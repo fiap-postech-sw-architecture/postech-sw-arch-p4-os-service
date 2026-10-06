@@ -178,7 +178,7 @@ def resposta_erro_interno(request: Request, exc: Exception) -> JSONResponse:
         logger.error(
             "erro_interno",
             request_id=request_id,
-            erro=type(exc.orig).__name__,
+            error=type(exc.orig).__name__,
             pgcode=getattr(exc.orig, "pgcode", None),
             constraint=getattr(diagnostico, "constraint_name", None),
         )
