@@ -1,0 +1,170 @@
+"""Fixtures de integracao: Postgres 16 efemero (testcontainers) com o schema
+criado pela migracao Alembic real (nao ``create_all``): toda a suite valida a
+migracao, e ``test_migracao.py`` confere que ela bate com o metadata.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
+
+from tests.integracao.seed_helpers import criar_usuario
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
+
+    from alembic.config import Config
+    from fastapi.testclient import TestClient
+    from sqlalchemy import Engine
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from src.autenticacao.dominio.usuario import Usuario
+
+RAIZ = Path(__file__).resolve().parents[2]
+
+# Colima (macOS): o socket nao fica em /var/run/docker.sock no host; o Ryuk
+# monta o socket de dentro da VM, onde ele existe. Assim `uv run pytest` funciona
+# direto, sem exportar variaveis. No CI e no Docker Desktop nada muda.
+_SOCKET_COLIMA = Path.home() / ".colima/default/docker.sock"
+if "DOCKER_HOST" not in os.environ and _SOCKET_COLIMA.exists():
+    os.environ["DOCKER_HOST"] = f"unix://{_SOCKET_COLIMA}"
+    os.environ.setdefault(
+        "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock"
+    )
+
+
+def config_alembic(database_url: str) -> Config:
+    """Config do Alembic apontando para ``database_url`` (sem mexer no logging)."""
+    from alembic.config import Config
+
+    cfg = Config(str(RAIZ / "alembic.ini"))
+    cfg.set_main_option("script_location", str(RAIZ / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", database_url)
+    # O fileConfig do env.py reconfiguraria o logging global do processo.
+    cfg.attributes["configure_logger"] = False
+    return cfg
+
+
+def alembic(database_url: str, revisao: str = "head", *, descer: bool = False) -> None:
+    """``alembic upgrade``/``downgrade`` programatico contra ``database_url``.
+
+    O env.py da precedencia a DATABASE_URL do ambiente sobre o alembic.ini,
+    entao a variavel e fixada durante o comando: um DATABASE_URL de dev no
+    shell nunca vira alvo de um downgrade de teste.
+    """
+    from alembic import command
+
+    anterior = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = database_url
+    try:
+        cfg = config_alembic(database_url)
+        if descer:
+            command.downgrade(cfg, revisao)
+        else:
+            command.upgrade(cfg, revisao)
+    finally:
+        if anterior is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = anterior
+
+
+@pytest.fixture(scope="session")
+def engine() -> Generator[Engine]:
+    from testcontainers.community.postgres import PostgresContainer
+
+    from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
+    from src.compartilhado.infraestrutura.database import criar_engine
+
+    iniciar_todos_mapeamentos()
+    with PostgresContainer("postgres:16") as postgres:
+        url = postgres.get_connection_url()
+        alembic(url)
+        eng = criar_engine(url)
+        yield eng
+        eng.dispose()
+
+
+@pytest.fixture
+def session(engine: Engine) -> Generator[Session]:
+    """Session isolada: transacao externa revertida no teardown.
+
+    ``join_transaction_mode="create_savepoint"`` faz o ``commit()`` do codigo
+    sob teste liberar um SAVEPOINT em vez de commitar a transacao externa.
+    ``expire_on_commit=False`` como na factory da aplicacao (``database.py``).
+    """
+    from sqlalchemy.orm import Session as SASession
+
+    connection = engine.connect()
+    transaction = connection.begin()
+    sess = SASession(
+        bind=connection,
+        join_transaction_mode="create_savepoint",
+        expire_on_commit=False,
+    )
+
+    yield sess
+
+    sess.close()
+    if transaction.is_active:
+        transaction.rollback()
+    connection.close()
+
+
+_EMAIL_ADMIN = "admin-integ@test.com"
+
+
+@pytest.fixture
+def session_factory(engine: Engine) -> Generator[sessionmaker[Session]]:
+    """Factory com commit real; o teardown trunca todas as tabelas."""
+    from sqlalchemy import text
+
+    from src.compartilhado.infraestrutura.database import (
+        criar_session_factory,
+        metadata,
+    )
+
+    factory = criar_session_factory(engine)
+    yield factory
+
+    # Testes de API e de concorrencia commitam de verdade: o rollback da
+    # fixture `session` nao os alcanca.
+    tabelas = ", ".join(t.name for t in reversed(metadata.sorted_tables))
+    with factory() as sess:
+        sess.execute(text(f"TRUNCATE TABLE {tabelas} CASCADE"))
+        sess.commit()
+
+
+@pytest.fixture
+def admin_user(session_factory: sessionmaker[Session]) -> Usuario:
+    """Semeia (com commit real) um usuario admin para autenticacao via API."""
+    from src.autenticacao.dominio.papel import Papel
+
+    return criar_usuario(session_factory, email=_EMAIL_ADMIN, papel=Papel.ADMIN)
+
+
+@pytest.fixture(scope="module")
+def api_client(engine: Engine) -> Generator[TestClient]:
+    """TestClient contra o app REAL (lifespan real) apontando para o banco de teste.
+
+    Escopo de modulo: o app e criado uma vez por arquivo; a limpeza segue por
+    teste via teardown de ``session_factory``.
+    """
+    from fastapi.testclient import TestClient
+
+    from src.main import criar_app
+
+    mp = pytest.MonkeyPatch()
+    # Segredo ficticio, so para assinar tokens contra o banco de teste.
+    jwt_teste = "test-secret-at-least-32-bytes-long-for-hs256-signing"  # gitleaks:allow
+    mp.setenv("JWT_SECRET", jwt_teste)
+    mp.setenv("ENVIRONMENT", "test")
+    mp.setenv("DATABASE_URL", engine.url.render_as_string(hide_password=False))
+    try:
+        with TestClient(criar_app()) as client:
+            yield client
+    finally:
+        mp.undo()

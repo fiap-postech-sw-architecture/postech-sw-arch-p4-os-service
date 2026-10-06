@@ -1,0 +1,68 @@
+# Stack local do OS Service: API + PostgreSQL 16 proprio (banco `os`).
+# Uso: `make compose-up` (build + migracoes + admin seed) e `make compose-down`.
+# Todos os valores abaixo sao de DEMONSTRACAO para dev local; em qualquer
+# ambiente exposto entram por Secret e o boot com ENVIRONMENT=production
+# recusa estes literais (validar_segredos_no_startup).
+# Credenciais do Postgres de demo num lugar so: o banco as usa para se criar e
+# a API (e o Alembic e o seed) monta a URL com elas (ENVIRONMENT=development).
+x-banco-demo: &banco-demo
+  POSTGRES_DB: os
+  POSTGRES_USER: pytstop
+  POSTGRES_PASSWORD: pytstop  # gitleaks:allow (senha do banco de demo)
+
+services:
+  api:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_DATE: ${GIT_DATE:-unknown}
+    image: ${APP_IMAGE:-pytstop-os-service:dev}
+    restart: unless-stopped
+    # So no loopback: o admin e as senhas de demo sao publicos no repo.
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *banco-demo
+      POSTGRES_HOST: postgres
+      ENVIRONMENT: development
+      JWT_SECRET: demo-jwt-secret-os-service-fase4-nao-usar-em-producao
+      ENCRYPTION_KEY: Chqh4o4QURACWBUSdtXjAxhOQt6HhxAfEg9rtvsABKU=  # gitleaks:allow (chave Fernet de demo)
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+      RUN_SEED_ON_STARTUP: "true"
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@pytstop.dev}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin-demo-os-2026}  # gitleaks:allow (senha de demo)
+      API_METRICS_ENABLED: ${API_METRICS_ENABLED:-true}
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+    # Readiness (banco acessivel): o `up --wait` so libera com a API pronta.
+    # O HEALTHCHECK da imagem segue na liveness /api/v1/saude.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/saude/pronto', timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    # Sem porta publicada no host: a API e a interface; para inspecionar,
+    # `docker compose exec postgres psql -U pytstop os`.
+    environment: *banco-demo
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pytstop -d os"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

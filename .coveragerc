@@ -1,0 +1,21 @@
+# Gate de cobertura do OS Service (minimo do enunciado: 80%; meta do grupo: 90%).
+# `uv run pytest` ja liga --cov=src (addopts no pyproject) e falha abaixo de
+# fail_under. branch=True mede ramos, nao so linhas.
+
+[run]
+relative_files = True
+branch = True
+source = src
+omit =
+    tests/*
+    */__init__.py
+    # Modulos so com Protocols (ports, sem logica): a linha so "cobre" via
+    # import; excluir torna o gate honesto em vez de premiar import morto.
+    src/*/dominio/repository.py
+    src/*/aplicacao/ports.py
+    src/compartilhado/aplicacao/unit_of_work.py
+
+[report]
+fail_under = 90
+show_missing = True
+skip_covered = True
