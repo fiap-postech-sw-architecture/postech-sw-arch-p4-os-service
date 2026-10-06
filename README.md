@@ -42,6 +42,8 @@ make check   # ruff (lint e formato), import-linter, mypy strict, bandit e pytes
 
 `make test` (ou `uv run pytest`) roda os testes unitários e os de integração contra um PostgreSQL efêmero (testcontainers, Docker necessário) com gate de cobertura de 90% (`.coveragerc`). O schema dos testes de integração é criado pela própria migração Alembic.
 
+No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`) e builda a imagem. O workflow `Security` roda pip-audit (dependências de runtime), gitleaks e trivy (imagem).
+
 ## Repositórios da fase 4
 
 | Repositório | Papel |

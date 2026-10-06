@@ -28,10 +28,12 @@ typecheck:
 security:
 	$(PY) bandit -r src scripts -c pyproject.toml -q
 
-# Suite completa com cobertura (addopts do pyproject liga --cov=src). O
-# conftest de integracao acha sozinho o socket do colima no macOS.
+# Suite completa com cobertura (addopts do pyproject liga --cov=src). Gera os
+# relatorios que o CI publica (coverage.xml para o SonarQube, htmlcov/ e o
+# JUnit em reports/). O conftest de integracao acha o socket do colima.
 test:
-	$(PY) pytest
+	$(PY) pytest --cov-report=xml:coverage.xml --cov-report=html:htmlcov \
+		--junitxml=reports/junit.xml
 
 check: lint lint-arch typecheck security test
 	@echo "All checks passed"

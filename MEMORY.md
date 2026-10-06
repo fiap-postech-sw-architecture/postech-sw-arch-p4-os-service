@@ -17,6 +17,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Discovered conventions
 
+- 2026-10-06 - CI vem dos templates do coordenador (`ci.yml`: lint, type-check, security, test, sonarqube, build; `security.yml`: pip-audit, gitleaks, trivy). Os nomes dos jobs sao os checks obrigatorios da branch protection: nao renomear. `make test` gera `coverage.xml`, `htmlcov/` e `reports/junit.xml` (o job `sonarqube` le o coverage.xml do artefato do `test`)
+
 - 2026-10-06 - `uv run pytest` e o gate completo (addopts liga `--cov=src` e o `fail_under=90` do `.coveragerc`); para rodar subconjunto sem o gate use `--no-cov`. O schema da integracao vem de `alembic upgrade head` (nao `create_all`) e `test_migracao.py` compara migracao x metadata (`compare_metadata == []`): mudou mapping, escreva a migracao
 - 2026-10-06 - `tests/fabricas.py` leva a OS a qualquer status so pelos fatos de dominio (`ordem_em(status)`); nunca monte o agregado por campos privados. O conftest de integracao detecta o socket do colima e exporta `DOCKER_HOST`/`TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` sozinho
 
