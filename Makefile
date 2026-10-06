@@ -63,7 +63,9 @@ audit:
 # O access token do login passa pelo validador independente
 # (scripts/validar_token.py, so PyJWT): JWKS buscado por HTTP, RS256, iss, aud,
 # exp e type, como Billing e Execucao validam. O JWKS publico tem de trazer so
-# os membros publicos e o Cache-Control de 10 min.
+# os membros publicos e o Cache-Control de exatamente 10 min. Como controle
+# negativo, o mesmo token com a assinatura adulterada tem de ser recusado: um
+# validador que nao confere a assinatura aceitaria os dois.
 #
 # O log do uvicorn sai em JSON desde a primeira linha ("Started server
 # process"): o `configurar_logging` roda na fabrica do app, que o uvicorn importa
@@ -98,20 +100,28 @@ smoke:
 		-H 'Content-Type: application/json' \
 		-d "{\"email\": \"$$email\", \"senha\": \"$$senha\"}" \
 		| jq -er '.access_token')" \
-	&& curl -fsS --max-time 5 $(SMOKE_URL)/.well-known/jwks.json \
-		| jq -e '(.keys | length) > 0 and all(.keys[]; keys == ["alg","e","kid","kty","n","use"])' \
-		>/dev/null \
+	&& { curl -fsS --max-time 5 $(SMOKE_URL)/.well-known/jwks.json \
+			| jq -e '(.keys | length) > 0 and all(.keys[]; keys == ["alg","e","kid","kty","n","use"])' \
+			>/dev/null \
+		|| { echo "smoke: o JWKS esta vazio ou traz membro fora de alg, e, kid, kty, n e use" >&2; false; }; } \
 	&& { curl -fsS --max-time 5 -D - -o /dev/null $(SMOKE_URL)/.well-known/jwks.json \
-			| grep -qi '^cache-control: public, max-age=600' \
+			| tr -d '\r' | grep -qix 'cache-control: public, max-age=600' \
 		|| { echo "smoke: o JWKS nao traz o Cache-Control de 10 min" >&2; false; }; } \
 	&& printf '%s' "$$access" \
 		| $(SMOKE_COMPOSE) exec -T api python scripts/validar_token.py http://127.0.0.1:8000 \
+	&& adulterado="$$(printf '%s' "$$access" | awk -F. '{ c = substr($$3, 1, 1); \
+		printf "%s.%s.%s%s", $$1, $$2, (c == "A" ? "B" : "A"), substr($$3, 2) }')" \
+	&& erro="$$(printf '%s' "$$adulterado" \
+		| $(SMOKE_COMPOSE) exec -T api python scripts/validar_token.py http://127.0.0.1:8000 \
+			2>&1 >/dev/null; true)" \
+	&& { printf '%s' "$$erro" | grep -q 'Signature verification failed' \
+		|| { echo "smoke: o validador nao recusou o token de assinatura adulterada" >&2; false; }; } \
 	&& logs="$$($(SMOKE_COMPOSE) logs --no-color --no-log-prefix api)" \
 	&& { printf '%s\n' "$$logs" | grep -q '"event": "Started server process' \
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
 	&& { ! printf '%s\n' "$$logs" | grep -Eq '^(INFO|WARNING|ERROR|CRITICAL): ' \
 		|| { echo "smoke: o uvicorn escreveu log em texto puro" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS, log em JSON e imagem de producao" \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON e imagem de producao" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
