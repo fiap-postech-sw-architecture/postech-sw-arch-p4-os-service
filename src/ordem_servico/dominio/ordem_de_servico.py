@@ -8,11 +8,16 @@ saga (brief secoes 2, 3 e 6).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import unicodedata
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
+from src.compartilhado.dominio.exceptions import (
+    ValorInvalidoException,
+    ViolacaoRegraDeNegocioException,
+)
 from src.ordem_servico.dominio.events import (
     OrdemAbertaEvent,
     StatusDaOrdemAlteradoEvent,
@@ -40,13 +45,23 @@ _maquina: Final = MaquinaDeStatus()
 
 
 def _texto_obrigatorio(valor: str, rotulo: str, maximo: int) -> str:
-    texto = (valor or "").strip()
+    """Texto livre aparado, nao vazio, dentro do limite e sem controle.
+
+    CRLF vira LF (quebra de linha de formulario); qualquer outro caractere de
+    controle (NUL inclusive, que o Postgres recusa no flush) e rejeitado: so
+    quebra de linha e tabulacao passam. Violacao levanta
+    ``ValorInvalidoException`` (422).
+    """
+    texto = (valor or "").replace("\r\n", "\n").strip()
     if not texto:
         msg = f"{rotulo} e obrigatorio"
-        raise ValueError(msg)
+        raise ValorInvalidoException(msg)
     if len(texto) > maximo:
         msg = f"{rotulo} excede {maximo} caracteres"
-        raise ValueError(msg)
+        raise ValorInvalidoException(msg)
+    if any(c not in "\n\t" and unicodedata.category(c) == "Cc" for c in texto):
+        msg = f"{rotulo} tem caractere de controle"
+        raise ValorInvalidoException(msg)
     return texto
 
 
@@ -89,10 +104,10 @@ class OrdemDeServico(AggregateRoot):
         # Defende o None explicito (kw_only sem default ja barra a omissao).
         if self._cliente_id is None:
             msg = "cliente_id e obrigatorio"
-            raise ValueError(msg)
+            raise ValorInvalidoException(msg)
         if self._veiculo_id is None:
             msg = "veiculo_id e obrigatorio"
-            raise ValueError(msg)
+            raise ValorInvalidoException(msg)
         self._descricao_problema = _texto_obrigatorio(
             self._descricao_problema,
             "descricao do problema",
@@ -181,7 +196,12 @@ class OrdemDeServico(AggregateRoot):
         self._transicionar(StatusOrdem.EM_DIAGNOSTICO, origem=OrigemMudanca.EXECUCAO)
 
     def registrar_orcamento_gerado(
-        self, *, orcamento_id: UUID, total: Dinheiro, link_decisao: str
+        self,
+        *,
+        orcamento_id: UUID,
+        total: Dinheiro,
+        link_decisao: str,
+        valido_ate: datetime,
     ) -> None:
         """``OrcamentoGerado`` (Billing).
 
@@ -189,7 +209,10 @@ class OrdemDeServico(AggregateRoot):
         """
         self._validar_transicao(StatusOrdem.AGUARDANDO_APROVACAO)
         resumo = ResumoOrcamento(
-            orcamento_id=orcamento_id, total=total, link_decisao=link_decisao
+            orcamento_id=orcamento_id,
+            total=total,
+            link_decisao=link_decisao,
+            valido_ate=valido_ate,
         )
         self._aplicar_transicao(
             StatusOrdem.AGUARDANDO_APROVACAO, origem=OrigemMudanca.BILLING
@@ -197,7 +220,12 @@ class OrdemDeServico(AggregateRoot):
         self._resumo_orcamento = resumo
 
     def registrar_pagamento_solicitado(
-        self, *, pagamento_id: UUID, checkout_url: str
+        self,
+        *,
+        pagamento_id: UUID,
+        valor: Dinheiro,
+        checkout_url: str,
+        expira_em: datetime,
     ) -> None:
         """``PagamentoSolicitado`` (Billing).
 
@@ -207,12 +235,28 @@ class OrdemDeServico(AggregateRoot):
         resumo = ResumoPagamento(
             pagamento_id=pagamento_id,
             status=StatusPagamento.SOLICITADO,
+            valor=valor,
             checkout_url=checkout_url,
+            expira_em=expira_em,
         )
         self._aplicar_transicao(
             StatusOrdem.AGUARDANDO_PAGAMENTO, origem=OrigemMudanca.BILLING
         )
         self._resumo_pagamento = resumo
+
+    def registrar_status_do_pagamento(self, status: StatusPagamento) -> None:
+        """Novo estado do pagamento vindo do Billing (confirmado, recusado...).
+
+        So o resumo muda: o status da OS segue pelos fatos da Execucao e do
+        atendimento, sem linha no historico nem evento. Vale em qualquer
+        status da OS (um estorno chega depois do cancelamento), desde que o
+        pagamento ja tenha sido solicitado.
+        """
+        if self._resumo_pagamento is None:
+            msg = "Ordem sem pagamento solicitado"
+            raise ViolacaoRegraDeNegocioException(msg)
+        self._resumo_pagamento = replace(self._resumo_pagamento, status=status)
+        self._atualizado_em = datetime.now(UTC)
 
     def registrar_aguardando_execucao(self) -> None:
         """``ExecucaoAgendada`` (Execucao).
@@ -243,7 +287,8 @@ class OrdemDeServico(AggregateRoot):
 
         A maquina e validada primeiro: depois de EM_EXECUCAO (pivot) ou em
         estado terminal, o erro e ``TransicaoStatusInvalidaException`` (409),
-        nao o motivo. Motivo vazio ou acima do limite levanta ``ValueError``.
+        nao o motivo. Motivo vazio, acima do limite ou com caractere de
+        controle levanta ``ValorInvalidoException`` (422).
         """
         self._validar_transicao(StatusOrdem.CANCELADA)
         motivo_normalizado = _texto_obrigatorio(

@@ -39,17 +39,26 @@ class MudancaDeStatusDTO:
 
 @dataclass(frozen=True, slots=True)
 class ResumoOrcamentoDTO:
+    """Resumo do orcamento do Billing guardado na OS."""
+
     orcamento_id: UUID
     total: Decimal
     moeda: str
-    link_decisao: str
+    # Link assinado (credencial de quem o tiver): fora do repr.
+    link_decisao: str = field(repr=False)
+    valido_ate: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class ResumoPagamentoDTO:
+    """Resumo do pagamento do Billing guardado na OS."""
+
     pagamento_id: UUID
     status: str
-    checkout_url: str
+    valor: Decimal
+    moeda: str
+    checkout_url: str = field(repr=False)
+    expira_em: datetime
 
 
 @dataclass(frozen=True, slots=True)

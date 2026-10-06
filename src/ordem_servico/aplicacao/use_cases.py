@@ -56,6 +56,7 @@ def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
                 total=orcamento.total.valor,
                 moeda=orcamento.total.moeda,
                 link_decisao=orcamento.link_decisao,
+                valido_ate=orcamento.valido_ate,
             )
             if orcamento is not None
             else None
@@ -64,7 +65,10 @@ def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
             ResumoPagamentoDTO(
                 pagamento_id=pagamento.pagamento_id,
                 status=pagamento.status.value,
+                valor=pagamento.valor.valor,
+                moeda=pagamento.valor.moeda,
                 checkout_url=pagamento.checkout_url,
+                expira_em=pagamento.expira_em,
             )
             if pagamento is not None
             else None

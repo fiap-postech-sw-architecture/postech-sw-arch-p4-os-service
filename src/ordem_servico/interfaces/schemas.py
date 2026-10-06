@@ -12,12 +12,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from src.ordem_servico.aplicacao.situacoes import situacao_de
 from src.ordem_servico.dominio.ordem_de_servico import (
     TAMANHO_MAXIMO_DESCRICAO,
     TAMANHO_MAXIMO_MOTIVO,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.interfaces.situacoes import situacao_de
 
 _DESCRICAO_STATUS = (
     "Status tecnico (snake_case): recebida, em_diagnostico, aguardando_aprovacao, "
@@ -66,20 +66,32 @@ class CancelarOrdemRequest(BaseModel):
 
 
 class ResumoOrcamentoResponse(BaseModel):
+    """Resumo do orcamento gerado pelo Billing (copiado do ``OrcamentoGerado``)."""
+
     model_config = ConfigDict(from_attributes=True)
 
     orcamento_id: UUID
     total: Decimal = Field(description="Total em string decimal, ex.: '350.00'.")
     moeda: str = Field(description="ISO 4217, ex.: 'BRL'.")
     link_decisao: str = Field(description="Link assinado para o cliente decidir.")
+    valido_ate: datetime = Field(description="Fim da validade do orcamento (UTC).")
 
 
 class ResumoPagamentoResponse(BaseModel):
+    """Resumo do pagamento no Billing (``PagamentoSolicitado`` e seguintes)."""
+
     model_config = ConfigDict(from_attributes=True)
 
     pagamento_id: UUID
-    status: str
+    status: str = Field(
+        description=(
+            "solicitado, confirmado, recusado, expirado, cancelado ou estornado."
+        )
+    )
+    valor: Decimal = Field(description="Valor em string decimal, ex.: '350.00'.")
+    moeda: str = Field(description="ISO 4217, ex.: 'BRL'.")
     checkout_url: str = Field(description="URL do checkout (Mercado Pago).")
+    expira_em: datetime = Field(description="Expiracao do checkout (UTC).")
 
 
 class OrdemDeServicoResponse(_ComSituacao):

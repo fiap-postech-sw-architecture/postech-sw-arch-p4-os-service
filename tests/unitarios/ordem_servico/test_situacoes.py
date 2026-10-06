@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.ordem_servico.aplicacao.situacoes import _SITUACAO_POR_STATUS, situacao_de
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.interfaces.situacoes import _SITUACAO_POR_STATUS, situacao_de
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
     TransicaoStatusInvalidaException,
+    ValorInvalidoException,
 )
 from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, AcompanhamentoDTO
@@ -30,7 +31,13 @@ from src.ordem_servico.dominio.exceptions import (
     VeiculoNaoEncontradoException,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
-from tests.fabricas import CHECKOUT_URL, LINK_DECISAO, ordem_em
+from tests.fabricas import (
+    CHECKOUT_URL,
+    EXPIRA_EM,
+    LINK_DECISAO,
+    VALIDO_ATE,
+    ordem_em,
+)
 from tests.unitarios.fakes import (
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
@@ -91,11 +98,11 @@ class TestAbrirOrdem:
         assert repo.salvas == []
         assert not uow.committed
 
-    def test_descricao_invalida_levanta_value_error(self) -> None:
+    def test_descricao_invalida_levanta_valor_invalido(self) -> None:
         dto = AbrirOrdemDTO(
             cliente_id=uuid4(), veiculo_id=uuid4(), descricao_problema="   "
         )
-        with pytest.raises(ValueError, match="descricao do problema"):
+        with pytest.raises(ValorInvalidoException, match="descricao do problema"):
             AbrirOrdem(RepoEmMemoria(), FakeUnitOfWork(), ClientePortFake()).executar(
                 dto
             )
@@ -112,9 +119,12 @@ class TestObterOrdem:
         assert dto.orcamento.total == Decimal("350.00")
         assert dto.orcamento.moeda == "BRL"
         assert dto.orcamento.link_decisao == LINK_DECISAO
+        assert dto.orcamento.valido_ate == VALIDO_ATE
         assert dto.pagamento is not None
         assert dto.pagamento.status == "solicitado"
+        assert (dto.pagamento.valor, dto.pagamento.moeda) == (Decimal("350.00"), "BRL")
         assert dto.pagamento.checkout_url == CHECKOUT_URL
+        assert dto.pagamento.expira_em == EXPIRA_EM
         assert [m.para for m in dto.historico] == [
             "recebida",
             "em_diagnostico",

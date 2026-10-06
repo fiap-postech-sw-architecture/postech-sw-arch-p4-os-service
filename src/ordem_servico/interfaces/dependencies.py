@@ -27,12 +27,15 @@ from src.ordem_servico.infraestrutura.repository import (
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+    from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
+    from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
-def _repo(session: Session) -> OrdemDeServicoSQLAlchemyRepository:
+
+def _repo(session: Session) -> OrdemDeServicoRepository:
     return OrdemDeServicoSQLAlchemyRepository(session=session)
 
 
-def _uow(session: Session) -> SQLAlchemyUnitOfWork:
+def _uow(session: Session) -> UnitOfWork:
     return SQLAlchemyUnitOfWork(session_factory=lambda: session)
 
 

@@ -96,9 +96,15 @@ def upgrade() -> None:
         sa.Column("orcamento_total", sa.Numeric(precision=12, scale=2), nullable=True),
         sa.Column("orcamento_moeda", sa.String(length=3), nullable=True),
         sa.Column("orcamento_link_decisao", sa.String(length=2048), nullable=True),
+        sa.Column(
+            "orcamento_valido_ate", sa.DateTime(timezone=True), nullable=True
+        ),
         sa.Column("pagamento_id", sa.Uuid(), nullable=True),
         sa.Column("pagamento_status", sa.String(length=30), nullable=True),
+        sa.Column("pagamento_valor", sa.Numeric(precision=12, scale=2), nullable=True),
+        sa.Column("pagamento_moeda", sa.String(length=3), nullable=True),
         sa.Column("pagamento_checkout_url", sa.String(length=2048), nullable=True),
+        sa.Column("pagamento_expira_em", sa.DateTime(timezone=True), nullable=True),
         sa.Column("motivo_cancelamento", sa.String(length=500), nullable=True),
         sa.Column("versao", sa.Integer(), nullable=False),
         sa.Column("criado_em", sa.DateTime(timezone=True), nullable=False),

@@ -6,6 +6,7 @@ sequencia legal de fatos, entao a fabrica quebra se a maquina mudar.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -17,6 +18,8 @@ from src.ordem_servico.dominio.status import StatusOrdem
 LINK_DECISAO = "https://billing.pytstop.local/publico/orcamentos/tok123"
 CHECKOUT_URL = "https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=1"
 TOTAL = Dinheiro(Decimal("350.00"))
+VALIDO_ATE = datetime(2026, 10, 13, 12, tzinfo=UTC)
+EXPIRA_EM = datetime(2026, 10, 7, 12, tzinfo=UTC)
 
 # Ordem do fluxo feliz (brief secao 2) e o fato que leva a cada estado.
 FLUXO = (
@@ -51,11 +54,17 @@ def aplicar_fato(ordem: OrdemDeServico, para: StatusOrdem) -> None:
             ordem.registrar_diagnostico_iniciado()
         case StatusOrdem.AGUARDANDO_APROVACAO:
             ordem.registrar_orcamento_gerado(
-                orcamento_id=uuid4(), total=TOTAL, link_decisao=LINK_DECISAO
+                orcamento_id=uuid4(),
+                total=TOTAL,
+                link_decisao=LINK_DECISAO,
+                valido_ate=VALIDO_ATE,
             )
         case StatusOrdem.AGUARDANDO_PAGAMENTO:
             ordem.registrar_pagamento_solicitado(
-                pagamento_id=uuid4(), checkout_url=CHECKOUT_URL
+                pagamento_id=uuid4(),
+                valor=TOTAL,
+                checkout_url=CHECKOUT_URL,
+                expira_em=EXPIRA_EM,
             )
         case StatusOrdem.AGUARDANDO_EXECUCAO:
             ordem.registrar_aguardando_execucao()

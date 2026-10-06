@@ -9,14 +9,15 @@ Tabelas ``ordens_de_servico`` e ``historico_status_ordem`` (uma linha por
   material de SAGA aplicado no banco.
 - Enums viram VARCHAR com o ``.value`` (``values_callable``), sem tipo
   nativo no Postgres: novo status nao exige ALTER TYPE.
-- Os resumos de orcamento/pagamento sao colunas planas; os listeners
-  ``load``/``refresh`` recompoem os VOs e ``before_insert``/``before_update``
-  os decompoem (mesmo padrao do p3 para ``Dinheiro``).
+- Os resumos de orcamento/pagamento sao ``composite`` sobre colunas planas:
+  o atributo e instrumentado, entao trocar so o VO (ex.: novo estado do
+  pagamento sem mudanca de status) suja a instancia, sai no UPDATE e sobe a
+  ``versao``. Todas as colunas nulas = OS ainda sem aquele resumo.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import (
     Column,
@@ -32,7 +33,7 @@ from sqlalchemy import (
     Uuid,
     event,
 )
-from sqlalchemy.orm import registry, relationship
+from sqlalchemy.orm import composite, registry, relationship
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.infraestrutura.database import metadata
@@ -50,10 +51,14 @@ from src.ordem_servico.dominio.resumos import (
 )
 from src.ordem_servico.dominio.status import StatusOrdem
 
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+    from enum import StrEnum
+
 _TAMANHO_ENUM = 30
 
 
-def _enum(tipo: type[Any], nome: str) -> Enum:
+def _enum(tipo: type[StrEnum], nome: str) -> Enum:
     """VARCHAR com o ``.value`` do enum (sem CHECK e sem tipo nativo)."""
     return Enum(
         tipo,
@@ -77,11 +82,15 @@ ordens_de_servico_table = Table(
     Column("orcamento_total", Numeric(12, 2), nullable=True),
     Column("orcamento_moeda", String(3), nullable=True),
     Column("orcamento_link_decisao", String(TAMANHO_MAXIMO_URL), nullable=True),
+    Column("orcamento_valido_ate", DateTime(timezone=True), nullable=True),
     Column("pagamento_id", Uuid, nullable=True),
     Column(
         "pagamento_status", _enum(StatusPagamento, "status_pagamento"), nullable=True
     ),
+    Column("pagamento_valor", Numeric(12, 2), nullable=True),
+    Column("pagamento_moeda", String(3), nullable=True),
     Column("pagamento_checkout_url", String(TAMANHO_MAXIMO_URL), nullable=True),
+    Column("pagamento_expira_em", DateTime(timezone=True), nullable=True),
     Column("motivo_cancelamento", String(TAMANHO_MAXIMO_MOTIVO), nullable=True),
     Column("versao", Integer, nullable=False),
     Column("criado_em", DateTime(timezone=True), nullable=False),
@@ -129,75 +138,87 @@ _COLUNAS_ORCAMENTO = (
     "_orcamento_total",
     "_orcamento_moeda",
     "_orcamento_link_decisao",
+    "_orcamento_valido_ate",
 )
-_COLUNAS_PAGAMENTO = ("_pagamento_id", "_pagamento_status", "_pagamento_checkout_url")
+_COLUNAS_PAGAMENTO = (
+    "_pagamento_id",
+    "_pagamento_status",
+    "_pagamento_valor",
+    "_pagamento_moeda",
+    "_pagamento_checkout_url",
+    "_pagamento_expira_em",
+)
 
 
-def _resumo_orcamento(estado: dict[str, Any]) -> ResumoOrcamento | None:
-    if estado.get("_orcamento_id") is None:
+# Fabricas dos composites: recebem os valores crus das colunas, na ordem de
+# _COLUNAS_*, e o VO revalida tudo (Any: o tipo vem do driver, nao do dominio).
+def _orcamento_das_colunas(*colunas: Any) -> ResumoOrcamento | None:  # noqa: ANN401
+    orcamento_id, total, moeda, link_decisao, valido_ate = colunas
+    if orcamento_id is None:
         return None
     return ResumoOrcamento(
-        orcamento_id=estado["_orcamento_id"],
-        total=Dinheiro(
-            valor=estado["_orcamento_total"], moeda=estado["_orcamento_moeda"]
-        ),
-        link_decisao=estado["_orcamento_link_decisao"],
+        orcamento_id=orcamento_id,
+        total=Dinheiro(valor=total, moeda=moeda),
+        link_decisao=link_decisao,
+        valido_ate=valido_ate,
     )
 
 
-def _resumo_pagamento(estado: dict[str, Any]) -> ResumoPagamento | None:
-    if estado.get("_pagamento_id") is None:
+def _pagamento_das_colunas(*colunas: Any) -> ResumoPagamento | None:  # noqa: ANN401
+    pagamento_id, status, valor, moeda, checkout_url, expira_em = colunas
+    if pagamento_id is None:
         return None
     return ResumoPagamento(
-        pagamento_id=estado["_pagamento_id"],
-        status=estado["_pagamento_status"],
-        checkout_url=estado["_pagamento_checkout_url"],
+        pagamento_id=pagamento_id,
+        status=status,
+        valor=Dinheiro(valor=valor, moeda=moeda),
+        checkout_url=checkout_url,
+        expira_em=expira_em,
     )
 
 
-def _colunas_do_orcamento(resumo: ResumoOrcamento | None) -> tuple[object, ...]:
-    if resumo is None:
-        return (None,) * len(_COLUNAS_ORCAMENTO)
+def _colunas_do_orcamento(resumo: ResumoOrcamento) -> tuple[object, ...]:
     return (
         resumo.orcamento_id,
         resumo.total.valor,
         resumo.total.moeda,
         resumo.link_decisao,
+        resumo.valido_ate,
     )
 
 
-def _colunas_do_pagamento(resumo: ResumoPagamento | None) -> tuple[object, ...]:
-    if resumo is None:
-        return (None,) * len(_COLUNAS_PAGAMENTO)
-    return (resumo.pagamento_id, resumo.status, resumo.checkout_url)
+def _colunas_do_pagamento(resumo: ResumoPagamento) -> tuple[object, ...]:
+    return (
+        resumo.pagamento_id,
+        resumo.status,
+        resumo.valor.valor,
+        resumo.valor.moeda,
+        resumo.checkout_url,
+        resumo.expira_em,
+    )
 
 
-def _reconstruir_os(target: OrdemDeServico, *_args: object) -> None:
-    """Listener ``load``/``refresh``: recompoe os VOs a partir das colunas planas.
+_RESUMOS: Final = frozenset({"_resumo_orcamento", "_resumo_pagamento"})
 
-    ``refresh`` (aridade diferente, absorvida por ``*_args``) cobre a releitura
-    por session.refresh/expire: sem ele os VOs ficariam stale.
-    """
-    estado: dict[str, Any] = target.__dict__
-    object.__setattr__(target, "_resumo_orcamento", _resumo_orcamento(estado))
-    object.__setattr__(target, "_resumo_pagamento", _resumo_pagamento(estado))
-    # SQLAlchemy nao chama __init__ na reidratacao: rearma a lista de eventos
-    # para os metodos de dominio funcionarem em instancia carregada.
+
+def _ao_carregar(target: OrdemDeServico, _contexto: object) -> None:
+    """Listener ``load``: o SQLAlchemy nao chama ``__init__`` na reidratacao,
+    entao cria a lista de eventos para os metodos de dominio funcionarem."""
     object.__setattr__(target, "_eventos_pendentes", [])
 
 
-def _decompor_os(_mapper: object, _connection: object, target: OrdemDeServico) -> None:
-    """Listener ``before_insert``/``before_update``: VOs -> colunas planas."""
-    colunas = zip(
-        (*_COLUNAS_ORCAMENTO, *_COLUNAS_PAGAMENTO),
-        (
-            *_colunas_do_orcamento(target.resumo_orcamento),
-            *_colunas_do_pagamento(target.resumo_pagamento),
-        ),
-        strict=True,
-    )
-    for nome, valor in colunas:
-        setattr(target, nome, valor)
+def _ao_recarregar(
+    target: OrdemDeServico, _contexto: object, atributos: Iterable[str] | None
+) -> None:
+    """Listener ``refresh``: estado relido do banco descarta eventos pendentes.
+
+    O composite remonta o VO no primeiro acesso depois de um flush e avisa
+    com um ``refresh`` so com a chave dele. Isso nao e releitura do banco e
+    nao pode apagar eventos ainda nao enfileirados na outbox.
+    """
+    if atributos is not None and set(atributos) <= _RESUMOS:
+        return
+    object.__setattr__(target, "_eventos_pendentes", [])
 
 
 _mapeamento_iniciado = False
@@ -208,6 +229,12 @@ def iniciar_mapeamentos() -> None:
     if _mapeamento_iniciado:
         return
     _mapeamento_iniciado = True
+
+    # O composite le os valores do VO por ``__composite_values__``; o metodo e
+    # pendurado aqui (mapeamento imperativo) para o dominio nao conhecer a
+    # ordem das colunas.
+    ResumoOrcamento.__composite_values__ = _colunas_do_orcamento  # type: ignore[attr-defined]
+    ResumoPagamento.__composite_values__ = _colunas_do_pagamento  # type: ignore[attr-defined]
 
     mapper_registry = registry()
 
@@ -240,9 +267,15 @@ def iniciar_mapeamentos() -> None:
             "_orcamento_total": t.c.orcamento_total,
             "_orcamento_moeda": t.c.orcamento_moeda,
             "_orcamento_link_decisao": t.c.orcamento_link_decisao,
+            "_orcamento_valido_ate": t.c.orcamento_valido_ate,
+            "_resumo_orcamento": composite(_orcamento_das_colunas, *_COLUNAS_ORCAMENTO),
             "_pagamento_id": t.c.pagamento_id,
             "_pagamento_status": t.c.pagamento_status,
+            "_pagamento_valor": t.c.pagamento_valor,
+            "_pagamento_moeda": t.c.pagamento_moeda,
             "_pagamento_checkout_url": t.c.pagamento_checkout_url,
+            "_pagamento_expira_em": t.c.pagamento_expira_em,
+            "_resumo_pagamento": composite(_pagamento_das_colunas, *_COLUNAS_PAGAMENTO),
             "_motivo_cancelamento": t.c.motivo_cancelamento,
             "_versao": t.c.versao,
             "_criado_em": t.c.criado_em,
@@ -256,7 +289,5 @@ def iniciar_mapeamentos() -> None:
         },
     )
 
-    event.listen(OrdemDeServico, "load", _reconstruir_os)
-    event.listen(OrdemDeServico, "refresh", _reconstruir_os)
-    event.listen(OrdemDeServico, "before_insert", _decompor_os)
-    event.listen(OrdemDeServico, "before_update", _decompor_os)
+    event.listen(OrdemDeServico, "load", _ao_carregar)
+    event.listen(OrdemDeServico, "refresh", _ao_recarregar)

@@ -129,6 +129,17 @@ class TestAbrir:
         assert resp.status_code == 422
         assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
 
+    def test_descricao_com_nul_422_sem_mensagem_do_driver(
+        self, client: TestClient
+    ) -> None:
+        resp = client.post(_BASE, json=_abrir_corpo(descricao_problema="freio\x00"))
+
+        assert resp.status_code == 422
+        assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
+        assert resp.json()["erro"]["mensagem"] == (
+            "descricao do problema tem caractere de controle"
+        )
+
     def test_admin_abre(self, client_como: Callable[[str], TestClient]) -> None:
         resp = client_como("admin").post(_BASE, json=_abrir_corpo())
         assert resp.status_code == 201
@@ -199,7 +210,13 @@ class TestConsultas:
         assert corpo["situacao"] == "Aguardando pagamento"
         assert corpo["orcamento"]["total"] == "350.00"
         assert corpo["orcamento"]["moeda"] == "BRL"
+        assert corpo["orcamento"]["valido_ate"] == "2026-10-13T12:00:00Z"
         assert corpo["pagamento"]["status"] == "solicitado"
+        assert (corpo["pagamento"]["valor"], corpo["pagamento"]["moeda"]) == (
+            "350.00",
+            "BRL",
+        )
+        assert corpo["pagamento"]["expira_em"] == "2026-10-07T12:00:00Z"
 
     def test_obter_inexistente_404_no_envelope(self, client: TestClient) -> None:
         resp = client.get(f"{_BASE}/{uuid4()}")

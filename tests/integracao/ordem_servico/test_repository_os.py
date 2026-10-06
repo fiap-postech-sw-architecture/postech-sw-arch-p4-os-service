@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from src.cliente_veiculo.infraestrutura.adapters import (
     OrdemDeServicoSQLAlchemyAdapter,
@@ -19,6 +19,7 @@ from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.infraestrutura.metrics import metricas_api
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+from src.ordem_servico.dominio.events import OrdemAbertaEvent
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.resumos import StatusPagamento
@@ -29,7 +30,14 @@ from src.ordem_servico.infraestrutura.metrics import instrumentar_metricas_de_or
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
-from tests.fabricas import CHECKOUT_URL, FLUXO, LINK_DECISAO, aplicar_fato
+from tests.fabricas import (
+    CHECKOUT_URL,
+    EXPIRA_EM,
+    FLUXO,
+    LINK_DECISAO,
+    VALIDO_ATE,
+    aplicar_fato,
+)
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
 if TYPE_CHECKING:
@@ -74,15 +82,19 @@ class TestMapping:
 
         assert lida.status is S.AGUARDANDO_PAGAMENTO
         assert lida.descricao_problema == "Vazamento de oleo"
+        assert lida.resumo_orcamento == ordem.resumo_orcamento
+        assert lida.resumo_pagamento == ordem.resumo_pagamento
         orcamento = lida.resumo_orcamento
         assert orcamento is not None
         assert orcamento.total == Dinheiro(Decimal("350.00"), "BRL")
         assert orcamento.link_decisao == LINK_DECISAO
-        assert orcamento.orcamento_id == ordem.resumo_orcamento.orcamento_id  # type: ignore[union-attr]
+        assert orcamento.valido_ate == VALIDO_ATE
         pagamento = lida.resumo_pagamento
         assert pagamento is not None
         assert pagamento.status is StatusPagamento.SOLICITADO
+        assert pagamento.valor == Dinheiro(Decimal("350.00"), "BRL")
         assert pagamento.checkout_url == CHECKOUT_URL
+        assert pagamento.expira_em == EXPIRA_EM
         assert [(m.sequencia, m.de, m.para, m.origem) for m in lida.historico] == [
             (1, None, S.RECEBIDA, OrigemMudanca.ATENDIMENTO),
             (2, S.RECEBIDA, S.EM_DIAGNOSTICO, OrigemMudanca.EXECUCAO),
@@ -107,8 +119,8 @@ class TestMapping:
     def test_refresh_reidrata_os_resumos(self, session: Session) -> None:
         ordem = _abrir(session)
         _avancar(session, ordem, S.AGUARDANDO_APROVACAO)
-        # Muda a linha por fora do ORM: so o listener de `refresh` traz o
-        # valor novo para o VO (o atributo do resumo nao e mapeado).
+        # Muda a linha por fora do ORM: o refresh descarta o composite em
+        # cache e o VO e remontado com o valor novo da coluna.
         session.execute(
             text("UPDATE ordens_de_servico SET orcamento_total = 1 WHERE id = :id"),
             {"id": ordem.id},
@@ -118,6 +130,45 @@ class TestMapping:
 
         assert ordem.resumo_orcamento is not None
         assert ordem.resumo_orcamento.total.valor == Decimal("1.00")
+
+    def test_acessar_o_resumo_depois_do_flush_nao_descarta_eventos(
+        self, session: Session
+    ) -> None:
+        # O composite remonta o VO no primeiro acesso apos o INSERT e dispara
+        # um "refresh" sintetico; o listener nao pode zerar os pendentes.
+        ordem = _abrir(session)
+
+        assert ordem.resumo_orcamento is None
+        assert ordem.resumo_pagamento is None
+        assert [type(e) for e in ordem.coletar_eventos()] == [OrdemAbertaEvent]
+
+    def test_refresh_de_verdade_descarta_eventos_pendentes(
+        self, session: Session
+    ) -> None:
+        ordem = _abrir(session)
+        session.refresh(ordem)
+        assert ordem.coletar_eventos() == []
+
+    def test_trocar_so_o_resumo_suja_a_instancia_e_persiste(
+        self, session: Session
+    ) -> None:
+        ordem = _abrir(session)
+        _avancar(session, ordem, S.AGUARDANDO_PAGAMENTO)
+        lida = _recarregar(session, ordem)
+        versao = lida.versao
+
+        lida.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
+
+        # O composite leva o VO novo para a coluna na hora (sem esperar um
+        # flush disparado por outra mudanca da instancia).
+        historia = inspect(lida).attrs["_pagamento_status"].history
+        assert historia.added == [StatusPagamento.CONFIRMADO]
+        OrdemDeServicoSQLAlchemyRepository(session).salvar(lida)
+        relida = _recarregar(session, lida)
+        assert relida.resumo_pagamento is not None
+        assert relida.resumo_pagamento.status is StatusPagamento.CONFIRMADO
+        assert relida.status is S.AGUARDANDO_PAGAMENTO
+        assert relida.versao == versao + 1
 
     def test_ordem_carregada_aceita_novos_fatos(self, session: Session) -> None:
         ordem = _abrir(session)

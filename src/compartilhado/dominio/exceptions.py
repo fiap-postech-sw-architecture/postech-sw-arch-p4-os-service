@@ -40,6 +40,17 @@ class ConflitoDeConcorrenciaException(DomainException):
         super().__init__(codigo="CONFLITO_DE_CONCORRENCIA", mensagem=mensagem)
 
 
+class ValorInvalidoException(DomainException):
+    """Invariante de agregado violada pelos dados recebidos (422).
+
+    Separa a regra de dominio do ``ValueError`` generico, que tambem nasce de
+    driver e de bug.
+    """
+
+    def __init__(self, mensagem: str = "Valor invalido") -> None:
+        super().__init__(codigo="VALOR_INVALIDO", mensagem=mensagem)
+
+
 class EntidadeDuplicadaException(DomainException):
     def __init__(self, mensagem: str = "Entidade duplicada") -> None:
         super().__init__(codigo="ENTIDADE_DUPLICADA", mensagem=mensagem)

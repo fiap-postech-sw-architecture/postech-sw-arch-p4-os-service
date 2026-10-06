@@ -14,6 +14,7 @@ from src.compartilhado.dominio.exceptions import (
     EntidadeNaoEncontradaException,
     FalhaAutenticacaoException,
     TransicaoStatusInvalidaException,
+    ValorInvalidoException,
     ViolacaoRegraDeNegocioException,
 )
 from src.compartilhado.infraestrutura.logging import redigir_pii_erro
@@ -31,6 +32,7 @@ _EXCEPTION_STATUS_MAP: dict[type[DomainException], int] = {
     ConflitoDeConcorrenciaException: 409,
     EntidadeDuplicadaException: 409,
     FalhaAutenticacaoException: 401,
+    ValorInvalidoException: 422,
 }
 
 

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.compartilhado.dominio.dinheiro import Dinheiro
+from src.compartilhado.dominio.dinheiro import VALOR_MAXIMO, Dinheiro
 
 
 class TestDinheiro:
@@ -113,3 +113,21 @@ class TestDinheiro:
         d = Dinheiro(valor=Decimal("-0.001"))
         assert d.valor == Decimal("0.00")
         assert str(d.valor) == "0.00"  # sem sinal: -0.00 e normalizado
+
+
+class TestTetoDaColuna:
+    """``Numeric(12, 2)``: o VO recusa o que so estouraria no flush."""
+
+    def test_teto_passa_e_um_centavo_acima_levanta(self) -> None:
+        assert Dinheiro(VALOR_MAXIMO).valor == Decimal("9999999999.99")
+        with pytest.raises(ValueError, match="excede"):
+            Dinheiro(VALOR_MAXIMO + Decimal("0.01"))
+
+    def test_arredondamento_que_passa_do_teto_levanta(self) -> None:
+        with pytest.raises(ValueError, match="excede"):
+            Dinheiro(Decimal("9999999999.995"))
+
+    def test_valor_alem_da_precisao_vira_value_error(self) -> None:
+        # quantize de 1E+30 levanta decimal.InvalidOperation no contexto padrao.
+        with pytest.raises(ValueError, match="valor monetario invalido"):
+            Dinheiro(Decimal("1E+30"))
