@@ -144,6 +144,18 @@ def _cliente_com_rotas() -> TestClient:
     def _sumiu() -> None:
         raise HTTPException(status_code=404, detail="Ordem nao encontrada")
 
+    @app.get("/sem-credencial")
+    def _sem_credencial() -> None:
+        raise HTTPException(
+            status_code=401,
+            detail="Credencial ausente",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @app.get("/sem-permissao")
+    def _sem_permissao() -> None:
+        raise HTTPException(status_code=403, detail="Sem permissao")
+
     return TestClient(app)
 
 
@@ -172,6 +184,20 @@ def _cliente_com_rotas() -> TestClient:
             id="detail-proprio-da-rota",
         ),
         pytest.param(
+            "/sem-credencial",
+            401,
+            "NAO_AUTENTICADO",
+            "Credencial ausente",
+            id="401-de-uma-dependency-do-fastapi",
+        ),
+        pytest.param(
+            "/sem-permissao",
+            403,
+            "ACESSO_NEGADO",
+            "Sem permissao",
+            id="403-de-uma-dependency-do-fastapi",
+        ),
+        pytest.param(
             "/teapot", 418, "HTTP_418", "I'm a Teapot", id="status-sem-codigo"
         ),
     ],
@@ -193,6 +219,12 @@ def test_http_exception_sai_no_envelope_de_erro(
 
 def test_405_mantem_o_header_allow() -> None:
     assert _cliente_com_rotas().get("/so-post").headers["Allow"] == "POST"
+
+
+def test_401_de_http_exception_mantem_o_www_authenticate() -> None:
+    resp = _cliente_com_rotas().get("/sem-credencial")
+
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
 
 
 def test_excecao_generica_retorna_500() -> None:
