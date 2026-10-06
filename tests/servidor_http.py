@@ -20,11 +20,29 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-@contextmanager
-def servir(app: FastAPI, *, lifespan: Literal["on", "off"] = "off") -> Iterator[str]:
-    """URL base da ``app`` enquanto o bloco roda; derruba o servidor no fim."""
+def _soquete_em_porta_livre() -> socket.socket:
     soquete = socket.socket()
     soquete.bind(("127.0.0.1", 0))
+    return soquete
+
+
+def _esperar_subir(servidor: uvicorn.Server, thread: threading.Thread) -> None:
+    prazo = time.monotonic() + 10
+    while not servidor.started:
+        if not thread.is_alive() or time.monotonic() > prazo:
+            msg = "o uvicorn de teste nao subiu"
+            raise RuntimeError(msg)
+        time.sleep(0.01)
+
+
+@contextmanager
+def servir(app: FastAPI, *, lifespan: Literal["on", "off"] = "off") -> Iterator[str]:
+    """URL base da ``app`` enquanto o bloco roda; derruba o servidor no fim.
+
+    Se o servidor nao sobe, levanta ``RuntimeError`` e ainda assim fecha o
+    soquete e para a thread.
+    """
+    soquete = _soquete_em_porta_livre()
     # log_config=None e access_log padrao: o uvicorn nao mexe nos loggers do
     # processo de teste (com access_log=False ele deixaria o `uvicorn.access` sem
     # handler e sem propagar para todos os testes seguintes).
@@ -33,13 +51,8 @@ def servir(app: FastAPI, *, lifespan: Literal["on", "off"] = "off") -> Iterator[
         target=servidor.run, kwargs={"sockets": [soquete]}, daemon=True
     )
     thread.start()
-    prazo = time.monotonic() + 10
-    while not servidor.started:
-        if not thread.is_alive() or time.monotonic() > prazo:
-            msg = "o uvicorn de teste nao subiu"
-            raise RuntimeError(msg)
-        time.sleep(0.01)
     try:
+        _esperar_subir(servidor, thread)
         yield f"http://127.0.0.1:{soquete.getsockname()[1]}"
     finally:
         servidor.should_exit = True
