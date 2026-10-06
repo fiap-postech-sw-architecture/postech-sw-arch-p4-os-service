@@ -122,15 +122,18 @@ class Logout:
         # sessao; um refresh valido no header nao pode autenticar o logout.
         if payload.get("type") != "access":
             raise TokenInvalidoException(motivo="not_an_access_token")
-        jtis = {str(payload["jti"])}
+        jtis = [str(payload["jti"])]
         if refresh_token is not None:
             jti_refresh = self._jti_refresh_para_revogar(
                 refresh_token, sub=str(payload.get("sub"))
             )
             if jti_refresh is not None:
-                jtis.add(jti_refresh)
+                jtis.append(jti_refresh)
         with self._uow:
-            for jti in jtis:
+            # Sempre na mesma ordem: dois logouts simultaneos da mesma sessao
+            # (pods diferentes) esperam um pelo outro no UNIQUE do jti e
+            # travariam em deadlock se revogassem os dois jti em ordens opostas.
+            for jti in sorted(jtis):
                 self._token_repo.revogar(jti)
             self._uow.commit()
         return {"mensagem": "Logout realizado com sucesso"}

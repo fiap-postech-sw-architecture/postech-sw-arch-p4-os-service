@@ -51,8 +51,10 @@ class FakeUsuarioRepository:
 class FakeTokenRevogadoRepository:
     def __init__(self) -> None:
         self._revogados: set[str] = set()
+        self.ordem_das_revogacoes: list[str] = []
 
     def revogar(self, jti: str) -> bool:
+        self.ordem_das_revogacoes.append(jti)
         if jti in self._revogados:
             return False
         self._revogados.add(jti)
@@ -355,6 +357,24 @@ class TestLogout:
 
         assert token_repo.esta_revogado(str(jwt_svc.validar_token(access)["jti"]))
         assert token_repo.esta_revogado(str(jwt_svc.validar_token(refresh)["jti"]))
+
+    def test_revoga_os_jti_sempre_na_mesma_ordem(self) -> None:
+        # Dois logouts simultaneos da mesma sessao, em pods diferentes, travariam
+        # em deadlock se revogassem access e refresh em ordens opostas: o jti do
+        # access vem antes na leitura, mas depois na ordem de revogacao.
+        class _JwtComJtiFixo(FakeJWTService):
+            def validar_token(self, token: str) -> dict[str, object]:
+                jti = {"access": "z-do-access", "refresh": "a-do-refresh"}[token]
+                return {"sub": "u", "type": token, "jti": jti}
+
+        token_repo = FakeTokenRevogadoRepository()
+        uc = Logout(
+            jwt_service=_JwtComJtiFixo(), token_repo=token_repo, uow=FakeUnitOfWork()
+        )
+
+        uc.executar("access", refresh_token="refresh")
+
+        assert token_repo.ordem_das_revogacoes == ["a-do-refresh", "z-do-access"]
 
     def test_refresh_pos_logout_e_rejeitado(self) -> None:
         # Prova end-to-end de p3 #118: apos o logout com refresh, o fluxo de
