@@ -77,9 +77,9 @@ def obter_jwt_service() -> JWTService:
     expiracao curta.
     """
     return _jwt_service(
-        # Sem espaco nas pontas: um Secret criado com `echo` traz uma quebra de
-        # linha, e so isso nao pode derrubar o boot.
-        os.environ.get("JWT_PRIVATE_KEY", "").strip(),
+        os.environ.get("JWT_PRIVATE_KEY", ""),
+        # Um Secret criado com `echo` e sem chave anterior guarda so uma quebra de
+        # linha: isso e "sem chave anterior", nao um PEM invalido que derruba o boot.
         os.environ.get("JWT_PREVIOUS_PUBLIC_KEY", "").strip(),
         _minutos_do_ambiente("JWT_EXPIRATION_MINUTES", 15, ACCESS_MAXIMO_MINUTOS),
         _minutos_do_ambiente(

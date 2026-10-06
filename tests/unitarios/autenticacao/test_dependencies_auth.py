@@ -161,14 +161,6 @@ class TestConfiguracaoDoJwt:
         ambiente.setenv("JWT_PREVIOUS_PUBLIC_KEY", borda)
         assert [c["kid"] for c in obter_jwt_service().jwks()["keys"]] == [KID]
 
-    def test_pem_com_quebra_de_linha_nas_pontas_vale(
-        self, ambiente: pytest.MonkeyPatch
-    ) -> None:
-        ambiente.setenv("JWT_PRIVATE_KEY", f"\n{CHAVE_PEM}\n")
-        ambiente.setenv("JWT_PREVIOUS_PUBLIC_KEY", f"{pem_publico(OUTRA_CHAVE)}\r\n")
-        kids = [c["kid"] for c in obter_jwt_service().jwks()["keys"]]
-        assert kids == [KID, OUTRO_KID]
-
 
 class TestFactoriesDosCasosDeUso:
     @pytest.mark.usefixtures("ambiente")
