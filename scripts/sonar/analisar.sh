@@ -78,5 +78,15 @@ jq -s '{projeto: $p, medidas: .[0].component.measures, gate: .[1].projectStatus}
 
 if [ "$rc" -ne 0 ]; then
   echo "::error::Quality gate do SonarQube reprovou ou a analise falhou (rc=$rc)"
+  exit "$rc"
 fi
-exit "$rc"
+
+# Analise vazia passa no gate (sem coverage nem duplicacao para avaliar): um
+# sonar.sources errado viraria falso verde. Exige linhas de codigo e cobertura.
+ncloc="$(jq -r '[.medidas[]? | select(.metric=="ncloc") | .value][0] // "0"' reports/sonarqube.json)"
+cobertura="$(jq -r '[.medidas[]? | select(.metric=="coverage") | .value][0] // ""' reports/sonarqube.json)"
+if [ "${ncloc%%.*}" -le 0 ] || [ -z "$cobertura" ]; then
+  echo "::error::Analise do SonarQube sem codigo ou sem cobertura (ncloc=$ncloc, coverage=${cobertura:-ausente}); confira sonar.sources e o coverage.xml"
+  exit 1
+fi
+exit 0

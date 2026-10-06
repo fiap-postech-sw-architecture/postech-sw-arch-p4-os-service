@@ -47,12 +47,14 @@ uv run python -m src.main   # http://127.0.0.1:8000
 ## Qualidade
 
 ```bash
-make check   # ruff (lint e formato), import-linter, mypy strict, bandit e pytest
+make check   # uv.lock em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest
+make audit   # pip-audit das dependências de runtime (com os extras da imagem)
+make smoke   # imagem pelo entrypoint real: readiness e login do admin semeado, depois down -v
 ```
 
 `make test` (ou `uv run pytest`) roda os testes unitários e os de integração contra um PostgreSQL efêmero (testcontainers, Docker necessário) com gate de cobertura de 90% (`.coveragerc`). O schema dos testes de integração é criado pela própria migração Alembic.
 
-No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`) e builda a imagem. O workflow `Security` roda pip-audit (dependências de runtime), gitleaks e trivy (imagem).
+No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks e trivy (imagem), em todo PR e toda segunda-feira.
 
 ## Repositórios da fase 4
 

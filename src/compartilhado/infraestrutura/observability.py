@@ -7,11 +7,11 @@ ponto de contato, chamado pelo lifespan em ``src/main.py``.
 
 Default OFF: sem ``OTEL_ENABLED=true`` a funcao retorna antes de qualquer
 import de OpenTelemetry — custo zero para compose, CI e testes. Os imports
-sao lazy (dentro da funcao) porque o extra ``otel`` fica fora do grupo
-``dev`` de proposito: o CI nao instala SDK + grpcio, e o mypy do CI so
+sao lazy (dentro da funcao) porque o extra ``otel`` e opcional: o ``uv sync``
+padrao (grupo ``dev``) nao traz SDK + grpcio, e o mypy desse ambiente so
 enxerga estes modulos via override ``ignore_missing_imports`` no
-``pyproject.toml``. Flag ligada sem o extra instalado degrada para warning +
-no-op — nunca quebra o boot.
+``pyproject.toml``; o CI e a imagem instalam o extra. Flag ligada sem o extra
+instalado degrada para warning + no-op — nunca quebra o boot.
 """
 
 from __future__ import annotations

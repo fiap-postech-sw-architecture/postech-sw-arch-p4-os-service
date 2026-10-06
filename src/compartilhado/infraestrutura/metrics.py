@@ -22,8 +22,9 @@ Metricas (meter ``pytstop-os-service``):
 
 Default OFF: sem ``API_METRICS_ENABLED`` truthy a funcao retorna antes de
 qualquer import de OpenTelemetry — custo zero para CI e testes. Imports lazy
-porque o extra ``otel`` fica fora do grupo ``dev``: flag ligada sem o extra
-degrada para warning + no-op, e a fachada ``metricas_api`` e no-op enquanto
+porque o extra ``otel`` e opcional (o ``uv sync`` padrao nao o instala; o CI e
+a imagem, sim): flag ligada sem o extra degrada para warning + no-op, e a
+fachada ``metricas_api`` e no-op enquanto
 ``configurar_metricas_api`` nao vincula os instrumentos reais.
 """
 
@@ -40,9 +41,9 @@ from starlette.responses import Response
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-    # So anotacao: o extra `otel` fica fora do ambiente de lint/teste, e o
-    # override `opentelemetry.*` (ignore_missing_imports) mantem o mypy verde
-    # sem ele (os tipos degradam para Any nesse ambiente).
+    # So anotacao: sem o extra `otel` (uv sync padrao), o override
+    # `opentelemetry.*` (ignore_missing_imports) mantem o mypy verde (os tipos
+    # degradam para Any nesse ambiente).
     from opentelemetry.metrics import Counter, Histogram
     from starlette.middleware.base import RequestResponseEndpoint
     from starlette.requests import Request

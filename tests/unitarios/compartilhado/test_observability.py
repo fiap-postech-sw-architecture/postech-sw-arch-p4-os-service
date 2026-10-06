@@ -11,7 +11,8 @@ Contrato coberto:
   ``/api/v1/saude`` excluida e exporter apontando para o endpoint OTLP.
 
 Os stubs simulam os modulos otel em ``sys.modules`` para que a suite rode
-identica com ou sem o extra ``otel`` instalado (CI nao instala o extra).
+identica com ou sem o extra ``otel`` instalado (o CI o instala; o ``uv sync``
+padrao, nao).
 """
 
 from __future__ import annotations

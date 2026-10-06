@@ -3,20 +3,20 @@
 Contrato coberto:
 
 - flag ``API_METRICS_ENABLED`` desligada (ausente ou false) -> ``False`` sem
-  efeito algum: nenhum import de OpenTelemetry, nenhum mount/middleware, a
+  efeito algum: nenhum import de OpenTelemetry, nenhuma rota/middleware, a
   fachada ``metricas_api`` continua no-op;
 - flag ligada sem o extra ``otel`` instalado -> ``False`` + warning acionavel
   (boot da API nunca quebra por dependencia ausente);
 - flag ligada com dependencias presentes (stubs em ``sys.modules``) ->
   ``True`` com MeterProvider montado, os instrumentos criados com os NOMES
-  EXATOS do contrato dos dashboards, a fachada vinculada, ``/metrics``
-  montado e o ``MetricasHTTPMiddleware`` instalado;
+  EXATOS do contrato dos dashboards, a fachada vinculada, a rota ``/metrics``
+  e o ``MetricasHTTPMiddleware`` instalado;
 - middleware HTTP: observa {method, rota-template, status, duracao}; 404 sem
   rota casada agrega em ``nao_roteada``; excecao conta como 500 e propaga.
 
 Os stubs simulam os modulos otel/prometheus em ``sys.modules`` para que a
-suite rode identica com ou sem o extra ``otel`` instalado (o CI nao instala o
-extra). Espelha ``tests/unitarios/relay/test_metrics.py``.
+suite rode identica com ou sem o extra ``otel`` instalado (o CI o instala; o
+``uv sync`` padrao, nao).
 """
 
 from __future__ import annotations
