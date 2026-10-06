@@ -12,7 +12,7 @@ from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
 
 S = StatusOrdem
 
-# Brief secao 2: fluxo feliz + CANCELADA antes de EM_EXECUCAO.
+# RFC-004 secao 4.2: fluxo feliz + CANCELADA antes de EM_EXECUCAO.
 LEGAIS = frozenset(
     {
         (S.RECEBIDA, S.EM_DIAGNOSTICO),

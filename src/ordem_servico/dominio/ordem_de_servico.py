@@ -3,7 +3,7 @@
 A OS deixa de ter itens e de calcular orcamento (agora do Billing e da
 Execucao): guarda o problema relatado, o status com o historico das
 mudancas e o resumo do orcamento e do pagamento que chegam pelos fatos da
-saga (brief secoes 2, 3 e 6).
+saga (RFC-004 secoes 4.2, 4.4 e 6.1).
 """
 
 from __future__ import annotations

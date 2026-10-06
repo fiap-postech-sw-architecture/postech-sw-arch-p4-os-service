@@ -1,4 +1,4 @@
-"""Routers HTTP do contexto Ordem de Servico (brief secao 6, parte OS).
+"""Routers HTTP do contexto Ordem de Servico (RFC-004 secao 6.1, parte OS).
 
 ``router`` (JWT + papel): abertura, fila por prioridade, consulta, historico,
 cancelamento e entrega. ``router_publico`` (sem token, rate limit por IP):

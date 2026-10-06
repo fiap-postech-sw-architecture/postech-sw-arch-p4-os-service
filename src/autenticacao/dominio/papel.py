@@ -4,7 +4,7 @@ from enum import StrEnum
 
 
 class Papel(StrEnum):
-    """Papeis dos usuarios internos (brief secao 7)."""
+    """Papeis dos usuarios internos (ADR-039)."""
 
     ADMIN = "admin"
     MECANICO = "mecanico"

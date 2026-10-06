@@ -14,7 +14,7 @@ class TestPapel:
         assert Papel.ATENDENTE == "atendente"
 
     def test_total_de_papeis(self) -> None:
-        # So usuarios internos (brief secao 7): o cliente nao autentica aqui.
+        # So usuarios internos (ADR-039): o cliente nao autentica aqui.
         assert len(Papel) == 3
 
     def test_valores_sao_lowercase(self) -> None:

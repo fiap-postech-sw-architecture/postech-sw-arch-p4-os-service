@@ -32,7 +32,7 @@ class TestMain:
         assert "/api/v1/saude" in paths
         assert any("/api/v1/clientes" in p for p in paths)
         assert any("/api/v1/autenticacao" in p for p in paths)
-        # Superficie de OS da fase 4 (brief secao 6), sem saga e sem JWKS.
+        # Superficie de OS da fase 4 (RFC-004 secao 6.1), sem saga e sem JWKS.
         assert {
             "/api/v1/ordens-de-servico",
             "/api/v1/ordens-de-servico/{ordem_id}",

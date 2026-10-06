@@ -1,5 +1,5 @@
 """Lock otimista da OS (``versao``): escrita concorrente vira conflito, nunca
-lost update (contramedida *reread value*, brief secao 2)."""
+lost update (contramedida *reread value*, RFC-004 secao 4.5)."""
 
 from __future__ import annotations
 

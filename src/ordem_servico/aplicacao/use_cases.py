@@ -181,7 +181,7 @@ class CancelarOrdem:
     """Cancelamento pelo atendimento antes do inicio da execucao.
 
     Enquanto a saga nao existe, a OS vai direto para CANCELADA; com ela, o
-    cancelamento dispara as compensacoes antes (brief secao 3).
+    cancelamento dispara as compensacoes antes (RFC-004 secao 4.4).
     """
 
     def __init__(self, repo: OrdemDeServicoRepository, uow: UnitOfWork) -> None:

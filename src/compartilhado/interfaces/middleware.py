@@ -34,7 +34,7 @@ def _caminho_de_docs(path: str) -> bool:
 
 
 # Correlacao fim-a-fim: o X-Request-ID gerado na borda (Kong, plugin
-# correlation-id, brief secao 5) e aceito quando "sano" — ate 128 chars de um
+# correlation-id, ADR-038) e aceito quando "sano" — ate 128 chars de um
 # charset seguro para logs e headers. Qualquer outra coisa (vazio, longo
 # demais, espacos, CRLF, unicode) e descartada e um uuid4 novo assume: nunca
 # ecoamos lixo nem injecao de log de volta no header.
@@ -294,7 +294,7 @@ def configurar_proxy_headers(app: FastAPI) -> None:
 # malformado aborta o boot em vez de virar 500 na primeira request.
 #
 # ponytail: contador em memoria, por processo. O limite agregado entre
-# replicas e do API Gateway (Kong, brief secao 5); este fica como defesa em
+# replicas e do API Gateway (Kong, ADR-038); este fica como defesa em
 # profundidade. Storage compartilhado (ex.: Redis) entra se o gateway sair.
 _default_limit = os.environ.get("RATE_LIMIT", "60/minute")
 try:

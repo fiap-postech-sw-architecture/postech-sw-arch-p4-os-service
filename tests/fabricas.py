@@ -21,7 +21,7 @@ TOTAL = Dinheiro(Decimal("350.00"))
 VALIDO_ATE = datetime(2026, 10, 13, 12, tzinfo=UTC)
 EXPIRA_EM = datetime(2026, 10, 7, 12, tzinfo=UTC)
 
-# Ordem do fluxo feliz (brief secao 2) e o fato que leva a cada estado.
+# Ordem do fluxo feliz (RFC-004 secao 4.2) e o fato que leva a cada estado.
 FLUXO = (
     StatusOrdem.RECEBIDA,
     StatusOrdem.EM_DIAGNOSTICO,

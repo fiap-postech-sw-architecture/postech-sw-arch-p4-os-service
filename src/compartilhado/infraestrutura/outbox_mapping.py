@@ -6,7 +6,7 @@ dominio mapeado), registradas no ``metadata`` compartilhado para entrarem no
 
 - ``outbox``: a ``UnitOfWork`` grava os ``IntegrationEvent`` na mesma
   transacao do estado; o relay para o RabbitMQ le daqui.
-- ``mensagens_processadas``: idempotencia do consumidor (brief secao 4):
+- ``mensagens_processadas``: idempotencia do consumidor (RFC-004 secao 5.4):
   chave = ``id`` da mensagem, gravada na mesma transacao do efeito.
 
 ``pg_notify_outbox`` emite ``pg_notify('outbox_novo','')`` — NOTIFY e
@@ -86,7 +86,7 @@ Index(
     outbox_table.c.status,
 )
 
-# Consumidor idempotente (brief secao 4): o ``id`` da mensagem e a chave; o
+# Consumidor idempotente (ADR-036): o ``id`` da mensagem e a chave; o
 # INSERT acontece na mesma transacao do efeito, entao reentrega da mesma
 # mensagem viola a PK e o efeito nao se repete.
 mensagens_processadas_table = Table(

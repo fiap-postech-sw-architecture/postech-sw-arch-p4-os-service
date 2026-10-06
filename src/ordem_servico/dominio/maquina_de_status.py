@@ -9,12 +9,12 @@ from src.ordem_servico.dominio.status import StatusOrdem
 
 
 class MaquinaDeStatus:
-    """Allow-list das transicoes legais do ``StatusOrdem`` (brief secao 2).
+    """Allow-list das transicoes legais do ``StatusOrdem`` (RFC-004 secao 4.2).
 
     Fluxo feliz: RECEBIDA -> EM_DIAGNOSTICO -> AGUARDANDO_APROVACAO ->
     AGUARDANDO_PAGAMENTO -> AGUARDANDO_EXECUCAO -> EM_EXECUCAO -> FINALIZADA
     -> ENTREGUE. CANCELADA a partir de qualquer estado anterior a EM_EXECUCAO:
-    o inicio da execucao fisica e o pivot da saga (brief secao 3), depois dele
+    o inicio da execucao fisica e o pivot da saga (RFC-004 secao 4.4), depois dele
     nao ha compensacao. ENTREGUE e CANCELADA sao terminais.
     """
 

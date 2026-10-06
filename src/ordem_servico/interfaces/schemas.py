@@ -3,7 +3,7 @@
 Contrato HTTP separado dos DTOs da aplicacao: o router traduz com
 ``model_validate(dto)`` (``from_attributes``). Requests com ``extra='forbid'``.
 Dinheiro sai como string decimal (``"350.00"``) + ``moeda``, o mesmo formato
-das mensagens da saga (brief secao 4).
+das mensagens da saga (RFC-004 secao 5.3).
 """
 
 from datetime import datetime
