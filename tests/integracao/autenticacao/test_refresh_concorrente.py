@@ -1,9 +1,10 @@
-"""Refresh e logout simultaneos com o mesmo token: um vence, os outros recebem 401.
+"""Refresh e logout simultaneos com o mesmo token nao viram 500.
 
-Dois pedidos com o mesmo refresh passam ao mesmo tempo pela checagem de
-revogacao; o que perde a corrida esbarra no UNIQUE do ``jti`` ao revogar. Esse
-erro de banco nao pode virar 500: o refresh ja consumido responde o mesmo 401
-de qualquer refresh reutilizado.
+Refresh: dois pedidos com o mesmo refresh passam juntos pela checagem de
+revogacao e o que perde a corrida esbarraria no UNIQUE do ``jti`` ao revogar.
+O banco decide quem revoga primeiro e o perdedor recebe o 401 de qualquer
+refresh ja consumido. Logout: nao consulta a revogacao, entao todos os pedidos
+respondem 200.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from src.autenticacao.dominio.usuario import Usuario
 
 _CONCORRENTES = 6
-_RODADAS = 5
+_REPETICOES = 5
 
 
 def _esperar_insert_bloqueado(session_factory: sessionmaker[Session]) -> None:
@@ -65,8 +66,8 @@ def test_perdedor_da_corrida_do_revogar_recebe_false(
         session_factory() as sessao_b,
         ThreadPoolExecutor(max_workers=1) as pool,
     ):
-        # A insere e ainda nao commitou: B nao enxerga a linha, passa pela
-        # checagem de revogacao e para no INSERT, esperando a transacao de A.
+        # A insere e ainda nao commitou: B nao enxerga a linha e para no INSERT,
+        # esperando a transacao de A.
         assert TokenRevogadoSQLAlchemyRepository(sessao_a).revogar(jti) is True
         perdedor = pool.submit(TokenRevogadoSQLAlchemyRepository(sessao_b).revogar, jti)
         _esperar_insert_bloqueado(session_factory)
@@ -92,8 +93,8 @@ def _simultaneos(chamada: Callable[[], httpx.Response]) -> list[httpx.Response]:
 def test_refresh_simultaneo_do_mesmo_token_da_um_200_e_o_resto_401(
     api_client: TestClient, admin_user: Usuario
 ) -> None:
-    for _ in range(_RODADAS):
-        # O limite de 10/min do /refresh vale por IP: cada rodada comeca limpa.
+    for _ in range(_REPETICOES):
+        # O limite de 10/min do /refresh vale por IP: cada repeticao comeca limpa.
         limiter.reset()
         refresh = jwt_service().gerar_refresh_token(admin_user.id)
 
@@ -116,7 +117,7 @@ def test_refresh_simultaneo_do_mesmo_token_da_um_200_e_o_resto_401(
             assert perdedora.headers["WWW-Authenticate"] == "Bearer"
 
 
-def test_logout_simultaneo_do_mesmo_token_e_idempotente(
+def test_logout_simultaneo_do_mesmo_token_responde_200_para_todos(
     api_client: TestClient, admin_user: Usuario
 ) -> None:
     access = jwt_service().gerar_access_token(admin_user.id, "admin")
@@ -130,10 +131,9 @@ def test_logout_simultaneo_do_mesmo_token_e_idempotente(
         )
     )
 
-    # O primeiro revoga; os outros encontram o access ja revogado no gate (401)
-    # ou, se passaram juntos pelo gate, nao estouram o UNIQUE (200).
-    assert {r.status_code for r in respostas} <= {200, 401}
-    assert 200 in {r.status_code for r in respostas}
+    # O logout e idempotente: o primeiro revoga o access e o refresh, e os outros
+    # perdem a corrida no INSERT sem estourar o UNIQUE do jti.
+    assert [r.status_code for r in respostas] == [200] * _CONCORRENTES
     revogado = api_client.post(
         "/api/v1/autenticacao/refresh", json={"refresh_token": refresh}
     )
