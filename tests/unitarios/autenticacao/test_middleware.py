@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+import jwt
 import pytest
+import structlog
+import structlog.testing
 from fastapi import HTTPException
 
 from src.autenticacao.dominio.papel import Papel
@@ -17,6 +21,7 @@ from src.autenticacao.interfaces.middleware import (
 )
 
 _CHAVE = "test-secret"
+_MIDDLEWARE = "src.autenticacao.interfaces.middleware"
 _MOCK_SESSION = MagicMock()
 
 
@@ -109,7 +114,7 @@ class TestObterUsuarioAtual:
         ):
             obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
         assert exc.value.status_code == 401
-        assert "jti" in str(exc.value.detail)
+        assert exc.value.detail == "Credenciais invalidas"
 
     def test_token_revogado_retorna_401(self) -> None:
         svc = _jwt_service()
@@ -127,7 +132,65 @@ class TestObterUsuarioAtual:
             with pytest.raises(HTTPException) as exc:
                 obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
             assert exc.value.status_code == 401
-            assert "revogado" in str(exc.value.detail).lower()
+            assert exc.value.detail == "Credenciais invalidas"
+
+
+def _token(algoritmo: str = "HS256", **claims: object) -> str:
+    payload: dict[str, object] = {
+        "sub": str(uuid4()),
+        "jti": str(uuid4()),
+        "type": "access",
+        "exp": datetime.now(UTC) + timedelta(minutes=5),
+        **claims,
+    }
+    return jwt.encode(payload, _CHAVE, algorithm=algoritmo)
+
+
+class TestRespostaUniformeDoGate:
+    """ADR-039: toda falha de credencial da o mesmo 401; o motivo so no log."""
+
+    @pytest.mark.parametrize(
+        ("token", "motivo"),
+        [
+            pytest.param(None, "missing_token", id="sem-token"),
+            pytest.param("lixo", "invalid_token", id="malformado"),
+            pytest.param(
+                _token(exp=datetime.now(UTC) - timedelta(minutes=1)),
+                "expired_token",
+                id="expirado",
+            ),
+            pytest.param(_token("HS384"), "invalid_algorithm", id="outro-algoritmo"),
+            pytest.param(_token(type="refresh"), "not_an_access_token", id="refresh"),
+            pytest.param(_token(jti="revogado"), "revoked_token", id="revogado"),
+        ],
+    )
+    def test_mesmo_401_e_motivo_no_log(
+        self, token: str | None, motivo: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(f"{_MIDDLEWARE}._log", structlog.get_logger())
+        repo = MagicMock()
+        repo.esta_revogado = lambda jti: jti == "revogado"
+        monkeypatch.setattr(
+            f"{_MIDDLEWARE}.obter_token_revogado_repo", lambda _session: repo
+        )
+        creds = None if token is None else _FakeCredentials(token=token)
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(HTTPException) as exc,
+        ):
+            obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+
+        assert (exc.value.status_code, exc.value.detail, exc.value.headers) == (
+            401,
+            "Credenciais invalidas",
+            {"WWW-Authenticate": "Bearer"},
+        )
+        assert {
+            "event": "authentication_failed",
+            "reason": motivo,
+            "log_level": "warning",
+        } in logs
 
 
 class TestExigirPapel:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import ClassVar
+
 
 class DomainException(Exception):
     def __init__(self, codigo: str, mensagem: str) -> None:
@@ -44,5 +46,14 @@ class EntidadeDuplicadaException(DomainException):
 
 
 class FalhaAutenticacaoException(DomainException):
-    def __init__(self, mensagem: str = "Falha na autenticacao") -> None:
-        super().__init__(codigo="FALHA_AUTENTICACAO", mensagem=mensagem)
+    """401 de credencial: a mensagem publica e sempre a mesma (ADR-039).
+
+    ``motivo`` (identificador em ingles) diz o que falhou e vai so para o
+    log: a resposta nao da dica a quem testa credenciais.
+    """
+
+    MENSAGEM: ClassVar[str] = "Credenciais invalidas"
+
+    def __init__(self, motivo: str = "authentication_failed") -> None:
+        super().__init__(codigo="FALHA_AUTENTICACAO", mensagem=self.MENSAGEM)
+        self.motivo = motivo

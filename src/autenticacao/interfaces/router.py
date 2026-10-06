@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # Runtime import (nao TYPE_CHECKING): com `from __future__ import annotations`,
@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session  # noqa: TC002
 from starlette.requests import Request  # noqa: TC002
 
 from src.autenticacao.aplicacao.dtos import LoginDTO, RegistrarDTO
+from src.autenticacao.dominio.exceptions import TokenInvalidoException
 from src.autenticacao.interfaces.dependencies import (
     obter_login,
     obter_logout,
@@ -98,11 +99,8 @@ def logout(
     header). Header ausente -> 401.
     """
     if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token de autenticacao nao fornecido",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        # Mesmo 401 (e mesmo envelope) do token invalido no logout.
+        raise TokenInvalidoException(motivo="missing_token")
     # refresh_token e OPCIONAL no corpo (p3 #118): quando enviado, o logout
     # revoga tambem o refresh e encerra a sessao por completo (CWE-613). Corpo
     # ausente mantem o comportamento anterior (revoga so o access) — sem 422

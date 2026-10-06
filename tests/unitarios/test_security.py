@@ -120,8 +120,9 @@ class TestJWTAlgorithmEnforcement:
         }
         token = jwt.encode(payload, _CHAVE, algorithm="HS384")
         svc = _jwt_service()
-        with pytest.raises(TokenInvalidoException, match="Algoritmo"):
+        with pytest.raises(TokenInvalidoException) as exc:
             svc.validar_token(token)
+        assert exc.value.motivo == "invalid_algorithm"
 
     def test_hs512_rejected(self) -> None:
         payload = {
@@ -132,8 +133,9 @@ class TestJWTAlgorithmEnforcement:
         }
         token = jwt.encode(payload, _CHAVE, algorithm="HS512")
         svc = _jwt_service()
-        with pytest.raises(TokenInvalidoException, match="Algoritmo"):
+        with pytest.raises(TokenInvalidoException) as exc:
             svc.validar_token(token)
+        assert exc.value.motivo == "invalid_algorithm"
 
     def test_none_algorithm_rejected(self) -> None:
         """The 'none' algorithm attack must be blocked."""
@@ -260,7 +262,8 @@ class TestJWTTokenRevocation:
             with pytest.raises(HTTPException) as exc:
                 obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
             assert exc.value.status_code == 401
-            assert "revogado" in str(exc.value.detail).lower()
+            # ADR-039: a mesma mensagem de qualquer outra falha de credencial.
+            assert exc.value.detail == "Credenciais invalidas"
 
     def test_non_revoked_token_accepted(self) -> None:
         svc = _jwt_service()

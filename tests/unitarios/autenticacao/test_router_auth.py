@@ -11,6 +11,7 @@ from src.autenticacao.dominio.papel import Papel
 from src.autenticacao.interfaces.middleware import obter_usuario_atual
 from src.autenticacao.interfaces.router import router
 from src.compartilhado.interfaces.dependencies import obter_session
+from src.compartilhado.interfaces.error_handler import registrar_error_handlers
 
 
 def _criar_app() -> FastAPI:
@@ -119,9 +120,10 @@ class TestAuthRouter:
 
     def test_logout_sem_header_retorna_401(self) -> None:
         # HTTPBearer(auto_error=False) + 401 manual (p3 #167): header ausente e
-        # falta de AUTENTICACAO (401 com WWW-Authenticate e mensagem PT), nao
-        # o 403 generico do HTTPBearer default.
+        # falta de AUTENTICACAO (401 com WWW-Authenticate), nao o 403 generico
+        # do HTTPBearer default; mesma mensagem e envelope do token invalido.
         app = _criar_app()
+        registrar_error_handlers(app)
         with patch("src.autenticacao.interfaces.router.obter_logout") as mock_factory:
             mock_uc = MagicMock()
             mock_factory.return_value = mock_uc
@@ -129,7 +131,7 @@ class TestAuthRouter:
             client = TestClient(app)
             resp = client.post("/api/v1/autenticacao/logout")
             assert resp.status_code == 401
-            assert resp.json()["detail"] == "Token de autenticacao nao fornecido"
+            assert resp.json()["erro"]["mensagem"] == "Credenciais invalidas"
             assert resp.headers["WWW-Authenticate"] == "Bearer"
             mock_uc.executar.assert_not_called()
 

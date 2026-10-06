@@ -5,10 +5,13 @@ from src.compartilhado.dominio.exceptions import (
     FalhaAutenticacaoException,
 )
 
+# Toda falha de credencial responde 401 com a mesma mensagem
+# (``FalhaAutenticacaoException.MENSAGEM``); o ``motivo`` so vai para o log.
+
 
 class CredenciaisInvalidasException(FalhaAutenticacaoException):
-    def __init__(self, mensagem: str = "Credenciais invalidas") -> None:
-        super().__init__(mensagem=mensagem)
+    def __init__(self, motivo: str = "invalid_credentials") -> None:
+        super().__init__(motivo=motivo)
 
 
 class EmailDuplicadoException(EntidadeDuplicadaException):
@@ -17,15 +20,15 @@ class EmailDuplicadoException(EntidadeDuplicadaException):
 
 
 class TokenInvalidoException(FalhaAutenticacaoException):
-    def __init__(self, mensagem: str = "Token invalido") -> None:
-        super().__init__(mensagem=mensagem)
+    def __init__(self, motivo: str = "invalid_token") -> None:
+        super().__init__(motivo=motivo)
 
 
 class TokenExpiradoException(FalhaAutenticacaoException):
-    def __init__(self, mensagem: str = "Token expirado") -> None:
-        super().__init__(mensagem=mensagem)
+    def __init__(self, motivo: str = "expired_token") -> None:
+        super().__init__(motivo=motivo)
 
 
 class TokenRevogadoException(FalhaAutenticacaoException):
-    def __init__(self, mensagem: str = "Token revogado") -> None:
-        super().__init__(mensagem=mensagem)
+    def __init__(self, motivo: str = "revoked_token") -> None:
+        super().__init__(motivo=motivo)

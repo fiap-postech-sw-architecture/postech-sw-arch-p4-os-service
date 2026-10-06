@@ -396,8 +396,9 @@ class TestLogout:
         uow = FakeUnitOfWork()
         refresh = jwt_svc.gerar_refresh_token(uuid4())
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
-        with pytest.raises(TokenInvalidoException, match="Token nao e do tipo access"):
+        with pytest.raises(TokenInvalidoException) as exc:
             uc.executar(refresh)
+        assert exc.value.motivo == "not_an_access_token"
         assert not token_repo.esta_revogado(str(jwt_svc.validar_token(refresh)["jti"]))
 
     def test_refresh_de_outro_usuario_nao_e_revogado(self) -> None:
@@ -463,8 +464,9 @@ class TestRefreshToken:
             usuario_repo=repo,
             uow=uow,
         )
-        with pytest.raises(TokenInvalidoException, match="Token nao e do tipo refresh"):
+        with pytest.raises(TokenInvalidoException) as exc:
             uc.executar(access)
+        assert exc.value.motivo == "not_a_refresh_token"
 
     def test_rejeita_token_ja_revogado(self) -> None:
         repo = FakeUsuarioRepository()
@@ -503,10 +505,11 @@ class TestRefreshToken:
             usuario_repo=repo,
             uow=uow,
         )
-        with pytest.raises(
-            CredenciaisInvalidasException, match="Usuario nao encontrado"
-        ):
+        with pytest.raises(CredenciaisInvalidasException) as exc:
             uc.executar(refresh)
+        # Mesma mensagem publica do login errado (ADR-039); motivo so no log.
+        assert exc.value.mensagem == "Credenciais invalidas"
+        assert exc.value.motivo == "user_not_found"
 
     def test_segundo_uso_do_mesmo_refresh_e_rejeitado(self) -> None:
         # Single-use (p3 #167): reusar o refresh apos a rotacao -> 401.

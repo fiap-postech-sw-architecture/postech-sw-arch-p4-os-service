@@ -68,8 +68,6 @@ class JWTService:
         except jwt.ExpiredSignatureError:
             raise TokenExpiradoException() from None
         except jwt.InvalidAlgorithmError:
-            raise TokenInvalidoException(
-                mensagem="Algoritmo de token invalido"
-            ) from None
+            raise TokenInvalidoException(motivo="invalid_algorithm") from None
         except jwt.InvalidTokenError:
             raise TokenInvalidoException() from None

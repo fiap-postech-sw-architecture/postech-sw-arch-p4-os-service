@@ -57,7 +57,7 @@ class TestExceptionsEspecificas:
             (
                 FalhaAutenticacaoException,
                 "FALHA_AUTENTICACAO",
-                "Falha na autenticacao",
+                "Credenciais invalidas",
             ),
         ],
     )
@@ -80,7 +80,6 @@ class TestExceptionsEspecificas:
             TransicaoStatusInvalidaException,
             ConflitoDeConcorrenciaException,
             EntidadeDuplicadaException,
-            FalhaAutenticacaoException,
         ],
     )
     def test_excecao_com_mensagem_customizada(
@@ -89,6 +88,14 @@ class TestExceptionsEspecificas:
     ) -> None:
         exc = classe(mensagem="mensagem customizada")
         assert exc.mensagem == "mensagem customizada"
+
+    def test_falha_de_autenticacao_tem_mensagem_unica_e_motivo_so_interno(
+        self,
+    ) -> None:
+        exc = FalhaAutenticacaoException(motivo="expired_token")
+        assert exc.mensagem == FalhaAutenticacaoException.MENSAGEM
+        assert exc.motivo == "expired_token"
+        assert "expired" not in str(exc)
 
     @pytest.mark.parametrize(
         "classe",

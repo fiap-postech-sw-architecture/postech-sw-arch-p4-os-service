@@ -7,9 +7,12 @@ contextos de OS e de Cliente+Veiculo.
 
 from __future__ import annotations
 
+import os
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import jwt
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
@@ -329,6 +332,73 @@ class TestAcompanhamentoPublico:
         for resposta in respostas:
             assert resposta.status_code == nao_encontrada.status_code == 404
             assert resposta.json() == nao_encontrada.json()
+
+
+class TestFalhaDeCredencialUniforme:
+    """ADR-039: toda falha de credencial responde 401 com a mesma mensagem."""
+
+    def test_gate_responde_o_mesmo_401_para_qualquer_falha(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        segredo = os.environ["JWT_SECRET"]
+        claims = {"sub": str(admin_user.id), "jti": "x", "papel": "admin"}
+        expirado = jwt.encode(
+            {**claims, "type": "access", "exp": datetime.now(UTC) - timedelta(1)},
+            segredo,
+            algorithm="HS256",
+        )
+        outro_algoritmo = jwt.encode(
+            {**claims, "type": "access", "exp": datetime.now(UTC) + timedelta(1)},
+            segredo,
+            algorithm="HS384",
+        )
+        login = api_client.post(
+            "/api/v1/autenticacao/login",
+            json={"email": admin_user.email, "senha": SENHA_PADRAO},
+        ).json()
+        revogado = login["access_token"]
+        sair = api_client.post(
+            "/api/v1/autenticacao/logout",
+            headers={"Authorization": f"Bearer {revogado}"},
+        )
+        assert sair.status_code == 200
+
+        respostas = [
+            api_client.get(_OS, headers=headers)
+            for headers in (
+                {},
+                {"Authorization": "Bearer lixo"},
+                {"Authorization": f"Bearer {expirado}"},
+                {"Authorization": f"Bearer {outro_algoritmo}"},
+                {"Authorization": f"Bearer {login['refresh_token']}"},
+                {"Authorization": f"Bearer {revogado}"},
+            )
+        ]
+
+        for resposta in respostas:
+            assert resposta.status_code == 401
+            assert resposta.json() == {"detail": "Credenciais invalidas"}
+            assert resposta.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_login_e_refresh_usam_a_mesma_mensagem(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        senha_errada = api_client.post(
+            "/api/v1/autenticacao/login",
+            json={"email": admin_user.email, "senha": "outra-senha-qualquer"},
+        )
+        email_desconhecido = api_client.post(
+            "/api/v1/autenticacao/login",
+            json={"email": "ninguem@test.com", "senha": SENHA_PADRAO},
+        )
+        refresh_invalido = api_client.post(
+            "/api/v1/autenticacao/refresh", json={"refresh_token": "lixo"}
+        )
+
+        for resposta in (senha_errada, email_desconhecido, refresh_invalido):
+            assert resposta.status_code == 401
+            assert resposta.json()["erro"]["codigo"] == "FALHA_AUTENTICACAO"
+            assert resposta.json()["erro"]["mensagem"] == "Credenciais invalidas"
 
 
 class TestCadastroComDocumentoInvalido:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 import structlog
@@ -89,15 +90,23 @@ def registrar_error_handlers(app: FastAPI) -> None:
         # invalida) ficariam invisiveis. Nivel WARNING: esperado, mas
         # operacionalmente relevante. So o `codigo` estavel, nunca a mensagem
         # (que pode carregar dado do request).
+        # Falha de credencial: a mensagem publica e unica; o motivo so no log.
+        motivo = exc.motivo if isinstance(exc, FalhaAutenticacaoException) else None
         logger.warning(
             "dominio_excecao_tratada",
             codigo=exc.codigo,
             status=status_code,
             request_id=request_id,
+            reason=motivo,
         )
         return JSONResponse(
             status_code=status_code,
             content=_criar_envelope(exc.codigo, exc.mensagem, request_id),
+            headers=(
+                {"WWW-Authenticate": "Bearer"}
+                if status_code == HTTPStatus.UNAUTHORIZED
+                else None
+            ),
         )
 
     @app.exception_handler(RequestValidationError)

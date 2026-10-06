@@ -93,8 +93,10 @@ class TestJWTService:
         svc = JWTService(
             chave_secreta="key", expiracao_minutos=30, refresh_expiracao_minutos=10080
         )
-        with pytest.raises(TokenInvalidoException, match="Algoritmo"):
+        with pytest.raises(TokenInvalidoException) as exc:
             svc.validar_token(token)
+        assert exc.value.motivo == "invalid_algorithm"
+        assert exc.value.mensagem == "Credenciais invalidas"
 
     def test_jti_unico_por_token(self) -> None:
         svc = JWTService(

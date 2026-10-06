@@ -82,9 +82,9 @@ class Login:
             # Equaliza o custo com o ramo de senha errada (CWE-208): verifica
             # contra um hash dummy para o tempo nao denunciar e-mails validos.
             self._password_hasher.verificar_senha(dto.senha, _HASH_DUMMY_TIMING)
-            raise CredenciaisInvalidasException()
+            raise CredenciaisInvalidasException(motivo="unknown_email")
         if not self._password_hasher.verificar_senha(dto.senha, usuario.senha_hash):
-            raise CredenciaisInvalidasException()
+            raise CredenciaisInvalidasException(motivo="wrong_password")
         access = self._jwt_service.gerar_access_token(
             usuario_id=usuario.id,
             email=usuario.email,
@@ -123,7 +123,7 @@ class Logout:
         # Simetria com o gate de acesso (TD-029): so um ACCESS token encerra a
         # sessao; um refresh valido no header nao pode autenticar o logout.
         if payload.get("type") != "access":
-            raise TokenInvalidoException(mensagem="Token nao e do tipo access")
+            raise TokenInvalidoException(motivo="not_an_access_token")
         jtis = {str(payload["jti"])}
         if refresh_token is not None:
             jti_refresh = self._jti_refresh_para_revogar(
@@ -164,14 +164,14 @@ class RefreshToken:
     def executar(self, refresh_token: str) -> TokenDTO:
         payload = self._jwt_service.validar_token(refresh_token)
         if payload.get("type") != "refresh":
-            raise TokenInvalidoException(mensagem="Token nao e do tipo refresh")
+            raise TokenInvalidoException(motivo="not_a_refresh_token")
         jti = str(payload["jti"])
         if self._token_repo.esta_revogado(jti):
             raise TokenRevogadoException()
         usuario_id = UUID(str(payload["sub"]))
         usuario = self._usuario_repo.obter_por_id(usuario_id)
         if usuario is None:
-            raise CredenciaisInvalidasException(mensagem="Usuario nao encontrado")
+            raise CredenciaisInvalidasException(motivo="user_not_found")
         with self._uow:
             # Single-use atomico: o check esta_revogado acima e check-then-act
             # e dois refreshes concorrentes do MESMO token passariam ambos.
