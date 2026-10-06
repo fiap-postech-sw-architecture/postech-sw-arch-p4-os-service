@@ -15,7 +15,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 from uuid import uuid4
 
 import jwt
@@ -31,6 +31,9 @@ from src.autenticacao.infraestrutura.jwt_service import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import tzinfo
+
+    import pytest
 
 
 def _nova_chave() -> rsa.RSAPrivateKey:
@@ -92,6 +95,33 @@ def claims(**extras: object) -> dict[str, object]:
         "exp": agora + timedelta(hours=1),
         **extras,
     }
+
+
+# Instante em que o relogio do PyJWT para, nos testes de leeway.
+AGORA_CONGELADA: Final = datetime(2026, 10, 6, 12, 0, 0, tzinfo=UTC)
+
+
+def congelar_o_relogio_do_pyjwt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fixa em ``AGORA_CONGELADA`` o ``now`` com que o PyJWT confere ``exp`` e ``iat``.
+
+    So o ``decode`` enxerga o relogio congelado, entao os tokens do teste levam
+    ``iat`` e ``exp`` como NumericDate inteiro (``instante``): o ``encode`` so
+    converte ``datetime`` de verdade.
+    """
+
+    class _Relogio(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            if tz is None:
+                return AGORA_CONGELADA.replace(tzinfo=None)
+            return AGORA_CONGELADA
+
+    monkeypatch.setattr("jwt.api_jwt.datetime", _Relogio)
+
+
+def instante(deslocamento_segundos: int) -> int:
+    """NumericDate de ``AGORA_CONGELADA`` mais ``deslocamento_segundos``."""
+    return int(AGORA_CONGELADA.timestamp()) + deslocamento_segundos
 
 
 def validade_em_segundos(payload: Mapping[str, object]) -> int:

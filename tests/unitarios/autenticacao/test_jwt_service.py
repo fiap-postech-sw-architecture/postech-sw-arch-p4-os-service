@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import jwt
@@ -29,6 +28,7 @@ from tests.chaves_jwt import (
     claims,
     forjar_hmac_com_a_chave_publica,
     forjar_sem_assinatura,
+    instante,
     jwt_service,
     pem_privado,
     pem_publico,
@@ -77,25 +77,38 @@ class TestEmissao:
 
 
 class TestValidacao:
-    def test_expirado_alem_do_leeway(self) -> None:
-        agora = datetime.now(UTC)
-        token = assinar(claims(exp=agora - timedelta(seconds=15)))
-        with pytest.raises(TokenExpiradoException):
-            jwt_service().validar_token(token)
+    @pytest.mark.parametrize("atraso_s", [0, 1, 9])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_expirado_ate_9s_atras_ainda_vale_pelo_leeway(self, atraso_s: int) -> None:
+        token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
 
-    def test_expirado_dentro_do_leeway_de_10s_ainda_vale(self) -> None:
-        token = assinar(claims(exp=datetime.now(UTC) - timedelta(seconds=5)))
         assert jwt_service().validar_token(token)["type"] == "access"
 
-    def test_iat_no_futuro_alem_do_leeway(self) -> None:
-        agora = datetime.now(UTC)
-        assert jwt_service().validar_token(
-            assinar(claims(iat=agora + timedelta(seconds=5)))
-        )
+    @pytest.mark.parametrize("atraso_s", [10, 11, 60])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_expirado_10s_atras_ou_mais_e_recusado(self, atraso_s: int) -> None:
+        # O leeway e de 10 s exatos: com exp 10 s atras o token ja expirou.
+        token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
+
+        with pytest.raises(TokenExpiradoException) as exc:
+            jwt_service().validar_token(token)
+        assert exc.value.motivo == "expired_token"
+
+    @pytest.mark.parametrize("adianto_s", [0, 1, 10])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_iat_ate_10s_a_frente_ainda_vale_pelo_leeway(self, adianto_s: int) -> None:
+        token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
+
+        assert jwt_service().validar_token(token)["type"] == "access"
+
+    @pytest.mark.parametrize("adianto_s", [11, 12, 60])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_iat_11s_a_frente_ou_mais_e_recusado(self, adianto_s: int) -> None:
+        # Relogio de um pod mais de 10 s adiantado: o token ainda nao "nasceu".
+        token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
+
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(
-                assinar(claims(iat=agora + timedelta(seconds=30)))
-            )
+            jwt_service().validar_token(token)
         assert exc.value.motivo == "iat_in_future"
 
     @pytest.mark.parametrize(

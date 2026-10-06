@@ -6,7 +6,6 @@ Billing e Execucao): busca o JWKS servido pela app num uvicorn de verdade.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -28,6 +27,7 @@ from tests.chaves_jwt import (
     claims,
     forjar_hmac_com_a_chave_publica,
     forjar_sem_assinatura,
+    instante,
     jwt_service,
     pem_publico,
 )
@@ -145,9 +145,36 @@ class TestValidadorIndependente:
         assert (resultado["sub"], resultado["papel"]) == (str(uid), "mecanico")
         assert "email" not in resultado
 
-    def test_aceita_expirado_dentro_do_leeway(self, url_base: str) -> None:
-        token = assinar(claims(exp=datetime.now(UTC) - timedelta(seconds=5)))
+    @pytest.mark.parametrize("atraso_s", [0, 9])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_aceita_expirado_ate_9s_atras(self, url_base: str, atraso_s: int) -> None:
+        token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
         assert validar_access_token(url_base, token)["type"] == "access"
+
+    @pytest.mark.parametrize("atraso_s", [10, 11])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_recusa_expirado_10s_atras_ou_mais(
+        self, url_base: str, atraso_s: int
+    ) -> None:
+        # O leeway do validador e de 10 s exatos, como o do servico e dos consumidores.
+        token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
+        with pytest.raises(jwt.ExpiredSignatureError):
+            validar_access_token(url_base, token)
+
+    @pytest.mark.parametrize("adianto_s", [0, 10])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_aceita_iat_ate_10s_a_frente(self, url_base: str, adianto_s: int) -> None:
+        token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
+        assert validar_access_token(url_base, token)["type"] == "access"
+
+    @pytest.mark.parametrize("adianto_s", [11, 12])
+    @pytest.mark.usefixtures("relogio_congelado")
+    def test_recusa_iat_11s_a_frente_ou_mais(
+        self, url_base: str, adianto_s: int
+    ) -> None:
+        token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
+        with pytest.raises(jwt.ImmatureSignatureError):
+            validar_access_token(url_base, token)
 
     @pytest.mark.parametrize(
         "token",
@@ -162,10 +189,6 @@ class TestValidadorIndependente:
             ),
             pytest.param(lambda: assinar(claims(aud="outro-servico")), id="aud-errada"),
             pytest.param(lambda: assinar(claims(iss="outro-emissor")), id="iss-errado"),
-            pytest.param(
-                lambda: assinar(claims(exp=datetime.now(UTC) - timedelta(seconds=15))),
-                id="expirado-alem-do-leeway",
-            ),
             pytest.param(lambda: assinar(chave=OUTRA_CHAVE), id="kid-desconhecido"),
             pytest.param(
                 lambda: assinar(chave=OUTRA_CHAVE, kid=KID),
