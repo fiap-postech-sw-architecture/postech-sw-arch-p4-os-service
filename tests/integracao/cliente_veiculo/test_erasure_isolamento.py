@@ -1,8 +1,8 @@
 """Erasure LGPD do texto livre das OS e a trava contra abertura concorrente.
 
 Contra Postgres real e com commit de verdade (``session_factory``): o caso de
-uso roda na sua propria session e o estado e conferido por outra. Os tres
-mutantes do review deep (UPDATE sem ``WHERE cliente_id``, motivo nulo virando
+uso roda na sua propria session e o estado e conferido por outra. Tres
+mutacoes do codigo (UPDATE sem ``WHERE cliente_id``, motivo nulo virando
 ``ANONIMIZADO`` e historico sem ``ordem_id IN``) quebram estes testes.
 """
 

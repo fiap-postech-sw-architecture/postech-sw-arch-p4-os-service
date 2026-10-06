@@ -19,8 +19,8 @@ class Dinheiro(ValueObject):
     (o teto das colunas ``Numeric(12, 2)``) e codigo de moeda ISO 4217 com 3
     letras maiusculas. Qualquer violacao levanta ``ValueError``.
 
-    ponytail: sem aritmetica — a OS so guarda o total que o Billing calcula; as
-    operacoes do p3 (soma, subtracao, multiplicacao) voltam se a OS precisar.
+    Sem aritmetica: a OS so guarda o total que o Billing calcula. As operacoes
+    do p3 (soma, subtracao e multiplicacao) voltam se a OS precisar delas.
     """
 
     valor: Decimal

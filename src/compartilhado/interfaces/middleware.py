@@ -293,9 +293,9 @@ def configurar_proxy_headers(app: FastAPI) -> None:
 # O limite padrao vem de ``RATE_LIMIT`` no import, validado EAGER: valor
 # malformado aborta o boot em vez de virar 500 na primeira request.
 #
-# ponytail: contador em memoria, por processo. O limite agregado entre
-# replicas e do API Gateway (Kong, ADR-038); este fica como defesa em
-# profundidade. Storage compartilhado (ex.: Redis) entra se o gateway sair.
+# O contador e em memoria, por processo. O limite agregado entre replicas e do
+# API Gateway (Kong, ADR-038); este fica como defesa em profundidade. Um
+# storage compartilhado (ex.: Redis) so entra se o gateway sair.
 _default_limit = os.environ.get("RATE_LIMIT", "60/minute")
 try:
     parse_many(_default_limit)

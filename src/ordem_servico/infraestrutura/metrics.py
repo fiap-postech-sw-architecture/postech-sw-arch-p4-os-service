@@ -11,8 +11,8 @@ observabilidade.
   A permanencia vem das duas ultimas linhas do historico (entrada no status
   antigo e no novo), exata.
 
-ponytail: duas transicoes no mesmo flush medem so a ultima; os casos de uso
-fazem uma por transacao. Flush seguido de rollback ainda conta (raro).
+Limites: duas transicoes no mesmo flush medem so a ultima (os casos de uso
+fazem uma por transacao), e um flush seguido de rollback ainda conta (raro).
 """
 
 from __future__ import annotations
