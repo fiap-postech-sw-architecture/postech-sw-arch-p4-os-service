@@ -36,7 +36,9 @@ def obter_jwt_service() -> JWTService:
     if not chave:
         msg = "JWT_SECRET nao configurado"
         raise RuntimeError(msg)
-    expiracao = int(os.environ.get("JWT_EXPIRATION_MINUTES", "30"))
+    # Access de 15 min (ADR-039, RFC-004): o token circula entre os servicos e
+    # so o OS consulta a revogacao; nos demais o limite e a expiracao curta.
+    expiracao = int(os.environ.get("JWT_EXPIRATION_MINUTES", "15"))
     refresh_expiracao = int(os.environ.get("JWT_REFRESH_EXPIRATION_MINUTES", "10080"))
     return JWTService(
         chave_secreta=chave,

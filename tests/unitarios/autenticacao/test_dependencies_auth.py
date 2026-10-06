@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
+import jwt
 import pytest
 
 from src.autenticacao.interfaces.dependencies import (
@@ -25,6 +27,18 @@ class TestDependenciesAuth:
         with patch.dict(os.environ, {"JWT_SECRET": "test-secret"}):
             svc = obter_jwt_service()
             assert svc is not None
+
+    def test_access_de_15_minutos_e_refresh_de_7_dias_por_padrao(self) -> None:
+        with patch.dict(os.environ, {"JWT_SECRET": "x" * 32}, clear=True):
+            svc = obter_jwt_service()
+        sem_assinatura = {"verify_signature": False}
+        access = jwt.decode(
+            svc.gerar_access_token(uuid4(), "a@pytstop.dev", "admin"),
+            options=sem_assinatura,
+        )
+        refresh = jwt.decode(svc.gerar_refresh_token(uuid4()), options=sem_assinatura)
+        assert access["exp"] - access["iat"] == 15 * 60
+        assert refresh["exp"] - refresh["iat"] == 10080 * 60
 
     def test_obter_registrar(self) -> None:
         session = MagicMock()

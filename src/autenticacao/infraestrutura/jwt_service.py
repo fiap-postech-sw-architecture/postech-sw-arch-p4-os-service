@@ -19,7 +19,7 @@ _ALGORITMO = "HS256"
 
 class JWTService:
     # As expiracoes chegam pelo construtor (lidas do ambiente na factory
-    # `obter_jwt_service`, com os defaults 30/10080). Sem default aqui: quem
+    # `obter_jwt_service`, com os defaults 15/10080). Sem default aqui: quem
     # instancia direto e obrigado a informar, e os defaults tem fonte unica na
     # factory -- leitura de env no import-time congelava o valor antes de
     # qualquer configuracao de ambiente/teste.
