@@ -92,15 +92,17 @@ class TestValidacao:
         assert jwt_service().validar_token(
             assinar(claims(iat=agora + timedelta(seconds=5)))
         )
-        with pytest.raises(TokenInvalidoException):
+        with pytest.raises(TokenInvalidoException) as exc:
             jwt_service().validar_token(
                 assinar(claims(iat=agora + timedelta(seconds=30)))
             )
+        assert exc.value.motivo == "iat_in_future"
 
     @pytest.mark.parametrize(
         ("token", "motivo"),
         [
-            pytest.param("lixo.token.invalido", "invalid_token", id="malformado"),
+            pytest.param("lixo.token.invalido", "malformed", id="malformado"),
+            pytest.param("so-um-segmento", "malformed", id="sem-segmentos"),
             pytest.param(forjar_sem_assinatura(), "invalid_algorithm", id="alg-none"),
             pytest.param(
                 forjar_hmac_com_a_chave_publica(),
@@ -108,18 +110,25 @@ class TestValidacao:
                 id="hs256-com-a-chave-publica",
             ),
             pytest.param(
-                assinar(claims(aud="outro-servico")), "invalid_token", id="aud-errada"
+                assinar(claims(aud="outro-servico")),
+                "invalid_audience",
+                id="aud-errada",
             ),
             pytest.param(
-                assinar(claims(iss="outro-emissor")), "invalid_token", id="iss-errado"
+                assinar(claims(iss="outro-emissor")), "invalid_issuer", id="iss-errado"
             ),
             pytest.param(
                 assinar(chave=OUTRA_CHAVE), "unknown_kid", id="kid-desconhecido"
             ),
             pytest.param(
                 assinar(chave=OUTRA_CHAVE, kid=KID),
-                "invalid_token",
+                "invalid_signature",
                 id="outra-chave-com-o-kid-certo",
+            ),
+            pytest.param(
+                assinar().rpartition(".")[0] + ".!!!",
+                "malformed",
+                id="assinatura-que-nao-e-base64",
             ),
             pytest.param(
                 jwt.encode(claims(), CHAVE, algorithm="RS256"),
@@ -142,13 +151,15 @@ class TestValidacao:
     def test_claim_obrigatoria_ausente(self, ausente: str) -> None:
         corpo = claims()
         del corpo[ausente]
-        with pytest.raises(TokenInvalidoException):
+        with pytest.raises(TokenInvalidoException) as exc:
             jwt_service().validar_token(assinar(corpo))
+        assert exc.value.motivo == "missing_claim"
 
     def test_corpo_adulterado_com_a_assinatura_original(self) -> None:
         token = jwt_service().gerar_access_token(uuid4(), "atendente")
-        with pytest.raises(TokenInvalidoException):
+        with pytest.raises(TokenInvalidoException) as exc:
             jwt_service().validar_token(adulterar(token, papel="admin"))
+        assert exc.value.motivo == "invalid_signature"
 
 
 class TestRotacao:

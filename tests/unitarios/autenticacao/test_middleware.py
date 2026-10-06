@@ -27,6 +27,7 @@ from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
 from tests.chaves_jwt import (
     CHAVE_PEM,
+    KID,
     OUTRA_CHAVE,
     assinar,
     claims,
@@ -151,7 +152,7 @@ def _token(**extras: object) -> str:
 # (token, motivo no log). `None` = sem header Authorization.
 _FALHAS_DE_CREDENCIAL = [
     pytest.param(None, "missing_token", id="sem-token"),
-    pytest.param("lixo", "invalid_token", id="malformado"),
+    pytest.param("lixo", "malformed", id="malformado"),
     pytest.param(
         _token(exp=datetime.now(UTC) - timedelta(minutes=1)),
         "expired_token",
@@ -164,7 +165,13 @@ _FALHAS_DE_CREDENCIAL = [
         id="hs256-com-a-chave-publica",
     ),
     pytest.param(assinar(chave=OUTRA_CHAVE), "unknown_kid", id="kid-desconhecido"),
-    pytest.param(_token(aud="outro-servico"), "invalid_token", id="aud-errada"),
+    pytest.param(_token(aud="outro-servico"), "invalid_audience", id="aud-errada"),
+    pytest.param(_token(iss="outro-emissor"), "invalid_issuer", id="iss-errado"),
+    pytest.param(
+        assinar(claims(), chave=OUTRA_CHAVE, kid=KID),
+        "invalid_signature",
+        id="outra-chave-com-o-kid-certo",
+    ),
     pytest.param(_token(type="refresh"), "not_an_access_token", id="refresh"),
     pytest.param(_token(jti="revogado"), "revoked_token", id="revogado"),
 ]

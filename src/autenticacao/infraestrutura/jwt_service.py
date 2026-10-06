@@ -40,6 +40,20 @@ LEEWAY_SEGUNDOS: Final = 10
 BITS_MINIMOS: Final = 2048
 _ALGORITMO: Final = "RS256"
 _CLAIMS_OBRIGATORIAS: Final = ["iss", "aud", "sub", "type", "jti", "iat", "exp"]
+# Motivo da recusa que vai para o log: a resposta ao cliente e sempre a mesma
+# (ADR-039), mas numa rotacao de chave ou com o relogio de um pod fora de hora
+# quem investiga precisa ver a causa. Mais especifico primeiro: a assinatura
+# invalida e um caso de DecodeError.
+_MOTIVOS_DA_RECUSA: Final = (
+    (jwt.InvalidAlgorithmError, "invalid_algorithm"),
+    (jwt.InvalidSignatureError, "invalid_signature"),
+    (jwt.InvalidAudienceError, "invalid_audience"),
+    (jwt.InvalidIssuerError, "invalid_issuer"),
+    (jwt.MissingRequiredClaimError, "missing_claim"),
+    # So o iat chega aqui: o servico nao emite nbf.
+    (jwt.ImmatureSignatureError, "iat_in_future"),
+    (jwt.DecodeError, "malformed"),
+)
 
 
 def carregar_chave_privada(pem: str) -> rsa.RSAPrivateKey:
@@ -82,6 +96,13 @@ def _exigir_tamanho_minimo(bits: int) -> None:
     if bits < BITS_MINIMOS:
         msg = f"a chave tem {bits} bits; o minimo e {BITS_MINIMOS}"
         raise ValueError(msg)
+
+
+def _motivo_da_recusa(erro: jwt.InvalidTokenError) -> str:
+    for tipo, motivo in _MOTIVOS_DA_RECUSA:
+        if isinstance(erro, tipo):
+            return motivo
+    return "invalid_token"
 
 
 def _b64url(valor: int) -> str:
@@ -165,7 +186,9 @@ class JWTService:
         Raises:
             TokenExpiradoException: ``exp`` vencido alem do leeway.
             TokenInvalidoException: formato, ``kid``, algoritmo, assinatura,
-                ``iss``, ``aud`` ou claim obrigatoria.
+                ``iss``, ``aud``, ``iat`` ou claim obrigatoria; o ``motivo``
+                diz qual (``malformed``, ``unknown_kid``, ``invalid_signature``
+                e os demais de ``_MOTIVOS_DA_RECUSA``).
         """
         try:
             kid = jwt.get_unverified_header(token).get("kid")
@@ -183,10 +206,8 @@ class JWTService:
             )
         except jwt.ExpiredSignatureError:
             raise TokenExpiradoException() from None
-        except jwt.InvalidAlgorithmError:
-            raise TokenInvalidoException(motivo="invalid_algorithm") from None
-        except jwt.InvalidTokenError:
-            raise TokenInvalidoException() from None
+        except jwt.InvalidTokenError as exc:
+            raise TokenInvalidoException(motivo=_motivo_da_recusa(exc)) from None
         return claims
 
     def jwks(self) -> dict[str, list[dict[str, str]]]:
