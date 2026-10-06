@@ -63,6 +63,16 @@ class TestRotaJwks:
         # Os demais headers de seguranca continuam.
         assert resp.headers["X-Content-Type-Options"] == "nosniff"
 
+    def test_61a_chamada_no_minuto_recebe_429_no_envelope(self) -> None:
+        # O limite padrao (RATE_LIMIT) nao alcanca as rotas de include_router: o
+        # JWKS, publico e sem token, leva o proprio limite de 60/min por IP.
+        client = TestClient(criar_app())
+
+        respostas = [client.get(_JWKS) for _ in range(61)]
+
+        assert [r.status_code for r in respostas] == [200] * 60 + [429]
+        assert respostas[-1].json()["erro"]["codigo"] == "RATE_LIMIT_EXCEDIDO"
+
     def test_formato_rfc_7517_so_com_a_parte_publica(self) -> None:
         (chave,) = TestClient(criar_app()).get(_JWKS).json()["keys"]
 

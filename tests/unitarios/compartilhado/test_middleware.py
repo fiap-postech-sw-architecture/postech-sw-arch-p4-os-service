@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
@@ -13,6 +14,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
+from src.compartilhado.interfaces.dependencies import obter_session
 from src.compartilhado.interfaces.middleware import (
     SecurityHeadersMiddleware,
     _resolver_trusted_proxies,
@@ -21,6 +23,7 @@ from src.compartilhado.interfaces.middleware import (
     configurar_rate_limiting,
     handler_rate_limit_excedido,
 )
+from src.main import criar_app
 
 
 def _montar_app_com_limiter(limiter: Limiter) -> FastAPI:
@@ -307,6 +310,28 @@ class TestHandler429NoEnvelopeDoContrato:
         app = _criar_app_com_saude()
         configurar_rate_limiting(app)
         assert app.exception_handlers[RateLimitExceeded] is handler_rate_limit_excedido
+
+
+class TestLimitePadraoDoApp:
+    """O limite padrao (``RATE_LIMIT``) so alcanca as rotas registradas no app.
+
+    O SlowAPI nao acha o handler de uma rota de ``include_router``: por isso as
+    rotas da API levam ``@limiter.limit`` proprio, e o limite agregado e do Kong.
+    Se uma versao nova do FastAPI ou do SlowAPI mudar isto, o teste cai e os
+    comentarios de ``middleware.py`` e do ``.env.example`` precisam acompanhar.
+    """
+
+    def test_so_a_rota_registrada_direto_leva_o_padrao(self) -> None:
+        app = criar_app()
+        app.dependency_overrides[obter_session] = lambda: MagicMock()
+        client = TestClient(app)
+
+        openapi = [client.get("/openapi.json").status_code for _ in range(61)]
+        clientes = [client.get("/api/v1/clientes").status_code for _ in range(61)]
+
+        assert openapi == [200] * 60 + [429]
+        # Rota de include_router sem limite proprio: segue 401, nunca 429.
+        assert clientes == [401] * 61
 
 
 class TestMemoryStorageEnforce:

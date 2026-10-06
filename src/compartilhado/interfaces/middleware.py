@@ -271,11 +271,16 @@ def configurar_proxy_headers(app: FastAPI) -> None:
 # senao os contadores ficam em instancias diferentes e o limite nao vale.
 #
 # O limite padrao vem de ``RATE_LIMIT`` no import, validado EAGER: valor
-# malformado aborta o boot em vez de virar 500 na primeira request.
+# malformado aborta o boot em vez de virar 500 na primeira request. Ele so
+# alcanca as rotas registradas direto no app (Swagger e OpenAPI): o SlowAPI nao
+# acha o handler de uma rota de ``include_router`` (o app guarda o router
+# incluido como um todo) e a deixa sem limite. Por isso toda rota de API leva o
+# proprio ``@limiter.limit``, sem depender do padrao.
 #
-# O contador e em memoria, por processo. O limite agregado entre replicas e do
-# API Gateway (Kong, ADR-038); este fica como defesa em profundidade. Um
-# storage compartilhado (ex.: Redis) so entra se o gateway sair.
+# O contador e em memoria, por processo. O limite agregado, entre rotas e
+# replicas, e do API Gateway (Kong, ADR-038); este fica como defesa em
+# profundidade. Um storage compartilhado (ex.: Redis) so entra se o gateway
+# sair.
 _default_limit = os.environ.get("RATE_LIMIT", "60/minute")
 try:
     parse_many(_default_limit)
