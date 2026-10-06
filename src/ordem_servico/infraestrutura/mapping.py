@@ -124,6 +124,82 @@ historico_status_ordem_table = Table(
     ),
 )
 
+_COLUNAS_ORCAMENTO = (
+    "_orcamento_id",
+    "_orcamento_total",
+    "_orcamento_moeda",
+    "_orcamento_link_decisao",
+)
+_COLUNAS_PAGAMENTO = ("_pagamento_id", "_pagamento_status", "_pagamento_checkout_url")
+
+
+def _resumo_orcamento(estado: dict[str, Any]) -> ResumoOrcamento | None:
+    if estado.get("_orcamento_id") is None:
+        return None
+    return ResumoOrcamento(
+        orcamento_id=estado["_orcamento_id"],
+        total=Dinheiro(
+            valor=estado["_orcamento_total"], moeda=estado["_orcamento_moeda"]
+        ),
+        link_decisao=estado["_orcamento_link_decisao"],
+    )
+
+
+def _resumo_pagamento(estado: dict[str, Any]) -> ResumoPagamento | None:
+    if estado.get("_pagamento_id") is None:
+        return None
+    return ResumoPagamento(
+        pagamento_id=estado["_pagamento_id"],
+        status=estado["_pagamento_status"],
+        checkout_url=estado["_pagamento_checkout_url"],
+    )
+
+
+def _colunas_do_orcamento(resumo: ResumoOrcamento | None) -> tuple[object, ...]:
+    if resumo is None:
+        return (None,) * len(_COLUNAS_ORCAMENTO)
+    return (
+        resumo.orcamento_id,
+        resumo.total.valor,
+        resumo.total.moeda,
+        resumo.link_decisao,
+    )
+
+
+def _colunas_do_pagamento(resumo: ResumoPagamento | None) -> tuple[object, ...]:
+    if resumo is None:
+        return (None,) * len(_COLUNAS_PAGAMENTO)
+    return (resumo.pagamento_id, resumo.status, resumo.checkout_url)
+
+
+def _reconstruir_os(target: OrdemDeServico, *_args: object) -> None:
+    """Listener ``load``/``refresh``: recompoe os VOs a partir das colunas planas.
+
+    ``refresh`` (aridade diferente, absorvida por ``*_args``) cobre a releitura
+    por session.refresh/expire: sem ele os VOs ficariam stale.
+    """
+    estado: dict[str, Any] = target.__dict__
+    object.__setattr__(target, "_resumo_orcamento", _resumo_orcamento(estado))
+    object.__setattr__(target, "_resumo_pagamento", _resumo_pagamento(estado))
+    # SQLAlchemy nao chama __init__ na reidratacao: rearma a lista de eventos
+    # para os metodos de dominio funcionarem em instancia carregada.
+    object.__setattr__(target, "_eventos_pendentes", [])
+
+
+def _decompor_os(_mapper: object, _connection: object, target: OrdemDeServico) -> None:
+    """Listener ``before_insert``/``before_update``: VOs -> colunas planas."""
+    colunas = zip(
+        (*_COLUNAS_ORCAMENTO, *_COLUNAS_PAGAMENTO),
+        (
+            *_colunas_do_orcamento(target.resumo_orcamento),
+            *_colunas_do_pagamento(target.resumo_pagamento),
+        ),
+        strict=True,
+    )
+    for nome, valor in colunas:
+        setattr(target, nome, valor)
+
+
 _mapeamento_iniciado = False
 
 
@@ -180,58 +256,7 @@ def iniciar_mapeamentos() -> None:
         },
     )
 
-    @event.listens_for(OrdemDeServico, "load")
-    @event.listens_for(OrdemDeServico, "refresh")
-    def _reconstruir_os(target: OrdemDeServico, *_args: object) -> None:
-        # ``refresh`` (aridade diferente, absorvida por *_args) cobre a releitura
-        # por session.refresh/expire: sem ele os VOs ficariam stale. As colunas
-        # planas sao atributos injetados pelo map_imperatively.
-        estado: dict[str, Any] = target.__dict__
-        orcamento_id = estado.get("_orcamento_id")
-        object.__setattr__(
-            target,
-            "_resumo_orcamento",
-            ResumoOrcamento(
-                orcamento_id=orcamento_id,
-                total=Dinheiro(
-                    valor=estado["_orcamento_total"], moeda=estado["_orcamento_moeda"]
-                ),
-                link_decisao=estado["_orcamento_link_decisao"],
-            )
-            if orcamento_id is not None
-            else None,
-        )
-        pagamento_id = estado.get("_pagamento_id")
-        object.__setattr__(
-            target,
-            "_resumo_pagamento",
-            ResumoPagamento(
-                pagamento_id=pagamento_id,
-                status=estado["_pagamento_status"],
-                checkout_url=estado["_pagamento_checkout_url"],
-            )
-            if pagamento_id is not None
-            else None,
-        )
-        # SQLAlchemy nao chama __init__ na reidratacao: rearma a lista de
-        # eventos para os metodos de dominio funcionarem em instancia carregada.
-        object.__setattr__(target, "_eventos_pendentes", [])
-
-    @event.listens_for(OrdemDeServico, "before_insert")
-    @event.listens_for(OrdemDeServico, "before_update")
-    def _decompor_os(
-        _mapper: object, _connection: object, target: OrdemDeServico
-    ) -> None:
-        orcamento = target.resumo_orcamento
-        pagamento = target.resumo_pagamento
-        colunas: dict[str, object] = {
-            "_orcamento_id": orcamento.orcamento_id if orcamento else None,
-            "_orcamento_total": orcamento.total.valor if orcamento else None,
-            "_orcamento_moeda": orcamento.total.moeda if orcamento else None,
-            "_orcamento_link_decisao": orcamento.link_decisao if orcamento else None,
-            "_pagamento_id": pagamento.pagamento_id if pagamento else None,
-            "_pagamento_status": pagamento.status if pagamento else None,
-            "_pagamento_checkout_url": pagamento.checkout_url if pagamento else None,
-        }
-        for nome, valor in colunas.items():
-            setattr(target, nome, valor)
+    event.listen(OrdemDeServico, "load", _reconstruir_os)
+    event.listen(OrdemDeServico, "refresh", _reconstruir_os)
+    event.listen(OrdemDeServico, "before_insert", _decompor_os)
+    event.listen(OrdemDeServico, "before_update", _decompor_os)

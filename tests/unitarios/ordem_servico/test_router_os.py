@@ -4,6 +4,7 @@ de uso reais ligados a repositorio em memoria — sem banco."""
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -50,26 +51,17 @@ def client(repo: RepoEmMemoria, papel: str) -> Iterator[TestClient]:
         "papel": papel,
         "type": "access",
     }
-    with (
-        patch(
-            f"{_ROUTER}.obter_abrir_ordem",
-            lambda _s: AbrirOrdem(repo, FakeUnitOfWork(), ClientePortFake()),
-        ),
-        patch(f"{_ROUTER}.obter_listar_ordens", lambda _s: ListarOrdens(repo)),
-        patch(f"{_ROUTER}.obter_obter_ordem", lambda _s: ObterOrdem(repo)),
-        patch(
-            f"{_ROUTER}.obter_cancelar_ordem",
-            lambda _s: CancelarOrdem(repo, FakeUnitOfWork()),
-        ),
-        patch(
-            f"{_ROUTER}.obter_registrar_entrega",
-            lambda _s: RegistrarEntrega(repo, FakeUnitOfWork()),
-        ),
-        patch(
-            f"{_ROUTER}.obter_consultar_acompanhamento",
-            lambda _s: ConsultarAcompanhamento(repo),
-        ),
-    ):
+    fabricas = {
+        "obter_abrir_ordem": AbrirOrdem(repo, FakeUnitOfWork(), ClientePortFake()),
+        "obter_listar_ordens": ListarOrdens(repo),
+        "obter_obter_ordem": ObterOrdem(repo),
+        "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork()),
+        "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork()),
+        "obter_consultar_acompanhamento": ConsultarAcompanhamento(repo),
+    }
+    with ExitStack() as pilha:
+        for nome, caso_de_uso in fabricas.items():
+            pilha.enter_context(patch(f"{_ROUTER}.{nome}", return_value=caso_de_uso))
         yield TestClient(app)
 
 

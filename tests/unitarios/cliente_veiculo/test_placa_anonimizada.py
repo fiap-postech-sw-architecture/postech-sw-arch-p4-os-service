@@ -29,5 +29,7 @@ class TestPlacaAnonimizada:
 
     def test_igualdade_por_veiculo_id(self) -> None:
         vid = uuid4()
-        assert PlacaAnonimizada(veiculo_id=vid) == PlacaAnonimizada(veiculo_id=vid)
-        assert PlacaAnonimizada(veiculo_id=vid) != PlacaAnonimizada(veiculo_id=uuid4())
+        a, b = PlacaAnonimizada(veiculo_id=vid), PlacaAnonimizada(veiculo_id=vid)
+        assert a is not b
+        assert a == b
+        assert a != PlacaAnonimizada(veiculo_id=uuid4())

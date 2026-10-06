@@ -24,7 +24,8 @@ echo "::endgroup::"
 # A senha padrao admin/admin precisa ser trocada antes de qualquer chamada; a
 # nova senha atende a politica de complexidade e so existe neste runner.
 SENHA="Pytstop-$(openssl rand -hex 12)-Aa1!"
-curl -fsS -u admin:admin -X POST "$URL/api/users/change_password" \
+PADRAO="admin:admin"  # gitleaks:allow - credencial de fabrica do SonarQube efemero, trocada aqui
+curl -fsS -u "$PADRAO" -X POST "$URL/api/users/change_password" \
   --data-urlencode "login=admin" --data-urlencode "previousPassword=admin" \
   --data-urlencode "password=$SENHA" >/dev/null
 echo "::add-mask::$SENHA"

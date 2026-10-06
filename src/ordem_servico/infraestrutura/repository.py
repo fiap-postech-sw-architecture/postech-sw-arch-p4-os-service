@@ -67,10 +67,7 @@ class OrdemDeServicoSQLAlchemyRepository:
             self._session.flush()
         except StaleDataError:
             raise ConflitoDeConcorrenciaException(
-                mensagem=(
-                    f"Ordem de servico {ordem_id} foi alterada por outra "
-                    "operacao; releia e tente de novo"
-                )
+                mensagem=f"Ordem {ordem_id} alterada por outra operacao; releia"
             ) from None
 
     def listar(
