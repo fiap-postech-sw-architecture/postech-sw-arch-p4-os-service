@@ -379,9 +379,14 @@ class TestLogout:
 
         assert token_repo.ordem_das_revogacoes == ["a-do-refresh", "z-do-access"]
 
-    def test_refresh_pos_logout_e_rejeitado(self) -> None:
+    def test_refresh_pos_logout_e_rejeitado(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Prova end-to-end de p3 #118: apos o logout com refresh, o fluxo de
-        # refresh rejeita o token revogado (antes: cunhava novo par).
+        # refresh rejeita o token revogado (antes: cunhava novo par). O evento de
+        # reuso sai tambem aqui: a tabela de revogados nao distingue o refresh
+        # consumido na rotacao do revogado no logout.
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
         repo = FakeUsuarioRepository()
         usuario = Usuario.criar(
             email="t@t.com",
@@ -403,8 +408,12 @@ class TestLogout:
             usuario_repo=repo,
             uow=uow,
         )
-        with pytest.raises(TokenRevogadoException):
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(TokenRevogadoException),
+        ):
             refresh_uc.executar(refresh)
+        assert [e["event"] for e in logs] == ["refresh_reuse_detected"]
 
     def test_logout_com_refresh_token_no_header_e_rejeitado(self) -> None:
         # Simetria com o gate de acesso (TD-029, p3 #167): so um ACCESS token

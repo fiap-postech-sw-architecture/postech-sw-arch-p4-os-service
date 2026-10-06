@@ -259,8 +259,10 @@ def configurar_proxy_headers(app: FastAPI) -> None:
 # malformado aborta o boot em vez de virar 500 na primeira request. Ele so
 # alcanca as rotas registradas direto no app (Swagger e OpenAPI): o SlowAPI nao
 # acha o handler de uma rota de ``include_router`` (o app guarda o router
-# incluido como um todo) e a deixa sem limite. Por isso toda rota de API leva o
-# proprio ``@limiter.limit``, sem depender do padrao.
+# incluido como um todo) e a deixa sem limite. Por isso as rotas sem token e as
+# de credencial levam o proprio ``@limiter.limit`` (login, registrar, logout,
+# refresh, JWKS e acompanhamento publico); as demais, atras do gate de
+# autenticacao, ficam sem limite no servico e so o Kong as limita.
 #
 # O contador e em memoria, por processo. O limite agregado, entre rotas e
 # replicas, e do API Gateway (Kong, ADR-038); este fica como defesa em

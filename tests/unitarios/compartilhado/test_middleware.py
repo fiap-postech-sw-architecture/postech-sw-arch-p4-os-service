@@ -316,9 +316,10 @@ class TestLimitePadraoDoApp:
     """O limite padrao (``RATE_LIMIT``) so alcanca as rotas registradas no app.
 
     O SlowAPI nao acha o handler de uma rota de ``include_router``: por isso as
-    rotas da API levam ``@limiter.limit`` proprio, e o limite agregado e do Kong.
-    Se uma versao nova do FastAPI ou do SlowAPI mudar isto, o teste cai e os
-    comentarios de ``middleware.py`` e do ``.env.example`` precisam acompanhar.
+    rotas sem token e as de credencial levam ``@limiter.limit`` proprio, e o
+    limite agregado de toda a API e do Kong. Se uma versao nova do FastAPI ou do
+    SlowAPI mudar isto, o teste cai e os comentarios de ``middleware.py`` e do
+    ``.env.example`` precisam acompanhar.
     """
 
     def test_so_a_rota_registrada_direto_leva_o_padrao(self) -> None:

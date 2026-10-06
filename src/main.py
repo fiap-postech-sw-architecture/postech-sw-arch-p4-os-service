@@ -86,7 +86,8 @@ def criar_app() -> FastAPI:
 
     O uvicorn importa o app antes da primeira linha do servidor ("Started
     server process"), e o log JSON com o scrub de PII e configurado aqui, nao no
-    lifespan: o boot inteiro sai em JSON e mascarado.
+    lifespan: o log do uvicorn e o do app saem em JSON e mascarados desde a
+    primeira linha.
     """
     configurar_logging()
     application = FastAPI(

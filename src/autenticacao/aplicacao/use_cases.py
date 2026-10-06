@@ -194,12 +194,14 @@ class RefreshToken:
 
     @staticmethod
     def _reuso_detectado(payload: dict[str, object]) -> TokenRevogadoException:
-        """401 de um refresh ja consumido, com o evento que avisa quem opera.
+        """401 de um refresh ja usado ou revogado, com o evento que avisa quem opera.
 
-        O cliente repetiu o pedido ou o refresh vazou e alguem o usa depois do
-        dono; o log e o unico sinal, com o usuario e o ``jti`` reapresentado.
-        A resposta e a de sempre e a descendencia do refresh segue valida: a
-        revogacao da familia (RFC 9700, 4.14.2) esta como divida no MEMORY.
+        O cliente repetiu o pedido, o refresh foi revogado no logout ou ele
+        vazou e alguem o usa depois do dono: a tabela de revogados e a mesma
+        para os tres casos, e o log e o unico sinal, com o usuario e o ``jti``
+        reapresentado. A resposta e a de sempre e a descendencia do refresh segue
+        valida: a revogacao da familia (RFC 9700, 4.14.2) esta como divida no
+        MEMORY.
         """
         _log.warning(
             "refresh_reuse_detected", sub=str(payload["sub"]), jti=str(payload["jti"])

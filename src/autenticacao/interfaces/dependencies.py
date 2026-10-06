@@ -43,9 +43,9 @@ def obter_token_revogado_repo(session: Session) -> TokenRevogadoRepository:
 # continua no historico do git.
 KIDS_DAS_CHAVES_DEMO: Final = frozenset({"VmyReO-ecFv1-Etlmu9FZASx9UzxX_BJlxxPB4PUYVY"})
 
-# Tetos da validade dos tokens (ADR-039): o access circula entre os servicos e so
-# o OS consulta a revogacao, entao a expiracao curta e o limite; o refresh vale
-# ate 30 dias.
+# Tetos da validade dos tokens, limites deste servico (o ADR-039 fixa o access em
+# 15 min): o access circula entre os servicos e so o OS consulta a revogacao,
+# entao a expiracao curta e o limite; o refresh vale ate 30 dias.
 ACCESS_MAXIMO_MINUTOS: Final = 60
 REFRESH_MAXIMO_MINUTOS: Final = 30 * 24 * 60
 
