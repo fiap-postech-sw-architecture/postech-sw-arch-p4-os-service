@@ -71,6 +71,7 @@ from tests.chaves_jwt import (
     OUTRA_CHAVE,
     adulterar,
     claims,
+    credenciais,
     forjar_hmac_com_a_chave_publica,
     forjar_sem_assinatura,
     jwt_service,
@@ -79,11 +80,6 @@ from tests.chaves_jwt import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeCredentials:
-    def __init__(self, token: str) -> None:
-        self.credentials = token
 
 
 _MOCK_SESSION = MagicMock()
@@ -114,7 +110,14 @@ class TestJWTAlgorithmEnforcement:
         token = svc.gerar_access_token(uid, "admin")
         assert svc.validar_token(token)["sub"] == str(uid)
 
-    @pytest.mark.parametrize("algoritmo", ["HS256", "HS384", "HS512"])
+    @pytest.mark.parametrize(
+        "algoritmo",
+        [
+            pytest.param("HS256", id="hs256"),
+            pytest.param("HS384", id="hs384"),
+            pytest.param("HS512", id="hs512"),
+        ],
+    )
     def test_hmac_assinado_com_a_chave_publica_rejected(self, algoritmo: str) -> None:
         # Troca de algoritmo: o PEM publico (que esta no JWKS) como segredo HMAC.
         token = forjar_hmac_com_a_chave_publica(algoritmo)
@@ -173,9 +176,9 @@ class TestJWTTokenRevocation:
         payload = svc.validar_token(token)
         jti = str(payload["jti"])
         with _patch_revocation(revogados={jti}):
-            creds = _FakeCredentials(token=token)
+            creds = credenciais(token)
             with pytest.raises(FalhaAutenticacaoException) as exc:
-                obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+                obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)
             # ADR-039: a mesma mensagem de qualquer outra falha de credencial.
             assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
             assert exc.value.motivo == "revoked_token"
@@ -185,8 +188,8 @@ class TestJWTTokenRevocation:
         uid = uuid4()
         token = svc.gerar_access_token(uid, "admin")
         with _patch_revocation(revogados=set()):
-            creds = _FakeCredentials(token=token)
-            payload = obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+            creds = credenciais(token)
+            payload = obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)
             assert payload["sub"] == str(uid)
 
 

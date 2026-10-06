@@ -87,8 +87,8 @@ class TestObterJwtService:
         svc = obter_jwt_service()
         access = svc.validar_token(svc.gerar_access_token(uuid4(), "admin"))
         refresh = svc.validar_token(svc.gerar_refresh_token(uuid4()))
-        assert access["exp"] - access["iat"] == 15 * 60  # type: ignore[operator]
-        assert refresh["exp"] - refresh["iat"] == 10080 * 60  # type: ignore[operator]
+        assert validade_em_segundos(access) == 15 * 60
+        assert validade_em_segundos(refresh) == 10080 * 60
 
     def test_uma_instancia_por_configuracao(self, ambiente: pytest.MonkeyPatch) -> None:
         # O parse da chave RSA nao se repete a cada requisicao.

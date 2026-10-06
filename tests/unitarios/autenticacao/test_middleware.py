@@ -11,6 +11,7 @@ import httpx
 import pytest
 import structlog
 import structlog.testing
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 
 from src.autenticacao.dominio.papel import Papel
@@ -31,6 +32,7 @@ from tests.chaves_jwt import (
     OUTRA_CHAVE,
     assinar,
     claims,
+    credenciais,
     forjar_hmac_com_a_chave_publica,
     forjar_sem_assinatura,
 )
@@ -45,15 +47,12 @@ _CODIGO_401 = "NAO_AUTENTICADO"
 _MENSAGEM_401 = "Credencial ausente, invalida ou expirada"
 
 
-class _FakeCredentials:
-    def __init__(self, token: str) -> None:
-        self.credentials = token
-
-
-def _falha_do_gate(creds: _FakeCredentials | None) -> FalhaAutenticacaoException:
+def _falha_do_gate(
+    creds: HTTPAuthorizationCredentials | None,
+) -> FalhaAutenticacaoException:
     """Roda o gate esperando a falha de credencial e a devolve."""
     with pytest.raises(FalhaAutenticacaoException) as exc:
-        obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+        obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)
     return exc.value
 
 
@@ -70,13 +69,13 @@ class TestObterUsuarioAtual:
         assert falha.motivo == "missing_token"
 
     def test_token_invalido_retorna_401(self) -> None:
-        falha = _falha_do_gate(_FakeCredentials(token="invalido"))
+        falha = _falha_do_gate(credenciais("invalido"))
         assert (falha.codigo, falha.mensagem) == (_CODIGO_401, _MENSAGEM_401)
 
     def test_token_expirado_retorna_401(self) -> None:
         svc = _jwt_service(expiracao_minutos=-1)
         token = svc.gerar_access_token(usuario_id=uuid4(), papel="admin")
-        falha = _falha_do_gate(_FakeCredentials(token=token))
+        falha = _falha_do_gate(credenciais(token))
         assert (falha.codigo, falha.mensagem) == (_CODIGO_401, _MENSAGEM_401)
         assert falha.motivo == "expired_token"
 
@@ -84,14 +83,14 @@ class TestObterUsuarioAtual:
         svc = _jwt_service()
         uid = uuid4()
         token = svc.gerar_access_token(uid, "admin")
-        creds = _FakeCredentials(token=token)
+        creds = credenciais(token)
         fake_repo = MagicMock()
         fake_repo.esta_revogado = MagicMock(return_value=False)
         with patch(
             "src.autenticacao.infraestrutura.token_revogado_repository.TokenRevogadoSQLAlchemyRepository",
             return_value=fake_repo,
         ):
-            payload = obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+            payload = obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)
         assert payload["sub"] == str(uid)
 
     def test_refresh_token_rejeitado_como_access(self) -> None:
@@ -104,7 +103,7 @@ class TestObterUsuarioAtual:
         token = svc.gerar_refresh_token(uuid4())
         # Sem mock do repo de revogacao: o check `type != access` ocorre ANTES da
         # consulta de revogacao, entao o 401 vem do gate de tipo (nao da revogacao).
-        falha = _falha_do_gate(_FakeCredentials(token=token))
+        falha = _falha_do_gate(credenciais(token))
         assert falha.motivo == "not_an_access_token"
 
     def test_payload_sem_jti_retorna_401(self) -> None:
@@ -115,7 +114,7 @@ class TestObterUsuarioAtual:
             "sub": str(uuid4()),
             "type": "access",
         }
-        creds = _FakeCredentials(token="token-sem-jti")
+        creds = credenciais("token-sem-jti")
         with patch(
             "src.autenticacao.interfaces.middleware.obter_jwt_service",
             return_value=fake_jwt,
@@ -136,7 +135,7 @@ class TestObterUsuarioAtual:
             "src.autenticacao.infraestrutura.token_revogado_repository.TokenRevogadoSQLAlchemyRepository",
             return_value=fake_repo,
         ):
-            falha = _falha_do_gate(_FakeCredentials(token=token))
+            falha = _falha_do_gate(credenciais(token))
         assert (falha.codigo, falha.mensagem) == (_CODIGO_401, _MENSAGEM_401)
         assert falha.motivo == "revoked_token"
 
@@ -193,7 +192,7 @@ class TestRespostaUniformeDoGate:
 
     @pytest.mark.parametrize(("token", "motivo"), _FALHAS_DE_CREDENCIAL)
     def test_mesma_falha_e_motivo_proprio(self, token: str | None, motivo: str) -> None:
-        creds = None if token is None else _FakeCredentials(token=token)
+        creds = None if token is None else credenciais(token)
 
         falha = _falha_do_gate(creds)
 
@@ -397,13 +396,15 @@ class TestGuardasDePermissoes:
             _PERMISSOES[Papel.ATENDENTE].add(Papel.ADMIN)
 
 
-class TestEnvLimpeza:
-    def test_chave_jwt_nao_vaza_entre_testes(
+class TestGateSemChaveConfigurada:
+    def test_chave_ausente_e_erro_do_servidor_e_nao_um_401(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Config ruim derruba a requisicao (500): o gate nao a engole como se o
+        # token fosse invalido.
         monkeypatch.delenv("JWT_PRIVATE_KEY", raising=False)
         with pytest.raises(RuntimeError, match="JWT_PRIVATE_KEY nao configurada"):
             obter_usuario_atual(
-                credentials=_FakeCredentials(token="qualquer"),
+                credentials=credenciais("qualquer"),
                 session=_MOCK_SESSION,
             )
