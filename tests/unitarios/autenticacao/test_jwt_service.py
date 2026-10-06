@@ -29,9 +29,11 @@ from tests.chaves_jwt import (
     forjar_hmac_com_a_chave_publica,
     forjar_sem_assinatura,
     instante,
+    jwk_publico,
     jwt_service,
     pem_privado,
     pem_publico,
+    validade_em_segundos,
 )
 
 _CLAIMS_DO_ACCESS = {"iss", "aud", "sub", "papel", "type", "jti", "iat", "exp"}
@@ -66,7 +68,7 @@ class TestEmissao:
         payload = jwt_service(expiracao_minutos=15).validar_token(
             jwt_service(expiracao_minutos=15).gerar_access_token(uuid4(), "admin")
         )
-        assert payload["exp"] - payload["iat"] == 15 * 60  # type: ignore[operator]
+        assert validade_em_segundos(payload) == 15 * 60
 
     def test_jti_unico_por_token(self) -> None:
         svc = jwt_service()
@@ -77,14 +79,28 @@ class TestEmissao:
 
 
 class TestValidacao:
-    @pytest.mark.parametrize("atraso_s", [0, 1, 9])
+    @pytest.mark.parametrize(
+        "atraso_s",
+        [
+            pytest.param(0, id="0s-atras"),
+            pytest.param(1, id="1s-atras"),
+            pytest.param(9, id="9s-atras"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_expirado_ate_9s_atras_ainda_vale_pelo_leeway(self, atraso_s: int) -> None:
         token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
 
         assert jwt_service().validar_token(token)["type"] == "access"
 
-    @pytest.mark.parametrize("atraso_s", [10, 11, 60])
+    @pytest.mark.parametrize(
+        "atraso_s",
+        [
+            pytest.param(10, id="10s-atras"),
+            pytest.param(11, id="11s-atras"),
+            pytest.param(60, id="60s-atras"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_expirado_10s_atras_ou_mais_e_recusado(self, atraso_s: int) -> None:
         # O leeway e de 10 s exatos: com exp 10 s atras o token ja expirou.
@@ -94,14 +110,28 @@ class TestValidacao:
             jwt_service().validar_token(token)
         assert exc.value.motivo == "expired_token"
 
-    @pytest.mark.parametrize("adianto_s", [0, 1, 10])
+    @pytest.mark.parametrize(
+        "adianto_s",
+        [
+            pytest.param(0, id="0s-a-frente"),
+            pytest.param(1, id="1s-a-frente"),
+            pytest.param(10, id="10s-a-frente"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_iat_ate_10s_a_frente_ainda_vale_pelo_leeway(self, adianto_s: int) -> None:
         token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
 
         assert jwt_service().validar_token(token)["type"] == "access"
 
-    @pytest.mark.parametrize("adianto_s", [11, 12, 60])
+    @pytest.mark.parametrize(
+        "adianto_s",
+        [
+            pytest.param(11, id="11s-a-frente"),
+            pytest.param(12, id="12s-a-frente"),
+            pytest.param(60, id="60s-a-frente"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_iat_11s_a_frente_ou_mais_e_recusado(self, adianto_s: int) -> None:
         # Relogio de um pod mais de 10 s adiantado: o token ainda nao "nasceu".
@@ -148,6 +178,33 @@ class TestValidacao:
                 "unknown_kid",
                 id="sem-kid",
             ),
+            # Chave ou URL do atacante no cabecalho: o servico so olha o kid e
+            # as chaves que ele mesmo conhece, nunca o que o token traz.
+            pytest.param(
+                assinar(chave=OUTRA_CHAVE, jwk=jwk_publico(OUTRA_CHAVE)),
+                "unknown_kid",
+                id="jwk-do-atacante",
+            ),
+            pytest.param(
+                assinar(chave=OUTRA_CHAVE, kid=KID, jwk=jwk_publico(OUTRA_CHAVE)),
+                "invalid_signature",
+                id="jwk-do-atacante-com-o-kid-certo",
+            ),
+            pytest.param(
+                assinar(chave=OUTRA_CHAVE, jku="https://atacante.example/jwks.json"),
+                "unknown_kid",
+                id="jku-do-atacante",
+            ),
+            pytest.param(
+                assinar(chave=OUTRA_CHAVE, x5u="https://atacante.example/cert.pem"),
+                "unknown_kid",
+                id="x5u-do-atacante",
+            ),
+            pytest.param(
+                assinar(crit=["extensao"], extensao="x"),
+                "invalid_token",
+                id="crit-com-extensao-desconhecida",
+            ),
         ],
     )
     def test_token_forjado_ou_de_outro_emissor_e_recusado(
@@ -159,7 +216,11 @@ class TestValidacao:
         assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
 
     @pytest.mark.parametrize(
-        "ausente", ["iss", "aud", "sub", "type", "jti", "iat", "exp"]
+        "ausente",
+        [
+            pytest.param(nome, id=f"sem-{nome}")
+            for nome in ("iss", "aud", "sub", "type", "jti", "iat", "exp")
+        ],
     )
     def test_claim_obrigatoria_ausente(self, ausente: str) -> None:
         corpo = claims()

@@ -6,6 +6,7 @@ Billing e Execucao): busca o JWKS servido pela app num uvicorn de verdade.
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from jwt.utils import base64url_decode
 from scripts.validar_token import validar_access_token
 from src.autenticacao.infraestrutura.jwt_service import JWTService, kid_da_chave
 from src.autenticacao.interfaces.dependencies import obter_jwt_service
+from src.autenticacao.interfaces.router import jwks
 from src.main import criar_app
 from tests.chaves_jwt import (
     CHAVE,
@@ -29,6 +31,7 @@ from tests.chaves_jwt import (
     forjar_hmac_com_a_chave_publica,
     forjar_sem_assinatura,
     instante,
+    jwk_publico,
     jwt_service,
     pem_privado,
     pem_publico,
@@ -77,6 +80,41 @@ class TestRotaJwks:
 
         assert [r.status_code for r in respostas] == [200] * 60 + [429]
         assert respostas[-1].json()["erro"]["codigo"] == "RATE_LIMIT_EXCEDIDO"
+
+    def test_rota_roda_no_event_loop(self) -> None:
+        # A docstring promete responder mesmo com o threadpool cheio: so vale se a
+        # rota for async (com o limite do SlowAPI por cima).
+        assert inspect.iscoroutinefunction(jwks)
+
+    @pytest.mark.parametrize(
+        "metodo",
+        [pytest.param(m, id=m.lower()) for m in ("POST", "PUT", "DELETE", "HEAD")],
+    )
+    def test_metodo_que_nao_e_get_da_405_com_allow_no_envelope(
+        self, metodo: str
+    ) -> None:
+        resp = TestClient(criar_app()).request(metodo, _JWKS)
+
+        assert resp.status_code == 405
+        assert resp.headers["Allow"] == "GET"
+        assert resp.headers["Cache-Control"] == "no-store"
+        if metodo != "HEAD":  # a resposta do HEAD vai sem corpo
+            assert resp.json()["erro"]["codigo"] == "METODO_NAO_PERMITIDO"
+
+    def test_rota_inexistente_no_app_real_responde_o_id_da_requisicao(self) -> None:
+        resp = TestClient(criar_app()).get(
+            "/.well-known/nao-existe.json", headers={"X-Request-ID": "req-jwks-404"}
+        )
+
+        assert resp.status_code == 404
+        assert resp.json() == {
+            "erro": {
+                "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                "mensagem": "Recurso nao encontrado",
+                "id_requisicao": "req-jwks-404",
+            }
+        }
+        assert resp.headers["X-Request-ID"] == "req-jwks-404"
 
     def test_formato_rfc_7517_so_com_a_parte_publica(self) -> None:
         (chave,) = TestClient(criar_app()).get(_JWKS).json()["keys"]
@@ -149,13 +187,25 @@ class TestValidadorIndependente:
         assert (resultado["sub"], resultado["papel"]) == (str(uid), "mecanico")
         assert "email" not in resultado
 
-    @pytest.mark.parametrize("atraso_s", [0, 9])
+    @pytest.mark.parametrize(
+        "atraso_s",
+        [
+            pytest.param(0, id="0s-atras"),
+            pytest.param(9, id="9s-atras"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_aceita_expirado_ate_9s_atras(self, url_base: str, atraso_s: int) -> None:
         token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
         assert validar_access_token(url_base, token)["type"] == "access"
 
-    @pytest.mark.parametrize("atraso_s", [10, 11])
+    @pytest.mark.parametrize(
+        "atraso_s",
+        [
+            pytest.param(10, id="10s-atras"),
+            pytest.param(11, id="11s-atras"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_recusa_expirado_10s_atras_ou_mais(
         self, url_base: str, atraso_s: int
@@ -165,13 +215,41 @@ class TestValidadorIndependente:
         with pytest.raises(jwt.ExpiredSignatureError):
             validar_access_token(url_base, token)
 
-    @pytest.mark.parametrize("adianto_s", [0, 10])
+    @pytest.mark.parametrize(
+        "ausente",
+        [
+            pytest.param(nome, id=f"sem-{nome}")
+            for nome in ("exp", "sub", "type", "jti", "iat")
+        ],
+    )
+    def test_recusa_token_sem_claim_obrigatoria(
+        self, url_base: str, ausente: str
+    ) -> None:
+        corpo = claims()
+        del corpo[ausente]
+
+        with pytest.raises(jwt.MissingRequiredClaimError):
+            validar_access_token(url_base, assinar(corpo))
+
+    @pytest.mark.parametrize(
+        "adianto_s",
+        [
+            pytest.param(0, id="0s-a-frente"),
+            pytest.param(10, id="10s-a-frente"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_aceita_iat_ate_10s_a_frente(self, url_base: str, adianto_s: int) -> None:
         token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
         assert validar_access_token(url_base, token)["type"] == "access"
 
-    @pytest.mark.parametrize("adianto_s", [11, 12])
+    @pytest.mark.parametrize(
+        "adianto_s",
+        [
+            pytest.param(11, id="11s-a-frente"),
+            pytest.param(12, id="12s-a-frente"),
+        ],
+    )
     @pytest.mark.usefixtures("relogio_congelado")
     def test_recusa_iat_11s_a_frente_ou_mais(
         self, url_base: str, adianto_s: int
@@ -197,6 +275,26 @@ class TestValidadorIndependente:
             pytest.param(
                 lambda: assinar(chave=OUTRA_CHAVE, kid=KID),
                 id="outra-chave-com-o-kid-certo",
+            ),
+            pytest.param(
+                lambda: assinar(chave=OUTRA_CHAVE, jwk=jwk_publico(OUTRA_CHAVE)),
+                id="jwk-do-atacante-no-cabecalho",
+            ),
+            pytest.param(
+                lambda: assinar(
+                    chave=OUTRA_CHAVE, jku="https://atacante.example/jwks.json"
+                ),
+                id="jku-do-atacante",
+            ),
+            pytest.param(
+                lambda: assinar(
+                    chave=OUTRA_CHAVE, x5u="https://atacante.example/cert.pem"
+                ),
+                id="x5u-do-atacante",
+            ),
+            pytest.param(
+                lambda: assinar(crit=["extensao"], extensao="x"),
+                id="crit-com-extensao-desconhecida",
             ),
         ],
     )

@@ -21,6 +21,8 @@ from uuid import uuid4
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from fastapi.security import HTTPAuthorizationCredentials
+from jwt.algorithms import RSAAlgorithm
 
 from src.autenticacao.infraestrutura.jwt_service import (
     AUDIENCIA,
@@ -124,9 +126,20 @@ def instante(deslocamento_segundos: int) -> int:
     return int(AGORA_CONGELADA.timestamp()) + deslocamento_segundos
 
 
+def credenciais(token: str) -> HTTPAuthorizationCredentials:
+    """``Authorization: Bearer <token>`` como o FastAPI o entrega ao gate."""
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+
 def validade_em_segundos(payload: Mapping[str, object]) -> int:
     """``exp - iat`` das claims de um token validado (NumericDate, inteiros)."""
     return cast("int", payload["exp"]) - cast("int", payload["iat"])
+
+
+def jwk_publico(chave: rsa.RSAPrivateKey) -> dict[str, object]:
+    """A parte publica de ``chave`` como JWK (o que um atacante poria no cabecalho)."""
+    publica = RSAAlgorithm.to_jwk(chave.public_key(), as_dict=True)
+    return dict(publica)
 
 
 def assinar(
@@ -134,13 +147,20 @@ def assinar(
     *,
     chave: rsa.RSAPrivateKey = CHAVE,
     kid: str | None = None,
+    **cabecalho: object,
 ) -> str:
-    """RS256 com ``chave``; o ``kid`` padrao e o da propria chave."""
+    """RS256 com ``chave``; o ``kid`` padrao e o da propria chave.
+
+    ``cabecalho`` junta membros ao cabecalho (``jwk``, ``jku``, ``x5u``, ``crit``).
+    """
     return jwt.encode(
         dict(corpo if corpo is not None else claims()),
         chave,
         algorithm="RS256",
-        headers={"kid": kid if kid is not None else kid_da_chave(chave.public_key())},
+        headers={
+            "kid": kid if kid is not None else kid_da_chave(chave.public_key()),
+            **cabecalho,
+        },
     )
 
 
