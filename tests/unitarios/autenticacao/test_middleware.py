@@ -20,7 +20,8 @@ from src.autenticacao.interfaces.middleware import (
     obter_usuario_atual,
 )
 
-_CHAVE = "test-secret"
+# 64 bytes: os tokens de algoritmo trocado sao assinados ate com HS512.
+_CHAVE = "test-secret".ljust(64, "x")  # gitleaks:allow
 _MIDDLEWARE = "src.autenticacao.interfaces.middleware"
 _MOCK_SESSION = MagicMock()
 

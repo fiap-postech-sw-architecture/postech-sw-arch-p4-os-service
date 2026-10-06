@@ -32,3 +32,16 @@ class TestBootstrap:
             assert mock_auth.call_count == 1
             assert mock_clie.call_count == 1
             assert mock_os.call_count == 1
+
+
+def test_mapeamento_de_cada_contexto_e_idempotente() -> None:
+    # Segunda chamada de cada contexto e no-op (o bootstrap e o lifespan e os
+    # testes chamam mais de uma vez no mesmo processo).
+    from src.autenticacao.infraestrutura import mapping as auth
+    from src.cliente_veiculo.infraestrutura import mapping as clientes
+    from src.ordem_servico.infraestrutura import mapping as ordens
+
+    for modulo in (auth, clientes, ordens):
+        modulo.iniciar_mapeamentos()
+        modulo.iniciar_mapeamentos()
+        assert modulo._mapeamento_iniciado is True

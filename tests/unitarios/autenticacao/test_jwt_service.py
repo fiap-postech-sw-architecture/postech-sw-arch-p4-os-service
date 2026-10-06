@@ -12,7 +12,8 @@ from src.autenticacao.dominio.exceptions import (
 )
 from src.autenticacao.infraestrutura.jwt_service import JWTService
 
-_CHAVE = "chave-secreta-de-teste"
+# 32 bytes, o minimo do HS256 (abaixo disso o PyJWT avisa).
+_CHAVE = "chave-secreta-de-teste".ljust(32, "x")  # gitleaks:allow
 
 
 class TestJWTService:
@@ -63,7 +64,7 @@ class TestJWTService:
         )
         token = svc.gerar_access_token(uuid4(), "a@b.com", "admin")
         outro_svc = JWTService(
-            chave_secreta="outra-chave",
+            chave_secreta="outra-chave".ljust(32, "x"),
             expiracao_minutos=30,
             refresh_expiracao_minutos=10080,
         )
@@ -89,9 +90,10 @@ class TestJWTService:
 
     def test_algoritmo_invalido_rejeitado(self) -> None:
         payload = {"sub": "x", "jti": "y", "exp": 9999999999, "type": "access"}
-        token = jwt.encode(payload, "key", algorithm="HS384")
+        chave = "k" * 48  # minimo do HS384
+        token = jwt.encode(payload, chave, algorithm="HS384")
         svc = JWTService(
-            chave_secreta="key", expiracao_minutos=30, refresh_expiracao_minutos=10080
+            chave_secreta=chave, expiracao_minutos=30, refresh_expiracao_minutos=10080
         )
         with pytest.raises(TokenInvalidoException) as exc:
             svc.validar_token(token)

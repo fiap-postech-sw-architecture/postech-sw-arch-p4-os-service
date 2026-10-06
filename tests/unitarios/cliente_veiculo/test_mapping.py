@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
 from uuid import uuid4
 
 import pytest
@@ -64,11 +66,25 @@ class TestMapping:
 
 
 @pytest.fixture
-def engine_sqlite() -> object:
+def engine_sqlite() -> Iterator[object]:
     iniciar_mapeamentos()
     engine = create_engine("sqlite://")
     metadata.create_all(engine)
-    return engine
+    yield engine
+    # Sem o dispose a conexao do pool so fecha no GC (ResourceWarning solto
+    # em outro teste qualquer).
+    engine.dispose()
+
+
+@dataclass(frozen=True)
+class _DocumentoEstrangeiro:
+    numero: str
+
+    def formatado(self) -> str:
+        return self.numero
+
+    def mascarado(self) -> str:
+        return "****"
 
 
 def _criar_cliente(documento: CPF | CNPJ, nome: str = "Joao Silva") -> Cliente:
@@ -150,6 +166,50 @@ class TestEventosMapeamento:
             assert carregado is not None
             assert isinstance(carregado._documento, CPF)
             assert carregado._documento.numero == "21249722519"
+
+    def test_tipo_de_documento_desconhecido_na_releitura_falha(
+        self, engine_sqlite: object
+    ) -> None:
+        # Coluna fora do contrato nao vira CPF/CNPJ por exclusao: a
+        # reidratacao recusa em vez de montar um documento errado.
+        cliente_id = uuid4()
+        with Session(engine_sqlite) as sessao_insert:  # type: ignore[arg-type]
+            sessao_insert.execute(
+                clientes_table.insert().values(
+                    id=cliente_id,
+                    nome="Tipo errado",
+                    documento="21249722519",
+                    documento_hash="hash-tipo-errado",
+                    tipo_documento="rg",
+                    contato="11988887777",
+                    ativo=True,
+                )
+            )
+            sessao_insert.commit()
+
+        with (
+            Session(engine_sqlite) as sessao_load,  # type: ignore[arg-type]
+            pytest.raises(ValueError, match="tipo_documento invalido"),
+        ):
+            sessao_load.get(Cliente, cliente_id)
+
+    def test_documento_que_nao_e_cpf_nem_cnpj_nao_e_gravado(
+        self, engine_sqlite: object
+    ) -> None:
+        # Um terceiro tipo que cumpra o contrato Documento nao e gravado como
+        # "cnpj" por exclusao (p3 PR #65): o flush recusa.
+        cliente = Cliente(
+            id=uuid4(),
+            _nome="Estrangeiro",
+            _documento=_DocumentoEstrangeiro(numero="X123"),
+            _contato=Contato(valor="11999990000"),
+        )
+        with (
+            Session(engine_sqlite) as sessao,  # type: ignore[arg-type]
+            pytest.raises(TypeError, match="nao suportado"),
+        ):
+            sessao.add(cliente)
+            sessao.flush()
 
     def test_insert_de_cliente_com_cnpj(self, engine_sqlite: object) -> None:
         cliente_id = uuid4()

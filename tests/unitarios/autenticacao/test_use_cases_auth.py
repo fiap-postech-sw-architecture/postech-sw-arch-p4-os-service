@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import jwt
 import pytest
 
 from src.autenticacao.aplicacao.dtos import LoginDTO, RegistrarDTO
@@ -24,8 +25,11 @@ from src.autenticacao.infraestrutura.jwt_service import JWTService
 from src.autenticacao.infraestrutura.password_hasher import PasswordHasher, hash_senha
 from tests.unitarios.fakes import FakeUnitOfWork
 
+# 32 bytes: o minimo do HS256 (abaixo disso o PyJWT avisa InsecureKeyLength).
+_CHAVE_TESTE = "test-secret-de-32-bytes-do-hs256"  # gitleaks:allow
 
-def _jwt_service(chave: str = "test-secret") -> JWTService:
+
+def _jwt_service(chave: str = _CHAVE_TESTE) -> JWTService:
     return JWTService(
         chave_secreta=chave, expiracao_minutos=30, refresh_expiracao_minutos=10080
     )
@@ -400,6 +404,44 @@ class TestLogout:
             uc.executar(refresh)
         assert exc.value.motivo == "not_an_access_token"
         assert not token_repo.esta_revogado(str(jwt_svc.validar_token(refresh)["jti"]))
+
+    def test_refresh_malformado_no_corpo_revoga_so_o_access(self) -> None:
+        # Revogar o refresh e melhor esforco: invalido e ignorado e o logout
+        # do access segue.
+        from uuid import uuid4
+
+        jwt_svc = _jwt_service()
+        token_repo = FakeTokenRevogadoRepository()
+        uow = FakeUnitOfWork()
+        access = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
+
+        uc.executar(access, refresh_token="nao-e-jwt")
+
+        assert token_repo.esta_revogado(str(jwt_svc.validar_token(access)["jti"]))
+        assert uow.committed
+
+    def test_refresh_expirado_no_corpo_nao_e_revogado(self) -> None:
+        from uuid import uuid4
+
+        jwt_svc = _jwt_service()
+        expirado_svc = JWTService(
+            chave_secreta=_CHAVE_TESTE,
+            expiracao_minutos=30,
+            refresh_expiracao_minutos=-1,
+        )
+        token_repo = FakeTokenRevogadoRepository()
+        uow = FakeUnitOfWork()
+        usuario_id = uuid4()
+        access = jwt_svc.gerar_access_token(usuario_id, "t@t.com", "admin")
+        refresh = expirado_svc.gerar_refresh_token(usuario_id)
+        uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
+
+        uc.executar(access, refresh_token=refresh)
+
+        jti_refresh = jwt.decode(refresh, options={"verify_signature": False})["jti"]
+        assert token_repo.esta_revogado(str(jwt_svc.validar_token(access)["jti"]))
+        assert not token_repo.esta_revogado(jti_refresh)
 
     def test_refresh_de_outro_usuario_nao_e_revogado(self) -> None:
         # A revogacao do refresh e best-effort e escopada ao dono: um refresh

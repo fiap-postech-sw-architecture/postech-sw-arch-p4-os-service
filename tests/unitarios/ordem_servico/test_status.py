@@ -21,6 +21,8 @@ class TestStatusOrdem:
         assert "aguardando_aprovacao_complementar" not in {s.value for s in StatusOrdem}
 
     def test_comparavel_com_string(self) -> None:
+        # StrEnum: o membro e igual ao valor (colunas e payloads guardam a str).
+        assert StatusOrdem.RECEBIDA == "recebida"
         assert StatusOrdem("recebida") is StatusOrdem.RECEBIDA
 
     def test_terminais(self) -> None:

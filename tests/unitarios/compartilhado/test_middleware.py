@@ -95,12 +95,12 @@ class TestSecurityHeadersMiddleware:
     @pytest.mark.parametrize(
         "id_invalido",
         [
-            "",  # vazio nao e id
-            "a" * 129,  # acima do limite de 128 chars
-            "tem espaco",  # charset fora do seguro
-            "quebra\tde-linha",  # controle
-            "id;com;delimitador",  # metacaractere de header fora do charset
-            "injecao<script>",  # metacaracteres
+            pytest.param("", id="vazio"),
+            pytest.param("a" * 129, id="acima-de-128"),
+            pytest.param("tem espaco", id="espaco"),
+            pytest.param("quebra\tde-linha", id="controle"),
+            pytest.param("id;com;delimitador", id="delimitador-de-header"),
+            pytest.param("injecao<script>", id="metacaracteres"),
         ],
     )
     def test_x_request_id_externo_invalido_e_descartado(self, id_invalido: str) -> None:

@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import delete, event, insert, inspect, select, text
+from sqlalchemy.orm import Session
 
 from src.cliente_veiculo.infraestrutura.adapters import (
     OrdemDeServicoSQLAlchemyAdapter,
@@ -24,8 +25,10 @@ from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.infraestrutura import metrics as metricas_os
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
 from src.ordem_servico.infraestrutura.consultas import ConsultaAcompanhamentoSQLAlchemy
+from src.ordem_servico.infraestrutura.mapping import historico_status_ordem_table
 from src.ordem_servico.infraestrutura.metrics import instrumentar_metricas_de_ordens
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
@@ -41,7 +44,7 @@ from tests.fabricas import (
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+    from collections.abc import Iterator
 
     from src.cliente_veiculo.dominio.cliente import Cliente
 
@@ -102,6 +105,37 @@ class TestMapping:
             (4, S.AGUARDANDO_APROVACAO, S.AGUARDANDO_PAGAMENTO, OrigemMudanca.BILLING),
         ]
         assert lida.historico[0].ocorrido_em.utcoffset() is not None
+
+    def test_historico_volta_na_ordem_da_sequencia(self, session: Session) -> None:
+        ordem = _abrir(session)
+        _avancar(session, ordem, S.AGUARDANDO_APROVACAO)
+        # Regrava as linhas da mais nova para a mais antiga: sem o order_by do
+        # mapping, a releitura viria na ordem fisica (3, 2, 1).
+        h = historico_status_ordem_table
+        linhas = (
+            session.execute(
+                select(h).where(h.c.ordem_id == ordem.id).order_by(h.c.sequencia.desc())
+            )
+            .mappings()
+            .all()
+        )
+        session.execute(delete(h).where(h.c.ordem_id == ordem.id))
+        for linha in linhas:
+            session.execute(insert(h).values(**linha))
+        # Sem indice o Postgres le na ordem fisica (o indice da UNIQUE ja
+        # devolveria por sequencia e esconderia a falta do order_by). SET LOCAL
+        # morre com a transacao do teste.
+        for plano in ("enable_indexscan", "enable_indexonlyscan", "enable_bitmapscan"):
+            session.execute(text(f"SET LOCAL {plano} = off"))
+
+        lida = _recarregar(session, ordem)
+
+        assert [m.sequencia for m in lida.historico] == [1, 2, 3]
+        assert [m.para for m in lida.historico] == [
+            S.RECEBIDA,
+            S.EM_DIAGNOSTICO,
+            S.AGUARDANDO_APROVACAO,
+        ]
 
     def test_cancelada_persiste_motivo(self, session: Session) -> None:
         ordem = _abrir(session)
@@ -298,6 +332,18 @@ class TestAdaptersEntreContextos:
 
 
 class TestMetricasDeNegocio:
+    @pytest.fixture(autouse=True)
+    def _listener_so_neste_teste(self) -> Iterator[None]:
+        # O listener e da classe Session (global): sai no teardown para nao
+        # medir os flushes dos testes seguintes.
+        ja_havia = event.contains(Session, "before_flush", metricas_os._observar_flush)
+        yield
+        if not ja_havia and event.contains(
+            Session, "before_flush", metricas_os._observar_flush
+        ):
+            event.remove(Session, "before_flush", metricas_os._observar_flush)
+            metricas_os._instrumentado = False
+
     def test_abertura_e_transicao_alimentam_as_metricas(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -330,6 +376,8 @@ class TestMetricasDeNegocio:
     def test_escrita_sem_troca_de_status_nao_mede(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        ordem = _abrir(session)
+        _avancar(session, ordem, S.AGUARDANDO_PAGAMENTO)
         duracoes: list[tuple[str, float]] = []
         monkeypatch.setattr(
             metricas_api,
@@ -337,11 +385,9 @@ class TestMetricasDeNegocio:
             lambda status, duracao: duracoes.append((status, duracao)),
         )
         instrumentar_metricas_de_ordens()
-        ordem = _abrir(session)
 
-        # Mudanca de coluna sem transicao (nao acontece no dominio, mas o
-        # listener nao pode medir nada se o status nao mudou).
-        ordem._atualizado_em = ordem.atualizado_em
-        session.flush()
+        # So o resumo do pagamento muda (escrita sem transicao de status).
+        ordem.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
+        OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         assert duracoes == []

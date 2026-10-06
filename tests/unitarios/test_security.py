@@ -63,7 +63,8 @@ from src.ordem_servico.interfaces.schemas import (
     CancelarOrdemRequest,
 )
 
-_CHAVE = "test-secret-key-for-security-tests"
+# 64 bytes: os testes de troca de algoritmo assinam tambem com HS512.
+_CHAVE = "test-secret-key-for-security-tests".ljust(64, "x")  # gitleaks:allow
 
 
 def _jwt_service(chave: str = _CHAVE, expiracao_minutos: int = 30) -> JWTService:
@@ -193,7 +194,7 @@ class TestJWTTamperedPayload:
     def test_wrong_secret_rejected(self) -> None:
         svc = _jwt_service()
         token = svc.gerar_access_token(uuid4(), "a@b.com", "admin")
-        other_svc = _jwt_service(chave="completely-different-secret")
+        other_svc = _jwt_service(chave="completely-different-secret".ljust(32, "x"))
         with pytest.raises(TokenInvalidoException):
             other_svc.validar_token(token)
 

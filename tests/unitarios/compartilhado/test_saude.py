@@ -7,6 +7,8 @@ import pytest
 import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from src.compartilhado.infraestrutura.database import (
     criar_engine,
@@ -61,7 +63,13 @@ class TestReadiness:
     def test_pronto_200_com_o_banco_respondendo(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        engine = criar_engine("sqlite:///:memory:")
+        # A consulta roda numa thread do pool: conexao unica e sem trava de
+        # thread, para o dispose (thread principal) conseguir fecha-la.
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
         try:
             client = self._client(monkeypatch, criar_session_factory(engine))
             resp = client.get("/api/v1/saude/pronto")

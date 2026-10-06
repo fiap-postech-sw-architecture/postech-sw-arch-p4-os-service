@@ -66,6 +66,10 @@ class TestUsuario:
         )
         assert a == b
 
+    def test_senha_hash_vazio_invalido(self) -> None:
+        with pytest.raises(ValueError, match="Senha hash nao pode ser vazia"):
+            Usuario(_email="a@b.com", _senha_hash="", _papel=Papel.ADMIN)
+
     def test_email_sem_ponto_no_dominio_invalido(self) -> None:
         with pytest.raises(ValueError, match="Email invalido"):
             Usuario(_email="user@dominio", _senha_hash="x", _papel=Papel.ADMIN)

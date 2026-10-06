@@ -217,7 +217,10 @@ class TestFlagDesligada:
         assert app.user_middleware == []
         assert facade_isolada._http_duracao is None
 
-    @pytest.mark.parametrize("valor", ["false", "False", "0", "", "off"])
+    @pytest.mark.parametrize(
+        "valor",
+        ["false", "False", "0", pytest.param("", id="vazio"), "off"],
+    )
     def test_valores_desligados_retornam_false(
         self, monkeypatch: pytest.MonkeyPatch, valor: str
     ) -> None:

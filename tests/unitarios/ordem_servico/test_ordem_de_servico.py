@@ -4,7 +4,7 @@ cancelamento e eventos para a outbox."""
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import pairwise
 from uuid import uuid4
 
@@ -339,7 +339,24 @@ class TestFatosDaSaga:
         with pytest.raises(TransicaoStatusInvalidaException):
             _orcamento(ordem, link_decisao="nao-e-url")
 
-    def test_fluxo_completo_produz_linha_do_tempo_encadeada(self) -> None:
+    def test_fluxo_completo_produz_linha_do_tempo_encadeada(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Relogio que anda 1 minuto por leitura: a ordem dos instantes e
+        # provada sem depender da resolucao do relogio de parede (dois fatos
+        # no mesmo tique passariam num ">=" mesmo com a ordem trocada).
+        class _RelogioQueAvanca(datetime):
+            _proximo = datetime(2026, 10, 6, 12, tzinfo=UTC)
+
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> _RelogioQueAvanca:
+                atual = cls._proximo
+                cls._proximo = atual + timedelta(minutes=1)
+                return cls.fromtimestamp(atual.timestamp(), tz)
+
+        monkeypatch.setattr(
+            "src.ordem_servico.dominio.ordem_de_servico.datetime", _RelogioQueAvanca
+        )
         ordem = ordem_em(S.ENTREGUE)
 
         historico = ordem.historico
@@ -347,7 +364,7 @@ class TestFatosDaSaga:
         assert historico[0].de is None
         for anterior, atual in pairwise(historico):
             assert atual.de is anterior.para
-            assert atual.ocorrido_em >= anterior.ocorrido_em
+            assert atual.ocorrido_em > anterior.ocorrido_em
         assert historico[-1].para is S.ENTREGUE
 
     def test_historico_e_vista_imutavel(self) -> None:
