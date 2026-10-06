@@ -197,6 +197,54 @@ class TestRotacao:
         assert [c["kid"] for c in jwt_service(anterior=CHAVE).jwks()["keys"]] == [KID]
 
 
+class TestRotacaoEmDuasEtapas:
+    """Rollout da rotacao (README): nenhum pod recusa o token de outro.
+
+    ``JWT_PREVIOUS_PUBLIC_KEY`` guarda a chave que entra na etapa 1 e a que sai
+    na etapa 2; so ``JWT_PRIVATE_KEY`` assina.
+    """
+
+    def test_pods_de_etapas_vizinhas_aceitam_o_token_um_do_outro(self) -> None:
+        # Etapa 1: assina a K1 e a publica da K2 entra como "anterior".
+        etapa_1 = jwt_service(chave=CHAVE, anterior=OUTRA_CHAVE)
+        # Etapa 2: a troca. Assina a K2 e a publica da K1 fica como "anterior".
+        etapa_2 = jwt_service(chave=OUTRA_CHAVE, anterior=CHAVE)
+
+        do_pod_da_etapa_1 = etapa_1.gerar_access_token(uuid4(), "admin")
+        do_pod_da_etapa_2 = etapa_2.gerar_access_token(uuid4(), "admin")
+
+        # No rollout da etapa 2 os dois convivem: cada um aceita o token do outro.
+        assert etapa_2.validar_token(do_pod_da_etapa_1)["type"] == "access"
+        assert etapa_1.validar_token(do_pod_da_etapa_2)["type"] == "access"
+        assert jwt.get_unverified_header(do_pod_da_etapa_1)["kid"] == KID
+        assert jwt.get_unverified_header(do_pod_da_etapa_2)["kid"] == OUTRO_KID
+        # E os dois publicam as duas chaves, a que assina primeiro.
+        assert [c["kid"] for c in etapa_1.jwks()["keys"]] == [KID, OUTRO_KID]
+        assert [c["kid"] for c in etapa_2.jwks()["keys"]] == [OUTRO_KID, KID]
+
+    def test_sem_a_etapa_1_o_pod_antigo_recusa_o_token_do_pod_novo(self) -> None:
+        # Por isso a nova chave e publicada antes de assinar: um pod que so
+        # conhece a K1 nao valida o que o pod novo assina com a K2.
+        pod_antigo = jwt_service(chave=CHAVE)
+        pod_novo = jwt_service(chave=OUTRA_CHAVE, anterior=CHAVE)
+
+        with pytest.raises(TokenInvalidoException) as exc:
+            pod_antigo.validar_token(pod_novo.gerar_access_token(uuid4(), "admin"))
+
+        assert exc.value.motivo == "unknown_kid"
+
+    def test_etapa_3_sem_a_anterior_recusa_o_token_que_ela_assinou(self) -> None:
+        # Depois dos 7 dias do refresh, a K1 sai: o token dela deixa de valer.
+        antigo = jwt_service(chave=CHAVE).gerar_refresh_token(uuid4())
+        etapa_3 = jwt_service(chave=OUTRA_CHAVE)
+
+        with pytest.raises(TokenInvalidoException) as exc:
+            etapa_3.validar_token(antigo)
+
+        assert exc.value.motivo == "unknown_kid"
+        assert [c["kid"] for c in etapa_3.jwks()["keys"]] == [OUTRO_KID]
+
+
 class TestJwks:
     def test_so_membros_publicos_e_n_e_da_chave(self) -> None:
         (chave,) = jwt_service().jwks()["keys"]

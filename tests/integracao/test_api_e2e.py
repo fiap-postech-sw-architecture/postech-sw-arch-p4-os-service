@@ -449,6 +449,96 @@ class TestFalhaDeCredencialUniforme:
             )
 
 
+class TestRodizioDoRefresh:
+    """Login, /refresh e o reuso do refresh antigo, pela app real e o Postgres."""
+
+    _ROTA = "/api/v1/autenticacao"
+
+    @staticmethod
+    def _entrar(api_client: TestClient, email: str) -> dict[str, str]:
+        resp = api_client.post(
+            "/api/v1/autenticacao/login", json={"email": email, "senha": SENHA_PADRAO}
+        )
+        assert resp.status_code == 200
+        tokens: dict[str, str] = resp.json()
+        return tokens
+
+    def test_refresh_troca_o_par_e_o_antigo_deixa_de_valer(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        login = self._entrar(api_client, admin_user.email)
+
+        rodizio = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+
+        assert rodizio.status_code == 200
+        par = rodizio.json()
+        assert par["refresh_token"] != login["refresh_token"]
+        # O access novo autentica uma rota protegida.
+        autenticada = api_client.get(
+            _OS, headers={"Authorization": f"Bearer {par['access_token']}"}
+        )
+        assert autenticada.status_code == 200
+        # O refresh antigo foi consumido: o reuso e o mesmo 401 de qualquer
+        # credencial recusada, no envelope e com o header do esquema.
+        reuso = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+        assert reuso.status_code == 401
+        assert reuso.json() == {
+            "erro": {
+                "codigo": "NAO_AUTENTICADO",
+                "mensagem": "Credencial ausente, invalida ou expirada",
+                "id_requisicao": reuso.headers["X-Request-ID"],
+            }
+        }
+        assert reuso.headers["WWW-Authenticate"] == "Bearer"
+        # O refresh novo segue o mesmo rodizio.
+        segundo = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": par["refresh_token"]}
+        )
+        assert segundo.status_code == 200
+
+    def test_logout_com_o_refresh_encerra_a_sessao_inteira(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        login = self._entrar(api_client, admin_user.email)
+        headers = {"Authorization": f"Bearer {login['access_token']}"}
+
+        saida = api_client.post(
+            f"{self._ROTA}/logout",
+            headers=headers,
+            json={"refresh_token": login["refresh_token"]},
+        )
+
+        assert saida.status_code == 200
+        assert api_client.get(_OS, headers=headers).status_code == 401
+        refresh = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+        assert refresh.status_code == 401
+        assert refresh.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
+
+    def test_logout_so_com_o_header_deixa_o_refresh_valer(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        # O refresh so e revogado se vier no corpo: sem ele, o logout encerra o
+        # access e o refresh ainda cunha um par novo (README, Autenticacao).
+        login = self._entrar(api_client, admin_user.email)
+
+        saida = api_client.post(
+            f"{self._ROTA}/logout",
+            headers={"Authorization": f"Bearer {login['access_token']}"},
+        )
+        refresh = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+
+        assert saida.status_code == 200
+        assert refresh.status_code == 200
+
+
 class TestTokenValidadoPeloJwks:
     """ADR-039: Billing e Execucao validam o token so com o JWKS publico."""
 

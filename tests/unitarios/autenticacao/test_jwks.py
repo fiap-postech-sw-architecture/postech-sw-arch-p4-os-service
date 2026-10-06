@@ -15,7 +15,8 @@ from fastapi.testclient import TestClient
 from jwt.utils import base64url_decode
 
 from scripts.validar_token import validar_access_token
-from src.autenticacao.infraestrutura.jwt_service import JWTService
+from src.autenticacao.infraestrutura.jwt_service import JWTService, kid_da_chave
+from src.autenticacao.interfaces.dependencies import obter_jwt_service
 from src.main import criar_app
 from tests.chaves_jwt import (
     CHAVE,
@@ -29,12 +30,15 @@ from tests.chaves_jwt import (
     forjar_sem_assinatura,
     instante,
     jwt_service,
+    pem_privado,
     pem_publico,
 )
 from tests.servidor_http import servir
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
+
+    from cryptography.hazmat.primitives.asymmetric import rsa
 
 _JWKS = "/.well-known/jwks.json"
 # Membros privados de uma JWK RSA (RFC 7518, secao 6.3.2).
@@ -201,6 +205,34 @@ class TestValidadorIndependente:
     ) -> None:
         with pytest.raises(jwt.PyJWTError):
             validar_access_token(url_base, token())
+
+    @pytest.mark.parametrize(
+        ("assina", "anterior"),
+        [
+            pytest.param(CHAVE, OUTRA_CHAVE, id="etapa-1-a-nova-so-publicada"),
+            pytest.param(OUTRA_CHAVE, CHAVE, id="etapa-2-a-nova-assina"),
+        ],
+    )
+    def test_token_emitido_pela_configuracao_de_rotacao_passa_pelo_jwks(
+        self,
+        url_base: str,
+        monkeypatch: pytest.MonkeyPatch,
+        assina: rsa.RSAPrivateKey,
+        anterior: rsa.RSAPrivateKey,
+    ) -> None:
+        # O servico emite pela fabrica do ambiente (o mesmo caminho do login) e o
+        # validador independente confere pelo JWKS que a app serve: o kid do
+        # cabecalho e o da chave que assina, nunca o da anterior.
+        monkeypatch.setenv("JWT_PRIVATE_KEY", pem_privado(assina))
+        monkeypatch.setenv("JWT_PREVIOUS_PUBLIC_KEY", pem_publico(anterior))
+        uid = uuid4()
+
+        token = obter_jwt_service().gerar_access_token(uid, "admin")
+
+        assert validar_access_token(url_base, token)["sub"] == str(uid)
+        assert jwt.get_unverified_header(token)["kid"] == kid_da_chave(
+            assina.public_key()
+        )
 
     def test_token_da_chave_anterior_vale_enquanto_ela_esta_no_jwks(
         self, url_base: str, monkeypatch: pytest.MonkeyPatch

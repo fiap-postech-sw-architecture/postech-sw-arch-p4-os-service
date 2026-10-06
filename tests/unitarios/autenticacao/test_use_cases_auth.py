@@ -544,8 +544,11 @@ class TestRefreshToken:
             usuario_repo=repo,
             uow=uow,
         )
-        with pytest.raises(TokenRevogadoException):
+        with pytest.raises(TokenRevogadoException) as exc:
             uc.executar(refresh)
+        # A mesma mensagem publica de qualquer credencial recusada (ADR-039).
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
+        assert exc.value.motivo == "revoked_token"
 
     def test_reuso_do_refresh_gera_o_evento_com_usuario_e_jti(
         self, monkeypatch: pytest.MonkeyPatch
@@ -646,8 +649,10 @@ class TestRefreshToken:
         )
         refresh = jwt_svc.gerar_refresh_token(usuario.id)
         uc.executar(refresh)
-        with pytest.raises(TokenRevogadoException):
+        with pytest.raises(TokenRevogadoException) as exc:
             uc.executar(refresh)
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
+        assert exc.value.motivo == "revoked_token"
 
     def test_corrida_de_uso_simultaneo_do_refresh_e_rejeitada(
         self, monkeypatch: pytest.MonkeyPatch
