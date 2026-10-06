@@ -254,6 +254,11 @@ class TestConsultarAcompanhamento:
             pytest.param(
                 "12.abc.345/01de-35", CNPJ(numero="12ABC34501DE35"), id="cnpj-alfanum"
             ),
+            pytest.param(
+                " 11.222.333/0001-81\n",
+                CNPJ(numero="11222333000181"),
+                id="cnpj-com-espaco-e-quebra-de-linha",
+            ),
         ],
     )
     def test_documento_de_14_caracteres_vira_cnpj(

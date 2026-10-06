@@ -29,13 +29,16 @@ def normalizar_cpf(numero: str) -> str:
 
 
 def normalizar_cnpj(numero: str) -> str:
-    """CNPJ sem ``.``, ``/`` e ``-`` e em maiusculas.
+    """CNPJ sem espacos, quebras de linha, ``.``, ``/`` e ``-`` e em maiusculas.
 
     Letras ficam: o CNPJ alfanumerico (IN RFB 2.229/2024, emitido desde
     julho de 2026) tem letras nas 12 primeiras posicoes, e o ``brutils`` ja
-    calcula o digito verificador dele.
+    calcula o digito verificador dele. Espaco e quebra de linha saem antes do
+    ``remove_symbols``, que so conhece ``.``, ``/`` e ``-``: um CNPJ colado com
+    espaco nas pontas continua valido.
     """
-    sem_simbolos: str = remove_symbols(numero)  # brutils sem py.typed
+    sem_espacos = "".join(numero.split())
+    sem_simbolos: str = remove_symbols(sem_espacos)  # brutils sem py.typed
     return sem_simbolos.upper()
 
 

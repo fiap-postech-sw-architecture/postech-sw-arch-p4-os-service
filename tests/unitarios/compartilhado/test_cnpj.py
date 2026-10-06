@@ -16,6 +16,19 @@ class TestCNPJ:
         cnpj = CNPJ(numero="11.222.333/0001-81")
         assert cnpj.numero == CNPJ_VALIDO
 
+    @pytest.mark.parametrize(
+        "numero",
+        [
+            pytest.param(" 11.222.333/0001-81 ", id="espacos-nas-pontas"),
+            pytest.param("11.222.333/0001-81\n", id="quebra-de-linha-no-fim"),
+            pytest.param("\t11222333000181\r\n", id="tab-e-crlf"),
+            pytest.param("11 222 333 0001 81", id="espacos-no-meio"),
+            pytest.param("\u00a011222333000181\u00a0", id="espaco-inquebravel"),
+        ],
+    )
+    def test_espaco_e_quebra_de_linha_sao_ignorados(self, numero: str) -> None:
+        assert CNPJ(numero=numero).numero == CNPJ_VALIDO
+
     def test_cnpj_invalido_digito_verificador(self) -> None:
         with pytest.raises(ValueError, match="CNPJ invalido"):
             CNPJ(numero="11222333000182")
@@ -97,6 +110,9 @@ class TestCNPJAlfanumerico:
 
     def test_minusculas_viram_maiusculas(self) -> None:
         assert CNPJ(numero="12.abc.345/01de-35").numero == CNPJ_ALFANUMERICO
+
+    def test_espaco_e_quebra_de_linha_sao_ignorados(self) -> None:
+        assert CNPJ(numero=" 12.ABC.345/01DE-35\n").numero == CNPJ_ALFANUMERICO
 
     def test_dv_errado_e_rejeitado(self) -> None:
         with pytest.raises(ValueError, match="CNPJ invalido"):
