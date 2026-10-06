@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -11,6 +12,8 @@ import structlog
 import uvicorn
 
 from src.compartilhado.infraestrutura.logging import (
+    _JWT_PATTERN,
+    _PEM_PRIVADA_PATTERN,
     adicionar_versao_imagem,
     configurar_logging,
     redigir_pii_erro,
@@ -19,7 +22,7 @@ from src.compartilhado.infraestrutura.logging import (
 from tests.chaves_jwt import jwt_service
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 class TestLogging:
@@ -349,9 +352,15 @@ class TestScrubChavesSensiveis:
 _CORPO_PEM = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrnHu8kBQQGe7e"
 
 
+def _cabecalho_pem(rotulo: str = "PRIVATE KEY") -> str:
+    # Montado em tempo de execucao: a linha literal acionaria o detector de
+    # chave privada do gitleaks, que olha o texto do arquivo.
+    return f"-----BEGIN {rotulo}-----"
+
+
 def _pem(rotulo: str = "PRIVATE KEY", *, com_fim: bool = True) -> str:
     fim = f"\n-----END {rotulo}-----" if com_fim else ""
-    return f"-----BEGIN {rotulo}-----\n{_CORPO_PEM}\n{_CORPO_PEM}{fim}"
+    return f"{_cabecalho_pem(rotulo)}\n{_CORPO_PEM}\n{_CORPO_PEM}{fim}"
 
 
 class TestScrubChaveEJwtEmTextoLivre:
@@ -379,6 +388,23 @@ class TestScrubChaveEJwtEmTextoLivre:
 
         assert _CORPO_PEM not in mascarado
         assert "BEGIN" not in mascarado
+
+    @pytest.mark.parametrize(
+        "formato",
+        [
+            pytest.param(repr, id="repr"),
+            pytest.param(json.dumps, id="json"),
+        ],
+    )
+    def test_pem_com_quebra_de_linha_escapada_e_mascarado_inteiro(
+        self, formato: Callable[[str], str]
+    ) -> None:
+        # No repr e no JSON a quebra de linha vira `\n` literal.
+        mascarado = scrub_pii(None, "error", {"event": formato(_pem())})["event"]
+
+        assert _CORPO_PEM not in mascarado
+        assert "BEGIN" not in mascarado
+        assert mascarado in ("'***'", '"***"')
 
     def test_pem_publico_nao_e_mascarado(self) -> None:
         # A parte publica sai no JWKS: nao e segredo.
@@ -424,6 +450,33 @@ class TestScrubChaveEJwtEmTextoLivre:
 
         assert mascarado == moldura.format("***")
 
+    def test_jwt_logo_depois_de_quebra_de_linha_escapada_e_mascarado(self) -> None:
+        token = jwt_service().gerar_access_token(uuid4(), "admin")
+
+        mascarado = scrub_pii(None, "info", {"event": repr(f"token:\n{token}")})
+
+        assert mascarado["event"] == "'token:\\n***'"
+
+    @pytest.mark.parametrize(
+        "entrada",
+        [
+            pytest.param("eyJ-" * 50_000, id="eyj-com-hifen"),
+            pytest.param("eyJ.eyJ." * 25_000, id="eyj-com-ponto"),
+            pytest.param(_cabecalho_pem() * 5_000, id="begin-repetido"),
+            pytest.param(_cabecalho_pem() + "A" * 200_000, id="pem-sem-fim"),
+        ],
+    )
+    def test_padroes_de_chave_e_jwt_nao_tem_tempo_quadratico(
+        self, entrada: str
+    ) -> None:
+        # O scrubber roda sobre toda string do log, inclusive o path de uma
+        # requisicao: o tempo quadratico (10 s ou mais nestas entradas) viraria
+        # amplificacao de CPU. O teto e folgado: o tempo real e de milissegundos.
+        inicio = time.perf_counter()
+        _PEM_PRIVADA_PATTERN.sub("***", entrada)
+        _JWT_PATTERN.sub("***", entrada)
+        assert time.perf_counter() - inicio < 1.0
+
     def test_token_de_verdade_do_servico_e_mascarado(self) -> None:
         token = jwt_service().gerar_access_token(uuid4(), "admin")
 
@@ -443,10 +496,15 @@ class TestScrubChaveEJwtEmTextoLivre:
     def test_texto_que_nao_e_jwt_fica_intacto(self, texto: str) -> None:
         assert scrub_pii(None, "info", {"event": texto})["event"] == texto
 
-    def test_erro_gravado_no_banco_tambem_sai_sem_o_token(self) -> None:
-        # redigir_pii_erro usa o mesmo mascaramento (outbox.ultimo_erro).
+    def test_erro_devolvido_ao_cliente_tambem_sai_sem_o_token(self) -> None:
+        # redigir_pii_erro usa o mesmo mascaramento (a mensagem do 422 de
+        # ValueError). Resultado exato: o teto de 200 caracteres cortaria um token
+        # sem mascara e o teste passaria do mesmo jeito.
         token = jwt_service().gerar_refresh_token(uuid4())
-        assert token not in redigir_pii_erro(f"consumidor recusou {token}")
+
+        assert redigir_pii_erro(f"consumidor recusou {token}") == (
+            "consumidor recusou ***"
+        )
 
 
 @pytest.fixture

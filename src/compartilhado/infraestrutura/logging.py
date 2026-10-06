@@ -48,21 +48,26 @@ _EMAIL_PATTERN = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
 )
 
-# Chave privada em PEM solta no texto (mensagem de erro, traceback): do BEGIN ao
-# END ou, se a mensagem foi truncada, ate onde o corpo base64 termina. A parte
-# publica (`PUBLIC KEY`) sai no JWKS e nao e segredo. O quantificador possessivo
-# (`*+`) evita o backtracking: o scrubber roda sobre qualquer string do log.
+# Chave privada em PEM solta no texto (mensagem de erro, traceback, repr, JSON):
+# do BEGIN ao END ou, se a mensagem foi truncada, ate onde o corpo base64
+# termina. O corpo aceita a quebra de linha real e a escapada (`\n` literal, como
+# no `repr` e no `json.dumps`). A parte publica (`PUBLIC KEY`) sai no JWKS e nao e
+# segredo. O quantificador possessivo (`*+`) evita o backtracking: o scrubber roda
+# sobre qualquer string do log.
 _PEM_PRIVADA_PATTERN = re.compile(
-    r"-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----[A-Za-z0-9+/=\s]*+"
+    r"-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----(?:[A-Za-z0-9+/=\s]|\\[nrt])*+"
     r"(?:-----END [A-Z ]{0,20}PRIVATE KEY-----)?"
 )
 # JWT solto no texto (header Authorization, query da URL, mensagem de erro):
 # cabecalho e corpo comecam em `eyJ` (o JSON `{"` em base64url) e a assinatura
 # pode ser vazia (alg=none). Possessivo e so a partir do inicio de uma sequencia
 # de caracteres base64url (o lookbehind): sem isso, uma linha longa de `eyJ-eyJ-`
-# faria o scrubber reler o resto da linha a cada `eyJ` (tempo quadratico).
+# faria o scrubber reler o resto da linha a cada `eyJ` (tempo quadratico). O
+# token logo depois de uma quebra de linha escapada (`\n` literal) tambem conta
+# como inicio.
 _JWT_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]++\.[A-Za-z0-9_-]++\.[A-Za-z0-9_-]*+"
+    r"(?:(?<![A-Za-z0-9_-])|(?<=\\[nrt]))"
+    r"eyJ[A-Za-z0-9_-]++\.[A-Za-z0-9_-]++\.[A-Za-z0-9_-]*+"
 )
 
 # Telefone BR: duas formas estruturais, escolhidas para nao gerar falso-positivo
@@ -199,9 +204,10 @@ def scrub_pii(
 ) -> MutableMapping[str, Any]:
     """Structlog processor que mascara PII e segredos em todo o event_dict.
 
-    Mascara CPF, CNPJ, email e telefone BR formatado por regex de VALOR; e mascara
-    o valor inteiro quando o NOME do campo esta na denylist `_CHAVES_SENSIVEIS`
-    (password/token/secret/...). Percorre recursivamente strings, dicts, listas e
+    Mascara CPF, CNPJ, email, telefone BR formatado, chave privada em PEM e JWT
+    por regex de VALOR; e mascara o valor inteiro quando o NOME do campo esta na
+    denylist `_CHAVES_SENSIVEIS` (password/token/secret/jwt_private_key/...).
+    Percorre recursivamente strings, dicts, listas e
     tuplas ate `_MAX_SCRUB_DEPTH` para pegar PII em payloads estruturados. Aplicado
     automaticamente pelo pipeline de logging (inclusive na chave `exception` do
     traceback, que `format_exc_info` monta ANTES deste processor) para impedir
@@ -216,13 +222,13 @@ _MAX_ERRO_LEN = 200
 
 
 def redigir_pii_erro(erro: str) -> str:
-    """Remove PII (CPF, CNPJ, e-mail, telefone) de strings de erro.
+    """Remove PII e segredos (CPF, CNPJ, e-mail, telefone, chave PEM e JWT) de erros.
 
-    Complementa o scrubber de log (``scrub_pii``): aquele actua no pipeline
-    de structlog em memoria; esta funcao actua em strings que serao gravadas
-    no banco (``outbox.ultimo_erro``) e devolvidas por endpoints admin /
-    CLI — necessario para conformidade LGPD porque o scrubber de log nao
-    alcanca o banco.
+    Complementa o scrubber de log (``scrub_pii``): aquele atua no pipeline de
+    structlog em memoria; esta funcao atua nas strings de erro que saem do
+    processo por outro caminho: a mensagem do 422 de ``ValueError`` devolvida
+    ao cliente e, quando o relay da outbox chegar, a ``outbox.ultimo_erro``
+    gravada no banco (LGPD: o scrubber de log nao alcanca nenhum dos dois).
 
     Trunca o resultado em ``_MAX_ERRO_LEN`` caracteres para evitar que
     mensagens de excepcao excessivamente longas ocupem espaco excessivo.
