@@ -79,9 +79,11 @@ def registrar_error_handlers(app: FastAPI) -> None:
 
     Cada DomainException levantada no request vira um JSONResponse com o envelope
     `{erro: {codigo, mensagem, id_requisicao}}`. Os codigos suportados sao 401,
-    403, 404, 409 e 422. ValueError (invariantes de value object/aggregate) vira
-    422 VALOR_INVALIDO -- ver p3 #83. Excecoes nao tratadas viram 500 com traceback
-    no log e o request_id.
+    403, 404, 409 e 422. A invariante de agregado (`ValorInvalidoException`) e a
+    de value object (`ValueError`, com a mensagem sem PII) viram 422
+    VALOR_INVALIDO -- ver p3 #83. O resto vira 500 ERRO_INTERNO com o
+    `id_requisicao` na resposta; o log leva o traceback, ou so tipo, `pgcode` e
+    constraint no caso de `DBAPIError` (ver `resposta_erro_interno`).
     """
 
     @app.exception_handler(DomainException)

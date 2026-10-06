@@ -118,7 +118,8 @@ class AbrirOrdem:
             ClienteNaoEncontradoException: cliente inexistente ou inativo (404).
             VeiculoNaoEncontradoException: veiculo inexistente ou de outro
                 cliente (404; os dois casos sao indistinguiveis de proposito).
-            ValueError: descricao do problema vazia ou longa demais (422).
+            ValorInvalidoException: descricao do problema vazia, longa demais
+                ou com caractere de controle (422).
         """
         if not self._cliente_port.cliente_existe(dto.cliente_id):
             raise ClienteNaoEncontradoException(dto.cliente_id)
@@ -196,7 +197,8 @@ class CancelarOrdem:
             TransicaoStatusInvalidaException: execucao ja iniciada ou ordem
                 encerrada (409).
             ConflitoDeConcorrenciaException: escrita concorrente (409).
-            ValueError: motivo vazio ou longo demais (422).
+            ValorInvalidoException: motivo vazio, longo demais ou com
+                caractere de controle (422).
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
