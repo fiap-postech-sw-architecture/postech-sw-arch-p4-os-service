@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.autenticacao.aplicacao.dtos import TokenDTO, UsuarioDTO
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
         UsuarioRepository,
     )
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
+
+_log = structlog.get_logger(__name__)
 
 # Hash bcrypt fixo de uma string aleatoria constante (nao corresponde a senha
 # de ninguem). Quando o e-mail nao existe, o Login verifica a senha contra este
@@ -168,7 +171,7 @@ class RefreshToken:
             raise TokenInvalidoException(motivo="not_a_refresh_token")
         jti = str(payload["jti"])
         if self._token_repo.esta_revogado(jti):
-            raise TokenRevogadoException()
+            raise self._reuso_detectado(payload)
         usuario_id = UUID(str(payload["sub"]))
         usuario = self._usuario_repo.obter_por_id(usuario_id)
         if usuario is None:
@@ -179,7 +182,7 @@ class RefreshToken:
             # `revogar` devolve False quando o jti ja foi consumido -- o
             # perdedor da corrida recebe 401 em vez de um segundo par valido.
             if not self._token_repo.revogar(jti):
-                raise TokenRevogadoException()
+                raise self._reuso_detectado(payload)
             self._uow.commit()
         access = self._jwt_service.gerar_access_token(
             usuario_id=usuario.id, papel=usuario.papel.value
@@ -188,3 +191,17 @@ class RefreshToken:
             usuario_id=usuario.id,
         )
         return TokenDTO(access_token=access, refresh_token=refresh)
+
+    @staticmethod
+    def _reuso_detectado(payload: dict[str, object]) -> TokenRevogadoException:
+        """401 de um refresh ja consumido, com o evento que avisa quem opera.
+
+        O cliente repetiu o pedido ou o refresh vazou e alguem o usa depois do
+        dono; o log e o unico sinal, com o usuario e o ``jti`` reapresentado.
+        A resposta e a de sempre e a descendencia do refresh segue valida: a
+        revogacao da familia (RFC 9700, 4.14.2) esta como divida no MEMORY.
+        """
+        _log.warning(
+            "refresh_reuse_detected", sub=str(payload["sub"]), jti=str(payload["jti"])
+        )
+        return TokenRevogadoException()

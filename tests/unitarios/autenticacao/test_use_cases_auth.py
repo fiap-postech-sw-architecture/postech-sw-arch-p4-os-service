@@ -4,7 +4,10 @@ from uuid import UUID
 
 import jwt
 import pytest
+import structlog
+import structlog.testing
 
+from src.autenticacao.aplicacao import use_cases
 from src.autenticacao.aplicacao.dtos import LoginDTO, RegistrarDTO
 from src.autenticacao.aplicacao.use_cases import (
     _HASH_DUMMY_TIMING,
@@ -544,6 +547,67 @@ class TestRefreshToken:
         with pytest.raises(TokenRevogadoException):
             uc.executar(refresh)
 
+    def test_reuso_do_refresh_gera_o_evento_com_usuario_e_jti(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # O 401 e o de sempre; o evento e o sinal para quem opera.
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
+        repo = FakeUsuarioRepository()
+        usuario = Usuario.criar(
+            email="test@test.com",
+            senha_hash=hash_senha("senhaforte1234"),
+            papel=Papel.ADMIN,
+        )
+        repo.salvar(usuario)
+        jwt_svc = _jwt_service()
+        uc = RefreshToken(
+            jwt_service=jwt_svc,
+            token_repo=FakeTokenRevogadoRepository(),
+            usuario_repo=repo,
+            uow=FakeUnitOfWork(),
+        )
+        refresh = jwt_svc.gerar_refresh_token(usuario.id)
+        uc.executar(refresh)
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(TokenRevogadoException),
+        ):
+            uc.executar(refresh)
+
+        assert logs == [
+            {
+                "event": "refresh_reuse_detected",
+                "sub": str(usuario.id),
+                "jti": str(jwt_svc.validar_token(refresh)["jti"]),
+                "log_level": "warning",
+            }
+        ]
+
+    def test_refresh_valido_nao_gera_o_evento_de_reuso(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
+        repo = FakeUsuarioRepository()
+        usuario = Usuario.criar(
+            email="test@test.com",
+            senha_hash=hash_senha("senhaforte1234"),
+            papel=Papel.ADMIN,
+        )
+        repo.salvar(usuario)
+        jwt_svc = _jwt_service()
+        uc = RefreshToken(
+            jwt_service=jwt_svc,
+            token_repo=FakeTokenRevogadoRepository(),
+            usuario_repo=repo,
+            uow=FakeUnitOfWork(),
+        )
+
+        with structlog.testing.capture_logs() as logs:
+            uc.executar(jwt_svc.gerar_refresh_token(usuario.id))
+
+        assert logs == []
+
     def test_usuario_inexistente(self) -> None:
         repo = FakeUsuarioRepository()
         jwt_svc = _jwt_service()
@@ -585,11 +649,15 @@ class TestRefreshToken:
         with pytest.raises(TokenRevogadoException):
             uc.executar(refresh)
 
-    def test_corrida_de_uso_simultaneo_do_refresh_e_rejeitada(self) -> None:
+    def test_corrida_de_uso_simultaneo_do_refresh_e_rejeitada(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Corrida do single-use (p3 #167): dois refreshes concorrentes passam
         # ambos no pre-check `esta_revogado` (aqui simulado por um fake que
         # sempre responde False); a atomicidade vem do `revogar` devolver
         # False para o perdedor -- que recebe TokenRevogadoException.
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
+
         class RepoComJanelaDeCorrida(FakeTokenRevogadoRepository):
             def esta_revogado(self, jti: str) -> bool:
                 return False
@@ -610,5 +678,10 @@ class TestRefreshToken:
         )
         refresh = jwt_svc.gerar_refresh_token(usuario.id)
         uc.executar(refresh)
-        with pytest.raises(TokenRevogadoException):
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(TokenRevogadoException),
+        ):
             uc.executar(refresh)
+        # O perdedor da corrida tambem e reuso: o mesmo evento.
+        assert [e["event"] for e in logs] == ["refresh_reuse_detected"]
