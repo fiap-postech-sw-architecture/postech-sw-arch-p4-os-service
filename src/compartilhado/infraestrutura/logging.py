@@ -54,16 +54,19 @@ _EMAIL_PATTERN = re.compile(
 #   1. DDD (com/sem parenteses) + separador OPCIONAL + bloco local com hifen
 #      4-4/5-4 -- cobre `(11)99999-0000` e `1199999-0000` alem dos formatados.
 #      Colateral aceito (direcao LGPD-safe): ids numericos hifenizados com
-#      shape 6+4 (`123456-7890`) tambem sao mascarados -- nenhum log site
-#      atual emite esse formato (ordens usam UUID).
+#      shape 6+4 (`123456-7890`) tambem sao mascarados.
 #   2. `+55` seguido de 10-11 digitos corridos -- cobre `+5511999990000` (o
 #      prefixo de pais e estrutura suficiente; nada legitimo em log tem essa
 #      forma). `+55 11999990000` (com espaco) e `11999990000` (sem nada) tem
 #      11 digitos corridos com shape de CPF e caem no _CPF_PATTERN acima
 #      antes desta regex; campos NOMEADOS telefone/celular/contato sao
 #      mascarados pela denylist abaixo.
+# O numero nao pode encostar em letra, digito, `_` nem hifen: os ids do servico
+# (`ordem_id`, `request_id`, `jti` e o ator da auditoria, o `sub`) sao UUID, e o
+# v4 traz entre os grupos trechos `dd-dddd-dddd` (`732ffc02-3465-4237-...`) que o
+# split 4-4 casaria. Sem os lookarounds, cerca de 1,4% dos UUID saiam mascarados.
 _TELEFONE_PATTERN = re.compile(
-    r"(?<!\d)"  # nao precedido de digito (evita capturar parte de numero maior)
+    r"(?<![\w-])"  # nao colado em palavra nem em id hifenizado (UUID)
     r"(?:"
     r"(?:\+55[\s.-]?)?"  # codigo do pais opcional
     r"(?:\(\d{2}\)|\d{2})"  # DDD com ou sem parenteses
@@ -72,7 +75,7 @@ _TELEFONE_PATTERN = re.compile(
     r"|"
     r"\+55[\s.-]?\d{10,11}"  # +55 com numero corrido (sem hifen local)
     r")"
-    r"(?!\d)"  # nao seguido de digito
+    r"(?![\w-])"  # idem, do lado direito (tambem barra numero maior)
 )
 
 # Denylist de chaves: quando o NOME do campo indica segredo ou PII, o valor

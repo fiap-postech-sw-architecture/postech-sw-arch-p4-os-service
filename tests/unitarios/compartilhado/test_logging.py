@@ -4,6 +4,7 @@ import io
 import json
 import logging
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
 import structlog
@@ -200,6 +201,52 @@ class TestScrubTelefone:
         event_dict: dict[str, object] = {"event": "retorno 11999990000"}
         result = scrub_pii(None, "info", event_dict)
         assert "11999990000" not in str(result["event"])
+
+    @pytest.mark.parametrize(
+        "texto",
+        [
+            pytest.param("tel (11) 99999-0000, ok", id="virgula-depois"),
+            pytest.param("(+55 11 99999-0000)", id="entre-parenteses"),
+            pytest.param("contato: 11 99999-0000.", id="ponto-final"),
+            pytest.param("Key (contato)=(11 99999-0000) existe", id="detalhe-do-banco"),
+        ],
+    )
+    def test_telefone_cercado_de_pontuacao_mascarado(self, texto: str) -> None:
+        result = scrub_pii(None, "info", {"event": texto})
+        assert "99999-0000" not in str(result["event"])
+        assert "***" in str(result["event"])
+
+
+# UUID v4 de verdade cujo trecho "02-3465-4237" (dd-dddd-dddd) casava com o telefone.
+_UUID_COM_SPLIT_DE_TELEFONE = "732ffc02-3465-4237-a5f6-12fd4a2b3be0"
+
+
+class TestScrubUuid:
+    """Os ids do servico (``ordem_id``, ``request_id``, ator e ``jti``) sao UUID."""
+
+    def test_uuid_com_trecho_dd_dddd_dddd_fica_intacto(self) -> None:
+        texto = f"ordem {_UUID_COM_SPLIT_DE_TELEFONE}"
+        assert scrub_pii(None, "info", {"event": texto})["event"] == texto
+
+    def test_dez_mil_uuid4_ficam_intactos(self) -> None:
+        # Antes da correcao cerca de 1,4% dos UUID v4 saiam mascarados do log.
+        ids = [str(uuid4()) for _ in range(10_000)]
+        mascarados = [
+            valor
+            for valor in ids
+            if scrub_pii(None, "info", {"id": valor})["id"] != valor
+        ]
+        assert mascarados == []
+
+    def test_ator_e_alvo_saem_intactos_no_log_json(
+        self, logging_pipeline: io.StringIO
+    ) -> None:
+        # Pelo pipeline real: o ator da auditoria (o sub) e o ordem_id sao UUID.
+        structlog.get_logger("test.uuid").info(
+            "evento", ator=_UUID_COM_SPLIT_DE_TELEFONE, ordem_id=str(uuid4())
+        )
+        registro = json.loads(logging_pipeline.getvalue().splitlines()[-1])
+        assert registro["ator"] == _UUID_COM_SPLIT_DE_TELEFONE
 
 
 class TestScrubChavesSensiveis:
