@@ -128,7 +128,7 @@ class TestRouter:
                 "/api/v1/clientes/",
                 json={
                     "nome": "Joao Silva",
-                    "documento": "12345678900",
+                    "documento": "52998224725",
                     "tipo_documento": "cpf",
                     "contato": "11999990000",
                 },

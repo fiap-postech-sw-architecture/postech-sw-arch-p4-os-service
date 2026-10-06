@@ -10,7 +10,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.repository import (
@@ -300,6 +301,56 @@ class TestAcompanhamentoPublico:
             == documento_errado.json()
             == {"detail": "Ordem nao encontrada"}
         )
+
+    def test_documento_ou_placa_invalidos_dao_o_404_sem_ir_ao_banco(
+        self, api_client: TestClient
+    ) -> None:
+        comandos: list[str] = []
+
+        def _contar(*args: object) -> None:
+            comandos.append(str(args[2]))
+
+        nao_encontrada = api_client.post(
+            self._ROTA, json={"placa": "ZZZ9Z99", "documento": "52998224725"}
+        )
+        event.listen(Engine, "before_cursor_execute", _contar)
+        try:
+            respostas = [
+                api_client.post(self._ROTA, json=corpo)
+                for corpo in (
+                    {"placa": "PUB1A23", "documento": "529.982.247-26"},
+                    {"placa": "PUB1A23", "documento": "11.111.111/0001-11"},
+                    {"placa": "!!!!!!!", "documento": "52998224725"},
+                )
+            ]
+        finally:
+            event.remove(Engine, "before_cursor_execute", _contar)
+
+        assert comandos == []
+        for resposta in respostas:
+            assert resposta.status_code == nao_encontrada.status_code == 404
+            assert resposta.json() == nao_encontrada.json()
+
+
+class TestCadastroComDocumentoInvalido:
+    def test_dv_errado_da_422_sem_ecoar_o_numero(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        resp = api_client.post(
+            "/api/v1/clientes/",
+            headers=_login(api_client, admin_user.email),
+            json={
+                "nome": "Maria Silva",
+                "documento": "529.982.247-26",
+                "tipo_documento": "cpf",
+                "contato": "maria@exemplo.com",
+            },
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
+        assert resp.json()["erro"]["mensagem"] == "CPF invalido"
+        assert "247" not in resp.text
 
 
 class TestRegrasEntreContextos:

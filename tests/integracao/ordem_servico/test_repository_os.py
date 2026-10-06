@@ -14,13 +14,17 @@ from src.cliente_veiculo.infraestrutura.adapters import (
     OrdemDeServicoSQLAlchemyAdapter,
 )
 from src.cliente_veiculo.infraestrutura.repository import ClienteSQLAlchemyRepository
+from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.dinheiro import Dinheiro
+from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.infraestrutura.metrics import metricas_api
+from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
+from src.ordem_servico.infraestrutura.consultas import ConsultaAcompanhamentoSQLAlchemy
 from src.ordem_servico.infraestrutura.metrics import instrumentar_metricas_de_ordens
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
@@ -138,26 +142,42 @@ class TestMapping:
         assert OrdemDeServicoSQLAlchemyRepository(session).obter_por_id(uuid4()) is None
 
 
-class TestAcompanhamentoPorPlacaEDocumento:
+class TestConsultaAcompanhamento:
     @pytest.fixture
     def cliente(self, session: Session) -> Cliente:
         return criar_cliente_com_veiculo(
             session, cpf="52998224725", placa="ABC1D23", contato="x@y.com"
         )
 
-    def test_devolve_a_mais_recente_do_par(
-        self, session: Session, cliente: Cliente
-    ) -> None:
-        _abrir(session, cliente)
-        mais_nova = _abrir(session, cliente)
-        repo = OrdemDeServicoSQLAlchemyRepository(session)
-
-        achada = repo.obter_mais_recente_por_placa_e_documento(
-            "abc-1d23", "529.982.247-25"
+    @staticmethod
+    def _consultar(session: Session, placa: str, documento: str) -> object:
+        return ConsultaAcompanhamentoSQLAlchemy(session).mais_recente(
+            Placa(valor=placa), CPF(numero=documento)
         )
 
-        assert achada is not None
-        assert achada.id == mais_nova.id
+    def test_projeta_so_status_e_timestamps_da_mais_recente(
+        self, session: Session, cliente: Cliente
+    ) -> None:
+        antiga = _abrir(session, cliente)
+        mais_nova = _abrir(session, cliente)
+        _avancar(session, mais_nova, S.EM_DIAGNOSTICO)
+        # criado_em explicito: duas aberturas no mesmo instante cairiam no
+        # desempate por id (uuid4 aleatorio) e o teste ficaria instavel.
+        session.execute(
+            text(
+                "UPDATE ordens_de_servico SET criado_em = criado_em - interval "
+                "'1 hour' WHERE id = :id"
+            ),
+            {"id": antiga.id},
+        )
+
+        achada = self._consultar(session, "abc-1d23", "529.982.247-25")
+
+        assert achada == AcompanhamentoDTO(
+            status="em_diagnostico",
+            criado_em=mais_nova.criado_em,
+            atualizado_em=mais_nova.atualizado_em,
+        )
 
     @pytest.mark.parametrize(
         ("placa", "documento"),
@@ -168,8 +188,7 @@ class TestAcompanhamentoPorPlacaEDocumento:
         self, session: Session, cliente: Cliente, placa: str, documento: str
     ) -> None:
         _abrir(session, cliente)
-        repo = OrdemDeServicoSQLAlchemyRepository(session)
-        assert repo.obter_mais_recente_por_placa_e_documento(placa, documento) is None
+        assert self._consultar(session, placa, documento) is None
 
     def test_cliente_anonimizado_nao_e_encontrado(
         self, session: Session, cliente: Cliente
@@ -180,11 +199,7 @@ class TestAcompanhamentoPorPlacaEDocumento:
         ClienteSQLAlchemyRepository(session).anonimizar_dados(cliente.id)
         session.flush()
 
-        repo = OrdemDeServicoSQLAlchemyRepository(session)
-        assert (
-            repo.obter_mais_recente_por_placa_e_documento("ABC1D23", "52998224725")
-            is None
-        )
+        assert self._consultar(session, "ABC1D23", "52998224725") is None
 
 
 class TestAdaptersEntreContextos:

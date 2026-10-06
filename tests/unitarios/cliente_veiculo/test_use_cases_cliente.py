@@ -58,6 +58,8 @@ def _cpf_alternativo(seed: int) -> str:
 class FakeClienteRepository:
     def __init__(self) -> None:
         self._clientes: dict[UUID, Cliente] = {}
+        # Toda leitura registra o metodo: validacao de VO tem de falhar antes.
+        self.consultas: list[str] = []
         self.veiculos_bloqueados: list[UUID] = []
         # Veiculos que ``bloquear_veiculo_para_remocao`` deve reportar como
         # ja inexistentes, simulando o caso em que outra transacao deletou a
@@ -65,6 +67,7 @@ class FakeClienteRepository:
         self.veiculos_sumidos_no_lock: set[UUID] = set()
 
     def obter_por_id(self, cliente_id: UUID) -> Cliente | None:
+        self.consultas.append("obter_por_id")
         return self._clientes.get(cliente_id)
 
     def bloquear_veiculo_para_remocao(self, veiculo_id: UUID) -> bool:
@@ -82,6 +85,7 @@ class FakeClienteRepository:
         return len(self._clientes)
 
     def obter_por_documento(self, documento: CPF | CNPJ) -> Cliente | None:
+        self.consultas.append("obter_por_documento")
         for c in self._clientes.values():
             if c.documento == documento:
                 return c
@@ -90,6 +94,7 @@ class FakeClienteRepository:
     def placa_existe(
         self, placa: Placa, excluir_cliente_id: UUID | None = None
     ) -> bool:
+        self.consultas.append("placa_existe")
         for c in self._clientes.values():
             if excluir_cliente_id and c.id == excluir_cliente_id:
                 continue
@@ -172,31 +177,29 @@ class TestCriarCliente:
         with pytest.raises(ViolacaoRegraDeNegocioException, match="Tipo de documento"):
             uc.executar(dto)
 
-    def test_documento_invalido_cpf_malformado(self) -> None:
+    @pytest.mark.parametrize(
+        ("documento", "tipo", "erro"),
+        [
+            pytest.param("12345678900", "cpf", "CPF invalido", id="cpf-dv-errado"),
+            pytest.param("111.111.111-11", "cpf", "CPF invalido", id="cpf-iguais"),
+            pytest.param("", "cnpj", "CNPJ invalido", id="cnpj-vazio"),
+            pytest.param("11222333000182", "cnpj", "CNPJ invalido", id="cnpj-dv"),
+            pytest.param("12ABC34501DE36", "cnpj", "CNPJ invalido", id="cnpj-alfa-dv"),
+        ],
+    )
+    def test_documento_invalido_falha_antes_do_banco(
+        self, documento: str, tipo: str, erro: str
+    ) -> None:
         repo = FakeClienteRepository()
         uow = FakeUnitOfWork()
         uc = CriarCliente(repo=repo, uow=uow)
         dto = CriarClienteDTO(
-            nome="Joao",
-            documento="12345678900",  # invalid checksum
-            tipo_documento="cpf",
-            contato="11999",
+            nome="Joao", documento=documento, tipo_documento=tipo, contato="11999"
         )
-        with pytest.raises(ValueError, match="CPF invalido"):
+        with pytest.raises(ValueError, match=erro):
             uc.executar(dto)
-
-    def test_documento_invalido_cnpj_vazio(self) -> None:
-        repo = FakeClienteRepository()
-        uow = FakeUnitOfWork()
-        uc = CriarCliente(repo=repo, uow=uow)
-        dto = CriarClienteDTO(
-            nome="Empresa",
-            documento="",
-            tipo_documento="cnpj",
-            contato="11999",
-        )
-        with pytest.raises(ValueError, match="CNPJ invalido"):
-            uc.executar(dto)
+        assert repo.consultas == []
+        assert not uow.committed
 
     def test_corrida_check_then_insert_mapeia_integrity_error(self) -> None:
         # Duas requisicoes concorrentes passam pelo obter_por_documento antes
@@ -370,6 +373,16 @@ class TestAdicionarVeiculo:
         dto = AdicionarVeiculoDTO(placa="ABC1234", marca="VW", modelo="Gol", ano=2021)
         with pytest.raises(PlacaDuplicadaException):
             uc.executar(cliente2.id, dto)
+
+    def test_placa_invalida_falha_antes_do_banco(self) -> None:
+        repo = FakeClienteRepository()
+        uow = FakeUnitOfWork()
+        uc = AdicionarVeiculo(repo=repo, uow=uow)
+        dto = AdicionarVeiculoDTO(placa="!!!!!!!", marca="Fiat", modelo="Uno", ano=2020)
+        with pytest.raises(ValueError, match="Placa invalida"):
+            uc.executar(uuid4(), dto)
+        assert repo.consultas == []
+        assert not uow.committed
 
     def test_cliente_nao_encontrado(self) -> None:
         repo = FakeClienteRepository()

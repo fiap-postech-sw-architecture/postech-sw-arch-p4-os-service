@@ -19,6 +19,7 @@ from src.ordem_servico.aplicacao.use_cases import (
     RegistrarEntrega,
 )
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
+from src.ordem_servico.infraestrutura.consultas import ConsultaAcompanhamentoSQLAlchemy
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
@@ -60,4 +61,6 @@ def obter_registrar_entrega(session: Session) -> RegistrarEntrega:
 
 
 def obter_consultar_acompanhamento(session: Session) -> ConsultarAcompanhamento:
-    return ConsultarAcompanhamento(repo=_repo(session))
+    return ConsultarAcompanhamento(
+        consulta=ConsultaAcompanhamentoSQLAlchemy(session=session)
+    )

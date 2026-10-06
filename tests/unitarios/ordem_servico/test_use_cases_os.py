@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
 
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
     TransicaoStatusInvalidaException,
 )
-from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
+from src.compartilhado.dominio.placa import Placa
+from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, AcompanhamentoDTO
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,
@@ -27,7 +31,12 @@ from src.ordem_servico.dominio.exceptions import (
 )
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import CHECKOUT_URL, LINK_DECISAO, ordem_em
-from tests.unitarios.fakes import ClientePortFake, FakeUnitOfWork, RepoEmMemoria
+from tests.unitarios.fakes import (
+    ClientePortFake,
+    ConsultaAcompanhamentoEspia,
+    FakeUnitOfWork,
+    RepoEmMemoria,
+)
 
 
 def _dto() -> AbrirOrdemDTO:
@@ -205,18 +214,71 @@ class TestListarOrdens:
         assert repo.args_contar is True
 
 
+def _arabe_indico(digitos: str) -> str:
+    return "".join(chr(0x0660 + int(d)) for d in digitos)
+
+
+_CPF = "52998224725"
+_ACOMPANHAMENTO = AcompanhamentoDTO(
+    status="em_diagnostico",
+    criado_em=datetime(2026, 10, 1, 12, tzinfo=UTC),
+    atualizado_em=datetime(2026, 10, 1, 13, tzinfo=UTC),
+)
+
+
 class TestConsultarAcompanhamento:
-    def test_encontrada_devolve_so_status_e_timestamps(self) -> None:
-        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
-        repo = RepoEmMemoria(ordem)
+    def test_par_valido_consulta_com_os_vos_normalizados(self) -> None:
+        espia = ConsultaAcompanhamentoEspia(resultado=_ACOMPANHAMENTO)
 
-        dto = ConsultarAcompanhamento(repo).executar("ABC1D23", "52998224725")
+        dto = ConsultarAcompanhamento(espia).executar("abc-1d23", "529.982.247-25")
 
-        assert repo.consulta_publica == ("ABC1D23", "52998224725")
-        assert dto is not None
-        assert dto.status == "em_diagnostico"
-        assert dto.criado_em == ordem.criado_em
-        assert dto.atualizado_em == ordem.atualizado_em
+        assert dto is _ACOMPANHAMENTO
+        assert espia.chamadas == [(Placa(valor="ABC1D23"), CPF(numero=_CPF))]
 
-    def test_nao_encontrada_devolve_none(self) -> None:
-        assert ConsultarAcompanhamento(RepoEmMemoria()).executar("X", "Y") is None
+    @pytest.mark.parametrize(
+        ("documento", "esperado"),
+        [
+            pytest.param(
+                "11.222.333/0001-81", CNPJ(numero="11222333000181"), id="cnpj"
+            ),
+            pytest.param(
+                "12.abc.345/01de-35", CNPJ(numero="12ABC34501DE35"), id="cnpj-alfanum"
+            ),
+        ],
+    )
+    def test_documento_de_14_caracteres_vira_cnpj(
+        self, documento: str, esperado: CNPJ
+    ) -> None:
+        espia = ConsultaAcompanhamentoEspia()
+
+        assert ConsultarAcompanhamento(espia).executar("ABC1D23", documento) is None
+        assert espia.chamadas == [(Placa(valor="ABC1D23"), esperado)]
+
+    @pytest.mark.parametrize(
+        ("placa", "documento"),
+        [
+            pytest.param("ABC1D23", "52998224726", id="cpf-dv-errado"),
+            pytest.param("ABC1D23", "123.456.789-00", id="cpf-mascarado-dv-errado"),
+            pytest.param("ABC1D23", "111.111.111-11", id="cpf-digitos-iguais"),
+            pytest.param("ABC1D23", "11.111.111/0001-11", id="cnpj-dv-errado"),
+            pytest.param("ABC1D23", "12ABC34501DE36", id="cnpj-alfanum-dv-errado"),
+            pytest.param("ABC1D23", "abcdefghijk", id="documento-sem-digito"),
+            pytest.param("ABC1D23", _arabe_indico(_CPF), id="cpf-arabe-indico"),
+            pytest.param("!!!!!!!", _CPF, id="placa-com-simbolos"),
+            pytest.param("1234ABC", _CPF, id="placa-fora-do-padrao"),
+            pytest.param("ABC" + _arabe_indico("1234"), _CPF, id="placa-arabe-indica"),
+        ],
+    )
+    def test_entrada_invalida_devolve_none_sem_consultar_o_banco(
+        self, placa: str, documento: str
+    ) -> None:
+        espia = ConsultaAcompanhamentoEspia(resultado=_ACOMPANHAMENTO)
+
+        assert ConsultarAcompanhamento(espia).executar(placa, documento) is None
+        assert espia.chamadas == []
+
+    def test_par_valido_sem_ordem_devolve_none(self) -> None:
+        espia = ConsultaAcompanhamentoEspia()
+
+        assert ConsultarAcompanhamento(espia).executar("ABC1D23", _CPF) is None
+        assert len(espia.chamadas) == 1

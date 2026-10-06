@@ -8,8 +8,12 @@ Execucao e compensacoes sao papel da saga, fora destes casos de uso.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.documento import normalizar_cnpj
+from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.aplicacao.dtos import (
     AcompanhamentoDTO,
     MudancaDeStatusDTO,
@@ -30,8 +34,9 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
+    from src.compartilhado.dominio.documento import Documento
     from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
-    from src.ordem_servico.aplicacao.ports import ClientePort
+    from src.ordem_servico.aplicacao.ports import ClientePort, ConsultaAcompanhamento
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 
@@ -220,19 +225,36 @@ class RegistrarEntrega:
         return _ordem_dto(ordem)
 
 
+_TAMANHO_CNPJ: Final = 14
+
+
+def _documento(numero: str) -> Documento:
+    """CNPJ se tiver 14 caracteres sem mascara (inclui o alfanumerico), senao CPF.
+
+    O VO valida o digito verificador (modulo 11) e levanta ``ValueError``.
+    """
+    if len(normalizar_cnpj(numero)) == _TAMANHO_CNPJ:
+        return CNPJ(numero=numero)
+    return CPF(numero=numero)
+
+
 class ConsultarAcompanhamento:
     """Consulta publica por placa + documento (CPF/CNPJ)."""
 
-    def __init__(self, repo: OrdemDeServicoRepository) -> None:
-        self._repo = repo
+    def __init__(self, consulta: ConsultaAcompanhamento) -> None:
+        self._consulta = consulta
 
     def executar(self, placa: str, documento: str) -> AcompanhamentoDTO | None:
-        """Ordem mais recente do par placa+documento, ou ``None``."""
-        ordem = self._repo.obter_mais_recente_por_placa_e_documento(placa, documento)
-        if ordem is None:
+        """Ordem mais recente do par placa+documento, ou ``None``.
+
+        Documento (digito verificador) e placa (formato) sao validados pelos
+        VOs antes de qualquer acesso ao banco. Entrada invalida devolve
+        ``None``, o mesmo resultado de "nao encontrada": a rota publica
+        responde o mesmo 404 nos dois casos (anti-enumeracao).
+        """
+        try:
+            placa_vo = Placa(valor=placa)
+            documento_vo = _documento(documento)
+        except ValueError:
             return None
-        return AcompanhamentoDTO(
-            status=ordem.status.value,
-            criado_em=ordem.criado_em,
-            atualizado_em=ordem.atualizado_em,
-        )
+        return self._consulta.mais_recente(placa_vo, documento_vo)

@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from types import TracebackType
     from uuid import UUID
 
+    from src.compartilhado.dominio.documento import Documento
+    from src.compartilhado.dominio.placa import Placa
+    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 
@@ -50,7 +53,6 @@ class RepoEmMemoria:
         self.ordens = {o.id: o for o in ordens}
         self.salvas: list[OrdemDeServico] = []
         self._conflito = conflito
-        self.consulta_publica: tuple[str, str] | None = None
 
     def obter_por_id(self, ordem_id: UUID) -> OrdemDeServico | None:
         return self.ordens.get(ordem_id)
@@ -71,11 +73,19 @@ class RepoEmMemoria:
         self.args_contar = incluir_encerradas
         return 42
 
-    def obter_mais_recente_por_placa_e_documento(
-        self, placa: str, documento: str
-    ) -> OrdemDeServico | None:
-        self.consulta_publica = (placa, documento)
-        return next(iter(self.ordens.values()), None)
+
+class ConsultaAcompanhamentoEspia:
+    """Registra cada consulta: entrada invalida tem de deixar ``chamadas`` vazia."""
+
+    def __init__(self, resultado: AcompanhamentoDTO | None = None) -> None:
+        self.resultado = resultado
+        self.chamadas: list[tuple[Placa, Documento]] = []
+
+    def mais_recente(
+        self, placa: Placa, documento: Documento
+    ) -> AcompanhamentoDTO | None:
+        self.chamadas.append((placa, documento))
+        return self.resultado
 
 
 class ClientePortFake:

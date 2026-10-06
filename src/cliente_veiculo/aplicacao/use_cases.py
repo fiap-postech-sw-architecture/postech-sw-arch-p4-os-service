@@ -117,6 +117,7 @@ class CriarCliente:
                 mensagem=f"Tipo de documento invalido: {dto.tipo_documento}"
             )
 
+        # O VO valida o digito verificador antes de qualquer consulta ao banco.
         documento: Documento
         if dto.tipo_documento == "cpf":
             documento = CPF(numero=dto.documento)
@@ -232,9 +233,10 @@ class AdicionarVeiculo:
         self._uow = uow
 
     def executar(self, cliente_id: UUID, dto: AdicionarVeiculoDTO) -> VeiculoDTO:
+        # Placa invalida falha antes de qualquer consulta ao banco.
+        placa = Placa(valor=dto.placa)
         cliente = obter_cliente_ou_falhar(self._repo, cliente_id)
         _exigir_cliente_ativo(cliente)
-        placa = Placa(valor=dto.placa)
         if self._repo.placa_existe(placa, excluir_cliente_id=cliente_id):
             raise PlacaDuplicadaException()
         veiculo = cliente.adicionar_veiculo(placa, dto.marca, dto.modelo, dto.ano)

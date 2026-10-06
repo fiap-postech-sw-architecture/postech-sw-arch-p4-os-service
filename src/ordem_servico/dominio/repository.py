@@ -40,9 +40,3 @@ class OrdemDeServicoRepository(Protocol):
     def contar(self, *, incluir_encerradas: bool = False) -> int:
         """Total do mesmo universo de ``listar`` (paginacao consistente)."""
         pass
-
-    def obter_mais_recente_por_placa_e_documento(
-        self, placa: str, documento: str
-    ) -> OrdemDeServico | None:
-        """Ordem mais recente do veiculo ``placa`` do cliente ``documento``."""
-        pass

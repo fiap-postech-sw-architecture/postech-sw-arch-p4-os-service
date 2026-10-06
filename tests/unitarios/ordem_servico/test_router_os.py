@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -13,8 +14,11 @@ import structlog.testing
 from fastapi.testclient import TestClient
 
 from src.autenticacao.interfaces.middleware import obter_usuario_atual
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
+from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,
@@ -26,7 +30,12 @@ from src.ordem_servico.aplicacao.use_cases import (
 from src.ordem_servico.dominio.ordem_de_servico import TAMANHO_MAXIMO_DESCRICAO
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import ordem_em
-from tests.unitarios.fakes import ClientePortFake, FakeUnitOfWork, RepoEmMemoria
+from tests.unitarios.fakes import (
+    ClientePortFake,
+    ConsultaAcompanhamentoEspia,
+    FakeUnitOfWork,
+    RepoEmMemoria,
+)
 
 _BASE = "/api/v1/ordens-de-servico"
 _ROUTER = "src.ordem_servico.interfaces.router"
@@ -38,12 +47,19 @@ def repo() -> RepoEmMemoria:
 
 
 @pytest.fixture
+def consulta() -> ConsultaAcompanhamentoEspia:
+    return ConsultaAcompanhamentoEspia()
+
+
+@pytest.fixture
 def papel() -> str:
     return "atendente"
 
 
 @pytest.fixture
-def client(repo: RepoEmMemoria, papel: str) -> Iterator[TestClient]:
+def client(
+    repo: RepoEmMemoria, consulta: ConsultaAcompanhamentoEspia, papel: str
+) -> Iterator[TestClient]:
     app = criar_app()
     app.dependency_overrides[obter_session] = lambda: MagicMock()
     app.dependency_overrides[obter_usuario_atual] = lambda: {
@@ -57,7 +73,7 @@ def client(repo: RepoEmMemoria, papel: str) -> Iterator[TestClient]:
         "obter_obter_ordem": ObterOrdem(repo),
         "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork()),
         "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork()),
-        "obter_consultar_acompanhamento": ConsultarAcompanhamento(repo),
+        "obter_consultar_acompanhamento": ConsultarAcompanhamento(consulta),
     }
     with ExitStack() as pilha:
         for nome, caso_de_uso in fabricas.items():
@@ -277,25 +293,55 @@ class TestAcompanhamentoPublico:
     _ROTA = "/api/v1/publico/acompanhamento"
 
     def test_encontrada_so_status_e_timestamps(
-        self, client: TestClient, repo: RepoEmMemoria
+        self, client: TestClient, consulta: ConsultaAcompanhamentoEspia
     ) -> None:
-        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
-        repo.ordens[ordem.id] = ordem
+        consulta.resultado = AcompanhamentoDTO(
+            status="em_diagnostico",
+            criado_em=datetime(2026, 10, 1, 12, tzinfo=UTC),
+            atualizado_em=datetime(2026, 10, 1, 13, tzinfo=UTC),
+        )
 
         resp = client.post(self._ROTA, json=_CORPO_PUBLICO)
 
         assert resp.status_code == 200
         assert set(resp.json()) == {"status", "situacao", "criado_em", "atualizado_em"}
         assert resp.json()["situacao"] == "Em diagnóstico"
-        assert repo.consulta_publica == ("ABC1D23", "529.982.247-25")
+        assert consulta.chamadas == [
+            (Placa(valor="ABC1D23"), CPF(numero="52998224725"))
+        ]
 
     def test_nao_encontrada_404_com_a_resposta_do_p3(self, client: TestClient) -> None:
-        # Corpo fixo e identico para placa inexistente ou documento errado
-        # (anti-enumeracao): o caso de uso so devolve None nos dois casos.
         resp = client.post(self._ROTA, json=_CORPO_PUBLICO)
 
         assert resp.status_code == 404
         assert resp.json() == {"detail": "Ordem nao encontrada"}
+
+    @pytest.mark.parametrize(
+        "corpo",
+        [
+            pytest.param(
+                {**_CORPO_PUBLICO, "documento": "529.982.247-26"}, id="cpf-dv"
+            ),
+            pytest.param(
+                {**_CORPO_PUBLICO, "documento": "11111111111"}, id="cpf-iguais"
+            ),
+            pytest.param({**_CORPO_PUBLICO, "placa": "!!!!!!!"}, id="placa-simbolos"),
+        ],
+    )
+    def test_documento_ou_placa_invalidos_dao_o_mesmo_404_sem_consultar(
+        self,
+        client: TestClient,
+        consulta: ConsultaAcompanhamentoEspia,
+        corpo: dict[str, str],
+    ) -> None:
+        nao_encontrada = client.post(self._ROTA, json=_CORPO_PUBLICO)
+        consulta.chamadas.clear()
+
+        invalida = client.post(self._ROTA, json={**_CORPO_PUBLICO, **corpo})
+
+        assert invalida.status_code == nao_encontrada.status_code == 404
+        assert invalida.json() == nao_encontrada.json()
+        assert consulta.chamadas == []
 
     def test_get_com_pii_na_url_nao_existe(self, client: TestClient) -> None:
         assert client.get(self._ROTA, params=_CORPO_PUBLICO).status_code == 405

@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Final
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm.exc import StaleDataError
 
-from src.cliente_veiculo.infraestrutura.mapping import clientes_table, veiculos_table
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.compartilhado.infraestrutura.encryption import EncryptionService
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
@@ -39,9 +36,6 @@ _PRIORIDADE_STATUS: Final = {
     StatusOrdem.RECEBIDA: 5,
 }
 _PRIORIDADE_ENCERRADAS: Final = 9
-# Mesma normalizacao do contexto Cliente+Veiculo: documento so com digitos e
-# placa em maiusculas sem hifen, senao a entrada mascarada nao casa.
-_NAO_DIGITO: Final = re.compile(r"\D", re.ASCII)
 
 
 class OrdemDeServicoSQLAlchemyRepository:
@@ -92,25 +86,3 @@ class OrdemDeServicoSQLAlchemyRepository:
         if not incluir_encerradas:
             stmt = stmt.where(_t.c.status.notin_(_ESTADOS_ENCERRADOS))
         return self._session.scalar(stmt) or 0
-
-    def obter_mais_recente_por_placa_e_documento(
-        self, placa: str, documento: str
-    ) -> OrdemDeServico | None:
-        """Ordem mais recente do par placa + documento (CPF/CNPJ), ou ``None``.
-
-        O documento e comparado pelo hash deterministico (nunca em claro); a
-        escolha da mais recente e do banco (``ORDER BY ... LIMIT 1``).
-        """
-        doc_hash = EncryptionService.instance().hash_deterministic(
-            _NAO_DIGITO.sub("", documento)
-        )
-        stmt = (
-            select(OrdemDeServico)
-            .join(clientes_table, _t.c.cliente_id == clientes_table.c.id)
-            .join(veiculos_table, _t.c.veiculo_id == veiculos_table.c.id)
-            .where(veiculos_table.c.placa == placa.upper().replace("-", ""))
-            .where(clientes_table.c.documento_hash == doc_hash)
-            .order_by(_t.c.criado_em.desc(), _t.c.id.desc())
-            .limit(1)
-        )
-        return self._session.scalars(stmt).first()
