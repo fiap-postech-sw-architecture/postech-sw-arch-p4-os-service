@@ -211,7 +211,7 @@ class TestCicloDaOrdem:
             f"Veiculo {veiculo_b} nao encontrado para o cliente informado"
         )
 
-    def test_mecanico_le_mas_nao_cancela(
+    def test_mecanico_nao_acessa_a_os(
         self,
         api_client: TestClient,
         admin_user: Usuario,
@@ -229,9 +229,8 @@ class TestCicloDaOrdem:
         )
         h_mecanico = _login(api_client, mecanico.email)
 
-        assert (
-            api_client.get(f"{_OS}/{ordem_id}", headers=h_mecanico).status_code == 200
-        )
+        for url in (_OS, f"{_OS}/{ordem_id}", f"{_OS}/{ordem_id}/historico"):
+            assert api_client.get(url, headers=h_mecanico).status_code == 403
         resp = api_client.post(
             f"{_OS}/{ordem_id}/cancelamento", headers=h_mecanico, json={"motivo": "x"}
         )

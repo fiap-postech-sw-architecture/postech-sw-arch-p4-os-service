@@ -50,11 +50,9 @@ _log = structlog.get_logger(__name__)
 router = APIRouter(prefix="/api/v1/ordens-de-servico", tags=["ordens-de-servico"])
 router_publico = APIRouter(prefix="/api/v1/publico", tags=["publico"])
 
+# Toda rota de OS e do atendente (admin herda); o mecanico nao tem rota no
+# OS Service: trabalha pela fila do Execution Service (ADR-039).
 _Atendente = Annotated[dict[str, object], Depends(exigir_papel(Papel.ATENDENTE))]
-_Leitor = Annotated[
-    dict[str, object],
-    Depends(exigir_papel(Papel.ATENDENTE, Papel.MECANICO)),
-]
 _Sessao = Annotated[Session, Depends(obter_session)]
 
 _RESPOSTA_409: dict[int | str, dict[str, Any]] = {
@@ -89,7 +87,7 @@ def abrir_ordem(
 
 @router.get("", summary="Fila de ordens por prioridade de status")
 def listar_ordens(
-    usuario: _Leitor,
+    usuario: _Atendente,
     session: _Sessao,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -117,7 +115,7 @@ def listar_ordens(
 
 @router.get("/{ordem_id}", summary="Consulta uma ordem")
 def obter_ordem(
-    ordem_id: UUID, usuario: _Leitor, session: _Sessao
+    ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
     """Status, resumo do orcamento e do pagamento e timestamps da ordem."""
     return OrdemDeServicoResponse.model_validate(
@@ -127,7 +125,7 @@ def obter_ordem(
 
 @router.get("/{ordem_id}/historico", summary="Linha do tempo de status da ordem")
 def obter_historico(
-    ordem_id: UUID, usuario: _Leitor, session: _Sessao
+    ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> HistoricoResponse:
     """Mudancas de status da abertura ate agora (de, para, origem, motivo)."""
     ordem = obter_obter_ordem(session).executar(ordem_id)

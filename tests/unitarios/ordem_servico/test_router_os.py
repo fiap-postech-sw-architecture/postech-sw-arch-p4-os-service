@@ -3,7 +3,7 @@ de uso reais ligados a repositorio em memoria — sem banco."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
@@ -52,21 +52,10 @@ def consulta() -> ConsultaAcompanhamentoEspia:
 
 
 @pytest.fixture
-def papel() -> str:
-    return "atendente"
-
-
-@pytest.fixture
-def client(
-    repo: RepoEmMemoria, consulta: ConsultaAcompanhamentoEspia, papel: str
-) -> Iterator[TestClient]:
-    app = criar_app()
-    app.dependency_overrides[obter_session] = lambda: MagicMock()
-    app.dependency_overrides[obter_usuario_atual] = lambda: {
-        "sub": "u-123",
-        "papel": papel,
-        "type": "access",
-    }
+def client_como(
+    repo: RepoEmMemoria, consulta: ConsultaAcompanhamentoEspia
+) -> Iterator[Callable[[str], TestClient]]:
+    """Fabrica de clientes com o papel pedido; os casos de uso usam os fakes."""
     fabricas = {
         "obter_abrir_ordem": AbrirOrdem(repo, FakeUnitOfWork(), ClientePortFake()),
         "obter_listar_ordens": ListarOrdens(repo),
@@ -75,10 +64,26 @@ def client(
         "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork()),
         "obter_consultar_acompanhamento": ConsultarAcompanhamento(consulta),
     }
+
+    def _como(papel: str) -> TestClient:
+        app = criar_app()
+        app.dependency_overrides[obter_session] = lambda: MagicMock()
+        app.dependency_overrides[obter_usuario_atual] = lambda: {
+            "sub": "u-123",
+            "papel": papel,
+            "type": "access",
+        }
+        return TestClient(app)
+
     with ExitStack() as pilha:
         for nome, caso_de_uso in fabricas.items():
             pilha.enter_context(patch(f"{_ROUTER}.{nome}", return_value=caso_de_uso))
-        yield TestClient(app)
+        yield _como
+
+
+@pytest.fixture
+def client(client_como: Callable[[str], TestClient]) -> TestClient:
+    return client_como("atendente")
 
 
 def _abrir_corpo(**extra: object) -> dict[str, object]:
@@ -124,17 +129,44 @@ class TestAbrir:
         assert resp.status_code == 422
         assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
 
-    @pytest.mark.parametrize("papel", ["mecanico"])
-    def test_mecanico_nao_abre(self, client: TestClient) -> None:
-        assert client.post(_BASE, json=_abrir_corpo()).status_code == 403
+    def test_admin_abre(self, client_como: Callable[[str], TestClient]) -> None:
+        resp = client_como("admin").post(_BASE, json=_abrir_corpo())
+        assert resp.status_code == 201
 
-    @pytest.mark.parametrize("papel", ["admin"])
-    def test_admin_abre(self, client: TestClient) -> None:
-        assert client.post(_BASE, json=_abrir_corpo()).status_code == 201
+
+_ROTAS_DE_OS = [
+    pytest.param("POST", "", _abrir_corpo(), id="abrir"),
+    pytest.param("GET", "", None, id="listar"),
+    pytest.param("GET", "/{id}", None, id="obter"),
+    pytest.param("GET", "/{id}/historico", None, id="historico"),
+    pytest.param("POST", "/{id}/cancelamento", {"motivo": "x"}, id="cancelar"),
+    pytest.param("POST", "/{id}/entrega", None, id="entregar"),
+]
+
+
+class TestPapeis:
+    """Toda rota de OS e do atendente (admin herda); o mecanico nao tem nenhuma."""
+
+    @pytest.mark.parametrize(("metodo", "sufixo", "corpo"), _ROTAS_DE_OS)
+    def test_mecanico_recebe_403_em_toda_rota(
+        self,
+        client_como: Callable[[str], TestClient],
+        repo: RepoEmMemoria,
+        metodo: str,
+        sufixo: str,
+        corpo: dict[str, object] | None,
+    ) -> None:
+        ordem = ordem_em(StatusOrdem.FINALIZADA)
+        repo.ordens[ordem.id] = ordem
+        url = _BASE + sufixo.format(id=ordem.id)
+
+        resp = client_como("mecanico").request(metodo, url, json=corpo)
+
+        assert resp.status_code == 403
+        assert repo.salvas == []
 
 
 class TestConsultas:
-    @pytest.mark.parametrize("papel", ["mecanico"])
     def test_lista_paginada(self, client: TestClient, repo: RepoEmMemoria) -> None:
         ordem = ordem_em(StatusOrdem.EM_EXECUCAO)
         repo.ordens[ordem.id] = ordem
@@ -251,11 +283,6 @@ class TestCancelamento:
     def test_corpo_invalido_422(self, client: TestClient, corpo: dict) -> None:
         resp = client.post(f"{_BASE}/{uuid4()}/cancelamento", json=corpo)
         assert resp.status_code == 422
-
-    @pytest.mark.parametrize("papel", ["mecanico"])
-    def test_mecanico_nao_cancela(self, client: TestClient) -> None:
-        resp = client.post(f"{_BASE}/{uuid4()}/cancelamento", json={"motivo": "x"})
-        assert resp.status_code == 403
 
 
 class TestEntrega:

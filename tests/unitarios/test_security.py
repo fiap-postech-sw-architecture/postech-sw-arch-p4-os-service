@@ -685,26 +685,6 @@ class TestAllSchemasExtraForbid:
 # ===========================================================================
 
 
-class TestCancellationAuthorization:
-    """Cancelamento: atendente (e admin, por heranca); mecanico nao (brief secao 7)."""
-
-    def test_cancellation_rejects_mecanico(self) -> None:
-        verificar = exigir_papel("atendente")
-        with pytest.raises(HTTPException) as exc:
-            verificar({"papel": "mecanico", "sub": str(uuid4())})  # type: ignore[operator]
-        assert exc.value.status_code == 403
-
-    def test_cancellation_accepts_atendente(self) -> None:
-        verificar = exigir_papel("atendente")
-        result = verificar({"papel": "atendente", "sub": str(uuid4())})  # type: ignore[operator]
-        assert result["papel"] == "atendente"
-
-    def test_cancellation_accepts_admin(self) -> None:
-        verificar = exigir_papel("atendente")
-        result = verificar({"papel": "admin", "sub": str(uuid4())})  # type: ignore[operator]
-        assert result["papel"] == "admin"
-
-
 class TestLGPDEndpointsRequireAuth:
     """LGPD endpoints (dados-pessoais, consentimento) must require authentication.
 
@@ -874,20 +854,18 @@ class TestRBACRouteDeclarations:
         ("metodo", "sufixo"),
         [
             ("POST", ""),
+            ("GET", ""),
+            ("GET", "/{ordem_id}"),
+            ("GET", "/{ordem_id}/historico"),
             ("POST", "/{ordem_id}/cancelamento"),
             ("POST", "/{ordem_id}/entrega"),
         ],
     )
-    def test_escritas_da_os_sao_do_atendente(self, metodo: str, sufixo: str) -> None:
+    def test_toda_rota_de_os_e_so_do_atendente(self, metodo: str, sufixo: str) -> None:
+        """ADR-039: o mecanico nao tem rota no OS Service (admin herda atendente)."""
         rota = self._rota_os(metodo, sufixo)
         assert self._route_has_auth_dependency(rota)
         assert self._get_route_papeis(rota) == {"atendente"}
-
-    @pytest.mark.parametrize("sufixo", ["", "/{ordem_id}", "/{ordem_id}/historico"])
-    def test_leituras_da_os_sao_de_atendente_e_mecanico(self, sufixo: str) -> None:
-        rota = self._rota_os("GET", sufixo)
-        assert self._route_has_auth_dependency(rota)
-        assert self._get_route_papeis(rota) == {"atendente", "mecanico"}
 
     def test_registrar_requires_admin(self) -> None:
         from src.autenticacao.interfaces.router import router
