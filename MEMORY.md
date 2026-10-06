@@ -8,6 +8,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Recent decisions
 
+- 2026-10-06 - Todo 401 do servico (login, refresh, logout e o gate de qualquer rota) sai como `NAO_AUTENTICADO` e todo 403 como `ACESSO_NEGADO`, no envelope `{erro: {codigo, mensagem, id_requisicao}}` dos tres servicos; o gate levanta `FalhaAutenticacaoException` e `AcessoNegadoException` (nao mais `HTTPException`) e o motivo da recusa fica so no log (`dominio_excecao_tratada`, campo `reason`). Token sem `papel`, com papel desconhecido ou de tipo errado e falha de credencial (401, ADR-039 e RFC-004 secao 6); o 403 e so para papel valido sem permissao. Substitui as entradas de 401 uniforme abaixo, que deixavam o gate em `{detail}` e o papel invalido em 403 - PR #2
 - 2026-10-06 - Decisoes do recorte fora do brief, que o PR so tinha no codigo: motivo de cancelamento vazio e descricao so com espacos dao 422 `VALOR_INVALIDO` (invariante do agregado, nao 409); a fila mantem a prioridade por status do p3 (RN-019/020: EM_EXECUCAO primeiro, RECEBIDA por ultimo, encerradas so com `incluir_encerradas`); cada linha do historico e o evento levam a `OrigemMudanca` (ATENDIMENTO, EXECUCAO, BILLING, SAGA) - review deep do PR #2
 - 2026-10-06 - Contrato de erro dos tres servicos: "nao encontrado" generico e `ENTIDADE_NAO_ENCONTRADA` no envelope `{erro: {codigo, mensagem, id_requisicao}}`; o 422 de schema segue o formato do p3 (`{detail, id_requisicao}`) e o 404 do acompanhamento publico segue `{"detail": "Ordem nao encontrada"}` (anti-enumeracao) - coordenador, depois da triagem
 - 2026-10-06 - Access token de 15 min por padrao com o nome da tabela de parametros da RFC-004 (`JWT_EXPIRATION_MINUTES=15`; o coordenador citou `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, nome do RFC-001 do p3 que o codigo nunca leu) - coordenador, depois da triagem
@@ -31,6 +32,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Discovered conventions
 
+- 2026-10-06 - `make smoke` confere a imagem de producao alem da readiness e do login: usuario 1001 e `ENVIRONMENT=production` no `docker image inspect` e nenhum header `server` na resposta (o compose sobe em development, entao ele sozinho nao exercita a imagem como producao). `APP_IMAGE` do Makefile e o nome da imagem do compose - PR #2
+- 2026-10-06 - App de teste que inclui so um router (sem `criar_app`) precisa chamar `registrar_error_handlers`: sem ele o 401 e o 403 do gate, que sao excecoes de dominio, nao viram resposta HTTP - PR #2
 - 2026-10-06 - Politica de warnings do pytest: so dois warnings conhecidos de terceiros (httpx do TestClient do starlette, `asyncio.iscoroutinefunction` do slowapi) ficam no `filterwarnings`; a suite roda sem warning, entao um novo aparece. Segredos de JWT dos testes tem o tamanho do hash (32, 48 ou 64 bytes)
 - 2026-10-06 - `ci.yml`, `security.yml` e `scripts/sonar/analisar.sh` sao copia literal do template do coordenador: mudanca vai no template e e recopiada nos tres servicos. `make check` = jobs lint, type-check, security e test (com `uv lock --check`); `make smoke` = job build (projeto compose `pytstop-os-smoke`, porta 18000, `down -v` ate em falha, logs antes); `make audit` = pip-audit com os extras da imagem
 - 2026-10-06 - CI vem dos templates do coordenador (`ci.yml`: lint, type-check, security, test, sonarqube, build; `security.yml`: pip-audit, gitleaks, trivy). Os nomes dos jobs sao os checks obrigatorios da branch protection: nao renomear. `make test` gera `coverage.xml`, `htmlcov/` e `reports/junit.xml` (o job `sonarqube` le o coverage.xml do artefato do `test`)
@@ -40,6 +43,9 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Gotchas
 
+- 2026-10-06 - `brutils.cnpj.remove_symbols` so tira `.`, `/` e `-`: espaco e quebra de linha ficam e o CNPJ vira invalido (no acompanhamento publico, 404 para uma OS que existe). A normalizacao por `\D` do p3 aceitava; `normalizar_cnpj` tira o espaco antes - PR #2
+- 2026-10-06 - O padrao de CNPJ do scrubber so aceita letras maiusculas: com minusculas ele mascara enderecos de memoria dos reprs (`0x7f3a9c2b1d10` termina em dois digitos em cerca de 40% dos casos) - PR #2
+- 2026-10-06 - `make smoke APP_IMAGE=<outra>`: o `up --build` do compose tagueia a imagem construida com esse nome; apontar para uma imagem base (ex.: `python:3.14-slim`) a sobrescreve no Docker local - PR #2
 - 2026-10-06 - O indice da UNIQUE `(ordem_id, sequencia)` devolve o historico ordenado mesmo sem `order_by`: teste de ordenacao precisa de `SET LOCAL enable_indexscan/enable_indexonlyscan/enable_bitmapscan = off` para o Postgres ler na ordem fisica
 - 2026-10-06 - SQLite `:memory:` (SingletonThreadPool) com rota que consulta em thread (readiness, `run_in_threadpool`): o `dispose()` da thread principal nao fecha a conexao da outra (check_same_thread) e sobra `ResourceWarning`; nos testes use `StaticPool` com `check_same_thread=False`
 - 2026-10-06 - `StarletteDeprecationWarning` e subclasse de `UserWarning`, nao de `DeprecationWarning`: o `filterwarnings` precisa da categoria certa
@@ -55,6 +61,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Tech debt / TODO
 
+- 2026-10-06 - LOW - A mensagem do 401 e `Credenciais invalidas` no OS e `Credencial ausente, invalida ou expirada` em Billing e Execucao; o ADR-039 pede a mesma nos tres. Alinhar num texto so (no OS, `FalhaAutenticacaoException.MENSAGEM` e os testes que a citam)
+- 2026-10-06 - LOW - O 404 de rota inexistente e o 405 saem no formato padrao do Starlette (`{"detail": ...}`) e o 404 do acompanhamento publico segue `{"detail": "Ordem nao encontrada"}`, enquanto Billing e Execucao mapeiam todo `HTTPException` para o envelope por status. Decidir se o OS faz o mesmo (o 404 publico precisaria manter o corpo identico para todo caso de nao encontrado)
 - 2026-10-06 - LOW - Sugestoes para o template do coordenador, nao aplicadas aqui para o CI seguir copia literal: resultado do pip-audit e do trivy no `$GITHUB_STEP_SUMMARY` e pip-audit com export com hashes e `--disable-pip`. O total do gate no `cobertura_resumo.py` ja foi feito aqui
 - 2026-10-06 - LOW - BDD de componente (ADR-041: a saga com barramento falso) entra com a saga; o comentario do job `test` do template ja o anuncia
 - 2026-10-06 - LOW - `mensagens_processadas` ainda sem consumidor (entra com o consumidor RabbitMQ da onda B) e com `id`/`tipo` no lugar de `mensagem_id`/`processada_em` do ER da RFC-004 secao 7.2; a migracao 002 da onda B alinha, como o ER da outbox
@@ -69,6 +77,11 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Review lessons
 
+- 2026-10-06 - Regra de ADR com lista de casos (401 para papel ausente, desconhecido ou de tipo errado) se confere caso a caso contra o codigo: os testes que fixavam o 403 documentavam o desvio em vez de pega-lo - PR #2
+- 2026-10-06 - Formato de erro se confere pela rota real, nao so pelo handler: o gate (dependency) levantava `HTTPException` e saia fora do envelope enquanto os casos de uso saiam dentro - PR #2
+- 2026-10-06 - Padrao de PII (regex do scrubber) acompanha cada formato que o value object aceita: o CNPJ alfanumerico passou no cadastro e escapou do mascaramento de log e de erro - PR #2
+- 2026-10-06 - Troca de regex por helper de biblioteca (`\D` por `remove_symbols`) pede teste do que a regex antiga aceitava (espaco, quebra de linha) - PR #2
+- 2026-10-06 - Smoke que sobe o compose em development nao prova a imagem de producao: conferir o config da imagem (usuario, `ENVIRONMENT`) e a resposta (headers) e testar a propria checagem contra uma imagem errada - PR #2
 - 2026-10-06 - Comentario ou docstring que afirma propriedade ("toda resposta" leva os headers, "o CI nao instala o extra") precisa de teste ou vira mentira: o 500 saia sem headers e o CI instalava o extra - review deep do PR #2
 - 2026-10-06 - "Validar antes do banco" se prova com espiao (zero chamadas ao repositorio), nao com teste do VO: a rota publica so limitava tamanho e a suite inteira passava - review deep do PR #2
 - 2026-10-06 - RBAC conferido rota a rota contra a tabela de papeis do ADR-039 (celula vazia = nenhuma rota): o PR deixava o mecanico ler OS e historico - review deep do PR #2
