@@ -65,6 +65,10 @@ audit:
 # exp e type, como Billing e Execucao validam. O JWKS publico tem de trazer so
 # os membros publicos e o Cache-Control de 10 min.
 #
+# O log do uvicorn sai em JSON desde a primeira linha ("Started server
+# process"): o `configurar_logging` roda na fabrica do app, que o uvicorn importa
+# antes do servidor subir. O smoke falha se aparecer linha de texto puro dele.
+#
 # O compose sobe a API com ENVIRONMENT=development (a guarda de producao
 # recusa os segredos de demonstracao), entao o que a imagem faz em producao e
 # conferido a parte: usuario numerico 1001 e ENVIRONMENT=production no
@@ -102,7 +106,12 @@ smoke:
 		|| { echo "smoke: o JWKS nao traz o Cache-Control de 10 min" >&2; false; }; } \
 	&& printf '%s' "$$access" \
 		| $(SMOKE_COMPOSE) exec -T api python scripts/validar_token.py http://127.0.0.1:8000 \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS e imagem de producao" \
+	&& logs="$$($(SMOKE_COMPOSE) logs --no-color --no-log-prefix api)" \
+	&& { printf '%s\n' "$$logs" | grep -q '"event": "Started server process' \
+		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
+	&& { ! printf '%s\n' "$$logs" | grep -Eq '^(INFO|WARNING|ERROR|CRITICAL): ' \
+		|| { echo "smoke: o uvicorn escreveu log em texto puro" >&2; false; }; } \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS, log em JSON e imagem de producao" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \

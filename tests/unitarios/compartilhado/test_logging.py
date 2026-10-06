@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 import structlog
+import uvicorn
 
 from src.compartilhado.infraestrutura.logging import (
     adicionar_versao_imagem,
@@ -478,8 +479,8 @@ class TestPipelineMascaraTraceback:
         assert "exception" in registro
 
     def test_stdlib_log_simples_e_scrubado(self, logging_pipeline: io.StringIO) -> None:
-        # Log stdlib sem excecao (ex.: uvicorn access log) tambem e scrubado.
-        logging.getLogger("uvicorn.access").warning(
+        # Log stdlib sem excecao (ex.: uma linha do uvicorn) tambem e scrubado.
+        logging.getLogger("uvicorn.error").warning(
             "request de joao@example.com cpf 111.222.333-44"
         )
         saida = logging_pipeline.getvalue()
@@ -521,3 +522,98 @@ class TestPipelineMascaraTraceback:
             acc.handlers = handlers_acc_anteriores
             acc.propagate = propagate_acc_anterior
             structlog.configure(**config_anterior)
+
+
+@pytest.fixture
+def buffer_com_uvicorn_restaurado() -> Iterator[io.StringIO]:
+    """Buffer para o ``configurar_logging``; no fim, desfaz o que ele e o uvicorn mexem.
+
+    O ``uvicorn.Config`` troca handlers e ``propagate`` de tres loggers globais, e
+    o ``configurar_logging`` troca o handler do root: nada disso pode vazar.
+    """
+    nomes = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    root = logging.getLogger()
+    handlers_anteriores, nivel_anterior = root.handlers[:], root.level
+    config_anterior = structlog.get_config()
+    estado = {
+        nome: (
+            logging.getLogger(nome).handlers[:],
+            logging.getLogger(nome).propagate,
+            logging.getLogger(nome).level,
+        )
+        for nome in nomes
+    }
+    yield io.StringIO()
+    root.handlers = handlers_anteriores
+    root.setLevel(nivel_anterior)
+    structlog.configure(**config_anterior)
+    for nome, (handlers, propagate, nivel) in estado.items():
+        logger = logging.getLogger(nome)
+        logger.handlers = handlers
+        logger.propagate = propagate
+        logger.setLevel(nivel)
+
+
+class TestLoggersDoUvicorn:
+    """O uvicorn monta os loggers antes de importar o app (``--no-access-log``)."""
+
+    def test_sem_access_log_o_uvicorn_continua_sem_access_log(
+        self, buffer_com_uvicorn_restaurado: io.StringIO
+    ) -> None:
+        # O uvicorn deixa `uvicorn.access` sem handler e sem propagar e le o
+        # `hasHandlers()` a cada conexao: religar a propagacao ao root traria de
+        # volta a linha de acesso, mesmo com a flag.
+        uvicorn.Config("src.main:app", access_log=False)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+
+        acesso = logging.getLogger("uvicorn.access")
+        assert not acesso.hasHandlers()
+        acesso.info('127.0.0.1:5000 - "GET /api/v1/saude HTTP/1.1" 200')
+        assert buffer_com_uvicorn_restaurado.getvalue() == ""
+
+    def test_o_resto_do_uvicorn_sai_em_json_com_o_access_log_desligado(
+        self, buffer_com_uvicorn_restaurado: io.StringIO
+    ) -> None:
+        uvicorn.Config("src.main:app", access_log=False)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+
+        logging.getLogger("uvicorn.error").info("Started server process [1]")
+        registro = json.loads(buffer_com_uvicorn_restaurado.getvalue())
+        assert (registro["logger"], registro["event"]) == (
+            "uvicorn.error",
+            "Started server process [1]",
+        )
+
+    def test_com_access_log_ligado_o_acesso_sai_em_json_e_scrubado(
+        self, buffer_com_uvicorn_restaurado: io.StringIO
+    ) -> None:
+        uvicorn.Config("src.main:app", access_log=True)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+
+        logging.getLogger("uvicorn.access").info("GET /x?email=joao@example.com")
+        saida = buffer_com_uvicorn_restaurado.getvalue()
+        assert json.loads(saida)["logger"] == "uvicorn.access"
+        assert "joao@example.com" not in saida
+
+    def test_configurar_duas_vezes_mantem_o_access_log_ligado(
+        self, buffer_com_uvicorn_restaurado: io.StringIO
+    ) -> None:
+        # A fabrica do app roda mais de uma vez no mesmo processo (testes, reload):
+        # a segunda chamada ve o estado deixado pela primeira.
+        uvicorn.Config("src.main:app", access_log=True)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+
+        logging.getLogger("uvicorn.access").info("GET /saude")
+        assert json.loads(buffer_com_uvicorn_restaurado.getvalue())["logger"] == (
+            "uvicorn.access"
+        )
+
+    def test_configurar_duas_vezes_mantem_o_access_log_desligado(
+        self, buffer_com_uvicorn_restaurado: io.StringIO
+    ) -> None:
+        uvicorn.Config("src.main:app", access_log=False)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+
+        assert not logging.getLogger("uvicorn.access").hasHandlers()

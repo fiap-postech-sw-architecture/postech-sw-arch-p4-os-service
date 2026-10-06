@@ -164,14 +164,19 @@ class TestMain:
         assert schema["openapi"].startswith("3.")
         assert len(schema["paths"]) > 0
 
+    def test_criar_app_configura_o_log_json_antes_do_servidor_subir(self) -> None:
+        # O uvicorn importa o app antes de "Started server process": configurar o
+        # log so no lifespan deixava o boot em texto puro e sem o scrub.
+        with patch("src.main.configurar_logging") as mock_logging:
+            criar_app()
+
+        mock_logging.assert_called_once_with()
+
     def test_lifespan_executa_mapeamentos(self) -> None:
         app = FastAPI()
 
         async def _run() -> None:
             with (
-                patch(
-                    "src.compartilhado.infraestrutura.logging.configurar_logging"
-                ) as mock_logging,
                 patch(
                     "src.compartilhado.infraestrutura.bootstrap.iniciar_todos_mapeamentos"
                 ) as mock_mapeamentos,
@@ -201,7 +206,6 @@ class TestMain:
                 mock_engine.return_value.dispose = lambda: None
                 async with lifespan(app):
                     pass
-                mock_logging.assert_called_once()
                 mock_mapeamentos.assert_called_once()
                 mock_engine.assert_called_once()
                 mock_factory.assert_called_once()
@@ -217,7 +221,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -252,7 +255,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -291,7 +293,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -326,7 +327,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -352,7 +352,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -382,7 +381,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -431,7 +429,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),

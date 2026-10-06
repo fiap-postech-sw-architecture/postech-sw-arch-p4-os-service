@@ -25,10 +25,10 @@ def servir(app: FastAPI, *, lifespan: Literal["on", "off"] = "off") -> Iterator[
     """URL base da ``app`` enquanto o bloco roda; derruba o servidor no fim."""
     soquete = socket.socket()
     soquete.bind(("127.0.0.1", 0))
-    # log_config=None: o uvicorn nao reconfigura o logging do processo de teste.
-    servidor = uvicorn.Server(
-        uvicorn.Config(app, lifespan=lifespan, log_config=None, access_log=False)
-    )
+    # log_config=None e access_log padrao: o uvicorn nao mexe nos loggers do
+    # processo de teste (com access_log=False ele deixaria o `uvicorn.access` sem
+    # handler e sem propagar para todos os testes seguintes).
+    servidor = uvicorn.Server(uvicorn.Config(app, lifespan=lifespan, log_config=None))
     thread = threading.Thread(
         target=servidor.run, kwargs={"sockets": [soquete]}, daemon=True
     )

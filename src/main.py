@@ -9,6 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from src.autenticacao.interfaces.dependencies import validar_chave_jwt_no_startup
+from src.compartilhado.infraestrutura.logging import configurar_logging
 from src.compartilhado.interfaces.error_handler import registrar_error_handlers
 from src.compartilhado.interfaces.middleware import (
     SecurityHeadersMiddleware,
@@ -22,17 +23,11 @@ from src.compartilhado.interfaces.router_publico import router as router_publico
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    """Ciclo de vida do app: inicializa logging + mappings no startup."""
-    from src.compartilhado.infraestrutura.logging import configurar_logging
-
-    configurar_logging()
-
+    """Ciclo de vida do app: inicializa os mappings, as guardas e a sessao."""
     # Banner de boot. SHA/data sao injetadas em todo log structlog pelo
-    # processor `adicionar_versao_imagem` (configurar_logging acima) --
+    # processor `adicionar_versao_imagem` (configurado em `criar_app`) --
     # nao precisa de `bind_contextvars` aqui, que seria limpado pelo
-    # SecurityHeadersMiddleware a cada request. `print` garante
-    # visibilidade imediata antes do stdlib logging ter handler do
-    # uvicorn.
+    # SecurityHeadersMiddleware a cada request.
     git_sha = os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12]
     git_date = os.environ.get("PYTSTOP_GIT_DATE", "unknown")
     print(f">>> pytstop-os-service | commit {git_sha} | {git_date}", flush=True)
@@ -88,7 +83,12 @@ def criar_app() -> FastAPI:
 
     Swagger (`/docs`, `/redoc`, `/openapi.json`) fica ligado em todo ambiente:
     a documentacao da API e entregavel e e publicada na borda (Kong).
+
+    O uvicorn importa o app antes da primeira linha do servidor ("Started
+    server process"), e o log JSON com o scrub de PII e configurado aqui, nao no
+    lifespan: o boot inteiro sai em JSON e mascarado.
     """
+    configurar_logging()
     application = FastAPI(
         title="PytStop OS Service",
         description=(

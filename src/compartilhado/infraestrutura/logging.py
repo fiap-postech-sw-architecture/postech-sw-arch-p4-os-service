@@ -123,7 +123,8 @@ _MASCARA = "***"
 
 # Loggers que o uvicorn configura com handler proprio + `propagate=False`.
 # `configurar_logging` os religa ao root para passarem pelo scrubber (p3 #86).
-_LOGGERS_UVICORN = ("uvicorn", "uvicorn.error", "uvicorn.access")
+_LOGGER_DE_ACESSO = "uvicorn.access"
+_LOGGERS_UVICORN = ("uvicorn", "uvicorn.error", _LOGGER_DE_ACESSO)
 
 # Cap on recursion depth when scrubbing nested structures. Guards against
 # pathological or cyclic structured log payloads without sacrificing coverage
@@ -299,11 +300,18 @@ def configurar_logging(stream: TextIO | None = None) -> None:
     # uvicorn (lancado por CLI no container) instala os PROPRIOS handlers nos
     # loggers `uvicorn`/`uvicorn.access` com `propagate=False` -- seus logs (inclui
     # access logs, que podem trazer PII em path/query) NAO chegariam ao handler de
-    # scrub do root. `configurar_logging` roda no lifespan startup, DEPOIS de
-    # uvicorn montar seus loggers; aqui removemos os handlers crus de uvicorn e
-    # religamos `propagate=True` para que tudo flua pelo ProcessorFormatter do root
-    # (scrubado, JSON unico). Idempotente. p3 #86.
+    # scrub do root. `configurar_logging` roda na fabrica do app, que o uvicorn
+    # importa DEPOIS de montar seus loggers e antes da primeira linha do servidor;
+    # aqui removemos os handlers crus de uvicorn e religamos `propagate=True` para
+    # que tudo flua pelo ProcessorFormatter do root (scrubado, JSON unico).
+    # Idempotente. p3 #86.
     for nome in _LOGGERS_UVICORN:
         uvlog = logging.getLogger(nome)
+        if nome == _LOGGER_DE_ACESSO and not uvlog.handlers and not uvlog.propagate:
+            # `--no-access-log` deixa o logger assim, e o uvicorn decide por
+            # `hasHandlers()`, a cada conexao, se escreve o acesso. Religar a
+            # propagacao o ligaria de novo ao handler do root: a linha de acesso
+            # voltaria mesmo com a flag.
+            continue
         uvlog.handlers = []
         uvlog.propagate = True
