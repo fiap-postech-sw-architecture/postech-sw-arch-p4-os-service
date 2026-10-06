@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -7,6 +8,12 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from src.autenticacao.aplicacao.use_cases import (
+    Login,
+    Logout,
+    RefreshToken,
+    Registrar,
+)
 from src.autenticacao.infraestrutura.jwt_service import (
     carregar_chave_privada,
     kid_da_chave,
@@ -33,6 +40,11 @@ from tests.chaves_jwt import (
     pem_publico,
     validade_em_segundos,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sqlalchemy.orm import Session
 
 
 @pytest.fixture
@@ -161,20 +173,67 @@ class TestConfiguracaoDoJwt:
 class TestFactoriesDosCasosDeUso:
     @pytest.mark.usefixtures("ambiente")
     @pytest.mark.parametrize(
-        "factory", [obter_registrar, obter_login, obter_logout, obter_refresh_token]
+        ("factory", "caso_de_uso"),
+        [
+            pytest.param(obter_registrar, Registrar, id="registrar"),
+            pytest.param(obter_login, Login, id="login"),
+            pytest.param(obter_logout, Logout, id="logout"),
+            pytest.param(obter_refresh_token, RefreshToken, id="refresh"),
+        ],
     )
-    def test_monta_o_caso_de_uso(self, factory: object) -> None:
-        assert factory(MagicMock()) is not None  # type: ignore[operator]
+    def test_monta_o_caso_de_uso(
+        self, factory: Callable[[Session], object], caso_de_uso: type
+    ) -> None:
+        assert isinstance(factory(MagicMock()), caso_de_uso)
 
 
 class TestGuardaDeBootDaChaveJwt:
-    @pytest.mark.parametrize("ambiente_app", ["development", "test", "Test"])
+    @pytest.mark.parametrize(
+        "ambiente_app",
+        [
+            pytest.param("development", id="development"),
+            pytest.param("test", id="test"),
+            pytest.param("Test", id="test-em-caixa-mista"),
+        ],
+    )
     def test_dev_e_test_aceitam_ate_chave_ausente(
         self, ambiente: pytest.MonkeyPatch, ambiente_app: str
     ) -> None:
         ambiente.setenv("ENVIRONMENT", ambiente_app)
         ambiente.delenv("JWT_PRIVATE_KEY")
         validar_chave_jwt_no_startup()
+
+    def test_environment_ausente_vale_development(
+        self, ambiente: pytest.MonkeyPatch
+    ) -> None:
+        # A imagem fixa ENVIRONMENT=production; sem a variavel (processo fora da
+        # imagem) o servico se comporta como development, e a guarda nao age.
+        ambiente.delenv("ENVIRONMENT", raising=False)
+        ambiente.delenv("JWT_PRIVATE_KEY")
+        validar_chave_jwt_no_startup()
+
+    @pytest.mark.parametrize(
+        "ambiente_app",
+        [
+            pytest.param("production", id="production"),
+            pytest.param("Production", id="production-em-caixa-mista"),
+            pytest.param("staging", id="staging"),
+            pytest.param("prod", id="prod"),
+            pytest.param("homolog", id="homolog"),
+            pytest.param("dev", id="dev"),
+            pytest.param("local", id="local"),
+            pytest.param("", id="vazio"),
+        ],
+    )
+    def test_ambiente_fora_de_development_e_test_barra_a_chave_de_demo(
+        self, ambiente: pytest.MonkeyPatch, ambiente_app: str
+    ) -> None:
+        # A chave de demonstracao e publica: um staging com ela aceitaria token
+        # forjado por qualquer um. So development e test a dispensam.
+        ambiente.setenv("JWT_PRIVATE_KEY", pem_demo_do_compose())
+        ambiente.setenv("ENVIRONMENT", ambiente_app)
+        with pytest.raises(RuntimeError, match="demonstracao"):
+            validar_chave_jwt_no_startup()
 
     def test_producao_com_chave_propria_passa(
         self, ambiente: pytest.MonkeyPatch
@@ -235,7 +294,13 @@ class TestGuardaDeBootDaChaveJwt:
         with pytest.raises(RuntimeError, match="1024 bits; o minimo e 2048"):
             validar_chave_jwt_no_startup()
 
-    @pytest.mark.parametrize("como", ["atual", "anterior"])
+    @pytest.mark.parametrize(
+        "como",
+        [
+            pytest.param("atual", id="como-atual"),
+            pytest.param("anterior", id="como-anterior"),
+        ],
+    )
     def test_producao_com_a_chave_de_demonstracao_aborta(
         self, ambiente: pytest.MonkeyPatch, como: str
     ) -> None:
