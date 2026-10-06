@@ -225,6 +225,14 @@ _mapeamento_iniciado = False
 
 
 def iniciar_mapeamentos() -> None:
+    """Mapeia ``OrdemDeServico`` e ``MudancaDeStatus`` nas tabelas do contexto.
+
+    Idempotente: so a primeira chamada faz algo. Quem chama e
+    ``bootstrap.iniciar_todos_mapeamentos``, depois de ``cliente_veiculo``,
+    cujas tabelas as chaves estrangeiras da ordem referenciam. Liga o
+    ``__composite_values__`` dos resumos e os listeners de ``load`` e
+    ``refresh`` que mantem a lista de eventos pendentes.
+    """
     global _mapeamento_iniciado  # noqa: PLW0603  # init-once flag
     if _mapeamento_iniciado:
         return

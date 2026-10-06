@@ -146,18 +146,22 @@ class OrdemDeServico(AggregateRoot):
 
     @property
     def cliente_id(self) -> UUID:
+        """Cliente dono do veiculo atendido."""
         return self._cliente_id
 
     @property
     def veiculo_id(self) -> UUID:
+        """Veiculo recebido para o servico."""
         return self._veiculo_id
 
     @property
     def descricao_problema(self) -> str:
+        """Problema relatado no atendimento: texto livre ja aparado e validado."""
         return self._descricao_problema
 
     @property
     def status(self) -> StatusOrdem:
+        """Status atual; so muda pelos fatos de dominio, que validam a maquina."""
         return self._status
 
     @property
@@ -167,26 +171,32 @@ class OrdemDeServico(AggregateRoot):
 
     @property
     def resumo_orcamento(self) -> ResumoOrcamento | None:
+        """Resumo do orcamento do Billing; ``None`` ate o ``OrcamentoGerado``."""
         return self._resumo_orcamento
 
     @property
     def resumo_pagamento(self) -> ResumoPagamento | None:
+        """Resumo do pagamento do Billing; ``None`` ate o ``PagamentoSolicitado``."""
         return self._resumo_pagamento
 
     @property
     def motivo_cancelamento(self) -> str | None:
+        """Motivo informado no cancelamento; ``None`` se a ordem nao foi cancelada."""
         return self._motivo_cancelamento
 
     @property
     def versao(self) -> int:
+        """Versao do lock otimista: comeca em 1 e sobe a cada gravacao."""
         return self._versao
 
     @property
     def criado_em(self) -> datetime:
+        """Instante da abertura da ordem (UTC)."""
         return self._criado_em
 
     @property
     def atualizado_em(self) -> datetime:
+        """Instante da ultima alteracao do agregado (UTC)."""
         return self._atualizado_em
 
     # ----- fatos da saga (cada um valida, anota no historico e emite evento)

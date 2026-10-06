@@ -116,6 +116,8 @@ class OrdemDeServicoResponse(_ComSituacao):
 
 
 class OrdemResumoResponse(_ComSituacao):
+    """Item da fila de ordens: ids, status e timestamps, sem o detalhe da ordem."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -126,6 +128,8 @@ class OrdemResumoResponse(_ComSituacao):
 
 
 class OrdemListaResponse(BaseModel):
+    """Pagina da fila de ordens, com o total do universo filtrado."""
+
     items: list[OrdemResumoResponse]
     total: int = Field(description="Total do universo listado (acompanha o filtro).")
     offset: int
@@ -133,6 +137,8 @@ class OrdemListaResponse(BaseModel):
 
 
 class MudancaDeStatusResponse(BaseModel):
+    """Uma linha do historico: a transicao de status, quem a originou e quando."""
+
     model_config = ConfigDict(from_attributes=True)
 
     sequencia: int
@@ -144,6 +150,8 @@ class MudancaDeStatusResponse(BaseModel):
 
 
 class HistoricoResponse(BaseModel):
+    """Linha do tempo da ordem, da abertura ate a ultima mudanca de status."""
+
     ordem_id: UUID
     mudancas: list[MudancaDeStatusResponse]
 
