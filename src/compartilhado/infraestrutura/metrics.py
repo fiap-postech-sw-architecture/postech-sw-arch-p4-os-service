@@ -1,9 +1,9 @@
 """Metricas Prometheus do servico (herdado do p3 @ 08dcffe, ADR-032).
 
 Um ``MeterProvider`` OTel com ``PrometheusMetricReader`` registra os
-instrumentos no ``REGISTRY`` default do ``prometheus_client``; a exposicao e o
-sub-app ASGI ``make_asgi_app()`` montado em ``/metrics`` no proprio FastAPI —
-o Prometheus raspa a API na mesma porta HTTP.
+instrumentos no ``REGISTRY`` default do ``prometheus_client``; a exposicao e a
+rota ``GET /metrics`` (``generate_latest``) no proprio FastAPI: o Prometheus
+raspa a API na mesma porta HTTP.
 
 Metricas (meter ``pytstop-os-service``):
 
@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -45,7 +46,6 @@ if TYPE_CHECKING:
     from opentelemetry.metrics import Counter, Histogram
     from starlette.middleware.base import RequestResponseEndpoint
     from starlette.requests import Request
-    from starlette.responses import Response
 
 _log = structlog.get_logger(__name__)
 
@@ -186,7 +186,7 @@ def configurar_metricas_api(app: FastAPI) -> bool:
     ``MeterProvider`` (service.name=pytstop-os-service, service.version=
     PYTSTOP_GIT_SHA curto) com um ``PrometheusMetricReader`` — o reader
     registra os instrumentos no ``REGISTRY`` default do ``prometheus_client``
-    — monta o sub-app ``make_asgi_app()`` em ``/metrics`` e instala o
+    — expoe ``GET /metrics`` e instala o
     ``MetricasHTTPMiddleware``. Deve rodar em ``criar_app`` (antes do boot do
     servidor): middleware nao pode ser adicionado com o app ja servindo.
 
@@ -202,7 +202,7 @@ def configurar_metricas_api(app: FastAPI) -> bool:
         from opentelemetry.exporter.prometheus import PrometheusMetricReader
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.resources import Resource
-        from prometheus_client import make_asgi_app
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
     except ImportError:
         _log.warning(
             "metricas da API ignoradas: API_METRICS_ENABLED=true mas o extra "
@@ -217,8 +217,8 @@ def configurar_metricas_api(app: FastAPI) -> bool:
             "service.version": os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12],
         }
     )
-    # O reader registra no REGISTRY default do prometheus_client; o
-    # make_asgi_app montado abaixo serve esse mesmo registry em /metrics.
+    # O reader registra no REGISTRY default do prometheus_client; a rota
+    # /metrics abaixo serve esse mesmo registry.
     reader = PrometheusMetricReader()
     provider = MeterProvider(metric_readers=[reader], resource=resource)
     meter = provider.get_meter(_NOME_METER)
@@ -244,7 +244,12 @@ def configurar_metricas_api(app: FastAPI) -> bool:
         ),
     )
 
-    app.mount("/metrics", make_asgi_app())
+    def _expor_metricas(_request: Request) -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    # Rota (nao mount): um mount so casa `/metrics/` e, sem redirect de barra,
+    # o scrape em `/metrics` daria 404.
+    app.add_route("/metrics", _expor_metricas, include_in_schema=False)
     app.add_middleware(MetricasHTTPMiddleware)
-    _log.info("metricas da API ativas: /metrics montado")
+    _log.info("metricas da API ativas: /metrics exposto")
     return True

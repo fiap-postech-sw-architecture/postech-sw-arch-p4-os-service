@@ -98,8 +98,8 @@ class TestRouter:
             if method != "HEAD"
         }
         esperado = {
-            ("/api/v1/clientes/", "POST"),
-            ("/api/v1/clientes/", "GET"),
+            ("/api/v1/clientes", "POST"),
+            ("/api/v1/clientes", "GET"),
             ("/api/v1/clientes/{cliente_id}", "GET"),
             ("/api/v1/clientes/{cliente_id}", "PUT"),
             ("/api/v1/clientes/{cliente_id}", "DELETE"),
@@ -125,7 +125,7 @@ class TestRouter:
 
             client = TestClient(app)
             resp = client.post(
-                "/api/v1/clientes/",
+                "/api/v1/clientes",
                 json={
                     "nome": "Joao Silva",
                     "documento": "52998224725",
@@ -150,7 +150,7 @@ class TestRouter:
             mock_factory.return_value = mock_uc
 
             client = TestClient(app)
-            resp = client.get("/api/v1/clientes/")
+            resp = client.get("/api/v1/clientes")
             assert resp.status_code == 200
             assert resp.json()["total"] == 1
 

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src import main
+from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app, lifespan
 
 
@@ -46,6 +47,17 @@ class TestMain:
         removidos = ("/servicos", "/estoque", "/minhas-ordens", "/admin/outbox")
         assert not [p for p in paths if any(r in p for r in removidos)]
         assert not [p for p in paths if p.endswith(("/itens", "/orcamento"))]
+
+    def test_rotas_de_colecao_sem_barra_e_sem_redirect(self) -> None:
+        paths = set(criar_app().openapi()["paths"])
+        assert not [p for p in paths if p.endswith("/")]
+        application = criar_app()
+        application.dependency_overrides[obter_session] = lambda: MagicMock()
+        client = TestClient(application, follow_redirects=False)
+        # Sem barra a rota existe (pede token); com barra nao ha 307, so 404.
+        assert client.get("/api/v1/clientes").status_code == 401
+        assert client.get("/api/v1/clientes/").status_code == 404
+        assert client.get("/api/v1/ordens-de-servico/").status_code == 404
 
     def test_versao(self) -> None:
         from importlib.metadata import version

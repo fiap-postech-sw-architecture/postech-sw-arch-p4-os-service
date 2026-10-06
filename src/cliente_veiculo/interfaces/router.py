@@ -55,7 +55,7 @@ _log = structlog.get_logger(__name__)
 
 
 @router.post(
-    "/",
+    "",
     status_code=status.HTTP_201_CREATED,
     summary="Cadastra um cliente (CPF ou CNPJ)",
 )
@@ -78,7 +78,7 @@ def criar_cliente(
     return ClienteResponse(**dataclasses.asdict(result))
 
 
-@router.get("/", summary="Lista clientes paginados")
+@router.get("", summary="Lista clientes paginados")
 def listar_clientes(
     usuario: Annotated[
         dict[str, object], Depends(exigir_papel(Papel.ADMIN, Papel.ATENDENTE))

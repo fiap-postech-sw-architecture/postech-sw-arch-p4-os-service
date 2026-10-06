@@ -48,7 +48,7 @@ def _cliente_com_veiculo(
     placa: str,
 ) -> tuple[str, str]:
     cliente = api_client.post(
-        "/api/v1/clientes/",
+        "/api/v1/clientes",
         headers=headers,
         json={
             "nome": "Maria Silva",
@@ -406,7 +406,7 @@ class TestCadastroComDocumentoInvalido:
         self, api_client: TestClient, admin_user: Usuario
     ) -> None:
         resp = api_client.post(
-            "/api/v1/clientes/",
+            "/api/v1/clientes",
             headers=_login(api_client, admin_user.email),
             json={
                 "nome": "Maria Silva",

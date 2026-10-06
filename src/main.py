@@ -135,6 +135,9 @@ def criar_app() -> FastAPI:
         lifespan=lifespan,
         docs_url=docs_url,
         redoc_url=redoc_url,
+        # Sem 307 para a variante com/sem barra: atras do Kong o Location
+        # absoluto sairia com o esquema errado. Rotas de colecao nao tem barra.
+        redirect_slashes=False,
     )
 
     # Imports locais: routers so carregam ao fabricar o app (sem instanciacao

@@ -138,12 +138,8 @@ def otel_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
         def __init__(self) -> None:
             registro["reader"] = self
 
-    async def asgi_app_stub(scope: dict, receive: object, send: object) -> None:
-        raise NotImplementedError  # nunca chamado nos testes
-
-    def make_asgi_app_stub() -> object:
-        registro["asgi_app"] = asgi_app_stub
-        return asgi_app_stub
+    def generate_latest_stub() -> bytes:
+        return b"# HELP stub\n"
 
     simbolos_por_modulo = {
         "opentelemetry.exporter.prometheus": {
@@ -151,7 +147,10 @@ def otel_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
         },
         "opentelemetry.sdk.metrics": {"MeterProvider": MeterProviderStub},
         "opentelemetry.sdk.resources": {"Resource": ResourceStub},
-        "prometheus_client": {"make_asgi_app": make_asgi_app_stub},
+        "prometheus_client": {
+            "CONTENT_TYPE_LATEST": "text/plain; version=0.0.4; charset=utf-8",
+            "generate_latest": generate_latest_stub,
+        },
     }
 
     # Registra cada modulo-alvo e todos os pacotes intermediarios: o import
@@ -303,11 +302,15 @@ class TestFlagLigadaComDependencias:
         ]
         assert buckets_status[0] == 60.0
         assert buckets_status[-1] == 604800.0
-        # /metrics montado com o sub-app do prometheus_client.
+        # GET /metrics como rota (sem barra final nem redirect).
         rotas_metrics = [
             r for r in app.routes if getattr(r, "path", None) == "/metrics"
         ]
         assert len(rotas_metrics) == 1
+        resposta = TestClient(app).get("/metrics")
+        assert resposta.status_code == 200
+        assert resposta.text == "# HELP stub\n"
+        assert resposta.headers["content-type"].startswith("text/plain")
         # Middleware de latencia instalado.
         assert any(m.cls is MetricasHTTPMiddleware for m in app.user_middleware)
 
