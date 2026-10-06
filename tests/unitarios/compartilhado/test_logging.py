@@ -12,8 +12,10 @@ import structlog
 from src.compartilhado.infraestrutura.logging import (
     adicionar_versao_imagem,
     configurar_logging,
+    redigir_pii_erro,
     scrub_pii,
 )
+from tests.chaves_jwt import jwt_service
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -264,6 +266,9 @@ class TestScrubChavesSensiveis:
             "refresh_token",
             "access_token",
             "api_key",
+            # Chave RSA do JWT (PEM em texto): o valor nao tem forma fixa de log.
+            "jwt_private_key",
+            "private_key",
             # PII sem forma detectavel por regex (p3 #99): mascara por nome.
             "telefone",
             "celular",
@@ -296,6 +301,109 @@ class TestScrubChavesSensiveis:
         result = scrub_pii(None, "info", event_dict)
         assert result["username"] == "joao"
         assert result["count"] == 3
+
+
+_CORPO_PEM = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrnHu8kBQQGe7e"
+
+
+def _pem(rotulo: str = "PRIVATE KEY", *, com_fim: bool = True) -> str:
+    fim = f"\n-----END {rotulo}-----" if com_fim else ""
+    return f"-----BEGIN {rotulo}-----\n{_CORPO_PEM}\n{_CORPO_PEM}{fim}"
+
+
+class TestScrubChaveEJwtEmTextoLivre:
+    """Chave privada em PEM e JWT soltos no texto (mensagem, traceback, URL)."""
+
+    @pytest.mark.parametrize(
+        "rotulo",
+        [
+            pytest.param("PRIVATE KEY", id="pkcs8"),
+            pytest.param("RSA PRIVATE KEY", id="pkcs1"),
+            pytest.param("EC PRIVATE KEY", id="ec"),
+            pytest.param("ENCRYPTED PRIVATE KEY", id="cifrada"),
+        ],
+    )
+    def test_pem_privado_e_mascarado_inteiro(self, rotulo: str) -> None:
+        texto = f"falha ao ler a chave: {_pem(rotulo)} (fim)"
+
+        mascarado = scrub_pii(None, "error", {"event": texto})["event"]
+
+        assert mascarado == "falha ao ler a chave: *** (fim)"
+
+    def test_pem_privado_sem_o_fim_e_mascarado_ate_o_fim_do_corpo(self) -> None:
+        # Mensagem de erro truncada: sem o END, o corpo base64 nao pode sobrar.
+        mascarado = scrub_pii(None, "error", {"event": _pem(com_fim=False)})["event"]
+
+        assert _CORPO_PEM not in mascarado
+        assert "BEGIN" not in mascarado
+
+    def test_pem_publico_nao_e_mascarado(self) -> None:
+        # A parte publica sai no JWKS: nao e segredo.
+        publico = _pem("PUBLIC KEY")
+        assert scrub_pii(None, "info", {"event": publico})["event"] == publico
+
+    def test_pem_no_traceback_sai_mascarado_pelo_pipeline(
+        self, logging_pipeline: io.StringIO
+    ) -> None:
+        try:
+            raise ValueError(f"chave invalida: {_pem()}")
+        except ValueError:
+            structlog.get_logger("test.pem").exception("falha")
+
+        assert _CORPO_PEM not in logging_pipeline.getvalue()
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            pytest.param(
+                "eyJhbGciOiJSUzI1NiIsImtpZCI6IngifQ.eyJzdWIiOiJ1In0.c2lnbmF0dXJl",
+                id="rs256",
+            ),
+            pytest.param(
+                "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1In0.", id="alg-none-sem-assinatura"
+            ),
+            pytest.param(
+                "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.a-b_c-d_e-f_g", id="base64url"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "moldura",
+        [
+            pytest.param("{}", id="sozinho"),
+            pytest.param("Authorization: Bearer {}", id="header-no-texto"),
+            pytest.param("GET /x?token={}&a=1", id="query-da-url"),
+            pytest.param("refresh {} reaproveitado", id="no-meio-da-frase"),
+        ],
+    )
+    def test_jwt_e_mascarado(self, token: str, moldura: str) -> None:
+        mascarado = scrub_pii(None, "info", {"event": moldura.format(token)})["event"]
+
+        assert mascarado == moldura.format("***")
+
+    def test_token_de_verdade_do_servico_e_mascarado(self) -> None:
+        token = jwt_service().gerar_access_token(uuid4(), "admin")
+
+        mascarado = scrub_pii(None, "info", {"event": f"token {token}"})["event"]
+
+        assert mascarado == "token ***"
+
+    @pytest.mark.parametrize(
+        "texto",
+        [
+            pytest.param("eyJ", id="so-o-prefixo"),
+            pytest.param("versao 1.2.3 e a.b.c", id="pontos-comuns"),
+            pytest.param("src.compartilhado.infraestrutura.logging", id="modulo"),
+            pytest.param("meyJhbGciOiJSUzI1NiJ9.e30.x", id="eyj-no-meio-da-palavra"),
+        ],
+    )
+    def test_texto_que_nao_e_jwt_fica_intacto(self, texto: str) -> None:
+        assert scrub_pii(None, "info", {"event": texto})["event"] == texto
+
+    def test_erro_gravado_no_banco_tambem_sai_sem_o_token(self) -> None:
+        # redigir_pii_erro usa o mesmo mascaramento (outbox.ultimo_erro).
+        token = jwt_service().gerar_refresh_token(uuid4())
+        assert token not in redigir_pii_erro(f"consumidor recusou {token}")
 
 
 @pytest.fixture

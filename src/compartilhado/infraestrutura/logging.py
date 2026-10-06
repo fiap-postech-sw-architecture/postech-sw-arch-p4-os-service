@@ -48,6 +48,23 @@ _EMAIL_PATTERN = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
 )
 
+# Chave privada em PEM solta no texto (mensagem de erro, traceback): do BEGIN ao
+# END ou, se a mensagem foi truncada, ate onde o corpo base64 termina. A parte
+# publica (`PUBLIC KEY`) sai no JWKS e nao e segredo. O quantificador possessivo
+# (`*+`) evita o backtracking: o scrubber roda sobre qualquer string do log.
+_PEM_PRIVADA_PATTERN = re.compile(
+    r"-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----[A-Za-z0-9+/=\s]*+"
+    r"(?:-----END [A-Z ]{0,20}PRIVATE KEY-----)?"
+)
+# JWT solto no texto (header Authorization, query da URL, mensagem de erro):
+# cabecalho e corpo comecam em `eyJ` (o JSON `{"` em base64url) e a assinatura
+# pode ser vazia (alg=none). Possessivo e so a partir do inicio de uma sequencia
+# de caracteres base64url (o lookbehind): sem isso, uma linha longa de `eyJ-eyJ-`
+# faria o scrubber reler o resto da linha a cada `eyJ` (tempo quadratico).
+_JWT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]++\.[A-Za-z0-9_-]++\.[A-Za-z0-9_-]*+"
+)
+
 # Telefone BR: duas formas estruturais, escolhidas para nao gerar falso-positivo
 # em precos (`1500.00`), ids (`12345`), anos (`2026`), portas (`8000`) e CEPs
 # (`12345-678`) -- nenhum deles tem o split `\d{4,5}-\d{4}` nem prefixo `+55`:
@@ -93,6 +110,8 @@ _CHAVES_SENSIVEIS = frozenset(
         "refresh_token",
         "access_token",
         "api_key",
+        "jwt_private_key",
+        "private_key",
         "telefone",
         "celular",
         "phone",
@@ -131,6 +150,10 @@ def _mask_email(match: re.Match[str]) -> str:
 
 
 def _mask_string(value: str) -> str:
+    # Chave e token primeiro: o corpo em base64 pode ter sequencias de digitos
+    # que os padroes de documento e telefone achariam.
+    value = _PEM_PRIVADA_PATTERN.sub(_MASCARA, value)
+    value = _JWT_PATTERN.sub(_MASCARA, value)
     value = _CPF_PATTERN.sub(_mask_cpf, value)
     value = _CNPJ_PATTERN.sub(_mask_cnpj, value)
     value = _EMAIL_PATTERN.sub(_mask_email, value)
