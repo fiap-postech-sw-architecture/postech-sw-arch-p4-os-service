@@ -51,7 +51,8 @@ uv run python -m src.main   # http://127.0.0.1:8000
 ```bash
 make check   # uv.lock em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest
 make audit   # pip-audit das dependências de runtime (com os extras da imagem)
-make smoke   # imagem pelo entrypoint real: readiness e login do admin semeado, depois down -v
+make smoke   # imagem pelo entrypoint real: readiness, login do admin semeado e a imagem de produção
+             # (usuário 1001, ENVIRONMENT=production, sem header server), depois down -v
 ```
 
 `make test` (ou `uv run pytest`) roda os testes unitários e os de integração contra um PostgreSQL efêmero (testcontainers, Docker necessário) com gate de cobertura de 90% (`.coveragerc`). O schema dos testes de integração é criado pela própria migração Alembic.

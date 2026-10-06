@@ -59,21 +59,37 @@ audit:
 # stack, confere a readiness e o login do admin semeado e derruba tudo com os
 # volumes, inclusive em falha (depois de mostrar os logs). Projeto e porta
 # proprios para nao derrubar a stack do compose-up.
+#
+# O compose sobe a API com ENVIRONMENT=development (a guarda de producao
+# recusa os segredos de demonstracao), entao o que a imagem faz em producao e
+# conferido a parte: usuario numerico 1001 e ENVIRONMENT=production no
+# config da imagem, e nenhum header `server` na resposta (uvicorn com
+# --no-server-header, do entrypoint).
+APP_IMAGE ?= pytstop-os-service:dev
 SMOKE_PORT ?= 18000
 SMOKE_URL := http://127.0.0.1:$(SMOKE_PORT)
-SMOKE_COMPOSE := APP_PORT=$(SMOKE_PORT) $(DOCKER_COMPOSE) -p pytstop-os-smoke
+SMOKE_COMPOSE := APP_PORT=$(SMOKE_PORT) APP_IMAGE=$(APP_IMAGE) \
+	$(DOCKER_COMPOSE) -p pytstop-os-smoke
 
 smoke:
 	@status=0; \
 	$(SMOKE_COMPOSE) up -d --build --wait \
 	&& curl -fsS --max-time 5 $(SMOKE_URL)/api/v1/saude/pronto && echo \
+	&& { [ "$$(docker image inspect -f '{{.Config.User}}' $(APP_IMAGE))" = 1001 ] \
+		|| { echo "smoke: a imagem nao roda como o usuario 1001" >&2; false; }; } \
+	&& { docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+			$(APP_IMAGE) | grep -qx 'ENVIRONMENT=production' \
+		|| { echo "smoke: a imagem nao traz ENVIRONMENT=production" >&2; false; }; } \
+	&& cabecalhos="$$(curl -fsS --max-time 5 -D - -o /dev/null $(SMOKE_URL)/api/v1/saude)" \
+	&& { ! printf '%s' "$$cabecalhos" | grep -qi '^server:' \
+		|| { echo "smoke: a resposta traz o header server" >&2; false; }; } \
 	&& email="$$($(SMOKE_COMPOSE) exec -T api printenv ADMIN_EMAIL)" \
 	&& senha="$$($(SMOKE_COMPOSE) exec -T api printenv ADMIN_PASSWORD)" \
 	&& curl -fsS --max-time 10 -X POST $(SMOKE_URL)/api/v1/autenticacao/login \
 		-H 'Content-Type: application/json' \
 		-d "{\"email\": \"$$email\", \"senha\": \"$$senha\"}" \
 		| jq -e '.access_token' >/dev/null \
-	&& echo "smoke ok: readiness 200 e login do admin semeado" \
+	&& echo "smoke ok: readiness 200, login do admin semeado e imagem de producao" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
