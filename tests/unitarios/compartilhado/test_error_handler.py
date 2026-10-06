@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
@@ -93,7 +93,7 @@ def test_falha_de_autenticacao_responde_nao_autenticado_sem_o_motivo() -> None:
     erro = resp.json()["erro"]
     assert (erro["codigo"], erro["mensagem"]) == (
         "NAO_AUTENTICADO",
-        "Credenciais invalidas",
+        "Credencial ausente, invalida ou expirada",
     )
     assert "expired" not in resp.text
 
@@ -126,6 +126,73 @@ def test_dominio_excecao_emite_warning_estruturado(
     assert "ENTIDADE_NAO_ENCONTRADA" in log
     assert '"status": 404' in log
     assert "request_id" in log
+
+
+def _cliente_com_rotas() -> TestClient:
+    app = FastAPI()
+    registrar_error_handlers(app)
+
+    @app.post("/so-post")
+    def _so_post() -> None:
+        return None
+
+    @app.get("/teapot")
+    def _teapot() -> None:
+        raise HTTPException(status_code=418)
+
+    @app.get("/sumiu")
+    def _sumiu() -> None:
+        raise HTTPException(status_code=404, detail="Ordem nao encontrada")
+
+    return TestClient(app)
+
+
+@pytest.mark.parametrize(
+    ("rota", "status", "codigo", "mensagem"),
+    [
+        pytest.param(
+            "/nao-existe",
+            404,
+            "ENTIDADE_NAO_ENCONTRADA",
+            "Recurso nao encontrado",
+            id="rota-inexistente",
+        ),
+        pytest.param(
+            "/so-post",
+            405,
+            "METODO_NAO_PERMITIDO",
+            "Metodo nao permitido",
+            id="metodo-errado",
+        ),
+        pytest.param(
+            "/sumiu",
+            404,
+            "ENTIDADE_NAO_ENCONTRADA",
+            "Ordem nao encontrada",
+            id="detail-proprio-da-rota",
+        ),
+        pytest.param(
+            "/teapot", 418, "HTTP_418", "I'm a Teapot", id="status-sem-codigo"
+        ),
+    ],
+)
+def test_http_exception_sai_no_envelope_de_erro(
+    rota: str, status: int, codigo: str, mensagem: str
+) -> None:
+    resp = _cliente_com_rotas().get(rota)
+
+    assert resp.status_code == status
+    assert resp.json() == {
+        "erro": {
+            "codigo": codigo,
+            "mensagem": mensagem,
+            "id_requisicao": "desconhecido",
+        }
+    }
+
+
+def test_405_mantem_o_header_allow() -> None:
+    assert _cliente_com_rotas().get("/so-post").headers["Allow"] == "POST"
 
 
 def test_excecao_generica_retorna_500() -> None:

@@ -8,6 +8,9 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Recent decisions
 
+- 2026-10-06 - JWT RS256 (ADR-039): chave privada de `JWT_PRIVATE_KEY` (PEM, 2048 bits ou mais), `kid` = thumbprint RFC 7638, claims `iss`/`aud`/`sub`/`papel`/`type`/`jti`/`iat`/`exp` sem e-mail, validacao com RS256 fixo, `iss`, `aud` e leeway de 10 s. `JWT_PREVIOUS_PUBLIC_KEY` (opcional) so e publicada no JWKS e aceita na validacao, nunca assina; com varias replicas a rotacao e em duas etapas (README). `JWT_SECRET` saiu do codigo e da configuracao. `obter_jwt_service` guarda uma instancia por configuracao (`lru_cache` pelo PEM): o parse da chave custa milissegundos e o gate roda em toda requisicao - PR #3
+- 2026-10-06 - `GET /.well-known/jwks.json` publico, `async`, com `Cache-Control: public, max-age=600` (o `SecurityHeadersMiddleware` passou a usar `setdefault`: rota com cache proprio o mantem, o resto segue `no-store`) e `response_model` so com `kty/use/alg/kid/n/e`. A guarda de boot da chave (`validar_chave_jwt_no_startup`, no contexto autenticacao, chamada pelo lifespan) compara o `kid` da atual e da anterior com o da chave de demonstracao - PR #3
+- 2026-10-06 - 401 com a mensagem dos outros servicos (`Credencial ausente, invalida ou expirada`) e `HTTPException` no envelope de erro com os codigos de Billing e Execucao (404 `ENTIDADE_NAO_ENCONTRADA` "Recurso nao encontrado", 405 `METODO_NAO_PERMITIDO` com `Allow`); o 404 do acompanhamento publico vira envelope com a mesma mensagem para todo caso de nao encontrado (substitui o `{"detail": ...}` da entrada do contrato de erro abaixo). Resolve as duas entradas LOW de divida abaixo (mensagem do 401 e formato do 404/405) - PR #3
 - 2026-10-06 - Todo 401 do servico (login, refresh, logout e o gate de qualquer rota) sai como `NAO_AUTENTICADO` e todo 403 como `ACESSO_NEGADO`, no envelope `{erro: {codigo, mensagem, id_requisicao}}` dos tres servicos; o gate levanta `FalhaAutenticacaoException` e `AcessoNegadoException` (nao mais `HTTPException`) e o motivo da recusa fica so no log (`dominio_excecao_tratada`, campo `reason`). Token sem `papel`, com papel desconhecido ou de tipo errado e falha de credencial (401, ADR-039 e RFC-004 secao 6); o 403 e so para papel valido sem permissao. Substitui as entradas de 401 uniforme abaixo, que deixavam o gate em `{detail}` e o papel invalido em 403 - PR #2
 - 2026-10-06 - Decisoes do recorte fora do brief, que o PR so tinha no codigo: motivo de cancelamento vazio e descricao so com espacos dao 422 `VALOR_INVALIDO` (invariante do agregado, nao 409); a fila mantem a prioridade por status do p3 (RN-019/020: EM_EXECUCAO primeiro, RECEBIDA por ultimo, encerradas so com `incluir_encerradas`); cada linha do historico e o evento levam a `OrigemMudanca` (ATENDIMENTO, EXECUCAO, BILLING, SAGA) - review deep do PR #2
 - 2026-10-06 - Contrato de erro dos tres servicos: "nao encontrado" generico e `ENTIDADE_NAO_ENCONTRADA` no envelope `{erro: {codigo, mensagem, id_requisicao}}`; o 422 de schema segue o formato do p3 (`{detail, id_requisicao}`) e o 404 do acompanhamento publico segue `{"detail": "Ordem nao encontrada"}` (anti-enumeracao) - coordenador, depois da triagem
@@ -32,6 +35,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Discovered conventions
 
+- 2026-10-06 - Testes de JWT usam as chaves RSA geradas por sessao em `tests/chaves_jwt.py` (`CHAVE`/`OUTRA_CHAVE`, `assinar`, `claims`, `forjar_*`, `adulterar`), nunca chave fixa no repo (substitui a regra dos segredos HS256 de 32, 48 ou 64 bytes abaixo). O validador independente e o `scripts/validar_token.py` (so PyJWT), rodado pelos testes contra um uvicorn de verdade (`tests/servidor_http.py`, porta livre, `log_config=None`) e pelo `make smoke` dentro do container (o job `build` do CI nao tem uv) - PR #3
 - 2026-10-06 - `make smoke` confere a imagem de producao alem da readiness e do login: usuario 1001 e `ENVIRONMENT=production` no `docker image inspect` e nenhum header `server` na resposta (o compose sobe em development, entao ele sozinho nao exercita a imagem como producao). `APP_IMAGE` do Makefile e o nome da imagem do compose - PR #2
 - 2026-10-06 - App de teste que inclui so um router (sem `criar_app`) precisa chamar `registrar_error_handlers`: sem ele o 401 e o 403 do gate, que sao excecoes de dominio, nao viram resposta HTTP - PR #2
 - 2026-10-06 - Politica de warnings do pytest: so dois warnings conhecidos de terceiros (httpx do TestClient do starlette, `asyncio.iscoroutinefunction` do slowapi) ficam no `filterwarnings`; a suite roda sem warning, entao um novo aparece. Segredos de JWT dos testes tem o tamanho do hash (32, 48 ou 64 bytes)
@@ -43,6 +47,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Gotchas
 
+- 2026-10-06 - PEM multilinha e o `gitleaks:allow`: o gitleaks olha as linhas do match inteiro, da linha do BEGIN a do END. No compose a chave vai numa string YAML entre aspas duplas com escapes `\n` (uma linha so, com o comentario no fim); no `.env.example`, valor multilinha entre aspas com o comentario depois da aspa final. Bloco `|` do YAML nao serve: o comentario viraria parte da chave - PR #3
+- 2026-10-06 - O `PyJWKClient` busca o JWKS com urllib (nao httpx): respx e TestClient nao o alcancam; teste do validador precisa de servidor HTTP de verdade - PR #3
 - 2026-10-06 - `brutils.cnpj.remove_symbols` so tira `.`, `/` e `-`: espaco e quebra de linha ficam e o CNPJ vira invalido (no acompanhamento publico, 404 para uma OS que existe). A normalizacao por `\D` do p3 aceitava; `normalizar_cnpj` tira o espaco antes - PR #2
 - 2026-10-06 - O padrao de CNPJ do scrubber so aceita letras maiusculas: com minusculas ele mascara enderecos de memoria dos reprs (`0x7f3a9c2b1d10` termina em dois digitos em cerca de 40% dos casos) - PR #2
 - 2026-10-06 - `make smoke APP_IMAGE=<outra>`: o `up --build` do compose tagueia a imagem construida com esse nome; apontar para uma imagem base (ex.: `python:3.14-slim`) a sobrescreve no Docker local - PR #2
@@ -61,6 +67,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Tech debt / TODO
 
+- 2026-10-06 - LOW - ADR-039 (platform) ainda diz que girar a chave RSA derruba as sessoes e que publicar duas chaves fica como evolucao; o servico ja publica a anterior (`JWT_PREVIOUS_PUBLIC_KEY`) com a rotacao em duas etapas do README. Atualizar o ADR no platform - PR #3
+- 2026-10-06 - RESOLVIDO - A mensagem do 401 e o formato do 404/405 (entradas LOW abaixo) estao alinhados com Billing e Execucao - PR #3
 - 2026-10-06 - LOW - A mensagem do 401 e `Credenciais invalidas` no OS e `Credencial ausente, invalida ou expirada` em Billing e Execucao; o ADR-039 pede a mesma nos tres. Alinhar num texto so (no OS, `FalhaAutenticacaoException.MENSAGEM` e os testes que a citam)
 - 2026-10-06 - LOW - O 404 de rota inexistente e o 405 saem no formato padrao do Starlette (`{"detail": ...}`) e o 404 do acompanhamento publico segue `{"detail": "Ordem nao encontrada"}`, enquanto Billing e Execucao mapeiam todo `HTTPException` para o envelope por status. Decidir se o OS faz o mesmo (o 404 publico precisaria manter o corpo identico para todo caso de nao encontrado)
 - 2026-10-06 - LOW - Sugestoes para o template do coordenador, nao aplicadas aqui para o CI seguir copia literal: resultado do pip-audit e do trivy no `$GITHUB_STEP_SUMMARY` e pip-audit com export com hashes e `--disable-pip`. O total do gate no `cobertura_resumo.py` ja foi feito aqui
@@ -77,6 +85,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Review lessons
 
+- 2026-10-06 - Gate de lint roda nos mesmos caminhos do Makefile (`src/ scripts/ migrations/ tests/`), nao so nos diretorios mexidos: o script novo em `scripts/` passou sem `ruff` e o `make lint` do CI reprovaria - PR #3
+- 2026-10-06 - Rotacao de chave com varias replicas se confere no rollout, nao so no estado final: pod antigo recusa o `kid` novo ate conhece-lo, entao a chave nova e publicada antes de assinar - PR #3
 - 2026-10-06 - Regra de ADR com lista de casos (401 para papel ausente, desconhecido ou de tipo errado) se confere caso a caso contra o codigo: os testes que fixavam o 403 documentavam o desvio em vez de pega-lo - PR #2
 - 2026-10-06 - Formato de erro se confere pela rota real, nao so pelo handler: o gate (dependency) levantava `HTTPException` e saia fora do envelope enquanto os casos de uso saiam dentro - PR #2
 - 2026-10-06 - Padrao de PII (regex do scrubber) acompanha cada formato que o value object aceita: o CNPJ alfanumerico passou no cadastro e escapou do mascaramento de log e de erro - PR #2

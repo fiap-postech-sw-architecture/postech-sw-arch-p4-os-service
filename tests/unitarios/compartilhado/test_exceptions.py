@@ -58,7 +58,7 @@ class TestExceptionsEspecificas:
             (
                 FalhaAutenticacaoException,
                 "NAO_AUTENTICADO",
-                "Credenciais invalidas",
+                "Credencial ausente, invalida ou expirada",
             ),
             (
                 AcessoNegadoException,

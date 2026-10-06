@@ -8,6 +8,7 @@ from importlib.metadata import version
 import uvicorn
 from fastapi import FastAPI
 
+from src.autenticacao.interfaces.dependencies import validar_chave_jwt_no_startup
 from src.compartilhado.interfaces.error_handler import registrar_error_handlers
 from src.compartilhado.interfaces.middleware import (
     SecurityHeadersMiddleware,
@@ -64,10 +65,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # fica hardcoded no codigo.
     database_url = resolver_database_url()
 
-    # Guarda de segredos: em producao, aborta o boot se JWT_SECRET for fraco
-    # (< 32 bytes) ou se qualquer segredo de demonstracao publico estiver em
-    # uso. No-op em dev/test. Roda antes de criar o engine.
+    # Guardas de segredos: fora de dev/test, aborta o boot com segredo
+    # ausente, fraco ou de demonstracao (a chave RSA do JWT tem guarda
+    # propria, no contexto que a usa). Rodam antes de criar o engine.
     validar_segredos_no_startup()
+    validar_chave_jwt_no_startup()
 
     engine = criar_engine(database_url)
     configurar_session_factory(criar_session_factory(engine))
@@ -103,6 +105,7 @@ def criar_app() -> FastAPI:
     # Imports locais: routers so carregam ao fabricar o app (sem instanciacao
     # precoce de dependencias no import do modulo).
     from src.autenticacao.interfaces.router import router as auth_router
+    from src.autenticacao.interfaces.router import router_jwks
     from src.cliente_veiculo.interfaces.router import router as cliente_router
     from src.ordem_servico.interfaces.router import router as os_router
     from src.ordem_servico.interfaces.router import (
@@ -111,6 +114,7 @@ def criar_app() -> FastAPI:
 
     application.include_router(router_publico)
     application.include_router(auth_router)
+    application.include_router(router_jwks)
     application.include_router(cliente_router)
     application.include_router(os_router)
     application.include_router(os_router_publico)

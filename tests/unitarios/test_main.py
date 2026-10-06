@@ -32,8 +32,9 @@ class TestMain:
         assert "/api/v1/saude" in paths
         assert any("/api/v1/clientes" in p for p in paths)
         assert any("/api/v1/autenticacao" in p for p in paths)
-        # Superficie de OS da fase 4 (RFC-004 secao 6.1), sem saga e sem JWKS.
+        # Superficie de OS da fase 4 (RFC-004 secao 6.1), sem saga.
         assert {
+            "/.well-known/jwks.json",
             "/api/v1/ordens-de-servico",
             "/api/v1/ordens-de-servico/{ordem_id}",
             "/api/v1/ordens-de-servico/{ordem_id}/historico",
@@ -395,6 +396,7 @@ class TestMain:
                     "src.compartilhado.interfaces.dependencies.configurar_session_factory"
                 ),
                 patch("src.main.validar_segredos_no_startup") as mock_validar,
+                patch("src.main.validar_chave_jwt_no_startup") as mock_validar_jwt,
                 patch.dict(
                     os.environ,
                     {"DATABASE_URL": "postgresql://x:x@localhost:5432/x"},
@@ -405,24 +407,27 @@ class TestMain:
                 async with lifespan(app):
                     pass
                 mock_validar.assert_called_once()
+                mock_validar_jwt.assert_called_once()
 
         asyncio.run(_run())
 
-    def test_lifespan_aborta_com_segredos_demo_em_producao(self) -> None:
-        """Boot em producao falha se um segredo de demonstracao esta em uso.
+    def test_lifespan_aborta_com_a_chave_rsa_de_demo_em_producao(self) -> None:
+        """Boot em producao falha com a chave RSA de demonstracao do compose.
 
-        Prova a integracao ponta-a-ponta: o lifespan (sem mockar a guarda)
-        aborta antes de aceitar requisicoes quando JWT_SECRET e o literal demo.
-        DATABASE_URL valida e setada para isolar a falha na guarda de segredos.
+        Prova a integracao ponta-a-ponta: o lifespan (sem mockar as guardas)
+        aborta antes de aceitar requisicoes. DATABASE_URL e ENCRYPTION_KEY
+        validas isolam a falha na guarda da chave do JWT.
         """
+        from cryptography.fernet import Fernet
+
+        from tests.chaves_jwt import pem_demo_do_compose
+
         app = FastAPI()
         env = dict(os.environ)
         env["ENVIRONMENT"] = "production"
         env["DATABASE_URL"] = "postgresql://x:x@localhost:5432/x"
-        env["JWT_SECRET"] = "demo-jwt-secret-os-service-fase4-nao-usar-em-producao"
-        # ENCRYPTION_KEY presente e nao-demo isola a falha no JWT_SECRET demo:
-        # sem ela, a guarda abortaria antes por ENCRYPTION_KEY ausente.
-        env["ENCRYPTION_KEY"] = "chave-encryption-forte-de-producao-nao-demo-1234"
+        env["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+        env["JWT_PRIVATE_KEY"] = pem_demo_do_compose()
 
         async def _run() -> None:
             with (
@@ -442,5 +447,5 @@ class TestMain:
                 async with lifespan(app):
                     pass
 
-        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        with pytest.raises(RuntimeError, match="chave RSA de demonstracao"):
             asyncio.run(_run())

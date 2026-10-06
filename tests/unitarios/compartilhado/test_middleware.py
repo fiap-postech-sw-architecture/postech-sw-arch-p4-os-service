@@ -3,7 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from slowapi import (
     Limiter,
@@ -69,6 +69,21 @@ class TestSecurityHeadersMiddleware:
         assert resp.headers["Cache-Control"] == "no-store"
         assert resp.headers["Content-Security-Policy"] == "default-src 'none'"
         assert "X-Request-ID" in resp.headers
+
+    def test_rota_que_define_o_proprio_cache_o_mantem(self) -> None:
+        app = FastAPI()
+
+        @app.get("/publico")
+        def publico(response: Response) -> dict[str, str]:
+            response.headers["Cache-Control"] = "public, max-age=600"
+            return {"status": "ok"}
+
+        app.add_middleware(SecurityHeadersMiddleware)
+
+        resp = TestClient(app).get("/publico")
+
+        assert resp.headers["Cache-Control"] == "public, max-age=600"
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
 
     def test_request_id_gerado_por_request(self) -> None:
         app = _criar_app_com_saude()

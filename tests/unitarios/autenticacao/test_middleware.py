@@ -8,14 +8,12 @@ from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import httpx
-import jwt
 import pytest
 import structlog
 import structlog.testing
 from fastapi.testclient import TestClient
 
 from src.autenticacao.dominio.papel import Papel
-from src.autenticacao.infraestrutura.jwt_service import JWTService
 from src.autenticacao.interfaces.middleware import (
     _PERMISSOES,
     exigir_papel,
@@ -27,24 +25,23 @@ from src.compartilhado.dominio.exceptions import (
 )
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
+from tests.chaves_jwt import (
+    CHAVE_PEM,
+    OUTRA_CHAVE,
+    assinar,
+    claims,
+    forjar_hmac_com_a_chave_publica,
+    forjar_sem_assinatura,
+)
+from tests.chaves_jwt import jwt_service as _jwt_service
 
-# 64 bytes: os tokens de algoritmo trocado sao assinados ate com HS512.
-_CHAVE = "test-secret".ljust(64, "x")  # gitleaks:allow
 _MIDDLEWARE = "src.autenticacao.interfaces.middleware"
 _MOCK_SESSION = MagicMock()
 
 
-def _jwt_service(expiracao_minutos: int = 30) -> JWTService:
-    return JWTService(
-        chave_secreta=_CHAVE,
-        expiracao_minutos=expiracao_minutos,
-        refresh_expiracao_minutos=10080,
-    )
-
-
 # O que o gate devolve para qualquer falha de credencial (ADR-039).
 _CODIGO_401 = "NAO_AUTENTICADO"
-_MENSAGEM_401 = "Credenciais invalidas"
+_MENSAGEM_401 = "Credencial ausente, invalida ou expirada"
 
 
 class _FakeCredentials:
@@ -60,8 +57,9 @@ def _falha_do_gate(creds: _FakeCredentials | None) -> FalhaAutenticacaoException
 
 
 @pytest.fixture(autouse=True)
-def _jwt_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("JWT_SECRET", _CHAVE)
+def _chave_jwt_no_ambiente(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JWT_PRIVATE_KEY", CHAVE_PEM)
+    monkeypatch.delenv("JWT_PREVIOUS_PUBLIC_KEY", raising=False)
 
 
 class TestObterUsuarioAtual:
@@ -76,9 +74,7 @@ class TestObterUsuarioAtual:
 
     def test_token_expirado_retorna_401(self) -> None:
         svc = _jwt_service(expiracao_minutos=-1)
-        token = svc.gerar_access_token(
-            usuario_id=uuid4(), email="t@t.com", papel="admin"
-        )
+        token = svc.gerar_access_token(usuario_id=uuid4(), papel="admin")
         falha = _falha_do_gate(_FakeCredentials(token=token))
         assert (falha.codigo, falha.mensagem) == (_CODIGO_401, _MENSAGEM_401)
         assert falha.motivo == "expired_token"
@@ -86,7 +82,7 @@ class TestObterUsuarioAtual:
     def test_token_valido_retorna_payload(self) -> None:
         svc = _jwt_service()
         uid = uuid4()
-        token = svc.gerar_access_token(uid, "t@t.com", "admin")
+        token = svc.gerar_access_token(uid, "admin")
         creds = _FakeCredentials(token=token)
         fake_repo = MagicMock()
         fake_repo.esta_revogado = MagicMock(return_value=False)
@@ -130,7 +126,7 @@ class TestObterUsuarioAtual:
     def test_token_revogado_retorna_401(self) -> None:
         svc = _jwt_service()
         uid = uuid4()
-        token = svc.gerar_access_token(uid, "t@t.com", "admin")
+        token = svc.gerar_access_token(uid, "admin")
         payload = svc.validar_token(token)
         jti = str(payload["jti"])
         fake_repo = MagicMock()
@@ -144,15 +140,12 @@ class TestObterUsuarioAtual:
         assert falha.motivo == "revoked_token"
 
 
-def _token(algoritmo: str = "HS256", **claims: object) -> str:
-    payload: dict[str, object] = {
-        "sub": str(uuid4()),
-        "jti": str(uuid4()),
-        "type": "access",
-        "exp": datetime.now(UTC) + timedelta(minutes=5),
-        **claims,
-    }
-    return jwt.encode(payload, _CHAVE, algorithm=algoritmo)
+def _token(**extras: object) -> str:
+    """Access token RS256 valido sem ``papel`` (o gate nao o le); ``extras`` muda."""
+    corpo = claims(**extras)
+    if "papel" not in extras:
+        del corpo["papel"]
+    return assinar(corpo)
 
 
 # (token, motivo no log). `None` = sem header Authorization.
@@ -164,7 +157,14 @@ _FALHAS_DE_CREDENCIAL = [
         "expired_token",
         id="expirado",
     ),
-    pytest.param(_token("HS384"), "invalid_algorithm", id="outro-algoritmo"),
+    pytest.param(forjar_sem_assinatura(), "invalid_algorithm", id="alg-none"),
+    pytest.param(
+        forjar_hmac_com_a_chave_publica(),
+        "invalid_algorithm",
+        id="hs256-com-a-chave-publica",
+    ),
+    pytest.param(assinar(chave=OUTRA_CHAVE), "unknown_kid", id="kid-desconhecido"),
+    pytest.param(_token(aud="outro-servico"), "invalid_token", id="aud-errada"),
     pytest.param(_token(type="refresh"), "not_an_access_token", id="refresh"),
     pytest.param(_token(jti="revogado"), "revoked_token", id="revogado"),
 ]
@@ -391,11 +391,11 @@ class TestGuardasDePermissoes:
 
 
 class TestEnvLimpeza:
-    def test_jwt_secret_nao_vaza_entre_testes(
+    def test_chave_jwt_nao_vaza_entre_testes(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("JWT_SECRET", raising=False)
-        with pytest.raises(RuntimeError, match="JWT_SECRET nao configurado"):
+        monkeypatch.delenv("JWT_PRIVATE_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="JWT_PRIVATE_KEY nao configurada"):
             obter_usuario_atual(
                 credentials=_FakeCredentials(token="qualquer"),
                 session=_MOCK_SESSION,

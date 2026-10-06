@@ -41,3 +41,18 @@ class UsuarioResponse(BaseModel):
     id: UUID
     email: str
     papel: str
+
+
+class JwkResponse(BaseModel):
+    """Chave publica RSA de assinatura (RFC 7517); os campos privados nao existem."""
+
+    kty: str
+    use: str
+    alg: str
+    kid: str
+    n: str
+    e: str
+
+
+class JwksResponse(BaseModel):
+    keys: list[JwkResponse]

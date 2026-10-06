@@ -60,6 +60,11 @@ audit:
 # volumes, inclusive em falha (depois de mostrar os logs). Projeto e porta
 # proprios para nao derrubar a stack do compose-up.
 #
+# O access token do login passa pelo validador independente
+# (scripts/validar_token.py, so PyJWT): JWKS buscado por HTTP, RS256, iss, aud,
+# exp e type, como Billing e Execucao validam. O JWKS publico tem de trazer so
+# os membros publicos e o Cache-Control de 10 min.
+#
 # O compose sobe a API com ENVIRONMENT=development (a guarda de producao
 # recusa os segredos de demonstracao), entao o que a imagem faz em producao e
 # conferido a parte: usuario numerico 1001 e ENVIRONMENT=production no
@@ -85,11 +90,19 @@ smoke:
 		|| { echo "smoke: a resposta traz o header server" >&2; false; }; } \
 	&& email="$$($(SMOKE_COMPOSE) exec -T api printenv ADMIN_EMAIL)" \
 	&& senha="$$($(SMOKE_COMPOSE) exec -T api printenv ADMIN_PASSWORD)" \
-	&& curl -fsS --max-time 10 -X POST $(SMOKE_URL)/api/v1/autenticacao/login \
+	&& access="$$(curl -fsS --max-time 10 -X POST $(SMOKE_URL)/api/v1/autenticacao/login \
 		-H 'Content-Type: application/json' \
 		-d "{\"email\": \"$$email\", \"senha\": \"$$senha\"}" \
-		| jq -e '.access_token' >/dev/null \
-	&& echo "smoke ok: readiness 200, login do admin semeado e imagem de producao" \
+		| jq -er '.access_token')" \
+	&& curl -fsS --max-time 5 $(SMOKE_URL)/.well-known/jwks.json \
+		| jq -e '(.keys | length) > 0 and all(.keys[]; keys == ["alg","e","kid","kty","n","use"])' \
+		>/dev/null \
+	&& { curl -fsS --max-time 5 -D - -o /dev/null $(SMOKE_URL)/.well-known/jwks.json \
+			| grep -qi '^cache-control: public, max-age=600' \
+		|| { echo "smoke: o JWKS nao traz o Cache-Control de 10 min" >&2; false; }; } \
+	&& printf '%s' "$$access" \
+		| $(SMOKE_COMPOSE) exec -T api python scripts/validar_token.py http://127.0.0.1:8000 \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS e imagem de producao" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \

@@ -196,10 +196,11 @@ def acompanhamento(
 
     ``POST`` com corpo de proposito, como no p3 (TD-034): placa e documento sao
     PII e nao devem ir para a URL (access log de proxy, historico do browser).
-    Nao ha variante GET. O 404 tem corpo identico para placa inexistente,
-    documento errado e documento ou placa invalidos (digito verificador ou
-    formato, recusados antes de qualquer consulta ao banco): anti-enumeracao,
-    mesma resposta do p3. O rate limit por IP completa a defesa.
+    Nao ha variante GET. O 404 (envelope de erro, ``ENTIDADE_NAO_ENCONTRADA``)
+    tem o mesmo codigo e a mesma mensagem para placa inexistente, documento
+    errado e documento ou placa invalidos (digito verificador ou formato,
+    recusados antes de qualquer consulta ao banco): anti-enumeracao. O rate
+    limit por IP completa a defesa.
     """
     resultado = obter_consultar_acompanhamento(session).executar(
         placa=corpo.placa, documento=corpo.documento

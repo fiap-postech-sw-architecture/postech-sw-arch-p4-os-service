@@ -86,9 +86,7 @@ class Login:
         if not self._password_hasher.verificar_senha(dto.senha, usuario.senha_hash):
             raise CredenciaisInvalidasException(motivo="wrong_password")
         access = self._jwt_service.gerar_access_token(
-            usuario_id=usuario.id,
-            email=usuario.email,
-            papel=usuario.papel.value,
+            usuario_id=usuario.id, papel=usuario.papel.value
         )
         refresh = self._jwt_service.gerar_refresh_token(
             usuario_id=usuario.id,
@@ -181,9 +179,7 @@ class RefreshToken:
                 raise TokenRevogadoException()
             self._uow.commit()
         access = self._jwt_service.gerar_access_token(
-            usuario_id=usuario.id,
-            email=usuario.email,
-            papel=usuario.papel.value,
+            usuario_id=usuario.id, papel=usuario.papel.value
         )
         refresh = self._jwt_service.gerar_refresh_token(
             usuario_id=usuario.id,

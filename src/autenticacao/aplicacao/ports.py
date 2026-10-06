@@ -27,7 +27,7 @@ class JWTServicePort(Protocol):
     """Porta de emissao/validacao de tokens JWT; implementacao na infraestrutura."""
 
     # corpos `pass` (nao `...`) evitam o FP CodeQL py/ineffectual-statement
-    def gerar_access_token(self, usuario_id: UUID, email: str, papel: str) -> str:
+    def gerar_access_token(self, usuario_id: UUID, papel: str) -> str:
         """Emite um access token assinado para o usuario."""
         pass
 

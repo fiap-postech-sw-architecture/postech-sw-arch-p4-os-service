@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, status
+from fastapi import APIRouter, Body, Depends, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # Runtime import (nao TYPE_CHECKING): com `from __future__ import annotations`,
@@ -15,6 +15,7 @@ from starlette.requests import Request  # noqa: TC002
 from src.autenticacao.aplicacao.dtos import LoginDTO, RegistrarDTO
 from src.autenticacao.dominio.exceptions import TokenInvalidoException
 from src.autenticacao.interfaces.dependencies import (
+    obter_jwt_service,
     obter_login,
     obter_logout,
     obter_refresh_token,
@@ -22,6 +23,7 @@ from src.autenticacao.interfaces.dependencies import (
 )
 from src.autenticacao.interfaces.middleware import exigir_papel
 from src.autenticacao.interfaces.schemas import (
+    JwksResponse,
     LoginRequest,
     RefreshRequest,
     RegistrarRequest,
@@ -32,6 +34,8 @@ from src.compartilhado.interfaces.dependencies import obter_session
 from src.compartilhado.interfaces.middleware import limiter
 
 router = APIRouter(prefix="/api/v1/autenticacao", tags=["autenticacao"])
+# Fora de /api/v1: o caminho padrao do JWKS, lido por Billing e Execucao.
+router_jwks = APIRouter(tags=["autenticacao"])
 
 # auto_error=False: o HTTPBearer default responde 403 sem WWW-Authenticate
 # para header ausente; o 401 manual abaixo espelha `obter_usuario_atual`.
@@ -128,3 +132,18 @@ def refresh(
         refresh_token=result.refresh_token,
         token_type=result.token_type,
     )
+
+
+@router_jwks.get(
+    "/.well-known/jwks.json",
+    summary="Chaves publicas que validam os tokens (JWKS)",
+)
+async def jwks(response: Response) -> JwksResponse:
+    """JWK Set (RFC 7517) com a chave de assinatura e, na rotacao, a anterior.
+
+    Publico, sem token: Billing e Execucao validam os JWT localmente com estas
+    chaves (ADR-039). O ``Cache-Control`` de 10 min e o mesmo cache dos
+    consumidores. ``async`` para responder mesmo com o threadpool cheio.
+    """
+    response.headers["Cache-Control"] = "public, max-age=600"
+    return JwksResponse.model_validate(obter_jwt_service().jwks())

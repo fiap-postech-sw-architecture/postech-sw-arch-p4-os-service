@@ -271,8 +271,7 @@ testpaths = ["tests"]
 # pendurar o job.
 timeout = 120
 # So os warnings conhecidos de terceiros ficam calados: um novo aparece no
-# resumo do pytest. Segredos de JWT dos testes tem 32 bytes ou mais (o PyJWT
-# avisa abaixo do tamanho do hash).
+# resumo do pytest.
 filterwarnings = [
     # starlette 1.7 (StarletteDeprecationWarning e UserWarning): o TestClient
     # ainda usa httpx (httpx2 nao e dependencia).

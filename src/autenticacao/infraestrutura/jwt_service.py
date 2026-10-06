@@ -1,10 +1,29 @@
+"""Emissao e validacao dos JWT do PytStop: RS256 com JWKS publico (ADR-039).
+
+O OS Service e o unico emissor. A chave privada RSA so existe aqui; a parte
+publica sai em ``GET /.well-known/jwks.json``, de onde Billing e Execucao
+validam os tokens sem segredo compartilhado. O ``kid`` de cada chave e o
+thumbprint da RFC 7638. Na rotacao, a chave anterior so e publicada e aceita na
+validacao, para os tokens em voo continuarem validos; ela nunca assina.
+"""
+
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import jwt
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import (
+    load_pem_private_key,
+    load_pem_public_key,
+)
+from jwt.utils import to_base64url_uint
 
 from src.autenticacao.dominio.exceptions import (
     TokenExpiradoException,
@@ -14,56 +33,153 @@ from src.autenticacao.dominio.exceptions import (
 if TYPE_CHECKING:
     from uuid import UUID
 
-_ALGORITMO = "HS256"
+EMISSOR: Final = "pytstop-os-service"
+AUDIENCIA: Final = "pytstop"
+# Folga para a diferenca de relogio entre pods, em `exp` e `iat`.
+LEEWAY_SEGUNDOS: Final = 10
+BITS_MINIMOS: Final = 2048
+_ALGORITMO: Final = "RS256"
+_CLAIMS_OBRIGATORIAS: Final = ["iss", "aud", "sub", "type", "jti", "iat", "exp"]
+
+
+def carregar_chave_privada(pem: str) -> rsa.RSAPrivateKey:
+    """Chave de assinatura a partir do PEM (PKCS#1 ou PKCS#8, sem senha).
+
+    Raises:
+        ValueError: PEM ilegivel, chave que nao e RSA ou com menos de 2048 bits.
+    """
+    try:
+        chave = load_pem_private_key(pem.encode(), password=None)
+    except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
+        msg = "nao e uma chave privada em PEM sem senha"
+        raise ValueError(msg) from exc
+    if not isinstance(chave, rsa.RSAPrivateKey):
+        msg = "a chave precisa ser RSA"
+        raise ValueError(msg)
+    _exigir_tamanho_minimo(chave.key_size)
+    return chave
+
+
+def carregar_chave_publica(pem: str) -> rsa.RSAPublicKey:
+    """Chave publica RSA a partir do PEM (a anterior, durante a rotacao).
+
+    Raises:
+        ValueError: PEM ilegivel, chave que nao e RSA ou com menos de 2048 bits.
+    """
+    try:
+        chave = load_pem_public_key(pem.encode())
+    except (ValueError, UnsupportedAlgorithm) as exc:
+        msg = "nao e uma chave publica em PEM"
+        raise ValueError(msg) from exc
+    if not isinstance(chave, rsa.RSAPublicKey):
+        msg = "a chave precisa ser RSA"
+        raise ValueError(msg)
+    _exigir_tamanho_minimo(chave.key_size)
+    return chave
+
+
+def _exigir_tamanho_minimo(bits: int) -> None:
+    if bits < BITS_MINIMOS:
+        msg = f"a chave tem {bits} bits; o minimo e {BITS_MINIMOS}"
+        raise ValueError(msg)
+
+
+def _b64url(valor: int) -> str:
+    return to_base64url_uint(valor).decode()
+
+
+def kid_da_chave(chave: rsa.RSAPublicKey) -> str:
+    """Thumbprint SHA-256 da chave publica (RFC 7638), usado como ``kid``."""
+    numeros = chave.public_numbers()
+    # Membros obrigatorios do kty RSA em ordem lexicografica, sem espacos.
+    canonico = json.dumps(
+        {"e": _b64url(numeros.e), "kty": "RSA", "n": _b64url(numeros.n)},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    resumo = hashlib.sha256(canonico.encode()).digest()
+    return base64.urlsafe_b64encode(resumo).rstrip(b"=").decode()
 
 
 class JWTService:
-    # As expiracoes chegam pelo construtor (lidas do ambiente na factory
-    # `obter_jwt_service`, com os defaults 15/10080). Sem default aqui: quem
-    # instancia direto e obrigado a informar, e os defaults tem fonte unica na
-    # factory -- leitura de env no import-time congelava o valor antes de
-    # qualquer configuracao de ambiente/teste.
+    """Emite e valida os tokens do servico e publica as chaves no JWKS."""
+
+    # As expiracoes chegam pelo construtor, lidas do ambiente na factory
+    # `obter_jwt_service` (defaults 15 e 10080): fonte unica dos defaults.
     def __init__(
         self,
-        chave_secreta: str,
+        chave_privada: rsa.RSAPrivateKey,
         expiracao_minutos: int,
         refresh_expiracao_minutos: int,
+        chave_anterior: rsa.RSAPublicKey | None = None,
     ) -> None:
-        self._chave_secreta = chave_secreta
+        self._chave_privada = chave_privada
+        self._kid = kid_da_chave(chave_privada.public_key())
+        # A atual primeiro; a anterior so verifica (tokens emitidos antes da troca).
+        self._chaves_publicas: dict[str, rsa.RSAPublicKey] = {
+            self._kid: chave_privada.public_key()
+        }
+        if chave_anterior is not None:
+            self._chaves_publicas.setdefault(
+                kid_da_chave(chave_anterior), chave_anterior
+            )
         self._expiracao_minutos = expiracao_minutos
         self._refresh_expiracao_minutos = refresh_expiracao_minutos
 
-    def gerar_access_token(self, usuario_id: UUID, email: str, papel: str) -> str:
-        agora = datetime.now(UTC)
-        payload = {
-            "sub": str(usuario_id),
-            "email": email,
-            "papel": papel,
-            "type": "access",
-            "jti": str(uuid.uuid4()),
-            "iat": agora,
-            "exp": agora + timedelta(minutes=self._expiracao_minutos),
-        }
-        return jwt.encode(payload, self._chave_secreta, algorithm=_ALGORITMO)
+    def gerar_access_token(self, usuario_id: UUID, papel: str) -> str:
+        # Sem e-mail: o token circula entre os servicos (ADR-039).
+        return self._assinar(
+            {"sub": str(usuario_id), "papel": papel, "type": "access"},
+            self._expiracao_minutos,
+        )
 
     def gerar_refresh_token(self, usuario_id: UUID) -> str:
+        return self._assinar(
+            {"sub": str(usuario_id), "type": "refresh"}, self._refresh_expiracao_minutos
+        )
+
+    def _assinar(self, claims: dict[str, str], minutos: int) -> str:
         agora = datetime.now(UTC)
         payload = {
-            "sub": str(usuario_id),
-            "type": "refresh",
+            "iss": EMISSOR,
+            "aud": AUDIENCIA,
+            **claims,
             "jti": str(uuid.uuid4()),
             "iat": agora,
-            "exp": agora + timedelta(minutes=self._refresh_expiracao_minutos),
+            "exp": agora + timedelta(minutes=minutos),
         }
-        return jwt.encode(payload, self._chave_secreta, algorithm=_ALGORITMO)
+        return jwt.encode(
+            payload,
+            self._chave_privada,
+            algorithm=_ALGORITMO,
+            headers={"kid": self._kid},
+        )
 
     def validar_token(self, token: str) -> dict[str, object]:
+        """Claims de um token deste emissor, de qualquer ``type``.
+
+        Do cabecalho nao verificado so sai o ``kid``, para escolher entre as
+        chaves deste servico; o algoritmo e fixo (RS256), o que barra ``none``
+        e HS256 assinado com a chave publica.
+
+        Raises:
+            TokenExpiradoException: ``exp`` vencido alem do leeway.
+            TokenInvalidoException: formato, ``kid``, algoritmo, assinatura,
+                ``iss``, ``aud`` ou claim obrigatoria.
+        """
         try:
-            return jwt.decode(
+            kid = jwt.get_unverified_header(token).get("kid")
+            chave = self._chaves_publicas.get(kid) if isinstance(kid, str) else None
+            if chave is None:
+                raise TokenInvalidoException(motivo="unknown_kid")
+            claims: dict[str, object] = jwt.decode(
                 token,
-                self._chave_secreta,
+                chave,
                 algorithms=[_ALGORITMO],
-                options={"require": ["sub", "jti", "exp", "type"]},
+                audience=AUDIENCIA,
+                issuer=EMISSOR,
+                leeway=LEEWAY_SEGUNDOS,
+                options={"require": _CLAIMS_OBRIGATORIAS},
             )
         except jwt.ExpiredSignatureError:
             raise TokenExpiradoException() from None
@@ -71,3 +187,20 @@ class JWTService:
             raise TokenInvalidoException(motivo="invalid_algorithm") from None
         except jwt.InvalidTokenError:
             raise TokenInvalidoException() from None
+        return claims
+
+    def jwks(self) -> dict[str, list[dict[str, str]]]:
+        """JWK Set (RFC 7517) so com a parte publica de cada chave."""
+        return {
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "use": "sig",
+                    "alg": _ALGORITMO,
+                    "kid": kid,
+                    "n": _b64url(chave.public_numbers().n),
+                    "e": _b64url(chave.public_numbers().e),
+                }
+                for kid, chave in self._chaves_publicas.items()
+            ]
+        }

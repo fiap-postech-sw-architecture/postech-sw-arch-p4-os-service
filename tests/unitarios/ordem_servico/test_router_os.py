@@ -403,11 +403,17 @@ class TestAcompanhamentoPublico:
             (Placa(valor="ABC1D23"), CPF(numero="52998224725"))
         ]
 
-    def test_nao_encontrada_404_com_a_resposta_do_p3(self, client: TestClient) -> None:
+    def test_nao_encontrada_404_no_envelope_de_erro(self, client: TestClient) -> None:
         resp = client.post(self._ROTA, json=_CORPO_PUBLICO)
 
         assert resp.status_code == 404
-        assert resp.json() == {"detail": "Ordem nao encontrada"}
+        assert resp.json() == {
+            "erro": {
+                "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                "mensagem": "Ordem nao encontrada",
+                "id_requisicao": resp.headers["X-Request-ID"],
+            }
+        }
 
     @pytest.mark.parametrize(
         "corpo",
@@ -427,13 +433,17 @@ class TestAcompanhamentoPublico:
         consulta: ConsultaAcompanhamentoEspia,
         corpo: dict[str, str],
     ) -> None:
-        nao_encontrada = client.post(self._ROTA, json=_CORPO_PUBLICO)
+        # Mesmo X-Request-ID nas duas: o corpo inteiro tem de ser identico.
+        mesmo_id = {"X-Request-ID": "acompanhamento-1"}
+        nao_encontrada = client.post(self._ROTA, json=_CORPO_PUBLICO, headers=mesmo_id)
         consulta.chamadas.clear()
 
-        invalida = client.post(self._ROTA, json={**_CORPO_PUBLICO, **corpo})
+        invalida = client.post(
+            self._ROTA, json={**_CORPO_PUBLICO, **corpo}, headers=mesmo_id
+        )
 
         assert invalida.status_code == nao_encontrada.status_code == 404
-        assert invalida.json() == nao_encontrada.json()
+        assert invalida.content == nao_encontrada.content
         assert consulta.chamadas == []
 
     @pytest.mark.parametrize(
@@ -464,7 +474,10 @@ class TestAcompanhamentoPublico:
         assert len(consulta.chamadas) == (1 if esperado == 404 else 0)
 
     def test_get_com_pii_na_url_nao_existe(self, client: TestClient) -> None:
-        assert client.get(self._ROTA, params=_CORPO_PUBLICO).status_code == 405
+        resp = client.get(self._ROTA, params=_CORPO_PUBLICO)
+        assert resp.status_code == 405
+        assert resp.json()["erro"]["codigo"] == "METODO_NAO_PERMITIDO"
+        assert resp.headers["Allow"] == "POST"
 
     @pytest.mark.parametrize(
         "corpo",

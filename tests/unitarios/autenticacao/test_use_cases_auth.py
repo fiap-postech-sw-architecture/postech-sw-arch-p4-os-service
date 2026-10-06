@@ -23,16 +23,9 @@ from src.autenticacao.dominio.papel import Papel
 from src.autenticacao.dominio.usuario import Usuario
 from src.autenticacao.infraestrutura.jwt_service import JWTService
 from src.autenticacao.infraestrutura.password_hasher import PasswordHasher, hash_senha
+from tests.chaves_jwt import CHAVE
+from tests.chaves_jwt import jwt_service as _jwt_service
 from tests.unitarios.fakes import FakeUnitOfWork
-
-# 32 bytes: o minimo do HS256 (abaixo disso o PyJWT avisa InsecureKeyLength).
-_CHAVE_TESTE = "test-secret-de-32-bytes-do-hs256"  # gitleaks:allow
-
-
-def _jwt_service(chave: str = _CHAVE_TESTE) -> JWTService:
-    return JWTService(
-        chave_secreta=chave, expiracao_minutos=30, refresh_expiracao_minutos=10080
-    )
 
 
 class FakeUsuarioRepository:
@@ -92,7 +85,7 @@ class FakeJWTService:
         self.access_calls = 0
         self.refresh_calls = 0
 
-    def gerar_access_token(self, usuario_id: UUID, email: str, papel: str) -> str:
+    def gerar_access_token(self, usuario_id: UUID, papel: str) -> str:
         self.access_calls += 1
         return "fake-access"
 
@@ -327,7 +320,7 @@ class TestLogout:
         uow = FakeUnitOfWork()
         from uuid import uuid4
 
-        token = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        token = jwt_svc.gerar_access_token(uuid4(), "admin")
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
         result = uc.executar(token)
         assert "mensagem" in result
@@ -340,7 +333,7 @@ class TestLogout:
         uow = FakeUnitOfWork()
         from uuid import uuid4
 
-        token = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        token = jwt_svc.gerar_access_token(uuid4(), "admin")
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
         result = uc.executar(token)
         assert result["mensagem"] == "Logout realizado com sucesso"
@@ -354,7 +347,7 @@ class TestLogout:
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
         usuario_id = uuid4()
-        access = jwt_svc.gerar_access_token(usuario_id, "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario_id, "admin")
         refresh = jwt_svc.gerar_refresh_token(usuario_id)
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
@@ -376,7 +369,7 @@ class TestLogout:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(usuario.id, "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario.id, "admin")
         refresh = jwt_svc.gerar_refresh_token(usuario.id)
         Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow).executar(
             access, refresh_token=refresh
@@ -413,7 +406,7 @@ class TestLogout:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(uuid4(), "admin")
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
         uc.executar(access, refresh_token="nao-e-jwt")
@@ -426,14 +419,12 @@ class TestLogout:
 
         jwt_svc = _jwt_service()
         expirado_svc = JWTService(
-            chave_secreta=_CHAVE_TESTE,
-            expiracao_minutos=30,
-            refresh_expiracao_minutos=-1,
+            chave_privada=CHAVE, expiracao_minutos=30, refresh_expiracao_minutos=-1
         )
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
         usuario_id = uuid4()
-        access = jwt_svc.gerar_access_token(usuario_id, "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario_id, "admin")
         refresh = expirado_svc.gerar_refresh_token(usuario_id)
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
@@ -452,7 +443,7 @@ class TestLogout:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(uuid4(), "eu@t.com", "admin")
+        access = jwt_svc.gerar_access_token(uuid4(), "admin")
         refresh_alheio = jwt_svc.gerar_refresh_token(uuid4())
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
@@ -499,7 +490,7 @@ class TestRefreshToken:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(usuario.id, "test@test.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario.id, "admin")
         uc = RefreshToken(
             jwt_service=jwt_svc,
             token_repo=token_repo,
@@ -550,7 +541,7 @@ class TestRefreshToken:
         with pytest.raises(CredenciaisInvalidasException) as exc:
             uc.executar(refresh)
         # Mesma mensagem publica do login errado (ADR-039); motivo so no log.
-        assert exc.value.mensagem == "Credenciais invalidas"
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
         assert exc.value.motivo == "user_not_found"
 
     def test_segundo_uso_do_mesmo_refresh_e_rejeitado(self) -> None:
