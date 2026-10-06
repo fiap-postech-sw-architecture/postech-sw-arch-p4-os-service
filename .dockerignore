@@ -1,0 +1,43 @@
+# O COPY . . do Dockerfile embute tudo que nao estiver listado aqui.
+
+# Git e ferramentas de agente
+.git
+.gitignore
+.gitattributes
+.gitleaks.toml
+.github/
+.claude/
+.cursor/
+
+# Documentacao
+docs/
+*.md
+
+# Testes e qualidade
+tests/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.import_linter_cache/
+.scannerwork/
+
+# Python
+**/__pycache__
+**/*.pyc
+*.egg-info/
+.venv
+build/
+dist/
+
+# Ambiente local e orquestracao
+.env
+.env.*
+docker-compose.yml
+Makefile
+k8s/
+**/*.log
+.DS_Store

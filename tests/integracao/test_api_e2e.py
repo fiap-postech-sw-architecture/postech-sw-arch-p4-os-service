@@ -1,0 +1,388 @@
+"""API ponta a ponta contra o app real (lifespan, middlewares, JWT) e Postgres.
+
+Cobre o que mocks nao pegam: wiring da session no lifespan, mapeamento real,
+envelope de erro, commit real com outbox e o filtro de OS ativa entre os
+contextos de OS e de Cliente+Veiculo.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+from uuid import UUID
+
+from sqlalchemy import text
+
+from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.infraestrutura.repository import (
+    OrdemDeServicoSQLAlchemyRepository,
+)
+from tests.fabricas import FLUXO, aplicar_fato
+from tests.integracao.seed_helpers import SENHA_PADRAO, criar_usuario
+
+if TYPE_CHECKING:
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from src.autenticacao.dominio.usuario import Usuario
+
+_OS = "/api/v1/ordens-de-servico"
+
+
+def _login(api_client: TestClient, email: str) -> dict[str, str]:
+    resp = api_client.post(
+        "/api/v1/autenticacao/login", json={"email": email, "senha": SENHA_PADRAO}
+    )
+    assert resp.status_code == 200
+    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+def _cliente_com_veiculo(
+    api_client: TestClient,
+    headers: dict[str, str],
+    *,
+    documento: str,
+    placa: str,
+) -> tuple[str, str]:
+    cliente = api_client.post(
+        "/api/v1/clientes/",
+        headers=headers,
+        json={
+            "nome": "Maria Silva",
+            "documento": documento,
+            "tipo_documento": "cpf",
+            "contato": "maria@exemplo.com",
+        },
+    )
+    assert cliente.status_code == 201
+    veiculo = api_client.post(
+        f"/api/v1/clientes/{cliente.json()['id']}/veiculos",
+        headers=headers,
+        json={"placa": placa, "marca": "Fiat", "modelo": "Uno", "ano": 2020},
+    )
+    assert veiculo.status_code == 201
+    return cliente.json()["id"], veiculo.json()["id"]
+
+
+def _abrir(
+    api_client: TestClient, headers: dict[str, str], cliente_id: str, veiculo_id: str
+) -> dict[str, object]:
+    resp = api_client.post(
+        _OS,
+        headers=headers,
+        json={
+            "cliente_id": cliente_id,
+            "veiculo_id": veiculo_id,
+            "descricao_problema": "Motor falhando",
+        },
+    )
+    assert resp.status_code == 201
+    return resp.json()
+
+
+def _levar_ate(
+    session_factory: sessionmaker[Session], ordem_id: str, status: StatusOrdem
+) -> None:
+    """Aplica os fatos da saga direto no dominio (a mensageria vem depois)."""
+    with session_factory() as sess:
+        repo = OrdemDeServicoSQLAlchemyRepository(sess)
+        ordem = repo.obter_por_id(UUID(ordem_id))
+        assert ordem is not None
+        for proximo in FLUXO[FLUXO.index(ordem.status) + 1 : FLUXO.index(status) + 1]:
+            aplicar_fato(ordem, proximo)
+            repo.salvar(ordem)
+        sess.commit()
+
+
+class TestAutenticacao:
+    def test_login_e_rotas_protegidas(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        resp = api_client.post(
+            "/api/v1/autenticacao/login",
+            json={"email": admin_user.email, "senha": "senha-errada-123"},
+        )
+        assert resp.status_code == 401
+        assert api_client.get(_OS).status_code == 401
+        invalido = {"Authorization": "Bearer token-invalido"}
+        assert api_client.get(_OS, headers=invalido).status_code == 401
+        headers = _login(api_client, admin_user.email)
+        assert api_client.get(_OS, headers=headers).status_code == 200
+
+
+class TestCicloDaOrdem:
+    def test_abrir_consultar_listar_historico_e_cancelar(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="ABC1D23"
+        )
+
+        ordem = _abrir(api_client, headers, cliente_id, veiculo_id)
+        ordem_id = ordem["id"]
+        assert (ordem["status"], ordem["versao"]) == ("recebida", 1)
+
+        detalhe = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
+        assert detalhe["descricao_problema"] == "Motor falhando"
+        lista = api_client.get(_OS, headers=headers).json()
+        assert [i["id"] for i in lista["items"]] == [ordem_id]
+        assert lista["total"] == 1
+
+        cancelada = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento",
+            headers=headers,
+            json={"motivo": "cliente desistiu"},
+        )
+        assert cancelada.status_code == 200
+        assert cancelada.json()["versao"] == 2
+
+        historico = api_client.get(f"{_OS}/{ordem_id}/historico", headers=headers)
+        assert [
+            (m["de"], m["para"], m["origem"], m["motivo"])
+            for m in historico.json()["mudancas"]
+        ] == [
+            (None, "recebida", "atendimento", None),
+            ("recebida", "cancelada", "atendimento", "cliente desistiu"),
+        ]
+
+        de_novo = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+        assert de_novo.status_code == 409
+        assert de_novo.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
+        # Encerrada sai da fila padrao.
+        assert api_client.get(_OS, headers=headers).json()["total"] == 0
+
+    def test_fatos_da_saga_ate_a_entrega(
+        self,
+        api_client: TestClient,
+        admin_user: Usuario,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="52998224725", placa="DEF4G56"
+        )
+        ordem_id = str(_abrir(api_client, headers, cliente_id, veiculo_id)["id"])
+
+        _levar_ate(session_factory, ordem_id, StatusOrdem.EM_EXECUCAO)
+        tarde = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+        assert tarde.status_code == 409  # pivot: execucao ja comecou
+
+        _levar_ate(session_factory, ordem_id, StatusOrdem.FINALIZADA)
+        entregue = api_client.post(f"{_OS}/{ordem_id}/entrega", headers=headers)
+        assert entregue.status_code == 200
+        corpo = entregue.json()
+        assert corpo["situacao"] == "Entregue"
+        assert corpo["orcamento"]["total"] == "350.00"
+        assert corpo["pagamento"]["status"] == "solicitado"
+
+        mudancas = api_client.get(
+            f"{_OS}/{ordem_id}/historico", headers=headers
+        ).json()["mudancas"]
+        assert [m["para"] for m in mudancas] == [s.value for s in FLUXO]
+
+    def test_abrir_rejeita_veiculo_de_outro_cliente(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_a, _ = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="AAA1A11"
+        )
+        _, veiculo_b = _cliente_com_veiculo(
+            api_client, headers, documento="57648016648", placa="BBB2B22"
+        )
+
+        resp = api_client.post(
+            _OS,
+            headers=headers,
+            json={
+                "cliente_id": cliente_a,
+                "veiculo_id": veiculo_b,
+                "descricao_problema": "x",
+            },
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["erro"]["mensagem"] == (
+            f"Veiculo {veiculo_b} nao encontrado para o cliente informado"
+        )
+
+    def test_mecanico_le_mas_nao_cancela(
+        self,
+        api_client: TestClient,
+        admin_user: Usuario,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        from src.autenticacao.dominio.papel import Papel
+
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="MEC1A23"
+        )
+        ordem_id = _abrir(api_client, headers, cliente_id, veiculo_id)["id"]
+        mecanico = criar_usuario(
+            session_factory, email="mecanico@test.com", papel=Papel.MECANICO
+        )
+        h_mecanico = _login(api_client, mecanico.email)
+
+        assert (
+            api_client.get(f"{_OS}/{ordem_id}", headers=h_mecanico).status_code == 200
+        )
+        resp = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=h_mecanico, json={"motivo": "x"}
+        )
+        assert resp.status_code == 403
+
+
+class TestOutboxViaApi:
+    def test_abertura_e_cancelamento_gravam_eventos_no_mesmo_commit(
+        self,
+        api_client: TestClient,
+        admin_user: Usuario,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="OBX1A23"
+        )
+        ordem_id = _abrir(api_client, headers, cliente_id, veiculo_id)["id"]
+        api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+
+        with session_factory() as sess:
+            linhas = sess.execute(
+                text(
+                    "SELECT tipo, payload FROM outbox "
+                    "WHERE agregado_id = :id ORDER BY id"
+                ),
+                {"id": ordem_id},
+            ).all()
+        assert [linha.tipo for linha in linhas] == [
+            "OrdemAbertaEvent",
+            "StatusDaOrdemAlteradoEvent",
+        ]
+        assert linhas[1].payload["status_novo"] == "cancelada"
+        assert "motivo" not in linhas[1].payload
+
+
+class TestAcompanhamentoPublico:
+    _ROTA = "/api/v1/publico/acompanhamento"
+
+    def test_par_valido_e_respostas_identicas_para_par_invalido(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="52998224725", placa="PUB1A23"
+        )
+        _abrir(api_client, headers, cliente_id, veiculo_id)
+
+        achada = api_client.post(
+            self._ROTA, json={"placa": "pub-1a23", "documento": "529.982.247-25"}
+        )
+        assert achada.status_code == 200
+        assert achada.json()["situacao"] == "Recebida"
+
+        placa_errada = api_client.post(
+            self._ROTA, json={"placa": "ZZZ9Z99", "documento": "52998224725"}
+        )
+        documento_errado = api_client.post(
+            self._ROTA, json={"placa": "PUB1A23", "documento": "11144477735"}
+        )
+        # Anti-enumeracao: mesmo status e mesmo corpo (resposta do p3).
+        assert placa_errada.status_code == documento_errado.status_code == 404
+        assert (
+            placa_errada.json()
+            == documento_errado.json()
+            == {"detail": "Ordem nao encontrada"}
+        )
+
+
+class TestRegrasEntreContextos:
+    def test_cliente_com_os_ativa_nao_desativa_ate_encerrar(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="ATV1A23"
+        )
+        ordem_id = _abrir(api_client, headers, cliente_id, veiculo_id)["id"]
+
+        bloqueado = api_client.delete(f"/api/v1/clientes/{cliente_id}", headers=headers)
+        assert bloqueado.status_code == 409
+        erasure = api_client.delete(
+            f"/api/v1/clientes/{cliente_id}/dados-pessoais", headers=headers
+        )
+        assert erasure.status_code == 409
+
+        api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+        liberado = api_client.delete(f"/api/v1/clientes/{cliente_id}", headers=headers)
+        assert liberado.status_code == 204
+
+    def test_erasure_anonimiza_o_texto_livre_das_os(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="LGP1A23"
+        )
+        resp = api_client.post(
+            _OS,
+            headers=headers,
+            json={
+                "cliente_id": cliente_id,
+                "veiculo_id": veiculo_id,
+                "descricao_problema": "Cliente Maria, tel 11 99999-0000, motor",
+            },
+        )
+        ordem_id = resp.json()["id"]
+        api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento",
+            headers=headers,
+            json={"motivo": "Maria ligou do 11 99999-0000 desistindo"},
+        )
+
+        erasure = api_client.delete(
+            f"/api/v1/clientes/{cliente_id}/dados-pessoais", headers=headers
+        )
+
+        assert erasure.status_code == 204
+        ordem = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
+        assert ordem["descricao_problema"] == "ANONIMIZADO"
+        assert ordem["motivo_cancelamento"] == "ANONIMIZADO"
+        assert ordem["versao"] == 3  # abertura, cancelamento e erasure
+        mudancas = api_client.get(
+            f"{_OS}/{ordem_id}/historico", headers=headers
+        ).json()["mudancas"]
+        # A linha do tempo continua inteira; so o texto livre sai.
+        assert [(m["para"], m["motivo"]) for m in mudancas] == [
+            ("recebida", None),
+            ("cancelada", "ANONIMIZADO"),
+        ]
+
+    def test_veiculo_com_qualquer_os_nao_e_removido(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="VEI1A23"
+        )
+        ordem_id = _abrir(api_client, headers, cliente_id, veiculo_id)["id"]
+        api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+
+        resp = api_client.delete(
+            f"/api/v1/clientes/{cliente_id}/veiculos/{veiculo_id}", headers=headers
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["erro"]["mensagem"] == (
+            "Veiculo possui ordem de servico vinculada e nao pode ser removido"
+        )

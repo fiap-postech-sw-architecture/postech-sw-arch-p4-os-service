@@ -1,0 +1,60 @@
+# Stack local do OS Service: API + PostgreSQL 16 proprio (banco `os`).
+# Uso: `make compose-up` (build + migracoes + admin seed) e `make compose-down`.
+# Todos os valores abaixo sao de DEMONSTRACAO para dev local; em qualquer
+# ambiente exposto entram por Secret e o boot com ENVIRONMENT=production
+# recusa estes literais (validar_segredos_no_startup).
+services:
+  api:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        GIT_DATE: ${GIT_DATE:-unknown}
+    image: ${APP_IMAGE:-pytstop-os-service:dev}
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://pytstop:pytstop@postgres:5432/os
+      - JWT_SECRET=demo-jwt-secret-os-service-fase4-nao-usar-em-producao
+      - ENCRYPTION_KEY=Chqh4o4QURACWBUSdtXjAxhOQt6HhxAfEg9rtvsABKU=  # gitleaks:allow (chave Fernet de demo)
+      - RUN_MIGRATIONS_ON_STARTUP=true
+      - RUN_SEED_ON_STARTUP=true
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@pytstop.dev}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin-demo-os-2026}  # gitleaks:allow (senha de demo)
+      - API_METRICS_ENABLED=${API_METRICS_ENABLED:-true}
+      - OTEL_ENABLED=${OTEL_ENABLED:-false}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/saude', timeout=2).status==200 else 1)"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    # Sem porta publicada no host: a API e a interface; para inspecionar,
+    # `docker compose exec postgres psql -U pytstop os`.
+    environment:
+      - POSTGRES_DB=os
+      - POSTGRES_USER=pytstop
+      - POSTGRES_PASSWORD=pytstop
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pytstop -d os"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

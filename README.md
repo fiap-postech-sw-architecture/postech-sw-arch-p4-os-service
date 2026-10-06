@@ -1,10 +1,46 @@
 # PytStop fase 4: OS Service
 
-Serviço de ordens de serviço: abertura, status e histórico da OS, cadastro de clientes e veículos, usuários internos (emissão de JWT) e orquestrador da saga de atendimento. Banco próprio: PostgreSQL.
+Serviço de ordens de serviço: abertura, status e histórico da OS, cadastro de clientes e veículos (com LGPD), usuários internos (emissão de JWT) e, nos próximos PRs, orquestrador da saga de atendimento. Banco próprio: PostgreSQL 16.
 
 Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT): o PytStop, sistema de gestão de oficina mecânica das fases anteriores, refatorado em microsserviços com Saga Pattern, mensageria assíncrona, CI/CD por serviço e deploy automatizado em Kubernetes.
 
 **Status:** em construção. Este README será substituído pela documentação completa do serviço (arquitetura, fluxos, exemplos de API, testes e cobertura, pipelines).
+
+**Proveniência:** recorte da `main` do PytStop fase 3 (`postech-sw-arch-p3` @ `08dcffe`), só com os contextos deste serviço (`compartilhado`, `cliente_veiculo`, `autenticacao`, `ordem_servico`). Referências `p3 #N` no código apontam para issues e PRs daquele repositório; IDs como `RF-018`, `ADR-020` e `TD-017` são da numeração contínua das fases anteriores (a fase 4 começa em RF-028 e ADR-034).
+
+## O que já existe
+
+- OS da fase 4: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
+- API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}`, `GET /{id}/historico`, `POST /{id}/cancelamento`, `POST /{id}/entrega`, clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
+- Outbox transacional: todo evento da OS é gravado na tabela `outbox` no mesmo commit da mudança.
+- Ainda não: saga, mensageria (RabbitMQ), JWT RS256 com JWKS e manifestos Kubernetes (PRs seguintes).
+
+## Como rodar local
+
+Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/).
+
+```bash
+make compose-up      # build da imagem, PostgreSQL 16, migrações e admin de demonstração
+curl -s localhost:8000/api/v1/saude
+make compose-down    # derruba e apaga o volume
+```
+
+A API sobe em `http://localhost:8000` (porta configurável com `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O usuário de demonstração é `admin@pytstop.dev` com a senha de `ADMIN_PASSWORD` no `docker-compose.yml` (valores só de dev; o boot com `ENVIRONMENT=production` recusa esses literais).
+
+```bash
+TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@pytstop.dev","senha":"admin-demo-os-2026"}' | jq -r .access_token)
+curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN"
+```
+
+## Qualidade
+
+```bash
+make check   # ruff (lint e formato), import-linter, mypy strict, bandit e pytest
+```
+
+`make test` (ou `uv run pytest`) roda os testes unitários e os de integração contra um PostgreSQL efêmero (testcontainers, Docker necessário) com gate de cobertura de 90% (`.coveragerc`). O schema dos testes de integração é criado pela própria migração Alembic.
 
 ## Repositórios da fase 4
 

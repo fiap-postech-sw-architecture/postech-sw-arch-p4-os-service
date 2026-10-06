@@ -1,0 +1,243 @@
+[project]
+name = "pytstop-os-service"
+version = "0.4.0"
+description = "PytStop fase 4 - OS Service: ordens de servico, clientes e veiculos, usuarios internos"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.51.0",
+    "sqlalchemy>=2.0,<2.1",
+    "psycopg2-binary>=2.9",
+    "alembic>=1.14",
+    "pyjwt>=2.15.1",  # 2.13.x tem 27 advisories (bypass de HMAC vazio, forja de token)
+    # Transitiva do starlette; o piso evita resolver versao com advisory (out/2026).
+    "anyio>=4.15.1",
+    "pwdlib[bcrypt]>=0.3.0",
+    "brutils>=2.3,<3",
+    "pydantic[email]>=2.13.4,<3",
+    "structlog>=24.0",
+    "slowapi>=0.1",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+# Observabilidade OTLP + metricas Prometheus. Fora do grupo `dev` de
+# proposito: o codigo que consome estes pacotes (observability.py /
+# metrics.py) importa lazy com try/ImportError, entao flag ligada sem o
+# extra degrada para warning + no-op. A imagem Docker instala o extra.
+otel = [
+    # Par compativel: SDK 1.42.x <-> instrumentation 0.63bx (o sdk exige
+    # semantic-conventions ==0.63bx). Atualizar os 4 juntos, em milestones.
+    "opentelemetry-sdk>=1.42,<1.43",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.42,<1.43",
+    "opentelemetry-instrumentation-fastapi>=0.63b1,<0.64",
+    "opentelemetry-instrumentation-sqlalchemy>=0.63b1,<0.64",
+    "opentelemetry-exporter-prometheus>=0.63b1,<0.64",
+    "prometheus-client>=0.26.0",
+]
+
+[dependency-groups]
+# Ferramentas de desenvolvimento e gates: o uv instala o grupo `dev` por padrao
+# (`uv run pytest`, `uv run ruff check .`) e a imagem o exclui (`--no-dev`).
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    # Teto por teste (config em [tool.pytest.ini_options]): teste de
+    # concorrencia que pendura vira falha visivel em vez de travar o job.
+    "pytest-timeout>=2.3",
+    "testcontainers[postgres]>=4.15.0",
+    "httpx>=0.27",
+    "ruff>=0.16.0",
+    "mypy>=2.3.0",
+    "bandit>=1.7",
+    "import-linter>=2.13",
+]
+
+[build-system]
+requires = ["setuptools>=83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.ruff]
+# Runtime e 3.14, mas o target do ruff fica em py313 DE PROPOSITO: com py314
+# o `ruff format` remove os parenteses de `except (A, B):` (PEP 758), sintaxe
+# que o SonarQube ainda nao parseia. Sem impacto no runtime 3.14.
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "A",   # flake8-builtins
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "RUF", # ruff-specific
+    "S",   # flake8-bandit
+    "PT",  # flake8-pytest-style
+    "ANN",     # flake8-annotations (codigo de prod; ignorado em tests/)
+    "BLE001",  # blind except
+    "FBT001",  # boolean-type-hint-positional-argument
+    "C901",    # complex-structure (mccabe)
+    "PLR2004", # magic-value-comparison
+    "PLR0912", # too-many-branches
+    "PLR0913", # too-many-arguments
+    "PLR0915", # too-many-statements
+    "PLW0603", # global-statement
+    "PYI034",  # non-self-return-type
+    "LOG014",  # exc-info-outside-except-handler
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.flake8-type-checking]
+# Campos de modelos Pydantic sao avaliados em runtime: mover o import da
+# annotation para TYPE_CHECKING quebraria a validacao (TC001 falso-positivo).
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101", "S105", "S106", "TCH", "SIM105", "PT012", "RUF059",
+    "ANN",                                  # tests podem ser destipados
+    "PLR2004",                              # magic values em asserts
+    "PLR0913", "PLR0915", "PLR0912",        # fixtures e factories sao grandes
+    "C901",                                 # tests podem ter setup complexo
+    "FBT001",                               # callsites de stub/fake
+    "BLE001",                               # tests as vezes capturam Exception
+    "LOG014",                               # tests nao usam exc_info
+    "PLW0603",                              # tests podem manipular singletons
+    "PYI034",                               # FakeUnitOfWork etc sao stubs
+]
+"**/exceptions.py" = ["N818"]
+"**/interfaces/schemas.py" = ["S105", "TCH003"]
+"**/interfaces/router*.py" = ["B008"]
+"**/interfaces/middleware.py" = ["B008", "TCH002"]
+"**/interfaces/dependencies.py" = ["B008"]
+"migrations/**" = ["E402"]
+"**/dtos.py" = ["S105"]
+
+# Contratos de arquitetura: a regra de dependencia da Clean Architecture e
+# verificada por lint (`make lint-arch`). `infraestrutura` fica fora do
+# contrato de camadas porque importa `aplicacao`/`dominio` legitimamente
+# (adapters implementam ports das camadas internas); o sentido proibido
+# (dominio e aplicacao -> infraestrutura) e coberto pelo contrato forbidden.
+[tool.importlinter]
+root_packages = ["src"]
+
+[[tool.importlinter.contracts]]
+name = "Camadas Clean por contexto (interfaces -> aplicacao -> dominio)"
+type = "layers"
+layers = ["interfaces", "aplicacao", "dominio"]
+containers = [
+    "src.cliente_veiculo",
+    "src.ordem_servico",
+    "src.autenticacao",
+    "src.compartilhado",
+]
+
+[[tool.importlinter.contracts]]
+name = "Dominio e aplicacao nao importam infraestrutura de nenhum contexto"
+type = "forbidden"
+source_modules = [
+    "src.cliente_veiculo.dominio",
+    "src.ordem_servico.dominio",
+    "src.autenticacao.dominio",
+    "src.compartilhado.dominio",
+    "src.cliente_veiculo.aplicacao",
+    "src.ordem_servico.aplicacao",
+    "src.autenticacao.aplicacao",
+    "src.compartilhado.aplicacao",
+]
+forbidden_modules = [
+    "src.cliente_veiculo.infraestrutura",
+    "src.ordem_servico.infraestrutura",
+    "src.autenticacao.infraestrutura",
+    "src.compartilhado.infraestrutura",
+]
+
+# Independencia entre bounded contexts: o `dominio` e a `aplicacao` de cada
+# contexto nao importam o nucleo de outro; a comunicacao passa por ports/
+# adapters (ACL). Infraestrutura e interfaces (composition roots) cruzam
+# legitimamente, por isso ficam fora. `compartilhado` e o nucleo tecnico.
+[[tool.importlinter.contracts]]
+name = "cliente_veiculo nao acopla no nucleo de outros contextos"
+type = "forbidden"
+source_modules = ["src.cliente_veiculo.dominio", "src.cliente_veiculo.aplicacao"]
+forbidden_modules = [
+    "src.ordem_servico.dominio",
+    "src.ordem_servico.aplicacao",
+    "src.autenticacao.dominio",
+    "src.autenticacao.aplicacao",
+]
+
+[[tool.importlinter.contracts]]
+name = "ordem_servico nao acopla no nucleo de outros contextos"
+type = "forbidden"
+source_modules = ["src.ordem_servico.dominio", "src.ordem_servico.aplicacao"]
+forbidden_modules = [
+    "src.cliente_veiculo.dominio",
+    "src.cliente_veiculo.aplicacao",
+    "src.autenticacao.dominio",
+    "src.autenticacao.aplicacao",
+]
+
+[[tool.importlinter.contracts]]
+name = "autenticacao nao acopla no nucleo de outros contextos"
+type = "forbidden"
+source_modules = ["src.autenticacao.dominio", "src.autenticacao.aplicacao"]
+forbidden_modules = [
+    "src.cliente_veiculo.dominio",
+    "src.cliente_veiculo.aplicacao",
+    "src.ordem_servico.dominio",
+    "src.ordem_servico.aplicacao",
+]
+
+[tool.mypy]
+strict = true
+python_version = "3.14"
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "brutils.*",
+    "pwdlib.*",
+    "slowapi.*",
+    "structlog.*",
+    "testcontainers.*",
+    "cryptography.*",
+]
+ignore_missing_imports = true
+
+# O gate roda mypy com o grupo `dev` (sem o extra `otel`): os imports lazy de
+# observability.py / metrics.py apontam para pacotes ausentes nesse ambiente.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.*", "prometheus_client.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = [
+    "integracao: testes de integracao (Postgres via testcontainers)",
+    "lento: testes que sobem container proprio ou demoram mais de 1s",
+]
+# `uv run pytest` e o gate completo: unitarios + integracao com cobertura e
+# fail_under do .coveragerc. Para rodar um subconjunto sem o gate, use --no-cov.
+addopts = "--strict-markers --cov=src --cov-report=term-missing:skip-covered"
+testpaths = ["tests"]
+# Teto por teste: regressao de concorrencia vira falha em ~120s em vez de
+# pendurar o job.
+timeout = 120
+
+[tool.bandit]
+targets = ["src", "scripts"]
