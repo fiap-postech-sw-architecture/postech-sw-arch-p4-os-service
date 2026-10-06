@@ -92,8 +92,8 @@ _AMBIENTES_SEM_VALIDACAO_DE_SEGREDOS = frozenset({"development", "test"})
 _JWT_SECRET_MIN_BYTES = 32
 
 # Literais de segredo de DEMONSTRACAO publicos no git -- proibidos em producao.
-# Fonte: docker-compose.yml. Mantenha em sincronia quando um default de demo
-# mudar ou quando k8s/ ganhar um Secret de demo.
+# Fonte: docker-compose.yml e .env.example. Mantenha em sincronia quando um
+# default de demo mudar ou quando k8s/ ganhar um Secret de demo.
 _SEGREDOS_DEMO_PROIBIDOS = frozenset(
     {
         "demo-jwt-secret-os-service-fase4-nao-usar-em-producao",

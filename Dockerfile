@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1.7
-# Builder e runtime usam a MESMA minor do Python (3.14, igual ao
-# .python-version): o venv copiado carrega bytecode e wheels compilados para
-# a versao do builder.
-FROM ghcr.io/astral-sh/uv:0.9-python3.14-bookworm-slim AS builder
+# Builder e runtime na MESMA base (python:3.14-slim): o venv copiado carrega
+# bytecode e wheels compilados para o Python e a glibc do builder. O uv entra
+# so como binario, e usa o Python da base (sem baixar outro).
+FROM python:3.14-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /bin/uv
 
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
+    UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
 WORKDIR /app
@@ -43,7 +46,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # UID/GID numericos (1001): o kubelet so verifica runAsNonRoot com UID numerico.
-RUN groupadd -r -g 1001 pytstop && useradd -r -u 1001 -g pytstop pytstop
+# Sem shell de login: o usuario so roda o processo da API.
+RUN groupadd -r -g 1001 pytstop \
+    && useradd -r -u 1001 -g pytstop -s /usr/sbin/nologin pytstop
 
 # Sem pip no runtime: o app roda so pelo venv do uv e nunca instala nada em
 # execucao; o pip da base traz pacotes vendorizados que o trivy audita.
@@ -51,7 +56,9 @@ RUN python -m pip uninstall -y pip
 
 WORKDIR /app
 
-COPY --from=builder --chown=pytstop:pytstop /app /app
+# Codigo e venv ficam com o root: o usuario 1001 le e executa, mas nao
+# reescreve o proprio codigo (o bytecode ja vem compilado do builder).
+COPY --from=builder /app /app
 
 # ENVIRONMENT=production por padrao: a imagem sobe com a guarda de segredos
 # ligada; so o compose local (e os testes) declaram development.

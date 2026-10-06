@@ -984,6 +984,15 @@ class TestValidarSegredosNoStartupProducao:
             assert literal in compose
         assert f"POSTGRES_PASSWORD: {_SENHA_DO_BANCO_DEMO}" in compose
 
+    def test_env_example_usa_os_mesmos_literais_de_demo(self) -> None:
+        # O .env.example (rodar fora do compose) repete os valores do compose:
+        # o denylist tambem os cobre.
+        raiz = Path(__file__).resolve().parents[2]
+        exemplo = (raiz / ".env.example").read_text()
+        for literal in (_DEMO_JWT_SECRET, _DEMO_ENC_KEY, _DEMO_ADMIN_PASSWORD):
+            assert f"={literal}  # gitleaks:allow" in exemplo
+        assert f"POSTGRES_PASSWORD={_SENHA_DO_BANCO_DEMO}  #" in exemplo
+
     def test_senha_do_banco_de_demo_em_producao_levanta(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

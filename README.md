@@ -34,6 +34,16 @@ TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
 curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN"
 ```
 
+Fora do compose (API no host, com `--reload`), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração:
+
+```bash
+docker run -d --name os-postgres -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_DB=os -e POSTGRES_USER=pytstop -e POSTGRES_PASSWORD=pytstop postgres:16
+cp .env.example .env && set -a && . ./.env && set +a
+uv run alembic upgrade head && uv run python scripts/seed_admin.py
+uv run python -m src.main   # http://127.0.0.1:8000
+```
+
 ## Qualidade
 
 ```bash

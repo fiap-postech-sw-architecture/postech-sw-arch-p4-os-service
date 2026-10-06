@@ -19,8 +19,9 @@ services:
         GIT_DATE: ${GIT_DATE:-unknown}
     image: ${APP_IMAGE:-pytstop-os-service:dev}
     restart: unless-stopped
+    # So no loopback: o admin e as senhas de demo sao publicos no repo.
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
