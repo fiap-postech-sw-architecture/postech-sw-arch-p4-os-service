@@ -66,8 +66,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     database_url = resolver_database_url()
 
     # Guardas de segredos: fora de dev/test, aborta o boot com segredo
-    # ausente, fraco ou de demonstracao (a chave RSA do JWT tem guarda
-    # propria, no contexto que a usa). Rodam antes de criar o engine.
+    # ausente, fraco ou de demonstracao (o JWT tem guarda propria, para a chave
+    # RSA e a validade, no contexto que o usa). Rodam antes de criar o engine.
     validar_segredos_no_startup()
     validar_chave_jwt_no_startup()
 

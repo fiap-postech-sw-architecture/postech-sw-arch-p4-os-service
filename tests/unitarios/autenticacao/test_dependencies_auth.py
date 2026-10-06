@@ -12,7 +12,9 @@ from src.autenticacao.infraestrutura.jwt_service import (
     kid_da_chave,
 )
 from src.autenticacao.interfaces.dependencies import (
-    KID_DA_CHAVE_DEMO,
+    ACCESS_MAXIMO_MINUTOS,
+    KIDS_DAS_CHAVES_DEMO,
+    REFRESH_MAXIMO_MINUTOS,
     obter_jwt_service,
     obter_login,
     obter_logout,
@@ -29,6 +31,7 @@ from tests.chaves_jwt import (
     pem_demo_do_env_example,
     pem_privado,
     pem_publico,
+    validade_em_segundos,
 )
 
 
@@ -87,6 +90,74 @@ class TestObterJwtService:
         assert jwt.get_unverified_header(token)["kid"] == KID
 
 
+class TestConfiguracaoDoJwt:
+    """Chave e validade do ambiente: valor ruim e erro do servidor, nunca 4xx."""
+
+    @pytest.mark.parametrize(
+        ("nome", "valor"),
+        [
+            pytest.param("JWT_EXPIRATION_MINUTES", "abc", id="access-texto"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "", id="access-vazio"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "0", id="access-zero"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "-5", id="access-negativo"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "61", id="access-acima-do-teto"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "525600", id="access-de-1-ano"),
+            pytest.param(
+                "JWT_EXPIRATION_MINUTES",
+                "99999999999999",
+                id="access-estoura-timedelta",
+            ),
+            pytest.param("JWT_REFRESH_EXPIRATION_MINUTES", "xx", id="refresh-texto"),
+            pytest.param("JWT_REFRESH_EXPIRATION_MINUTES", "0", id="refresh-zero"),
+            pytest.param(
+                "JWT_REFRESH_EXPIRATION_MINUTES", "43201", id="refresh-acima-do-teto"
+            ),
+        ],
+    )
+    def test_validade_fora_dos_limites_e_erro_do_servidor(
+        self, ambiente: pytest.MonkeyPatch, nome: str, valor: str
+    ) -> None:
+        # RuntimeError, nunca ValueError: o handler de ValueError responderia 422
+        # em todo login e a validade de 1 ano passaria pela guarda de boot.
+        ambiente.setenv(nome, valor)
+        with pytest.raises(RuntimeError, match=nome):
+            obter_jwt_service()
+
+    def test_validade_nos_tetos_vale(self, ambiente: pytest.MonkeyPatch) -> None:
+        ambiente.setenv("JWT_EXPIRATION_MINUTES", str(ACCESS_MAXIMO_MINUTOS))
+        ambiente.setenv("JWT_REFRESH_EXPIRATION_MINUTES", str(REFRESH_MAXIMO_MINUTOS))
+        svc = obter_jwt_service()
+
+        access = svc.validar_token(svc.gerar_access_token(uuid4(), "admin"))
+        refresh = svc.validar_token(svc.gerar_refresh_token(uuid4()))
+
+        assert validade_em_segundos(access) == ACCESS_MAXIMO_MINUTOS * 60
+        assert validade_em_segundos(refresh) == REFRESH_MAXIMO_MINUTOS * 60
+
+    @pytest.mark.parametrize(
+        "borda",
+        [
+            pytest.param("\n", id="so-quebra-de-linha"),
+            pytest.param(" ", id="so-espaco"),
+            pytest.param("\r\n", id="crlf"),
+        ],
+    )
+    def test_anterior_so_com_espaco_e_como_sem_anterior(
+        self, ambiente: pytest.MonkeyPatch, borda: str
+    ) -> None:
+        # Um Secret criado com `echo` guarda uma quebra de linha: nao aborta o boot.
+        ambiente.setenv("JWT_PREVIOUS_PUBLIC_KEY", borda)
+        assert [c["kid"] for c in obter_jwt_service().jwks()["keys"]] == [KID]
+
+    def test_pem_com_quebra_de_linha_nas_pontas_vale(
+        self, ambiente: pytest.MonkeyPatch
+    ) -> None:
+        ambiente.setenv("JWT_PRIVATE_KEY", f"\n{CHAVE_PEM}\n")
+        ambiente.setenv("JWT_PREVIOUS_PUBLIC_KEY", f"{pem_publico(OUTRA_CHAVE)}\r\n")
+        kids = [c["kid"] for c in obter_jwt_service().jwks()["keys"]]
+        assert kids == [KID, OUTRO_KID]
+
+
 class TestFactoriesDosCasosDeUso:
     @pytest.mark.usefixtures("ambiente")
     @pytest.mark.parametrize(
@@ -130,6 +201,30 @@ class TestGuardaDeBootDaChaveJwt:
         with pytest.raises(RuntimeError, match=erro):
             validar_chave_jwt_no_startup()
 
+    @pytest.mark.parametrize(
+        ("nome", "valor"),
+        [
+            pytest.param("JWT_EXPIRATION_MINUTES", "525600", id="access-de-1-ano"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "trinta", id="access-texto"),
+            pytest.param("JWT_REFRESH_EXPIRATION_MINUTES", "-5", id="refresh-negativo"),
+        ],
+    )
+    def test_producao_com_validade_fora_dos_limites_aborta(
+        self, ambiente: pytest.MonkeyPatch, nome: str, valor: str
+    ) -> None:
+        ambiente.setenv("ENVIRONMENT", "production")
+        ambiente.setenv(nome, valor)
+        with pytest.raises(RuntimeError, match=nome):
+            validar_chave_jwt_no_startup()
+
+    def test_producao_com_validade_padrao_passa(
+        self, ambiente: pytest.MonkeyPatch
+    ) -> None:
+        ambiente.setenv("ENVIRONMENT", "production")
+        ambiente.setenv("JWT_EXPIRATION_MINUTES", "15")
+        ambiente.setenv("JWT_REFRESH_EXPIRATION_MINUTES", "10080")
+        validar_chave_jwt_no_startup()
+
     def test_producao_com_chave_de_menos_de_2048_bits_aborta(
         self, ambiente: pytest.MonkeyPatch
     ) -> None:
@@ -160,4 +255,4 @@ class TestGuardaDeBootDaChaveJwt:
         # chave de demonstracao, e e ela que a guarda recusa.
         for pem in (pem_demo_do_compose(), pem_demo_do_env_example()):
             chave = carregar_chave_privada(pem)
-            assert kid_da_chave(chave.public_key()) == KID_DA_CHAVE_DEMO
+            assert kid_da_chave(chave.public_key()) in KIDS_DAS_CHAVES_DEMO

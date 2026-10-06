@@ -15,7 +15,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import jwt
@@ -92,6 +92,11 @@ def claims(**extras: object) -> dict[str, object]:
         "exp": agora + timedelta(hours=1),
         **extras,
     }
+
+
+def validade_em_segundos(payload: Mapping[str, object]) -> int:
+    """``exp - iat`` das claims de um token validado (NumericDate, inteiros)."""
+    return cast("int", payload["exp"]) - cast("int", payload["iat"])
 
 
 def assinar(

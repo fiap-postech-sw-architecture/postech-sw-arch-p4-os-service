@@ -819,12 +819,7 @@ _CHAVE_FERNET = Fernet.generate_key().decode()
 def _set_segredos_validos(monkeypatch: pytest.MonkeyPatch) -> None:
     """Define segredos fortes/nao-demo; cada teste corrompe so o que testa."""
     monkeypatch.setenv("ENCRYPTION_KEY", _CHAVE_FERNET)
-    for nome in (
-        "DATABASE_URL",
-        "JWT_EXPIRATION_MINUTES",
-        "JWT_REFRESH_EXPIRATION_MINUTES",
-    ):
-        monkeypatch.delenv(nome, raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
 
 
 class TestValidarSegredosNoStartupProducao:
@@ -891,32 +886,6 @@ class TestValidarSegredosNoStartupProducao:
         monkeypatch.setenv("ENCRYPTION_KEY", chave)
         with pytest.raises(RuntimeError, match="ENCRYPTION_KEY invalida"):
             validar_segredos_no_startup()
-
-    @pytest.mark.parametrize(
-        ("nome", "valor"),
-        [
-            pytest.param("JWT_EXPIRATION_MINUTES", "trinta", id="access-texto"),
-            pytest.param("JWT_EXPIRATION_MINUTES", "0", id="access-zero"),
-            pytest.param("JWT_REFRESH_EXPIRATION_MINUTES", "-5", id="refresh-neg"),
-        ],
-    )
-    def test_minutos_de_jwt_invalidos_em_producao_levantam(
-        self, monkeypatch: pytest.MonkeyPatch, nome: str, valor: str
-    ) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv(nome, valor)
-        with pytest.raises(RuntimeError, match=nome):
-            validar_segredos_no_startup()
-
-    def test_minutos_de_jwt_validos_em_producao_passam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv("JWT_EXPIRATION_MINUTES", "15")
-        monkeypatch.setenv("JWT_REFRESH_EXPIRATION_MINUTES", "10080")
-        validar_segredos_no_startup()  # nao deve levantar
 
     def test_admin_password_demo_em_producao_levanta(
         self, monkeypatch: pytest.MonkeyPatch

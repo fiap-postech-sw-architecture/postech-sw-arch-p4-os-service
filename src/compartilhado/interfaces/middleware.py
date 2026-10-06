@@ -98,9 +98,6 @@ _SEGREDOS_DEMO_PROIBIDOS = frozenset(
 # Senha do Postgres de demonstracao (compose), comparada com a da DATABASE_URL.
 _SENHA_DO_BANCO_DEMO = "pytstop"  # gitleaks:allow - senha do compose local
 
-# Validade dos tokens: inteiros positivos (minutos), lidos a cada request.
-_VARIAVEIS_DE_MINUTOS_JWT = ("JWT_EXPIRATION_MINUTES", "JWT_REFRESH_EXPIRATION_MINUTES")
-
 
 def validar_segredos_no_startup() -> None:
     """Valida os segredos sensiveis no startup; aborta o boot em producao.
@@ -113,10 +110,10 @@ def validar_segredos_no_startup() -> None:
     2. ``ENCRYPTION_KEY`` / ``ADMIN_PASSWORD`` iguais a um literal de
        demonstracao publico no git -> aborta (cada um so quando presente);
        idem para a senha do Postgres de demo na ``DATABASE_URL``.
-    3. ``ENCRYPTION_KEY`` que nao e chave Fernet, ou minutos de JWT que nao
-       sao inteiros positivos -> aborta.
+    3. ``ENCRYPTION_KEY`` que nao e chave Fernet -> aborta.
 
-    A chave RSA do JWT tem guarda propria (``validar_chave_jwt_no_startup``).
+    A guarda da chave RSA do JWT e da validade dos tokens fica no contexto que
+    os usa (``validar_chave_jwt_no_startup``).
 
     Falha o boot (``raise``), nao apenas avisa: pre-condicao de seguranca
     nao satisfeita nunca sobe aceitando requisicoes. Fora de producao e no-op.
@@ -159,8 +156,7 @@ def _validar_formatos_de_configuracao() -> None:
     """Configuracao malformada aborta o boot, nao vira 4xx na primeira request.
 
     Sem isto, uma ``ENCRYPTION_KEY`` invalida subia o app e o primeiro
-    documento devolvia 422 (erro de configuracao com cara de erro do cliente),
-    e minutos de JWT nao numericos virariam 500 em todo login.
+    documento devolvia 422 (erro de configuracao com cara de erro do cliente).
     """
     try:
         Fernet(os.environ["ENCRYPTION_KEY"])
@@ -170,17 +166,6 @@ def _validar_formatos_de_configuracao() -> None:
             "base64 url-safe, gere com Fernet.generate_key())."
         )
         raise RuntimeError(msg) from exc
-    for nome in _VARIAVEIS_DE_MINUTOS_JWT:
-        bruto = os.environ.get(nome)
-        if bruto is None:
-            continue
-        try:
-            minutos = int(bruto)
-        except ValueError:
-            minutos = 0
-        if minutos <= 0:
-            msg = f"{nome} precisa ser um inteiro positivo (minutos)."
-            raise RuntimeError(msg)
 
 
 def configurar_cors(app: FastAPI) -> None:

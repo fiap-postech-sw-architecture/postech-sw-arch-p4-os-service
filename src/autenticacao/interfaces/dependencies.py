@@ -37,9 +37,33 @@ def obter_token_revogado_repo(session: Session) -> TokenRevogadoRepository:
     return TokenRevogadoSQLAlchemyRepository(session=session)
 
 
-# kid (RFC 7638) da chave RSA de demonstracao do docker-compose.yml e do
-# .env.example: publica no git, recusada fora de development/test.
-KID_DA_CHAVE_DEMO: Final = "VmyReO-ecFv1-Etlmu9FZASx9UzxX_BJlxxPB4PUYVY"
+# kids (RFC 7638) das chaves RSA de demonstracao do docker-compose.yml e do
+# .env.example: publicas no git, recusadas fora de development/test. So cresce:
+# ao trocar a chave de demonstracao, o kid da antiga fica aqui, porque ela
+# continua no historico do git.
+KIDS_DAS_CHAVES_DEMO: Final = frozenset({"VmyReO-ecFv1-Etlmu9FZASx9UzxX_BJlxxPB4PUYVY"})
+
+# Tetos da validade dos tokens (ADR-039): o access circula entre os servicos e so
+# o OS consulta a revogacao, entao a expiracao curta e o limite; o refresh vale
+# ate 30 dias.
+ACCESS_MAXIMO_MINUTOS: Final = 60
+REFRESH_MAXIMO_MINUTOS: Final = 30 * 24 * 60
+
+
+def _minutos_do_ambiente(nome: str, padrao: int, maximo: int) -> int:
+    """Validade em minutos de ``nome``: inteiro de 1 a ``maximo``.
+
+    Valor ruim e erro de configuracao do servidor (``RuntimeError``), nunca um
+    4xx de quem chamou, nem um ``OverflowError`` no primeiro login.
+    """
+    try:
+        minutos = int(os.environ.get(nome, str(padrao)))
+    except ValueError:
+        minutos = 0
+    if not 0 < minutos <= maximo:
+        msg = f"{nome} precisa ser um inteiro de 1 a {maximo} (minutos)"
+        raise RuntimeError(msg)
+    return minutos
 
 
 def obter_jwt_service() -> JWTService:
@@ -52,10 +76,14 @@ def obter_jwt_service() -> JWTService:
     revogacao; nos demais o limite e a expiracao curta.
     """
     return _jwt_service(
-        os.environ.get("JWT_PRIVATE_KEY", ""),
-        os.environ.get("JWT_PREVIOUS_PUBLIC_KEY", ""),
-        int(os.environ.get("JWT_EXPIRATION_MINUTES", "15")),
-        int(os.environ.get("JWT_REFRESH_EXPIRATION_MINUTES", "10080")),
+        # Sem espaco nas pontas: um Secret criado com `echo` traz uma quebra de
+        # linha, e so isso nao pode derrubar o boot.
+        os.environ.get("JWT_PRIVATE_KEY", "").strip(),
+        os.environ.get("JWT_PREVIOUS_PUBLIC_KEY", "").strip(),
+        _minutos_do_ambiente("JWT_EXPIRATION_MINUTES", 15, ACCESS_MAXIMO_MINUTOS),
+        _minutos_do_ambiente(
+            "JWT_REFRESH_EXPIRATION_MINUTES", 10080, REFRESH_MAXIMO_MINUTOS
+        ),
     )
 
 
@@ -88,16 +116,18 @@ def _jwt_service(
 
 
 def validar_chave_jwt_no_startup() -> None:
-    """Fora de development/test, aborta o boot sem chave RSA utilizavel.
+    """Fora de development/test, aborta o boot sem configuracao de JWT utilizavel.
 
     Chave ausente, ilegivel, que nao e RSA, com menos de 2048 bits ou igual a
     de demonstracao (publica no git), como atual ou como anterior: um token
-    assinado com a chave de demonstracao seria aceito pelos tres servicos.
+    assinado com a chave de demonstracao seria aceito pelos tres servicos. Aborta
+    tambem com validade fora dos limites (access de 1 a 60 min, refresh de 1 min
+    a 30 dias).
     """
     if os.environ.get("ENVIRONMENT", "development").lower() in AMBIENTES_DEV:
         return
     kids = {chave["kid"] for chave in obter_jwt_service().jwks()["keys"]}
-    if KID_DA_CHAVE_DEMO in kids:
+    if kids & KIDS_DAS_CHAVES_DEMO:
         msg = (
             "JWT_PRIVATE_KEY ou JWT_PREVIOUS_PUBLIC_KEY usa a chave RSA de "
             "demonstracao, publica no git: proibida fora de development/test. "
