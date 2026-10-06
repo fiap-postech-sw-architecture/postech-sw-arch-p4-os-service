@@ -161,7 +161,7 @@ def _cliente_com_rotas() -> TestClient:
             "/so-post",
             405,
             "METODO_NAO_PERMITIDO",
-            "Metodo nao permitido",
+            "Metodo nao permitido para este recurso",
             id="metodo-errado",
         ),
         pytest.param(

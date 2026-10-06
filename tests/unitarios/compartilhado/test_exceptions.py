@@ -63,7 +63,7 @@ class TestExceptionsEspecificas:
             (
                 AcessoNegadoException,
                 "ACESSO_NEGADO",
-                "Papel nao autorizado",
+                "Papel nao autorizado para esta operacao",
             ),
         ],
     )

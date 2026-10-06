@@ -79,5 +79,7 @@ class AcessoNegadoException(DomainException):
     (``FalhaAutenticacaoException``), nao esta.
     """
 
-    def __init__(self, mensagem: str = "Papel nao autorizado") -> None:
+    def __init__(
+        self, mensagem: str = "Papel nao autorizado para esta operacao"
+    ) -> None:
         super().__init__(codigo="ACESSO_NEGADO", mensagem=mensagem)

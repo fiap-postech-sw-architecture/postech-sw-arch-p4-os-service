@@ -266,7 +266,7 @@ class TestEnvelopeDoGateNaRota:
         assert resp.json() == {
             "erro": {
                 "codigo": "ACESSO_NEGADO",
-                "mensagem": "Papel nao autorizado",
+                "mensagem": "Papel nao autorizado para esta operacao",
                 "id_requisicao": resp.headers["X-Request-ID"],
             }
         }
@@ -287,7 +287,7 @@ class TestExigirPapel:
             verificar({"papel": "atendente", "sub": "123"})  # type: ignore[operator]
         assert (exc.value.codigo, exc.value.mensagem) == (
             "ACESSO_NEGADO",
-            "Papel nao autorizado",
+            "Papel nao autorizado para esta operacao",
         )
 
     def test_multiplos_papeis_permitidos(self) -> None:
