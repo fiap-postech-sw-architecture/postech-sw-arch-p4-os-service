@@ -18,14 +18,14 @@ from src.cliente_veiculo.aplicacao.lgpd_use_cases import (
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
 from src.cliente_veiculo.dominio.exceptions import (
     ClienteNaoEncontradoException,
     ConsentimentoNaoEncontradoException,
 )
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
+from src.compartilhado.dominio.placa import Placa
 from tests.unitarios.fakes import FakeUnitOfWork
 
 CPF_VALIDO = "21249722519"

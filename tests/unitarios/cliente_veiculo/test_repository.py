@@ -45,7 +45,7 @@ class TestClienteSQLAlchemyRepository:
         assert hasattr(ClienteSQLAlchemyRepository, "placa_existe")
 
     def test_placa_existe_retorna_true(self) -> None:
-        from src.cliente_veiculo.dominio.placa import Placa
+        from src.compartilhado.dominio.placa import Placa
 
         session = MagicMock()
         session.scalar.return_value = 1
@@ -53,7 +53,7 @@ class TestClienteSQLAlchemyRepository:
         assert repo.placa_existe(Placa(valor="ABC1D23")) is True
 
     def test_placa_existe_retorna_false(self) -> None:
-        from src.cliente_veiculo.dominio.placa import Placa
+        from src.compartilhado.dominio.placa import Placa
 
         session = MagicMock()
         session.scalar.return_value = 0
@@ -61,7 +61,7 @@ class TestClienteSQLAlchemyRepository:
         assert repo.placa_existe(Placa(valor="ABC1D23")) is False
 
     def test_placa_existe_com_exclusao_de_cliente(self) -> None:
-        from src.cliente_veiculo.dominio.placa import Placa
+        from src.compartilhado.dominio.placa import Placa
 
         session = MagicMock()
         session.scalar.return_value = 0
@@ -71,7 +71,7 @@ class TestClienteSQLAlchemyRepository:
         assert result is False
 
     def test_placa_existe_retorna_false_quando_none(self) -> None:
-        from src.cliente_veiculo.dominio.placa import Placa
+        from src.compartilhado.dominio.placa import Placa
 
         session = MagicMock()
         session.scalar.return_value = None
@@ -87,7 +87,7 @@ class TestClienteSQLAlchemyRepository:
         session.scalars.assert_called_once()
 
     def test_obter_por_documento_usa_hash(self) -> None:
-        from src.cliente_veiculo.dominio.cpf import CPF
+        from src.compartilhado.dominio.cpf import CPF
 
         session = MagicMock()
         cliente_mock = MagicMock()
@@ -98,7 +98,7 @@ class TestClienteSQLAlchemyRepository:
         session.scalars.assert_called_once()
 
     def test_obter_por_documento_retorna_none_quando_nao_encontra(self) -> None:
-        from src.cliente_veiculo.dominio.cpf import CPF
+        from src.compartilhado.dominio.cpf import CPF
 
         session = MagicMock()
         session.scalars.return_value.first.return_value = None

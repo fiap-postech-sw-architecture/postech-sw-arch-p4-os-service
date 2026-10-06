@@ -7,8 +7,8 @@ if TYPE_CHECKING:
 
     from src.cliente_veiculo.dominio.cliente import Cliente
     from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
-    from src.cliente_veiculo.dominio.documento import Documento
-    from src.cliente_veiculo.dominio.placa import Placa
+    from src.compartilhado.dominio.documento import Documento
+    from src.compartilhado.dominio.placa import Placa
 
 
 class ClienteRepository(Protocol):

@@ -41,7 +41,7 @@ _PRIORIDADE_STATUS: Final = {
 _PRIORIDADE_ENCERRADAS: Final = 9
 # Mesma normalizacao do contexto Cliente+Veiculo: documento so com digitos e
 # placa em maiusculas sem hifen, senao a entrada mascarada nao casa.
-_NAO_DIGITO: Final = re.compile(r"\D")
+_NAO_DIGITO: Final = re.compile(r"\D", re.ASCII)
 
 
 class OrdemDeServicoSQLAlchemyRepository:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.cliente_veiculo.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cnpj import CNPJ
 
 CNPJ_VALIDO = "11222333000181"
 
@@ -27,6 +27,19 @@ class TestCNPJ:
     def test_cnpj_invalido_vazio(self) -> None:
         with pytest.raises(ValueError, match="CNPJ invalido"):
             CNPJ(numero="")
+
+    def test_cnpj_com_digitos_de_outro_alfabeto_e_rejeitado(self) -> None:
+        arabe_indico = "".join(chr(0x0660 + int(d)) for d in CNPJ_VALIDO)
+        with pytest.raises(ValueError, match="CNPJ invalido"):
+            CNPJ(numero=arabe_indico)
+
+    def test_dv_em_outro_alfabeto_e_rejeitado_mesmo_com_o_brutils_aceitando(
+        self,
+    ) -> None:
+        """O brutils le o DV com ``int()``, que aceita digito arabe-indico."""
+        dv_arabe_indico = "".join(chr(0x0660 + int(d)) for d in CNPJ_VALIDO[12:])
+        with pytest.raises(ValueError, match="CNPJ invalido"):
+            CNPJ(numero=CNPJ_VALIDO[:12] + dv_arabe_indico)
 
     def test_cnpj_invalido_todos_iguais(self) -> None:
         with pytest.raises(ValueError, match="CNPJ invalido"):
@@ -71,6 +84,33 @@ class TestCNPJ:
         r = repr(cnpj)
         assert "**.***.***/**01-81" in r
         assert CNPJ_VALIDO not in r
+
+
+CNPJ_ALFANUMERICO = "12ABC34501DE35"
+
+
+class TestCNPJAlfanumerico:
+    """CNPJ com letras (IN RFB 2.229/2024), emitido desde julho de 2026."""
+
+    def test_aceita_com_mascara_e_normaliza(self) -> None:
+        assert CNPJ(numero="12.ABC.345/01DE-35").numero == CNPJ_ALFANUMERICO
+
+    def test_minusculas_viram_maiusculas(self) -> None:
+        assert CNPJ(numero="12.abc.345/01de-35").numero == CNPJ_ALFANUMERICO
+
+    def test_dv_errado_e_rejeitado(self) -> None:
+        with pytest.raises(ValueError, match="CNPJ invalido"):
+            CNPJ(numero="12ABC34501DE36")
+
+    def test_letra_no_dv_e_rejeitada(self) -> None:
+        with pytest.raises(ValueError, match="CNPJ invalido"):
+            CNPJ(numero="12ABC34501DE3A")
+
+    def test_formatado_e_mascarado(self) -> None:
+        cnpj = CNPJ(numero=CNPJ_ALFANUMERICO)
+        assert cnpj.formatado() == "12.ABC.345/01DE-35"
+        assert cnpj.mascarado() == "**.***.***/**DE-35"
+        assert CNPJ_ALFANUMERICO not in repr(cnpj)
 
 
 def _digitos_verificadores(base: str) -> str:

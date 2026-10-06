@@ -56,7 +56,7 @@ class TestDocumentoAnonimizado:
         assert str(cid) in r
 
     def test_satisfaz_protocolo_documento(self) -> None:
-        from src.cliente_veiculo.dominio.documento import Documento
+        from src.compartilhado.dominio.documento import Documento
 
         doc: Documento = DocumentoAnonimizado(cliente_id=uuid4())
         # Acesso aos tres membros do Protocol nao deve levantar.

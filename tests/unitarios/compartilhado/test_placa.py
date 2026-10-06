@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.placa import Placa
 
 
 class TestPlaca:
@@ -41,6 +41,16 @@ class TestPlaca:
     def test_invalida_vazia(self) -> None:
         with pytest.raises(ValueError, match="Placa invalida"):
             Placa(valor="")
+
+    def test_digitos_de_outro_alfabeto_sao_rejeitados(self) -> None:
+        arabe_indico = "".join(chr(0x0660 + int(d)) for d in "1234")
+        with pytest.raises(ValueError, match="Placa invalida"):
+            Placa(valor="ABC" + arabe_indico)
+
+    def test_quebra_de_linha_final_e_rejeitada(self) -> None:
+        """``$`` casa antes do ``\\n`` final; a validacao usa ``fullmatch``."""
+        with pytest.raises(ValueError, match="Placa invalida"):
+            Placa(valor="ABC1234\n")
 
     def test_igualdade_mesmo_valor(self) -> None:
         a = Placa(valor="ABC1234")

@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.orm import Session
 
-    from src.cliente_veiculo.dominio.documento import Documento
-    from src.cliente_veiculo.dominio.placa import Placa
+    from src.compartilhado.dominio.documento import Documento
+    from src.compartilhado.dominio.placa import Placa
 
 
 class ClienteSQLAlchemyRepository:

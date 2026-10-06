@@ -21,17 +21,17 @@ from src.cliente_veiculo.aplicacao.use_cases import (
     RemoverVeiculo,
 )
 from src.cliente_veiculo.dominio.cliente import Cliente
-from src.cliente_veiculo.dominio.cnpj import CNPJ
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.exceptions import (
     ClienteNaoEncontradoException,
     DocumentoDuplicadoException,
     PlacaDuplicadaException,
     VeiculoNaoEncontradoException,
 )
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
+from src.compartilhado.dominio.placa import Placa
 from tests.unitarios.fakes import FakeUnitOfWork
 
 CPF_VALIDO = "21249722519"

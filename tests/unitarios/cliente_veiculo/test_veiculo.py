@@ -5,8 +5,8 @@ from uuid import uuid4
 import pytest
 
 from src.cliente_veiculo.dominio import veiculo as veiculo_module
-from src.cliente_veiculo.dominio.placa import Placa
 from src.cliente_veiculo.dominio.veiculo import Veiculo
+from src.compartilhado.dominio.placa import Placa
 
 _ANO_CONGELADO = 2030
 

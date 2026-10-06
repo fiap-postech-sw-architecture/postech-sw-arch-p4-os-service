@@ -7,17 +7,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from src.cliente_veiculo.dominio.cliente import Cliente
-from src.cliente_veiculo.dominio.cnpj import CNPJ
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
-from src.cliente_veiculo.dominio.placa import Placa
 from src.cliente_veiculo.infraestrutura import mapping as mapping_module
 from src.cliente_veiculo.infraestrutura.mapping import (
     clientes_table,
     iniciar_mapeamentos,
     veiculos_table,
 )
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.infraestrutura.database import metadata
 
 

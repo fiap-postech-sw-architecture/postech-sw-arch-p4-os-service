@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from brutils.cnpj import is_valid
 
-from src.cliente_veiculo.dominio.documento import normalizar_e_validar
+from src.compartilhado.dominio.documento import normalizar_cnpj, normalizar_e_validar
 from src.compartilhado.dominio.value_object import ValueObject
 
 
@@ -12,16 +12,16 @@ from src.compartilhado.dominio.value_object import ValueObject
 class CNPJ(ValueObject):
     """Value Object de CNPJ brasileiro.
 
-    Valida via `brutils.cnpj.is_valid`, normaliza removendo mascara, e expoe
+    Valida via `brutils.cnpj.is_valid`, inclusive o CNPJ alfanumerico (letras
+    nas 12 primeiras posicoes), normaliza sem mascara e em maiusculas, e expoe
     formatacao `XX.XXX.XXX/XXXX-XX` e mascaramento (LGPD). Imutavel.
     """
 
     numero: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "numero", normalizar_e_validar(self.numero, "CNPJ", is_valid)
-        )
+        numero = normalizar_e_validar(self.numero, "CNPJ", normalizar_cnpj, is_valid)
+        object.__setattr__(self, "numero", numero)
 
     def formatado(self) -> str:
         """Retorna o CNPJ no padrao `XX.XXX.XXX/XXXX-XX`."""

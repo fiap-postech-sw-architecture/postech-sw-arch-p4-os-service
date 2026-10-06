@@ -18,12 +18,12 @@ from fastapi.testclient import TestClient
 from src.autenticacao.interfaces.middleware import obter_usuario_atual
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
-from src.cliente_veiculo.dominio.placa import Placa
 from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
 from src.cliente_veiculo.infraestrutura.repository import ClienteSQLAlchemyRepository
 from src.cliente_veiculo.interfaces.router import router
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.interfaces.dependencies import obter_session
 
 if TYPE_CHECKING:

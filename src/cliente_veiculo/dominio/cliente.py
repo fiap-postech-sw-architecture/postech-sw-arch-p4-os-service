@@ -22,8 +22,8 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from src.cliente_veiculo.dominio.contato import Contato
-    from src.cliente_veiculo.dominio.documento import Documento
-    from src.cliente_veiculo.dominio.placa import Placa
+    from src.compartilhado.dominio.documento import Documento
+    from src.compartilhado.dominio.placa import Placa
 
 
 @dataclass(eq=False)

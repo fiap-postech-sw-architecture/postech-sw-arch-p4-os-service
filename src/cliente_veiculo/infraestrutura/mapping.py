@@ -15,14 +15,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import registry, relationship
 
 from src.cliente_veiculo.dominio.cliente import Cliente
-from src.cliente_veiculo.dominio.cnpj import CNPJ
 from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
-from src.cliente_veiculo.dominio.placa import Placa
 from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
 from src.cliente_veiculo.dominio.veiculo import Veiculo
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.infraestrutura.database import metadata
 from src.compartilhado.infraestrutura.encryption import EncryptionService
 

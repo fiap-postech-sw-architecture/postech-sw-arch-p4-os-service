@@ -24,8 +24,8 @@ import pytest
 
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
 from src.ordem_servico.infraestrutura.repository import (

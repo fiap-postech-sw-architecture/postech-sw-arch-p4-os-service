@@ -8,6 +8,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Recent decisions
 
+- 2026-10-06 - Proveniencia do recorte passa a `p3 @ 08dcffe + fc06263` (p3 #32, normalizacao ASCII de CPF/CNPJ, mergeado depois do ponto de corte). CPF, CNPJ, Placa e o contrato `Documento` moram em `compartilhado.dominio` com um helper unico de normalizacao (`documento.py`): o acompanhamento publico da OS valida com eles sem importar o nucleo de `cliente_veiculo` (import-linter) - review deep do PR #2
 - 2026-10-06 - Recorte do p3 @ 08dcffe (PR do recorte): contextos `compartilhado`, `cliente_veiculo`, `autenticacao`, `ordem_servico`; fora `catalogo_servicos`, `estoque`, `ui`, `relay`, `full-test`, `infra`, `k8s`, notificacao por e-mail (sem relay ninguem a dispara), DLQ admin da outbox, papel `CLIENTE` e `/minhas-ordens` (token da Lambda da fase 3), store Redis do rate limit (limite agregado e do Kong) e o JSON `/ordens-de-servico/metricas` (dashboards usam `/metrics`). Referencias `p3 #N` no codigo apontam para o repo do p3
 - 2026-10-06 - Concorrencia da OS por lock otimista (`version_id_col` = `ordens_de_servico.versao`; `StaleDataError` -> `ConflitoDeConcorrenciaException` -> 409 no `salvar`), sem o `FOR UPDATE` do p3: e o *reread value* do brief secao 2. Um unico `StatusDaOrdemAlteradoEvent` (de, para, origem) por transicao + `OrdemAbertaEvent`; `motivo` e `descricao_problema` ficam fora do payload da outbox (texto livre, potencial PII)
 - 2026-10-06 - Acompanhamento publico: `POST /api/v1/publico/acompanhamento` com placa+documento no corpo e 404 `{"detail": "Ordem nao encontrada"}` identico ao p3 (anti-enumeracao). O brief listava GET por engano (correcao do coordenador)
@@ -24,6 +25,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Gotchas
 
+- 2026-10-06 - O `\D`/`\d` do Python sao Unicode: sem `re.ASCII`, digitos arabe-indicos passavam na normalizacao de CPF/CNPJ e no formato da placa, e o `brutils` os aceita (no CNPJ, ate so no DV: `int()` le U+0668 como 8). O mesmo documento em outro alfabeto viraria outro `documento_hash` e furaria a UK. `compartilhado/dominio/documento.py` usa `re.ASCII` e exige resultado ASCII; a placa usa `fullmatch` (o `$` casa antes do `\n` final)
 - 2026-10-06 - Falha de flush (`StaleDataError` do lock otimista) expira a instancia: ler `ordem.id` depois exige rollback (`PendingRollbackError`). Capture ids antes do `flush`
 - 2026-10-06 - `structlog.testing.capture_logs` nao intercepta o `_log` de modulo ja cacheado por um `configurar_logging()` anterior (os testes de integracao rodam o lifespan antes dos unitarios): monkeypatch `<modulo>._log` com `structlog.get_logger()` no teste
 - 2026-10-06 - `app.dependency_overrides[dep] = MagicMock` (a classe) faz o FastAPI ler `*args/**kw` da assinatura como query params obrigatorios (422 em tudo): use `lambda: MagicMock()`
@@ -33,6 +35,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Tech debt / TODO
 
+- 2026-10-06 - RESOLVIDO - CNPJ alfanumerico agora e aceito (normalizacao com `brutils.cnpj.remove_symbols` + `upper()`). Corrige a premissa da entrada abaixo: o `brutils` 2.5.0 do lock ja validava o formato novo; quem descartava as letras era a normalizacao `\D`
 - 2026-10-06 - LOW - Eventos de log herdados do p3 estao em portugues (`dados_pessoais_exportados_via_admin`, `dominio_excecao_tratada`, ...) contra `canonical/language.md` (logs em ingles); eventos novos ja saem em ingles (`order_cancelled_via_api`). Renomear junto com as queries do Loki/dashboards quando a observabilidade entrar
 - 2026-10-06 - MEDIUM - CNPJ alfanumerico (IN RFB 2.229/2024, emitido desde jul/2026) e rejeitado: a normalizacao herdada do p3 descarta letras antes do `brutils`. Avaliar suporte quando o brutils cobrir o formato novo
 - 2026-10-06 - LOW - `StatusPagamento` so tem `SOLICITADO`: confirmado/recusado/expirado/estornado entram com os handlers da saga, junto do metodo de dominio que atualiza o resumo sem transicao de status

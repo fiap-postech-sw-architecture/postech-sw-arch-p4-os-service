@@ -10,9 +10,7 @@ from src.cliente_veiculo.aplicacao.dtos import (
     VeiculoDTO,
 )
 from src.cliente_veiculo.dominio.cliente import Cliente
-from src.cliente_veiculo.dominio.cnpj import CNPJ
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
 from src.cliente_veiculo.dominio.exceptions import (
     ClienteNaoEncontradoException,
@@ -20,8 +18,10 @@ from src.cliente_veiculo.dominio.exceptions import (
     PlacaDuplicadaException,
     VeiculoNaoEncontradoException,
 )
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
+from src.compartilhado.dominio.placa import Placa
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -32,10 +32,10 @@ if TYPE_CHECKING:
         CriarClienteDTO,
     )
     from src.cliente_veiculo.aplicacao.ports import OrdemDeServicoPort
-    from src.cliente_veiculo.dominio.documento import Documento
     from src.cliente_veiculo.dominio.repository import ClienteRepository
     from src.cliente_veiculo.dominio.veiculo import Veiculo
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
+    from src.compartilhado.dominio.documento import Documento
 
 
 # ----- DTO mapping helpers -----

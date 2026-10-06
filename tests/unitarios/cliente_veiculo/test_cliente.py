@@ -5,15 +5,15 @@ from uuid import uuid4
 import pytest
 
 from src.cliente_veiculo.dominio.cliente import Cliente
-from src.cliente_veiculo.dominio.cnpj import CNPJ
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.exceptions import (
     PlacaDuplicadaException,
     VeiculoNaoEncontradoException,
 )
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
+from src.compartilhado.dominio.placa import Placa
 
 CPF_VALIDO = "21249722519"
 CNPJ_VALIDO = "11222333000181"

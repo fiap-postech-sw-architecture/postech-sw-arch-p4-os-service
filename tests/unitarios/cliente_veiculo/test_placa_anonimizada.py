@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from src.cliente_veiculo.dominio.placa import Placa
 from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
+from src.compartilhado.dominio.placa import Placa
 
 
 class TestPlacaAnonimizada:

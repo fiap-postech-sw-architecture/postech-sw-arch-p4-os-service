@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from src.compartilhado.dominio.entity import Entity
 
 if TYPE_CHECKING:
-    from src.cliente_veiculo.dominio.placa import Placa
     from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
+    from src.compartilhado.dominio.placa import Placa
 
 ANO_PRIMEIRO_CARRO = 1886
 _ANOS_FUTURO_PERMITIDO = 1  # veiculo pode ser de ate o proximo ano-modelo

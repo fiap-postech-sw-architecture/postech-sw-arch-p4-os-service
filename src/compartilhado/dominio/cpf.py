@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from brutils.cpf import is_valid
 
-from src.cliente_veiculo.dominio.documento import normalizar_e_validar
+from src.compartilhado.dominio.documento import normalizar_cpf, normalizar_e_validar
 from src.compartilhado.dominio.value_object import ValueObject
 
 
@@ -12,16 +12,15 @@ from src.compartilhado.dominio.value_object import ValueObject
 class CPF(ValueObject):
     """Value Object de CPF brasileiro.
 
-    Valida via `brutils.cpf.is_valid`, normaliza removendo mascara, e expoe
+    Valida via `brutils.cpf.is_valid`, normaliza para digitos ASCII, e expoe
     formatacao `XXX.XXX.XXX-XX` e mascaramento `***.***.***-XX` (LGPD).
     """
 
     numero: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "numero", normalizar_e_validar(self.numero, "CPF", is_valid)
-        )
+        numero = normalizar_e_validar(self.numero, "CPF", normalizar_cpf, is_valid)
+        object.__setattr__(self, "numero", numero)
 
     def formatado(self) -> str:
         """Retorna o CPF no padrao `XXX.XXX.XXX-XX`."""

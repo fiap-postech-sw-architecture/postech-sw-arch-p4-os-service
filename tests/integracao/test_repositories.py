@@ -8,11 +8,11 @@ import pytest
 from src.autenticacao.dominio.papel import Papel
 from src.autenticacao.dominio.usuario import Usuario
 from src.cliente_veiculo.dominio.cliente import Cliente
-from src.cliente_veiculo.dominio.cnpj import CNPJ
 from src.cliente_veiculo.dominio.contato import Contato
-from src.cliente_veiculo.dominio.cpf import CPF
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
-from src.cliente_veiculo.dominio.placa import Placa
+from src.compartilhado.dominio.cnpj import CNPJ
+from src.compartilhado.dominio.cpf import CPF
+from src.compartilhado.dominio.placa import Placa
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -269,6 +269,24 @@ class TestClienteRepository:
         assert isinstance(resultado.documento, CNPJ)
         assert resultado.documento.numero == "11222333000181"
 
+    def test_cnpj_alfanumerico_persiste_e_e_achado_pelo_hash(
+        self, session: Session
+    ) -> None:
+        from src.cliente_veiculo.infraestrutura.repository import (
+            ClienteSQLAlchemyRepository,
+        )
+
+        repo = ClienteSQLAlchemyRepository(session=session)
+        cliente = _criar_cliente_cnpj(session, cnpj_numero="12.ABC.345/01DE-35")
+        session.expire_all()
+
+        resultado = repo.obter_por_documento(CNPJ(numero="12abc34501de35"))
+
+        assert resultado is not None
+        assert resultado.id == cliente.id
+        assert isinstance(resultado.documento, CNPJ)
+        assert resultado.documento.numero == "12ABC34501DE35"
+
     def test_obter_por_documento_cpf(self, session: Session) -> None:
         from src.cliente_veiculo.infraestrutura.repository import (
             ClienteSQLAlchemyRepository,
@@ -476,11 +494,11 @@ class TestClienteRepository:
     ) -> None:
         """p3 #72: a anonimizacao neutraliza a placa (PII) dos veiculos do cliente e
         preserva a linha/FK (historico de OS por veiculo_id intacto)."""
-        from src.cliente_veiculo.dominio.placa import Placa
         from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
         from src.cliente_veiculo.infraestrutura.repository import (
             ClienteSQLAlchemyRepository,
         )
+        from src.compartilhado.dominio.placa import Placa
 
         repo = ClienteSQLAlchemyRepository(session=session)
         cliente = _criar_cliente_cpf(session, cpf_numero="93214407473")
@@ -509,11 +527,11 @@ class TestClienteRepository:
     ) -> None:
         """p3 #72: o tombstone por-veiculo (ANONIMIZADO:{id}) mantem a UNIQUE da
         placa quando dois veiculos (de clientes distintos) sao anonimizados."""
-        from src.cliente_veiculo.dominio.placa import Placa
         from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
         from src.cliente_veiculo.infraestrutura.repository import (
             ClienteSQLAlchemyRepository,
         )
+        from src.compartilhado.dominio.placa import Placa
 
         repo = ClienteSQLAlchemyRepository(session=session)
         cliente_a = _criar_cliente_cpf(session, cpf_numero="21249722519")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.cliente_veiculo.dominio.cpf import CPF
+from src.compartilhado.dominio.cpf import CPF
 
 CPF_VALIDO = "21249722519"
 
@@ -31,6 +31,16 @@ class TestCPF:
     def test_cpf_invalido_vazio(self) -> None:
         with pytest.raises(ValueError, match="CPF invalido"):
             CPF(numero="")
+
+    def test_cpf_com_digitos_de_outro_alfabeto_e_rejeitado(self) -> None:
+        """Mesmo CPF valido em digitos arabe-indicos viraria um segundo cadastro.
+
+        O brutils aceita esses digitos; sem a normalizacao ASCII-only o
+        ``documento_hash`` seria outro e a UK nao barraria a duplicidade.
+        """
+        arabe_indico = "".join(chr(0x0660 + int(d)) for d in CPF_VALIDO)
+        with pytest.raises(ValueError, match="CPF invalido"):
+            CPF(numero=arabe_indico)
 
     def test_formatado(self) -> None:
         cpf = CPF(numero=CPF_VALIDO)

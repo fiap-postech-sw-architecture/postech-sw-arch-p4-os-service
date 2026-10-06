@@ -3,10 +3,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from src.compartilhado.dominio.documento import normalizar_placa
 from src.compartilhado.dominio.value_object import ValueObject
 
-_PADRAO_ANTIGA = re.compile(r"^[A-Z]{3}\d{4}$")
-_PADRAO_MERCOSUL = re.compile(r"^[A-Z]{3}\d[A-Z]\d{2}$")
+# re.ASCII: sem a flag, \d aceitaria digitos de outros alfabetos e a mesma
+# placa teria duas grafias distintas sob a UNIQUE de veiculos.placa.
+_PADRAO_ANTIGA = re.compile(r"[A-Z]{3}\d{4}", re.ASCII)
+_PADRAO_MERCOSUL = re.compile(r"[A-Z]{3}\d[A-Z]\d{2}", re.ASCII)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,8 +23,8 @@ class Placa(ValueObject):
     valor: str
 
     def __post_init__(self) -> None:
-        valor = self.valor.upper().replace("-", "")
-        if not (_PADRAO_ANTIGA.match(valor) or _PADRAO_MERCOSUL.match(valor)):
+        valor = normalizar_placa(self.valor)
+        if not (_PADRAO_ANTIGA.fullmatch(valor) or _PADRAO_MERCOSUL.fullmatch(valor)):
             # Sem ecoar o valor: placa e PII e o handler global de ValueError
             # devolve str(exc) no corpo do 422 (TD-033/p3 #126).
             msg = "Placa invalida"
