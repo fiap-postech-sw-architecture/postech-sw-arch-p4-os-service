@@ -137,9 +137,12 @@ def refresh(
 @router_jwks.get(
     "/.well-known/jwks.json",
     summary="Chaves publicas que validam os tokens (JWKS)",
+    # O response_model valida o que o servico monta: um JWKS inconsistente e
+    # erro do servidor (500), nao 422 de quem chamou.
+    response_model=JwksResponse,
 )
 @limiter.limit("60/minute")
-async def jwks(request: Request, response: Response) -> JwksResponse:
+async def jwks(request: Request, response: Response) -> dict[str, list[dict[str, str]]]:
     """JWK Set (RFC 7517) com a chave de assinatura e, na rotacao, a anterior.
 
     Publico, sem token: Billing e Execucao validam os JWT localmente com estas
@@ -147,4 +150,4 @@ async def jwks(request: Request, response: Response) -> JwksResponse:
     consumidores. ``async`` para responder mesmo com o threadpool cheio.
     """
     response.headers["Cache-Control"] = "public, max-age=600"
-    return JwksResponse.model_validate(obter_jwt_service().jwks())
+    return obter_jwt_service().jwks()

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from jwt.utils import base64url_decode
 
 from scripts.validar_token import validar_access_token
+from src.autenticacao.infraestrutura.jwt_service import JWTService
 from src.main import criar_app
 from tests.chaves_jwt import (
     CHAVE,
@@ -101,6 +102,37 @@ class TestRotaJwks:
         monkeypatch.setenv("JWT_PREVIOUS_PUBLIC_KEY", pem_publico(OUTRA_CHAVE))
         chaves = TestClient(criar_app()).get(_JWKS).json()["keys"]
         assert [c["kid"] for c in chaves] == [KID, OUTRO_KID]
+
+
+class TestFalhaInternaDoJwks:
+    """Erro ao montar o JWKS e erro do servidor (500, sem cache), nunca 422."""
+
+    def test_jwks_inconsistente_responde_500_sem_cache(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bug do servico, nao do cliente: a validacao do response_model falha e
+        # o handler de ValueError (422) nao pode alcanca-la.
+        monkeypatch.setattr(
+            JWTService, "jwks", lambda _self: {"keys": [{"kty": "RSA"}]}
+        )
+
+        resp = TestClient(criar_app(), raise_server_exceptions=False).get(_JWKS)
+
+        assert resp.status_code == 500
+        assert resp.headers["Cache-Control"] == "no-store"
+        assert resp.json()["erro"]["codigo"] == "ERRO_INTERNO"
+        assert "RSA" not in resp.text
+
+    def test_chave_ausente_responde_500_sem_cache(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("JWT_PRIVATE_KEY")
+
+        resp = TestClient(criar_app(), raise_server_exceptions=False).get(_JWKS)
+
+        assert resp.status_code == 500
+        assert resp.headers["Cache-Control"] == "no-store"
+        assert resp.json()["erro"]["codigo"] == "ERRO_INTERNO"
 
 
 class TestValidadorIndependente:
