@@ -27,6 +27,11 @@ reports/
 # Credencial de cluster (deploy no kind/k3s do ADR-042) nunca entra no git.
 kubeconfig*
 *-kubeconfig
+# Chave RSA do JWT e qualquer outra chave privada em arquivo: vai para o Secret,
+# nunca para o repositorio. A chave de demonstracao nao e arquivo: esta no
+# compose e no .env.example, com o gitleaks:allow.
+*.pem
+*.key
 
 # Editores e SO
 .idea/
