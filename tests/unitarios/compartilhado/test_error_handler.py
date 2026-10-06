@@ -176,6 +176,14 @@ def test_value_error_com_pii_na_mensagem_redigida_no_corpo() -> None:
     assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
 
 
+def test_value_error_com_cnpj_alfanumerico_na_mensagem_redigido_no_corpo() -> None:
+    client = _criar_app_com_excecao(ValueError("CNPJ 12.ABC.345/01DE-35 recusado"))
+    resp = client.get("/test")
+    assert resp.status_code == 422
+    assert "12.ABC.345/01DE-35" not in resp.text
+    assert "**.***.345/****-**" in resp.json()["erro"]["mensagem"]
+
+
 def test_value_error_request_id_fallback_quando_ausente() -> None:
     client = _criar_app_com_excecao(ValueError("CPF invalido"))
     resp = client.get("/test")

@@ -74,6 +74,24 @@ class TestLogging:
         result = scrub_pii(None, "info", event_dict)
         assert "12345678000190" not in str(result["event"])
 
+    @pytest.mark.parametrize(
+        "cnpj",
+        [
+            pytest.param("12.ABC.345/01DE-35", id="formatado"),
+            pytest.param("12ABC34501DE35", id="sem-pontuacao"),
+        ],
+    )
+    def test_scrub_cnpj_alfanumerico(self, cnpj: str) -> None:
+        event_dict: dict[str, object] = {"event": f"CNPJ {cnpj}"}
+        result = scrub_pii(None, "info", event_dict)
+        assert result["event"] == "CNPJ **.***.345/****-**"
+
+    def test_scrub_nao_mascara_endereco_de_memoria_de_repr(self) -> None:
+        # Os repr de objeto trazem 0x + 12 hexa minusculos: nao e CNPJ.
+        evento = "<Sessao object at 0x7f3a9c2b1d10>"
+        event_dict: dict[str, object] = {"event": evento}
+        assert scrub_pii(None, "info", event_dict)["event"] == evento
+
     def test_scrub_recursivo_em_dict_aninhado(self) -> None:
         event_dict: dict[str, object] = {
             "payload": {

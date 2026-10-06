@@ -33,7 +33,13 @@ def adicionar_versao_imagem(
 
 
 _CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
-_CNPJ_PATTERN = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b")
+# CNPJ numerico ou alfanumerico (IN RFB 2.229/2024): letras maiusculas e digitos
+# nas 12 primeiras posicoes, so digitos nas 2 ultimas. Sem minusculas de
+# proposito: `normalizar_cnpj` entrega maiusculas, e minusculas tambem casariam
+# com enderecos de memoria dos reprs (`0x7f3a9c2b1d10`).
+_CNPJ_PATTERN = re.compile(
+    r"\b[0-9A-Z]{2}\.?[0-9A-Z]{3}\.?[0-9A-Z]{3}/?[0-9A-Z]{4}-?\d{2}\b"
+)
 # Dominio casado label a label (`.` fora da classe) -- correcao do hotspot S5852
 # (backtracking polinomial): o scrubber roda sobre o event_dict inteiro,
 # tracebacks inclusos, sem cap de tamanho.
