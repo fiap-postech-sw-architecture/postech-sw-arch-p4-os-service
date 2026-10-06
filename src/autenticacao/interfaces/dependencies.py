@@ -70,10 +70,11 @@ def obter_jwt_service() -> JWTService:
     """Servico de tokens com a chave RSA e as validades do ambiente.
 
     ``JWT_PRIVATE_KEY``: chave privada RSA em PEM, de 2048 bits ou mais (Secret
-    no cluster). ``JWT_PREVIOUS_PUBLIC_KEY``, opcional: a publica da chave
-    anterior, so publicada e aceita na validacao durante a rotacao. Access de
-    15 min (ADR-039): o token circula entre os servicos e so o OS consulta a
-    revogacao; nos demais o limite e a expiracao curta.
+    no cluster). ``JWT_PREVIOUS_PUBLIC_KEY``, opcional: a publica da chave que
+    entra (etapa 1 da rotacao) ou da que sai (etapa 2); so e publicada e aceita
+    na validacao, nunca assina. Access de 15 min (ADR-039): o token circula
+    entre os servicos e so o OS consulta a revogacao; nos demais o limite e a
+    expiracao curta.
     """
     return _jwt_service(
         # Sem espaco nas pontas: um Secret criado com `echo` traz uma quebra de

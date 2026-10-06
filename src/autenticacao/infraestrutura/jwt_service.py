@@ -148,13 +148,17 @@ class JWTService:
         self._refresh_expiracao_minutos = refresh_expiracao_minutos
 
     def gerar_access_token(self, usuario_id: UUID, papel: str) -> str:
-        # Sem e-mail: o token circula entre os servicos (ADR-039).
+        """Access token do usuario, com o ``papel`` e a validade curta do access.
+
+        Sem e-mail: o token circula entre os servicos (ADR-039).
+        """
         return self._assinar(
             {"sub": str(usuario_id), "papel": papel, "type": "access"},
             self._expiracao_minutos,
         )
 
     def gerar_refresh_token(self, usuario_id: UUID) -> str:
+        """Refresh token do usuario: so ``sub``, sem ``papel``, com a validade longa."""
         return self._assinar(
             {"sub": str(usuario_id), "type": "refresh"}, self._refresh_expiracao_minutos
         )

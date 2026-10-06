@@ -46,13 +46,20 @@ class UsuarioResponse(BaseModel):
 class JwkResponse(BaseModel):
     """Chave publica RSA de assinatura (RFC 7517); os campos privados nao existem."""
 
-    kty: str
-    use: str
-    alg: str
-    kid: str
-    n: str
-    e: str
+    kty: str = Field(description="Tipo da chave: sempre RSA.")
+    use: str = Field(description="Uso da chave: sig, so assinatura.")
+    alg: str = Field(description="Algoritmo dos tokens: RS256.")
+    kid: str = Field(
+        description="Identificador da chave: o thumbprint da RFC 7638, que o "
+        "cabecalho de cada token repete."
+    )
+    n: str = Field(description="Modulo da chave publica, em base64url.")
+    e: str = Field(description="Expoente publico, em base64url.")
 
 
 class JwksResponse(BaseModel):
-    keys: list[JwkResponse]
+    """JWK Set (RFC 7517): as chaves publicas que validam os tokens do servico."""
+
+    keys: list[JwkResponse] = Field(
+        description="A chave que assina em primeiro lugar e, na rotacao, a outra."
+    )

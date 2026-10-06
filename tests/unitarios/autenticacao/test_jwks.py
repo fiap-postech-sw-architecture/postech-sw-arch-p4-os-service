@@ -81,6 +81,14 @@ class TestRotaJwks:
         assert [r.status_code for r in respostas] == [200] * 60 + [429]
         assert respostas[-1].json()["erro"]["codigo"] == "RATE_LIMIT_EXCEDIDO"
 
+    def test_swagger_documenta_o_cache_control_que_a_rota_devolve(self) -> None:
+        app = criar_app()
+        resposta_200 = app.openapi()["paths"][_JWKS]["get"]["responses"]["200"]
+
+        documentado = resposta_200["headers"]["Cache-Control"]["schema"]["example"]
+
+        assert TestClient(app).get(_JWKS).headers["Cache-Control"] == documentado
+
     def test_rota_roda_no_event_loop(self) -> None:
         # A docstring promete responder mesmo com o threadpool cheio: so vale se a
         # rota for async (com o limite do SlowAPI por cima).

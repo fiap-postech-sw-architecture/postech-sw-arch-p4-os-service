@@ -1,10 +1,13 @@
-"""Valida um access token do OS Service como Billing e Execucao validam (ADR-039).
+"""Valida um access token do OS Service como um consumidor o valida (ADR-039).
 
-So usa o PyJWT, nada do codigo do servico: busca o JWKS publico com o
-``PyJWKClient`` (cache de 10 min, timeout de 2 s), escolhe a chave pelo ``kid``
-e confere assinatura RS256, ``iss``, ``aud``, ``exp`` (leeway de 10 s) e
-``type=access``. O ``make smoke`` roda este script dentro do container com o
-token do login do admin semeado; os testes o usam como validador independente.
+E o modelo da conferencia que Billing e Execucao fazem, so com o PyJWT e a
+biblioteca padrao, nada do codigo do servico: busca o JWKS publico por HTTP,
+escolhe a chave pelo ``kid`` e confere assinatura RS256, ``iss``, ``aud``,
+``exp`` (leeway de 10 s) e ``type=access``. Os consumidores reais guardam o
+JWKS num cache proprio (copia fresca por 10 min, copia antiga por ate 1 h e um
+circuit breaker); aqui o ``PyJWKClient`` busca uma vez e e descartado. O
+``make smoke`` roda este script dentro do container com o token do login do
+admin semeado; os testes o usam como validador independente.
 
 Uso: ``python scripts/validar_token.py <url-base> < arquivo-com-o-token``
 """
