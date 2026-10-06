@@ -53,9 +53,12 @@ WORKDIR /app
 
 COPY --from=builder --chown=pytstop:pytstop /app /app
 
+# ENVIRONMENT=production por padrao: a imagem sobe com a guarda de segredos
+# ligada; so o compose local (e os testes) declaram development.
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    ENVIRONMENT=production \
     PYTSTOP_GIT_SHA="${GIT_SHA}" \
     PYTSTOP_GIT_DATE="${GIT_DATE}"
 

@@ -4,7 +4,6 @@ import os
 from collections.abc import AsyncGenerator  # noqa: TC003
 from contextlib import asynccontextmanager
 from importlib.metadata import version
-from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI
@@ -18,40 +17,6 @@ from src.compartilhado.interfaces.middleware import (
     validar_segredos_no_startup,
 )
 from src.compartilhado.interfaces.router_publico import router as router_publico
-
-_AMBIENTES_DEV = {"development", "test"}
-
-
-def _database_url_por_variaveis_postgres() -> str:
-    variaveis_obrigatorias = ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD")
-    ausentes = [nome for nome in variaveis_obrigatorias if not os.environ.get(nome)]
-    if ausentes:
-        msg = (
-            f"Variaveis obrigatorias ausentes: {ausentes!r}. Configure POSTGRES_DB, "
-            "POSTGRES_USER e POSTGRES_PASSWORD, ou defina DATABASE_URL."
-        )
-        raise RuntimeError(msg)
-
-    postgres_db = quote(os.environ["POSTGRES_DB"], safe="")
-    postgres_user = quote(os.environ["POSTGRES_USER"], safe="")
-    postgres_password = quote(os.environ["POSTGRES_PASSWORD"], safe="")
-    postgres_host = os.environ.get("POSTGRES_HOST", "localhost")
-    postgres_port = os.environ.get("POSTGRES_PORT", "5432")
-    return (
-        f"postgresql://{postgres_user}:{postgres_password}"
-        f"@{postgres_host}:{postgres_port}/{postgres_db}"
-    )
-
-
-def _obter_database_url(environment: str) -> str:
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url:
-        return database_url
-    if environment in _AMBIENTES_DEV:
-        return _database_url_por_variaveis_postgres()
-
-    msg = "DATABASE_URL obrigatoria quando ENVIRONMENT nao for 'development' ou 'test'."
-    raise RuntimeError(msg)
 
 
 @asynccontextmanager
@@ -87,6 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     from src.compartilhado.infraestrutura.database import (
         criar_engine,
         criar_session_factory,
+        resolver_database_url,
     )
     from src.compartilhado.infraestrutura.observability import configurar_otel
     from src.compartilhado.interfaces.dependencies import (
@@ -96,8 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # DATABASE_URL explicita tem precedencia. Em dev/test, a URL pode ser
     # montada pelas variaveis POSTGRES_* do compose/env local; a senha nunca
     # fica hardcoded no codigo.
-    environment = os.environ.get("ENVIRONMENT", "development").lower()
-    database_url = _obter_database_url(environment)
+    database_url = resolver_database_url()
 
     # Guarda de segredos: em producao, aborta o boot se JWT_SECRET for fraco
     # (< 32 bytes) ou se qualquer segredo de demonstracao publico estiver em
@@ -119,12 +84,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 def criar_app() -> FastAPI:
     """Fabrica o FastAPI com middleware de seguranca, CORS, rate limiting e handlers.
 
-    Docs (`/docs`, `/redoc`) sao desabilitados quando `ENVIRONMENT=production`.
+    Swagger (`/docs`, `/redoc`, `/openapi.json`) fica ligado em todo ambiente:
+    a documentacao da API e entregavel e e publicada na borda (Kong).
     """
-    environment = os.environ.get("ENVIRONMENT", "development").lower()
-    docs_url = "/docs" if environment != "production" else None
-    redoc_url = "/redoc" if environment != "production" else None
-
     application = FastAPI(
         title="PytStop OS Service",
         description=(
@@ -133,8 +95,6 @@ def criar_app() -> FastAPI:
         ),
         version=version("pytstop-os-service"),
         lifespan=lifespan,
-        docs_url=docs_url,
-        redoc_url=redoc_url,
         # Sem 307 para a variante com/sem barra: atras do Kong o Location
         # absoluto sairia com o esquema errado. Rotas de colecao nao tem barra.
         redirect_slashes=False,

@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
 from starlette.testclient import TestClient
@@ -51,6 +52,7 @@ from src.cliente_veiculo.interfaces.schemas import (
 from src.compartilhado.infraestrutura.encryption import EncryptionService
 from src.compartilhado.infraestrutura.logging import scrub_pii
 from src.compartilhado.interfaces.middleware import (
+    _SENHA_DO_BANCO_DEMO,
     SecurityHeadersMiddleware,
     configurar_cors,
     validar_segredos_no_startup,
@@ -899,10 +901,20 @@ _DEMO_ENC_KEY = "Chqh4o4QURACWBUSdtXjAxhOQt6HhxAfEg9rtvsABKU="  # gitleaks:allow
 _DEMO_ADMIN_PASSWORD = "admin-demo-os-2026"  # gitleaks:allow
 
 
+# Chave Fernet valida gerada a cada execucao (a guarda instancia o Fernet).
+_CHAVE_FERNET = Fernet.generate_key().decode()
+
+
 def _set_segredos_validos(monkeypatch: pytest.MonkeyPatch) -> None:
     """Define segredos fortes/nao-demo; cada teste corrompe so o que testa."""
     monkeypatch.setenv("JWT_SECRET", _SEGREDO_FORTE)
-    monkeypatch.setenv("ENCRYPTION_KEY", _SEGREDO_FORTE + "-enc")
+    monkeypatch.setenv("ENCRYPTION_KEY", _CHAVE_FERNET)
+    for nome in (
+        "DATABASE_URL",
+        "JWT_EXPIRATION_MINUTES",
+        "JWT_REFRESH_EXPIRATION_MINUTES",
+    ):
+        monkeypatch.delenv(nome, raising=False)
 
 
 class TestValidarSegredosNoStartupProducao:
@@ -970,6 +982,69 @@ class TestValidarSegredosNoStartupProducao:
         compose = (raiz / "docker-compose.yml").read_text()
         for literal in (_DEMO_JWT_SECRET, _DEMO_ENC_KEY, _DEMO_ADMIN_PASSWORD):
             assert literal in compose
+        assert f"POSTGRES_PASSWORD: {_SENHA_DO_BANCO_DEMO}" in compose
+
+    def test_senha_do_banco_de_demo_em_producao_levanta(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        _set_segredos_validos(monkeypatch)
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            f"postgresql://pytstop:{_SENHA_DO_BANCO_DEMO}@db:5432/os",
+        )
+        with pytest.raises(RuntimeError, match=r"DATABASE_URL.*demonstracao"):
+            validar_segredos_no_startup()
+
+    def test_senha_do_banco_real_em_producao_passa(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        _set_segredos_validos(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://os:s3nh4-real@db:5432/os")
+        validar_segredos_no_startup()  # nao deve levantar
+
+    @pytest.mark.parametrize(
+        "chave",
+        [
+            pytest.param("nao-e-fernet", id="texto"),
+            pytest.param(_SEGREDO_FORTE + "-enc", id="longa-sem-base64"),
+        ],
+    )
+    def test_encryption_key_malformada_em_producao_levanta(
+        self, monkeypatch: pytest.MonkeyPatch, chave: str
+    ) -> None:
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        _set_segredos_validos(monkeypatch)
+        monkeypatch.setenv("ENCRYPTION_KEY", chave)
+        with pytest.raises(RuntimeError, match="ENCRYPTION_KEY invalida"):
+            validar_segredos_no_startup()
+
+    @pytest.mark.parametrize(
+        ("nome", "valor"),
+        [
+            pytest.param("JWT_EXPIRATION_MINUTES", "trinta", id="access-texto"),
+            pytest.param("JWT_EXPIRATION_MINUTES", "0", id="access-zero"),
+            pytest.param("JWT_REFRESH_EXPIRATION_MINUTES", "-5", id="refresh-neg"),
+        ],
+    )
+    def test_minutos_de_jwt_invalidos_em_producao_levantam(
+        self, monkeypatch: pytest.MonkeyPatch, nome: str, valor: str
+    ) -> None:
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        _set_segredos_validos(monkeypatch)
+        monkeypatch.setenv(nome, valor)
+        with pytest.raises(RuntimeError, match=nome):
+            validar_segredos_no_startup()
+
+    def test_minutos_de_jwt_validos_em_producao_passam(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        _set_segredos_validos(monkeypatch)
+        monkeypatch.setenv("JWT_EXPIRATION_MINUTES", "15")
+        monkeypatch.setenv("JWT_REFRESH_EXPIRATION_MINUTES", "10080")
+        validar_segredos_no_startup()  # nao deve levantar
 
     def test_admin_password_demo_em_producao_levanta(
         self, monkeypatch: pytest.MonkeyPatch

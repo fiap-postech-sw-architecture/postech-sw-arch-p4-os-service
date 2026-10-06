@@ -9,6 +9,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 
 from src.autenticacao.dominio.exceptions import (
     CredenciaisInvalidasException,
@@ -25,6 +26,7 @@ from src.compartilhado.dominio.exceptions import (
 )
 from src.compartilhado.infraestrutura.logging import configurar_logging
 from src.compartilhado.interfaces.error_handler import registrar_error_handlers
+from src.compartilhado.interfaces.middleware import SecurityHeadersMiddleware
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -269,3 +271,79 @@ class TestRequestValidationSemEcoDeInput:
         # O `type` do erro (regra violada) e logado; o valor cru nunca.
         assert "string_too_long" in log
         assert "ZZZ-99999" not in log
+
+
+class _DriverError(Exception):
+    """Imita o ``orig`` do psycopg2: mensagem com a linha, pgcode e diag."""
+
+    pgcode = "23505"
+
+    class diag:  # noqa: N801  # mesmo nome do atributo do psycopg2
+        constraint_name = "uq_veiculos_placa"
+
+
+def test_erro_do_driver_loga_so_tipo_pgcode_e_constraint(
+    pipeline_buffer: io.StringIO,
+) -> None:
+    # O DETAIL do Postgres traz os valores da linha: nem a mensagem nem o
+    # traceback vao para o log, so o diagnostico estavel.
+    exc = IntegrityError(
+        "INSERT INTO veiculos (placa) VALUES (%(placa)s)",
+        {"placa": "ABC1D23"},
+        _DriverError("DETAIL:  Key (placa)=(ABC1D23) already exists."),
+    )
+    resp = _criar_app_com_excecao(exc).get("/test")
+
+    assert resp.status_code == 500
+    assert resp.json()["erro"]["codigo"] == "ERRO_INTERNO"
+    log = pipeline_buffer.getvalue()
+    assert "erro_interno" in log
+    assert "_DriverError" in log
+    assert "23505" in log
+    assert "uq_veiculos_placa" in log
+    assert "ABC1D23" not in log
+    assert "Traceback" not in log
+
+
+class TestErroNaoTratadoComHeaders:
+    """O 500 sai pelo SecurityHeadersMiddleware: headers e X-Request-ID."""
+
+    @staticmethod
+    def _client(exc: Exception) -> TestClient:
+        app = FastAPI()
+        registrar_error_handlers(app)
+        app.add_middleware(SecurityHeadersMiddleware)
+
+        @app.get("/test")
+        def _endpoint() -> None:
+            raise exc
+
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_500_leva_os_headers_de_seguranca_e_o_request_id(self) -> None:
+        resp = self._client(RuntimeError("boom")).get(
+            "/test", headers={"X-Request-ID": "req-500"}
+        )
+        assert resp.status_code == 500
+        assert resp.json() == {
+            "erro": {
+                "codigo": "ERRO_INTERNO",
+                "mensagem": "Erro interno do servidor",
+                "id_requisicao": "req-500",
+            }
+        }
+        assert resp.headers["X-Request-ID"] == "req-500"
+        assert resp.headers["X-Content-Type-Options"] == "nosniff"
+        assert resp.headers["Strict-Transport-Security"].startswith("max-age=")
+        assert resp.headers["Content-Security-Policy"] == "default-src 'none'"
+
+    def test_erro_do_driver_pelo_middleware_tambem_sem_os_valores(
+        self, pipeline_buffer: io.StringIO
+    ) -> None:
+        exc = IntegrityError(
+            "INSERT", {"placa": "XYZ9K88"}, _DriverError("Key (placa)=(XYZ9K88)")
+        )
+        resp = self._client(exc).get("/test")
+        assert resp.status_code == 500
+        assert "X-Request-ID" in resp.headers
+        assert "XYZ9K88" not in pipeline_buffer.getvalue()

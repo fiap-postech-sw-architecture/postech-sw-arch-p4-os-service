@@ -135,23 +135,29 @@ class TestLerConfig:
         with pytest.raises(_ConfigError, match="DATABASE_URL"):
             ler_config(env)
 
-    def test_database_url_usa_default_em_dev(self) -> None:
+    @pytest.mark.parametrize("ambiente", ["development", "test"])
+    def test_database_url_montada_de_postgres_em_dev(self, ambiente: str) -> None:
+        # Mesma resolucao da API e do Alembic (sem senha no codigo).
+        env = {
+            "ADMIN_EMAIL": "admin@pytstop.dev",
+            "ADMIN_PASSWORD": "S3nh4-Bem-Forte",
+            "ENVIRONMENT": ambiente,
+            "POSTGRES_DB": "os",
+            "POSTGRES_USER": "app",
+            "POSTGRES_PASSWORD": "senha-dev",
+            "POSTGRES_HOST": "postgres",
+        }
+        db_url, _, _ = ler_config(env)
+        assert db_url == "postgresql://app:senha-dev@postgres:5432/os"
+
+    def test_dev_sem_url_nem_postgres_falha_com_dica(self) -> None:
         env = {
             "ADMIN_EMAIL": "admin@pytstop.dev",
             "ADMIN_PASSWORD": "S3nh4-Bem-Forte",
             "ENVIRONMENT": "development",
         }
-        db_url, _, _ = ler_config(env)
-        assert "localhost:5432" in db_url
-
-    def test_database_url_usa_default_em_test(self) -> None:
-        env = {
-            "ADMIN_EMAIL": "admin@pytstop.dev",
-            "ADMIN_PASSWORD": "S3nh4-Bem-Forte",
-            "ENVIRONMENT": "test",
-        }
-        db_url, _, _ = ler_config(env)
-        assert "localhost:5432" in db_url
+        with pytest.raises(_ConfigError, match="POSTGRES_PASSWORD"):
+            ler_config(env)
 
     def test_retorna_valores_validos_no_happy_path(self) -> None:
         env = {

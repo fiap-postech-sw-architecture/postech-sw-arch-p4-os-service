@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 import structlog
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 
 from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
@@ -159,13 +160,35 @@ def registrar_error_handlers(app: FastAPI) -> None:
     async def _generic_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
-        request_id = _obter_request_id(request)
-        logger.exception("erro_interno", request_id=request_id)
-        return JSONResponse(
-            status_code=500,
-            content=_criar_envelope(
-                "ERRO_INTERNO",
-                "Erro interno do servidor",
-                request_id,
-            ),
+        # Rede de seguranca: o SecurityHeadersMiddleware ja converte o erro
+        # das rotas; aqui so chega o que escapar de um middleware externo.
+        return resposta_erro_interno(request, exc)
+
+
+def resposta_erro_interno(request: Request, exc: Exception) -> JSONResponse:
+    """500 no envelope do contrato, com o erro registrado sem PII.
+
+    Erro do driver (``DBAPIError``) vai para o log so com tipo, ``pgcode`` e
+    constraint: a mensagem do Postgres traz os valores da linha (``DETAIL:
+    Key (placa)=(...)``). Os demais levam o traceback.
+    """
+    request_id = _obter_request_id(request)
+    if isinstance(exc, DBAPIError):
+        diagnostico = getattr(exc.orig, "diag", None)
+        logger.error(
+            "erro_interno",
+            request_id=request_id,
+            erro=type(exc.orig).__name__,
+            pgcode=getattr(exc.orig, "pgcode", None),
+            constraint=getattr(diagnostico, "constraint_name", None),
         )
+    else:
+        logger.error("erro_interno", request_id=request_id, exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content=_criar_envelope(
+            "ERRO_INTERNO",
+            "Erro interno do servidor",
+            request_id,
+        ),
+    )

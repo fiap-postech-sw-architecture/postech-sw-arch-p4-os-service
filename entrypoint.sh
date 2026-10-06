@@ -25,4 +25,6 @@ fi
 # --no-proxy-headers: o trust de X-Forwarded-For e controlado pela app via
 # TRUSTED_PROXIES (ProxyHeadersMiddleware proprio); a flag desliga a camada
 # implicita do uvicorn, que confiaria no XFF de peers loopback.
-exec uvicorn src.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers
+# --no-server-header: sem `server: uvicorn` (nao anuncia a stack).
+exec uvicorn src.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers \
+  --no-server-header

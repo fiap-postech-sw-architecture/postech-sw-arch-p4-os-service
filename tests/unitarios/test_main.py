@@ -108,11 +108,13 @@ class TestMain:
             assert application.docs_url == "/docs"
             assert application.redoc_url == "/redoc"
 
-    def test_docs_url_em_production(self) -> None:
+    def test_docs_ligados_em_production(self) -> None:
+        # Swagger e entregavel e fica na borda em todo ambiente.
         with patch.dict(os.environ, {"ENVIRONMENT": "production"}, clear=False):
             application = criar_app()
-            assert application.docs_url is None
-            assert application.redoc_url is None
+            assert application.docs_url == "/docs"
+            assert application.redoc_url == "/redoc"
+            assert application.openapi_url == "/openapi.json"
 
     def test_executar_servidor_dev_usa_localhost_por_padrao(self) -> None:
         with (

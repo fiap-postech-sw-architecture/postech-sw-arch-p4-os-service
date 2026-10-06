@@ -19,15 +19,20 @@ def configurar_session_factory(factory: Callable[[], Session]) -> None:
     _session_factory = factory
 
 
-def obter_session() -> Generator[Session]:
-    """Dependency FastAPI que abre uma sessao por request e a fecha no teardown.
+def abrir_session() -> Session:
+    """Nova sessao da factory configurada; quem abre fecha (``with``).
 
     Levanta RuntimeError se a factory nao foi configurada.
     """
     if _session_factory is None:
         msg = "Session factory nao configurada"
         raise RuntimeError(msg)
-    session = _session_factory()
+    return _session_factory()
+
+
+def obter_session() -> Generator[Session]:
+    """Dependency FastAPI que abre uma sessao por request e a fecha no teardown."""
+    session = abrir_session()
     try:
         yield session
     finally:

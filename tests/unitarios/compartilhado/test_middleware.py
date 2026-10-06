@@ -714,6 +714,22 @@ class TestSaudeIsentaDeRateLimit:
             )
             assert resp.json() == {"status": "ok"}
 
+    def test_readiness_isenta_nunca_retorna_429_do_mesmo_ip(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A readiness tambem e probe do kubelet: 429 tiraria todo pod do
+        # balanceamento. Sem session factory ela responde 503, nunca 429.
+        from src.compartilhado.interfaces import dependencies
+
+        monkeypatch.setattr(dependencies, "_session_factory", None)
+        limite = 3
+        app = self._criar_app_limite_baixo(monkeypatch, limite=f"{limite}/minute")
+        client = TestClient(app, client=("10.244.0.1", 51000))
+        respostas = {
+            client.get("/api/v1/saude/pronto").status_code for _ in range(limite + 5)
+        }
+        assert respostas == {503}
+
     def test_rota_nao_isenta_ainda_rate_limita_provando_limiter_ativo(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

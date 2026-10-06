@@ -7,7 +7,8 @@ Uso (manual, fora do container):
     python scripts/seed_admin.py       # requer envs exportadas no shell
 
 Variaveis de ambiente obrigatorias:
-    DATABASE_URL     conexao com o PostgreSQL (default dev/test: localhost).
+    DATABASE_URL     conexao com o PostgreSQL (em development/test pode ser
+                     montada de POSTGRES_DB/USER/PASSWORD/HOST/PORT).
     ADMIN_EMAIL      email do admin (normalizado para lowercase automaticamente).
     ADMIN_PASSWORD   senha do admin (>= 12 chars, sem placeholders publicos).
 
@@ -70,16 +71,12 @@ def ler_config(env: dict[str, str] | None = None) -> tuple[str, str, str]:
     source = env if env is not None else dict(os.environ)
     environment = source.get("ENVIRONMENT", "development").lower()
 
-    database_url = source.get("DATABASE_URL")
-    if not database_url:
-        if environment in {"development", "test"}:
-            database_url = "postgresql://pytstop:pytstop@localhost:5432/os"
-        else:
-            msg = (
-                "DATABASE_URL obrigatoria quando ENVIRONMENT nao for "
-                "'development' ou 'test'."
-            )
-            raise _ConfigError(msg)
+    from src.compartilhado.infraestrutura.database import resolver_database_url
+
+    try:
+        database_url = resolver_database_url(source)
+    except RuntimeError as exc:
+        raise _ConfigError(str(exc)) from exc
 
     admin_email = (source.get("ADMIN_EMAIL") or "").strip().lower()
     if not admin_email:
@@ -164,10 +161,11 @@ def main() -> None:
     finally:
         engine.dispose()
 
+    # Sem o e-mail na saida: o log do container e coletado (dado pessoal).
     if criou:
-        print(f"Usuario admin '{admin_email}' criado com sucesso.")
+        print("Usuario admin criado com sucesso.")
     else:
-        print(f"Usuario admin '{admin_email}' ja existe. Nenhuma acao necessaria.")
+        print("Usuario admin ja existe. Nenhuma acao necessaria.")
 
 
 if __name__ == "__main__":

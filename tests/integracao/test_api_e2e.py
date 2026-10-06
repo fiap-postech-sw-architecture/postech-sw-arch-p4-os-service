@@ -97,6 +97,16 @@ def _levar_ate(
         sess.commit()
 
 
+class TestProbes:
+    def test_liveness_e_readiness_com_o_banco_real(
+        self, api_client: TestClient
+    ) -> None:
+        assert api_client.get("/api/v1/saude").json() == {"status": "ok"}
+        pronto = api_client.get("/api/v1/saude/pronto")
+        assert pronto.status_code == 200
+        assert pronto.json() == {"status": "ok"}
+
+
 class TestAutenticacao:
     def test_login_e_rotas_protegidas(
         self, api_client: TestClient, admin_user: Usuario

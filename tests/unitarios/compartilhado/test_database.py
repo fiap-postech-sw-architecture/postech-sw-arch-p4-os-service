@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-import pytest
+from unittest.mock import MagicMock
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
+from src.compartilhado.infraestrutura import database
 from src.compartilhado.infraestrutura.database import (
     criar_engine,
     criar_session_factory,
@@ -64,3 +69,45 @@ class TestDimensionamentoDoPool:
         engine = criar_engine("sqlite:///:memory:")
         assert not hasattr(engine.pool, "_max_overflow")
         engine.dispose()
+
+
+class TestErrosSemDadosDaLinha:
+    """Erro de statement nao leva os valores (placa, nome, texto livre) ao log."""
+
+    @pytest.mark.parametrize("url", [_URL_PG, "sqlite:///:memory:"])
+    def test_engine_esconde_parametros(self, url: str) -> None:
+        engine = criar_engine(url)
+        assert engine.hide_parameters is True
+        engine.dispose()
+
+    def test_mensagem_de_erro_do_statement_sem_os_valores(self) -> None:
+        engine = criar_engine("sqlite:///:memory:")
+        with engine.connect() as conn, pytest.raises(DBAPIError) as erro:
+            conn.execute(
+                text("SELECT * FROM inexistente WHERE placa = :p"), {"p": "ABC1D23"}
+            )
+        engine.dispose()
+        assert "ABC1D23" not in str(erro.value)
+
+
+class TestTempoLimiteDeConexao:
+    """Banco fora falha em segundos, sem prender a request no timeout do TCP."""
+
+    def _connect_args(self, monkeypatch: pytest.MonkeyPatch) -> object:
+        capturado: dict[str, object] = {}
+
+        def _espiao(url: str, **kwargs: object) -> MagicMock:
+            capturado.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(database, "create_engine", _espiao)
+        criar_engine(_URL_PG)
+        return capturado["connect_args"]
+
+    def test_padrao_de_5_segundos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("DB_CONNECT_TIMEOUT", raising=False)
+        assert self._connect_args(monkeypatch) == {"connect_timeout": 5}
+
+    def test_ajustavel_por_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DB_CONNECT_TIMEOUT", "2")
+        assert self._connect_args(monkeypatch) == {"connect_timeout": 2}
