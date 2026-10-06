@@ -17,6 +17,10 @@ class ClienteRepository(Protocol):
         """Busca o cliente pelo id; None se nao existir."""
         pass
 
+    def bloquear_cliente(self, cliente_id: UUID) -> bool:
+        """Trava a linha do cliente (FOR UPDATE) ate o commit; False se nao existe."""
+        pass
+
     def bloquear_veiculo_para_remocao(self, veiculo_id: UUID) -> bool:
         """Trava a linha do veiculo (FOR UPDATE); False se ela ja nao existe."""
         pass

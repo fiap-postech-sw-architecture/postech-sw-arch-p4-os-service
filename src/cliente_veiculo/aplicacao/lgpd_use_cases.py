@@ -10,6 +10,7 @@ from src.cliente_veiculo.aplicacao.dtos import (
 from src.cliente_veiculo.aplicacao.use_cases import (
     obter_cliente_ou_falhar,
     tipo_documento,
+    travar_cliente_sem_os_ativa,
     veiculo_dto,
 )
 from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
@@ -50,9 +51,10 @@ class ExcluirDadosPessoais:
     Alcanca cliente, veiculos e o texto livre das OS dele (descricao do
     problema e motivos de cancelamento), tudo na mesma transacao.
 
-    Espelha o guard de `DesativarCliente`: consulta
-    `OrdemDeServicoPort.existe_os_ativa_para_cliente` antes de apagar e, se
-    houver OS ativa, levanta `ViolacaoRegraDeNegocioException` (409). A LGPD
+    Espelha o guard de `DesativarCliente`: trava o cliente (FOR UPDATE) e
+    consulta `OrdemDeServicoPort.existe_os_ativa_para_cliente` na mesma
+    transacao do apagamento; se houver OS ativa, levanta
+    `ViolacaoRegraDeNegocioException` (409). A LGPD
     (Art. 16) permite reter dados pessoais para a execucao de um contrato, e
     uma OS ativa e justamente esse contrato em andamento — apagar agora
     quebraria a prestacao do servico.
@@ -69,12 +71,8 @@ class ExcluirDadosPessoais:
         self._os_port = os_port
 
     def executar(self, cliente_id: UUID) -> None:
-        obter_cliente_ou_falhar(self._repo, cliente_id)
-        if self._os_port.existe_os_ativa_para_cliente(cliente_id):
-            raise ViolacaoRegraDeNegocioException(
-                mensagem="Cliente possui ordem de servico ativa"
-            )
         with self._uow:
+            travar_cliente_sem_os_ativa(self._repo, self._os_port, cliente_id)
             self._repo.anonimizar_dados(cliente_id)
             self._os_port.anonimizar_textos_livres_do_cliente(cliente_id)
             self._uow.commit()

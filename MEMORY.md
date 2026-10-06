@@ -8,6 +8,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Recent decisions
 
+- 2026-10-06 - Desativacao e erasure LGPD travam o cliente (`ClienteRepository.bloquear_cliente`, `FOR UPDATE`) e so entao checam OS ativa, na mesma transacao da escrita; `ClientePort.cliente_existe` da abertura de OS le o cliente com `FOR SHARE`. Os dois locks se excluem, entao nao ha janela check-then-act entre abrir OS e apagar/desativar o cliente. O erasure tambem sobe `versao` e `atualizado_em` das OS - review deep do PR #2
 - 2026-10-06 - RBAC da OS: toda rota de `/api/v1/ordens-de-servico` e do atendente (admin herda); o mecanico nao tem rota no OS Service (ADR-039, celula vazia = nenhuma rota) e trabalha pela fila do Execution Service. A primeira versao do PR deixava o mecanico ler OS e historico (texto livre e, com a saga, `link_decisao`/`checkout_url`) - review deep do PR #2
 - 2026-10-06 - Acompanhamento publico valida documento (digito verificador, inclusive CNPJ alfanumerico) e placa pelos VOs antes de qualquer acesso ao banco: invalido devolve o mesmo 404 do "nao encontrado" sem consulta (feedback da banca da fase 3). A leitura e o query service `ConsultaAcompanhamento` (projeta so status e timestamps), fora do repositorio do agregado; `CriarCliente` e `AdicionarVeiculo` tambem montam os VOs antes do repositorio - review deep do PR #2
 - 2026-10-06 - Proveniencia do recorte passa a `p3 @ 08dcffe + fc06263` (p3 #32, normalizacao ASCII de CPF/CNPJ, mergeado depois do ponto de corte). CPF, CNPJ, Placa e o contrato `Documento` moram em `compartilhado.dominio` com um helper unico de normalizacao (`documento.py`): o acompanhamento publico da OS valida com eles sem importar o nucleo de `cliente_veiculo` (import-linter) - review deep do PR #2
@@ -37,6 +38,7 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Tech debt / TODO
 
+- 2026-10-06 - LOW - O erasure faz UPDATE do `motivo` em `historico_status_ordem`, unica excecao a regra de historico so com insercao (ADR-037, RFC-004). O codigo documenta a excecao (`cliente_veiculo/infraestrutura/adapters.py`); falta registra-la no ADR/RFC do platform (repassado ao coordenador)
 - 2026-10-06 - RESOLVIDO - CNPJ alfanumerico agora e aceito (normalizacao com `brutils.cnpj.remove_symbols` + `upper()`). Corrige a premissa da entrada abaixo: o `brutils` 2.5.0 do lock ja validava o formato novo; quem descartava as letras era a normalizacao `\D`
 - 2026-10-06 - LOW - Eventos de log herdados do p3 estao em portugues (`dados_pessoais_exportados_via_admin`, `dominio_excecao_tratada`, ...) contra `canonical/language.md` (logs em ingles); eventos novos ja saem em ingles (`order_cancelled_via_api`). Renomear junto com as queries do Loki/dashboards quando a observabilidade entrar
 - 2026-10-06 - MEDIUM - CNPJ alfanumerico (IN RFB 2.229/2024, emitido desde jul/2026) e rejeitado: a normalizacao herdada do p3 descarta letras antes do `brutils`. Avaliar suporte quando o brutils cobrir o formato novo

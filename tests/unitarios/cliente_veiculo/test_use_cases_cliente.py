@@ -70,6 +70,10 @@ class FakeClienteRepository:
         self.consultas.append("obter_por_id")
         return self._clientes.get(cliente_id)
 
+    def bloquear_cliente(self, cliente_id: UUID) -> bool:
+        self.consultas.append("bloquear_cliente")
+        return cliente_id in self._clientes
+
     def bloquear_veiculo_para_remocao(self, veiculo_id: UUID) -> bool:
         self.veiculos_bloqueados.append(veiculo_id)
         return veiculo_id not in self.veiculos_sumidos_no_lock
@@ -115,11 +119,15 @@ class StubOrdemDeServicoPort:
         self,
         os_ativa_cliente: bool = False,
         os_para_veiculo: bool = False,
+        repo: FakeClienteRepository | None = None,
     ) -> None:
         self._os_ativa_cliente = os_ativa_cliente
         self._os_para_veiculo = os_para_veiculo
+        self._repo = repo
 
     def existe_os_ativa_para_cliente(self, cliente_id: UUID) -> bool:
+        if self._repo is not None:
+            self._repo.consultas.append("existe_os_ativa_para_cliente")
         return self._os_ativa_cliente
 
     def existe_os_para_veiculo(self, veiculo_id: UUID) -> bool:
@@ -331,6 +339,24 @@ class TestDesativarCliente:
         uc = DesativarCliente(repo=repo, uow=uow, os_port=os_port)
         with pytest.raises(ViolacaoRegraDeNegocioException):
             uc.executar(cliente.id)
+        assert cliente.ativo
+        assert not uow.committed
+
+    def test_trava_o_cliente_antes_de_checar_os_ativa(self) -> None:
+        repo = FakeClienteRepository()
+        uow = FakeUnitOfWork()
+        os_port = StubOrdemDeServicoPort(repo=repo)
+        cpf = CPF(numero=CPF_VALIDO)
+        cliente = Cliente(_nome="Joao", _documento=cpf, _contato=Contato(valor="11999"))
+        repo.salvar(cliente)
+
+        DesativarCliente(repo=repo, uow=uow, os_port=os_port).executar(cliente.id)
+
+        assert repo.consultas[:2] == [
+            "bloquear_cliente",
+            "existe_os_ativa_para_cliente",
+        ]
+        assert uow.committed
 
     def test_nao_encontrado(self) -> None:
         repo = FakeClienteRepository()

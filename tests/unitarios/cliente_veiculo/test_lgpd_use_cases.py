@@ -32,13 +32,18 @@ CPF_VALIDO = "21249722519"
 
 
 class FakeClienteRepoLGPD:
-    def __init__(self) -> None:
+    def __init__(self, registro: list[str] | None = None) -> None:
         self._clientes: dict[UUID, Cliente] = {}
         self._consentimentos: dict[tuple[UUID, str], ConsentimentoCliente] = {}
-        self._anonimizado: set[UUID] = set()
+        self.anonimizados: set[UUID] = set()
+        self.registro = registro if registro is not None else []
 
     def obter_por_id(self, cliente_id: UUID) -> Cliente | None:
         return self._clientes.get(cliente_id)
+
+    def bloquear_cliente(self, cliente_id: UUID) -> bool:
+        self.registro.append("bloquear_cliente")
+        return cliente_id in self._clientes
 
     def salvar(self, cliente: Cliente) -> None:
         self._clientes[cliente.id] = cliente
@@ -62,7 +67,8 @@ class FakeClienteRepoLGPD:
         return self._clientes.get(cliente_id)
 
     def anonimizar_dados(self, cliente_id: UUID) -> None:
-        self._anonimizado.add(cliente_id)
+        self.registro.append("anonimizar_dados")
+        self.anonimizados.add(cliente_id)
 
     def salvar_consentimento(self, consentimento: ConsentimentoCliente) -> None:
         key = (consentimento.cliente_id, consentimento.tipo)
@@ -127,18 +133,37 @@ class TestExportarDadosPessoais:
 
 
 class StubOrdemDeServicoPort:
-    def __init__(self, os_ativa_cliente: bool = False) -> None:
+    def __init__(
+        self, os_ativa_cliente: bool = False, registro: list[str] | None = None
+    ) -> None:
         self._os_ativa_cliente = os_ativa_cliente
         self.textos_anonimizados: list[UUID] = []
+        self.registro = registro if registro is not None else []
 
     def existe_os_ativa_para_cliente(self, cliente_id: UUID) -> bool:
+        self.registro.append("existe_os_ativa_para_cliente")
         return self._os_ativa_cliente
 
     def existe_os_para_veiculo(self, veiculo_id: UUID) -> bool:
         return False
 
     def anonimizar_textos_livres_do_cliente(self, cliente_id: UUID) -> None:
+        self.registro.append("anonimizar_textos_livres_do_cliente")
         self.textos_anonimizados.append(cliente_id)
+
+
+class UowComRegistro(FakeUnitOfWork):
+    def __init__(self, registro: list[str]) -> None:
+        super().__init__()
+        self._registro = registro
+
+    def __enter__(self) -> UowComRegistro:
+        self._registro.append("inicio")
+        return self
+
+    def commit(self) -> None:
+        self._registro.append("commit")
+        super().commit()
 
 
 class TestExcluirDadosPessoais:
@@ -151,7 +176,7 @@ class TestExcluirDadosPessoais:
         os_port = StubOrdemDeServicoPort(os_ativa_cliente=False)
         uc = ExcluirDadosPessoais(repo=repo, uow=uow, os_port=os_port)
         uc.executar(cliente.id)
-        assert cliente.id in repo._anonimizado
+        assert cliente.id in repo.anonimizados
         # O texto livre das OS sai na mesma unidade de trabalho.
         assert os_port.textos_anonimizados == [cliente.id]
         assert uow.committed
@@ -162,6 +187,29 @@ class TestExcluirDadosPessoais:
         uc = ExcluirDadosPessoais(repo=repo, uow=uow, os_port=StubOrdemDeServicoPort())
         with pytest.raises(ClienteNaoEncontradoException):
             uc.executar(uuid4())
+
+    def test_trava_o_cliente_e_checa_os_ativa_dentro_da_transacao(self) -> None:
+        # Check-then-act: sem o lock dentro da UoW, uma OS aberta entre a
+        # checagem e o UPDATE escaparia do erasure.
+        registro: list[str] = []
+        repo = FakeClienteRepoLGPD(registro)
+        cpf = CPF(numero=CPF_VALIDO)
+        cliente = Cliente(_nome="Joao", _documento=cpf, _contato=Contato(valor="11999"))
+        repo.salvar(cliente)
+        os_port = StubOrdemDeServicoPort(registro=registro)
+
+        ExcluirDadosPessoais(
+            repo=repo, uow=UowComRegistro(registro), os_port=os_port
+        ).executar(cliente.id)
+
+        assert registro == [
+            "inicio",
+            "bloquear_cliente",
+            "existe_os_ativa_para_cliente",
+            "anonimizar_dados",
+            "anonimizar_textos_livres_do_cliente",
+            "commit",
+        ]
 
     def test_com_os_ativa_bloqueado(self) -> None:
         # LGPD Art. 16: dados podem ser retidos para execucao de contrato. Uma
@@ -178,7 +226,7 @@ class TestExcluirDadosPessoais:
             ViolacaoRegraDeNegocioException, match="ordem de servico ativa"
         ):
             uc.executar(cliente.id)
-        assert cliente.id not in repo._anonimizado
+        assert cliente.id not in repo.anonimizados
         assert os_port.textos_anonimizados == []
         assert not uow.committed
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import case, exists, select, update
@@ -52,9 +53,15 @@ class OrdemDeServicoSQLAlchemyAdapter:
     def anonimizar_textos_livres_do_cliente(self, cliente_id: UUID) -> None:
         """UPDATE direto da descricao e dos motivos das OS do cliente (LGPD).
 
-        So roda sem OS ativa (guard do erasure), entao nenhuma transicao
-        concorre; a ``versao`` sobe mesmo assim para o lock otimista enxergar
-        a escrita. Motivo nulo continua nulo (so o texto existente sai).
+        So roda sem OS ativa e com o cliente travado (guard do erasure), entao
+        nenhuma transicao concorre; ``versao`` e ``atualizado_em`` sobem mesmo
+        assim para o lock otimista e a leitura enxergarem a escrita. Motivo
+        nulo continua nulo (so o texto existente sai).
+
+        O UPDATE em ``historico_status_ordem`` e a unica excecao a regra de
+        historico so com insercao (ADR-037): o dever de apagar dado pessoal
+        (LGPD Art. 18) vale tambem para o motivo digitado na transicao. So o
+        texto sai; sequencia, status, origem e instante ficam.
         """
         ordens = ordens_de_servico_table
         self._session.execute(
@@ -67,6 +74,7 @@ class OrdemDeServicoSQLAlchemyAdapter:
                     else_=_ANONIMIZADO,
                 ),
                 versao=ordens.c.versao + 1,
+                atualizado_em=datetime.now(UTC),
             )
         )
         historico = historico_status_ordem_table

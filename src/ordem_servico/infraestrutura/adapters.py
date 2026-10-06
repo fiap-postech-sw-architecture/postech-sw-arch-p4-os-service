@@ -26,14 +26,22 @@ class ClienteSQLAlchemyAdapter:
         self._session = session
 
     def cliente_existe(self, cliente_id: UUID) -> bool:
-        """Cliente existe E esta ativo: desativado/anonimizado nao abre OS."""
-        stmt = select(
-            exists().where(
+        """Cliente existe E esta ativo: desativado/anonimizado nao abre OS.
+
+        ``FOR SHARE`` ate o commit da abertura: conflita com o ``FOR UPDATE``
+        de desativacao e erasure (``ClienteRepository.bloquear_cliente``), que
+        entao esperam e enxergam a OS nova; se eles chegarem antes, esta
+        leitura espera e reavalia ``ativo`` na linha ja atualizada.
+        """
+        stmt = (
+            select(clientes_table.c.id)
+            .where(
                 clientes_table.c.id == cliente_id,
                 clientes_table.c.ativo.is_(True),
             )
+            .with_for_update(read=True)
         )
-        return bool(self._session.scalar(stmt))
+        return self._session.execute(stmt).first() is not None
 
     def veiculo_pertence_ao_cliente(self, cliente_id: UUID, veiculo_id: UUID) -> bool:
         stmt = select(

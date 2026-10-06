@@ -29,6 +29,21 @@ class ClienteSQLAlchemyRepository:
     def obter_por_id(self, cliente_id: UUID) -> Cliente | None:
         return self._session.get(Cliente, cliente_id)
 
+    def bloquear_cliente(self, cliente_id: UUID) -> bool:
+        """``FOR UPDATE`` na linha do cliente, mantido ate o fim da transacao.
+
+        Serializa desativacao e erasure com a abertura de OS: o
+        ``ClientePort.cliente_existe`` do contexto OS le o cliente com
+        ``FOR SHARE``, que conflita com este lock. Quem chega depois espera e
+        decide sobre o estado ja commitado (OS ativa ou cliente inativo).
+        """
+        stmt = (
+            select(clientes_table.c.id)
+            .where(clientes_table.c.id == cliente_id)
+            .with_for_update()
+        )
+        return self._session.execute(stmt).first() is not None
+
     def bloquear_veiculo_para_remocao(self, veiculo_id: UUID) -> bool:
         """Adquire ``FOR UPDATE`` na linha do veiculo para serializar com INSERTs em
         ``ordens_de_servico``: a validacao de FK em INSERT pega ``FOR KEY SHARE``

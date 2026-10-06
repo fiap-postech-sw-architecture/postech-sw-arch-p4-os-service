@@ -189,8 +189,9 @@ class AtualizarCliente:
 class DesativarCliente:
     """Desativa (soft-delete) um cliente que nao tem OS ativa.
 
-    Consulta `OrdemDeServicoPort.existe_os_ativa_para_cliente` antes de
-    desativar. Se houver OS ativa, levanta `ViolacaoRegraDeNegocioException`.
+    Trava o cliente e consulta `OrdemDeServicoPort.existe_os_ativa_para_cliente`
+    na mesma transacao da escrita. Se houver OS ativa, levanta
+    `ViolacaoRegraDeNegocioException`.
 
     Decisao explicita: a desativacao e TERMINAL — nao existe caso de uso de
     reativacao e clientes inativos rejeitam qualquer mutacao (ver
@@ -210,13 +211,12 @@ class DesativarCliente:
         self._os_port = os_port
 
     def executar(self, cliente_id: UUID) -> None:
-        cliente = obter_cliente_ou_falhar(self._repo, cliente_id)
-        if self._os_port.existe_os_ativa_para_cliente(cliente_id):
-            raise ViolacaoRegraDeNegocioException(
-                mensagem="Cliente possui ordem de servico ativa"
-            )
-        cliente.desativar()
-        _salvar_com_commit(self._uow, self._repo, cliente)
+        with self._uow:
+            travar_cliente_sem_os_ativa(self._repo, self._os_port, cliente_id)
+            cliente = obter_cliente_ou_falhar(self._repo, cliente_id)
+            cliente.desativar()
+            self._repo.salvar(cliente)
+            self._uow.commit()
 
 
 class AdicionarVeiculo:
@@ -306,6 +306,24 @@ class RemoverVeiculo:
             cliente.remover_veiculo(veiculo_id)
             self._repo.salvar(cliente)
             self._uow.commit()
+
+
+def travar_cliente_sem_os_ativa(
+    repo: ClienteRepository, os_port: OrdemDeServicoPort, cliente_id: UUID
+) -> None:
+    """Trava o cliente (FOR UPDATE) e so entao confere que nao ha OS ativa.
+
+    Chamar dentro da ``UnitOfWork``: o lock vale ate o commit, entao uma
+    abertura de OS concorrente nao passa entre a checagem e a escrita
+    (check-then-act). Levanta ``ClienteNaoEncontradoException`` ou
+    ``ViolacaoRegraDeNegocioException`` (409).
+    """
+    if not repo.bloquear_cliente(cliente_id):
+        raise ClienteNaoEncontradoException()
+    if os_port.existe_os_ativa_para_cliente(cliente_id):
+        raise ViolacaoRegraDeNegocioException(
+            mensagem="Cliente possui ordem de servico ativa"
+        )
 
 
 def obter_cliente_ou_falhar(repo: ClienteRepository, cliente_id: UUID) -> Cliente:
