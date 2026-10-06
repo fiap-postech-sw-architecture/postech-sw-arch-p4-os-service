@@ -78,12 +78,16 @@ _JWT_PATTERN = re.compile(
 #      11 digitos corridos com shape de CPF e caem no _CPF_PATTERN acima
 #      antes desta regex; campos NOMEADOS telefone/celular/contato sao
 #      mascarados pela denylist abaixo.
-# O numero nao pode encostar em letra, digito, `_` nem hifen: os ids do servico
+# O numero nao pode comecar colado a um digito hexadecimal: os ids do servico
 # (`ordem_id`, `request_id`, `jti` e o ator da auditoria, o `sub`) sao UUID, e o
 # v4 traz entre os grupos trechos `dd-dddd-dddd` (`732ffc02-3465-4237-...`) que o
-# split 4-4 casaria. Sem os lookarounds, cerca de 1,4% dos UUID saiam mascarados.
+# split 4-4 casaria (cerca de 1,4% dos UUID saiam mascarados). Em todo UUID o
+# `dd` desse trecho vem depois de outro digito hexadecimal, entao o lookbehind o
+# barra sem deixar de mascarar o telefone colado a hifen, `_` ou a letra que nao
+# e hexadecimal (`tel-11 99999-0000`). Telefone que comeca em `(` ou `+` dispensa
+# o lookbehind, porque UUID nao tem nenhum dos dois (`fone(11)99999-0000`).
 _TELEFONE_PATTERN = re.compile(
-    r"(?<![\w-])"  # nao colado em palavra nem em id hifenizado (UUID)
+    r"(?:(?<![0-9A-Fa-f])|(?=[(+]))"  # nao colado a digito hexadecimal (UUID)
     r"(?:"
     r"(?:\+55[\s.-]?)?"  # codigo do pais opcional
     r"(?:\(\d{2}\)|\d{2})"  # DDD com ou sem parenteses
@@ -92,7 +96,7 @@ _TELEFONE_PATTERN = re.compile(
     r"|"
     r"\+55[\s.-]?\d{10,11}"  # +55 com numero corrido (sem hifen local)
     r")"
-    r"(?![\w-])"  # idem, do lado direito (tambem barra numero maior)
+    r"(?!\d)"  # nao seguido de digito (evita capturar parte de numero maior)
 )
 
 # Denylist de chaves: quando o NOME do campo indica segredo ou PII, o valor

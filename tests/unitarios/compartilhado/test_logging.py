@@ -219,6 +219,26 @@ class TestScrubTelefone:
         assert "99999-0000" not in str(result["event"])
         assert "***" in str(result["event"])
 
+    @pytest.mark.parametrize(
+        "texto",
+        [
+            pytest.param("55-11-99999-0000", id="depois-de-hifen"),
+            pytest.param("tel-11 99999-0000", id="rotulo-com-hifen"),
+            pytest.param("cel_11 99999-0000", id="depois-de-underscore"),
+            pytest.param("fone(11)99999-0000", id="parenteses-depois-de-letra"),
+            pytest.param("fone+55 11 99999-0000", id="mais-depois-de-letra"),
+            pytest.param("11 99999-0000abc", id="letra-depois"),
+            pytest.param("tel 11 99999-0000-ramal", id="hifen-depois"),
+        ],
+    )
+    def test_telefone_colado_a_hifen_ou_letra_continua_mascarado(
+        self, texto: str
+    ) -> None:
+        # So o digito hexadecimal antes do numero o poupa (o UUID e feito deles).
+        result = scrub_pii(None, "info", {"event": texto})
+        assert "99999-0000" not in str(result["event"])
+        assert "***" in str(result["event"])
+
 
 # UUID v4 de verdade cujo trecho "02-3465-4237" (dd-dddd-dddd) casava com o telefone.
 _UUID_COM_SPLIT_DE_TELEFONE = "732ffc02-3465-4237-a5f6-12fd4a2b3be0"
@@ -240,6 +260,28 @@ class TestScrubUuid:
             if scrub_pii(None, "info", {"id": valor})["id"] != valor
         ]
         assert mascarados == []
+
+    def test_dez_mil_uuid4_em_maiusculas_ficam_intactos(self) -> None:
+        ids = [str(uuid4()).upper() for _ in range(10_000)]
+        mascarados = [
+            valor
+            for valor in ids
+            if scrub_pii(None, "info", {"id": valor})["id"] != valor
+        ]
+        assert mascarados == []
+
+    @pytest.mark.parametrize(
+        "uuid",
+        [
+            pytest.param("12345678-1234-1234-1234-123456789012", id="so-digitos"),
+            pytest.param("00000000-0000-0000-0000-000000000000", id="zeros"),
+            pytest.param("99999999-9999-9999-9999-999999999999", id="noves"),
+        ],
+    )
+    def test_uuid_so_com_digitos_fica_intacto(self, uuid: str) -> None:
+        # O pior caso do split 4-4: todo grupo e numerico.
+        texto = f"ordem {uuid} ok"
+        assert scrub_pii(None, "info", {"event": texto})["event"] == texto
 
     def test_ator_e_alvo_saem_intactos_no_log_json(
         self, logging_pipeline: io.StringIO
