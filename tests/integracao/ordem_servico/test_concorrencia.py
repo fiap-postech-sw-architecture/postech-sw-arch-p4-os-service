@@ -7,14 +7,17 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import pytest
+from sqlalchemy import select
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura.outbox_mapping import outbox_table
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
+from src.ordem_servico.interfaces.dependencies import obter_cancelar_ordem
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
 if TYPE_CHECKING:
@@ -102,3 +105,32 @@ def test_releitura_apos_conflito_decide_sobre_o_estado_novo(
         OrdemDeServicoSQLAlchemyRepository(sess).salvar(relida)
         sess.commit()
         assert relida.versao == 3
+
+
+def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_a_outbox_so_tem_o_dele(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Mesmo wiring da API (obter_cancelar_ordem): repositorio e UoW reais na
+    # session da request. B le a versao 1 antes de A cancelar e decide sobre
+    # ela; o UPDATE condicional na versao barra B e o evento dele nao entra na
+    # outbox (rollback da transacao inteira).
+    ordem_id = _ordem_commitada(session_factory)
+    sessao_b = session_factory()
+    lida_por_b = OrdemDeServicoSQLAlchemyRepository(sessao_b).obter_por_id(ordem_id)
+    assert lida_por_b is not None
+    assert lida_por_b.versao == 1
+
+    obter_cancelar_ordem(session_factory()).executar(ordem_id, "cliente desistiu")
+    with pytest.raises(ConflitoDeConcorrenciaException):
+        obter_cancelar_ordem(sessao_b).executar(ordem_id, "outro motivo")
+
+    with session_factory() as sess:
+        final = OrdemDeServicoSQLAlchemyRepository(sess).obter_por_id(ordem_id)
+        assert final is not None
+        assert final.status is StatusOrdem.CANCELADA
+        assert final.versao == 2
+        assert final.motivo_cancelamento == "cliente desistiu"
+        eventos = sess.execute(
+            select(outbox_table.c.tipo).where(outbox_table.c.agregado_id == ordem_id)
+        ).scalars()
+        assert list(eventos) == ["StatusDaOrdemAlteradoEvent"]

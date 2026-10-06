@@ -54,6 +54,10 @@ class RepoEmMemoria:
         self.salvas: list[OrdemDeServico] = []
         self._conflito = conflito
 
+    def provocar_conflito(self) -> None:
+        """O proximo ``salvar`` ve outra transacao gravar antes (lock otimista)."""
+        self._conflito = True
+
     def obter_por_id(self, ordem_id: UUID) -> OrdemDeServico | None:
         return self.ordens.get(ordem_id)
 

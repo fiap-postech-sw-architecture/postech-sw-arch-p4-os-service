@@ -27,7 +27,10 @@ from src.ordem_servico.aplicacao.use_cases import (
     ObterOrdem,
     RegistrarEntrega,
 )
-from src.ordem_servico.dominio.ordem_de_servico import TAMANHO_MAXIMO_DESCRICAO
+from src.ordem_servico.dominio.ordem_de_servico import (
+    TAMANHO_MAXIMO_DESCRICAO,
+    TAMANHO_MAXIMO_MOTIVO,
+)
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import ordem_em
 from tests.unitarios.fakes import (
@@ -144,6 +147,10 @@ class TestAbrir:
         resp = client_como("admin").post(_BASE, json=_abrir_corpo())
         assert resp.status_code == 201
 
+    def test_descricao_no_tamanho_maximo_201(self, client: TestClient) -> None:
+        corpo = _abrir_corpo(descricao_problema="x" * TAMANHO_MAXIMO_DESCRICAO)
+        assert client.post(_BASE, json=corpo).status_code == 201
+
 
 _ROTAS_DE_OS = [
     pytest.param("POST", "", _abrir_corpo(), id="abrir"),
@@ -192,8 +199,27 @@ class TestConsultas:
         assert item["id"] == str(ordem.id)
         assert item["situacao"] == "Em execução"
         assert repo.args_listar == (0, 10, False)
+        assert repo.args_contar is False
 
-    @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"offset": -1}])
+    def test_incluir_encerradas_chega_a_listagem_e_ao_total(
+        self, client: TestClient, repo: RepoEmMemoria
+    ) -> None:
+        resp = client.get(
+            _BASE, params={"offset": 0, "limit": 10, "incluir_encerradas": "true"}
+        )
+
+        assert resp.status_code == 200
+        assert repo.args_listar == (0, 10, True)
+        assert repo.args_contar is True
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"limit": 0}, id="limit-zero"),
+            pytest.param({"limit": 101}, id="limit-acima-de-100"),
+            pytest.param({"offset": -1}, id="offset-negativo"),
+        ],
+    )
     def test_paginacao_invalida_422(self, client: TestClient, params: dict) -> None:
         assert client.get(_BASE, params=params).status_code == 422
 
@@ -289,17 +315,38 @@ class TestCancelamento:
     ) -> None:
         ordem = ordem_em(StatusOrdem.RECEBIDA)
         repo.ordens[ordem.id] = ordem
-        repo._conflito = True
+        repo.provocar_conflito()
 
         resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"})
 
         assert resp.status_code == 409
         assert resp.json()["erro"]["codigo"] == "CONFLITO_DE_CONCORRENCIA"
 
-    @pytest.mark.parametrize("corpo", [{}, {"motivo": ""}, {"motivo": "x", "y": 1}])
+    @pytest.mark.parametrize(
+        "corpo",
+        [
+            pytest.param({}, id="sem-motivo"),
+            pytest.param({"motivo": ""}, id="motivo-vazio"),
+            pytest.param({"motivo": "x" * (TAMANHO_MAXIMO_MOTIVO + 1)}, id="longo"),
+            pytest.param({"motivo": "x", "y": 1}, id="campo-extra"),
+        ],
+    )
     def test_corpo_invalido_422(self, client: TestClient, corpo: dict) -> None:
         resp = client.post(f"{_BASE}/{uuid4()}/cancelamento", json=corpo)
         assert resp.status_code == 422
+
+    def test_motivo_no_tamanho_maximo_cancela(
+        self, client: TestClient, repo: RepoEmMemoria
+    ) -> None:
+        ordem = ordem_em(StatusOrdem.RECEBIDA)
+        repo.ordens[ordem.id] = ordem
+
+        resp = client.post(
+            f"{_BASE}/{ordem.id}/cancelamento",
+            json={"motivo": "x" * TAMANHO_MAXIMO_MOTIVO},
+        )
+
+        assert resp.status_code == 200
 
 
 class TestEntrega:
@@ -386,6 +433,33 @@ class TestAcompanhamentoPublico:
         assert invalida.status_code == nao_encontrada.status_code == 404
         assert invalida.json() == nao_encontrada.json()
         assert consulta.chamadas == []
+
+    @pytest.mark.parametrize(
+        ("campo", "valor", "esperado"),
+        [
+            pytest.param("placa", "ABC1D2", 422, id="placa-6"),
+            pytest.param("placa", "ABC1D23", 404, id="placa-7"),
+            pytest.param("placa", "ABC-1234", 404, id="placa-8-com-hifen"),
+            pytest.param("placa", "ABC-12345", 422, id="placa-9"),
+            pytest.param("documento", "5299822472", 422, id="documento-10"),
+            pytest.param("documento", "52998224725", 404, id="documento-11"),
+            pytest.param("documento", "11.222.333/0001-81", 404, id="documento-18"),
+            pytest.param("documento", "11.222.333/0001-810", 422, id="documento-19"),
+        ],
+    )
+    def test_fronteiras_de_tamanho(
+        self,
+        client: TestClient,
+        consulta: ConsultaAcompanhamentoEspia,
+        campo: str,
+        valor: str,
+        esperado: int,
+    ) -> None:
+        resp = client.post(self._ROTA, json={**_CORPO_PUBLICO, campo: valor})
+
+        assert resp.status_code == esperado
+        # Dentro do tamanho e com DV/formato validos, a consulta acontece.
+        assert len(consulta.chamadas) == (1 if esperado == 404 else 0)
 
     def test_get_com_pii_na_url_nao_existe(self, client: TestClient) -> None:
         assert client.get(self._ROTA, params=_CORPO_PUBLICO).status_code == 405

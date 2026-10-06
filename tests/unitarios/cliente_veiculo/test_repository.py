@@ -3,9 +3,19 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
+
 from src.cliente_veiculo.infraestrutura.repository import (
     ClienteSQLAlchemyRepository,
 )
+from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _mapeamentos() -> None:
+    # select(Cliente) exige o mapper registrado: sem isto o arquivo so passava
+    # quando outro teste (a integracao) ja tinha iniciado os mapeamentos.
+    iniciar_todos_mapeamentos()
 
 
 class TestClienteSQLAlchemyRepository:

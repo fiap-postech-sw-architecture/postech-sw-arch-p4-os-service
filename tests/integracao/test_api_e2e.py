@@ -164,8 +164,14 @@ class TestCicloDaOrdem:
         )
         assert de_novo.status_code == 409
         assert de_novo.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
-        # Encerrada sai da fila padrao.
-        assert api_client.get(_OS, headers=headers).json()["total"] == 0
+        # Encerrada sai da fila padrao e volta com incluir_encerradas.
+        padrao = api_client.get(_OS, headers=headers).json()
+        assert (padrao["items"], padrao["total"]) == ([], 0)
+        completa = api_client.get(
+            _OS, headers=headers, params={"incluir_encerradas": "true"}
+        ).json()
+        assert [i["id"] for i in completa["items"]] == [ordem_id]
+        assert completa["total"] == 1
 
     def test_fatos_da_saga_ate_a_entrega(
         self,
@@ -516,3 +522,89 @@ class TestRegrasEntreContextos:
         assert resp.json()["erro"]["mensagem"] == (
             "Veiculo possui ordem de servico vinculada e nao pode ser removido"
         )
+
+
+class TestConsentimentoEPortabilidade:
+    """Ciclo LGPD de consentimento e export pela app real (repositorio e DI)."""
+
+    def test_conceder_revogar_e_conceder_de_novo(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, _ = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="LGP1D23"
+        )
+        url = f"/api/v1/clientes/{cliente_id}/consentimento"
+
+        concedido = api_client.post(url, headers=headers, json={"tipo": "Marketing"})
+        assert concedido.status_code == 201
+        assert (concedido.json()["tipo"], concedido.json()["ativo"]) == (
+            "marketing",
+            True,
+        )
+        assert (
+            api_client.post(
+                url, headers=headers, json={"tipo": "marketing"}
+            ).status_code
+            == 409
+        )
+
+        revogado = api_client.delete(url, headers=headers, params={"tipo": "MARKETING"})
+        assert revogado.status_code == 204
+
+        # Depois da revogacao vale o registro mais recente: concede de novo e o
+        # novo fica ativo (um segundo pedido volta a dar 409), e a revogacao
+        # alcanca esse novo registro, nao o antigo ja revogado.
+        assert (
+            api_client.post(
+                url, headers=headers, json={"tipo": "marketing"}
+            ).status_code
+            == 201
+        )
+        assert (
+            api_client.post(
+                url, headers=headers, json={"tipo": "marketing"}
+            ).status_code
+            == 409
+        )
+        assert (
+            api_client.delete(
+                url, headers=headers, params={"tipo": "marketing"}
+            ).status_code
+            == 204
+        )
+
+    def test_revogar_sem_consentimento_404(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, _ = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="LGP2D34"
+        )
+        resp = api_client.delete(
+            f"/api/v1/clientes/{cliente_id}/consentimento",
+            headers=headers,
+            params={"tipo": "marketing"},
+        )
+        assert resp.status_code == 404
+
+    def test_exportar_dados_pessoais(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="EXP1D23"
+        )
+
+        resp = api_client.get(
+            f"/api/v1/clientes/{cliente_id}/dados-pessoais/exportar", headers=headers
+        )
+
+        assert resp.status_code == 200
+        dados = resp.json()
+        assert dados["id"] == cliente_id
+        assert dados["nome"] == "Maria Silva"
+        assert dados["documento_formatado"] == "212.497.225-19"
+        assert dados["contato"] == "maria@exemplo.com"
+        assert [v["id"] for v in dados["veiculos"]] == [veiculo_id]
+        assert dados["veiculos"][0]["placa"] == "EXP1D23"
