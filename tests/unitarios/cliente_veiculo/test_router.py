@@ -17,6 +17,7 @@ from src.cliente_veiculo.aplicacao.dtos import (
 )
 from src.cliente_veiculo.interfaces.router import router
 from src.compartilhado.interfaces.dependencies import obter_session
+from src.compartilhado.interfaces.error_handler import registrar_error_handlers
 
 _ID = uuid4()
 _VEICULO_ID = uuid4()
@@ -283,6 +284,9 @@ class TestLgpdAuditoriaEAutorizacao:
     @staticmethod
     def _app_com_papel(papel: str) -> FastAPI:
         app = _criar_app()
+        # O app de teste nao tem os handlers: sem eles o 403 do gate e o 404 de
+        # dominio nao viram resposta HTTP.
+        registrar_error_handlers(app)
         app.dependency_overrides[obter_usuario_atual] = lambda: {
             "sub": "ator-123",
             "papel": papel,
@@ -298,6 +302,7 @@ class TestLgpdAuditoriaEAutorizacao:
             client = TestClient(app)
             resp = client.delete(f"/api/v1/clientes/{_ID}/dados-pessoais")
         assert resp.status_code == 403
+        assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
         uc.executar.assert_not_called()
 
     def test_excluir_dados_pessoais_admin_emite_auditoria(
@@ -441,17 +446,13 @@ class TestLgpdAuditoriaEAutorizacao:
             ClienteNaoEncontradoException,
         )
         from src.cliente_veiculo.interfaces import router as router_mod
-        from src.compartilhado.interfaces.error_handler import (
-            registrar_error_handlers,
-        )
 
         monkeypatch.setattr(
             router_mod, "_log", structlog.get_logger("test_lgpd"), raising=False
         )
+        # Com os handlers de `_app_com_papel` a ClienteNaoEncontradoException vira
+        # 404 real: prova o invariante "404 nao audita".
         app = self._app_com_papel("admin")
-        # Registra os handlers para a ClienteNaoEncontradoException virar 404 real
-        # (o app de teste bare nao os tem) -- prova o invariante "404 nao audita".
-        registrar_error_handlers(app)
         with patch("src.cliente_veiculo.interfaces.router.obter_exportar_dados") as m:
             m.return_value = MagicMock(
                 executar=MagicMock(side_effect=ClienteNaoEncontradoException())

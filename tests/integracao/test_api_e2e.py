@@ -249,7 +249,9 @@ class TestCicloDaOrdem:
         h_mecanico = _login(api_client, mecanico.email)
 
         for url in (_OS, f"{_OS}/{ordem_id}", f"{_OS}/{ordem_id}/historico"):
-            assert api_client.get(url, headers=h_mecanico).status_code == 403
+            negado = api_client.get(url, headers=h_mecanico)
+            assert negado.status_code == 403
+            assert negado.json()["erro"]["codigo"] == "ACESSO_NEGADO"
         resp = api_client.post(
             f"{_OS}/{ordem_id}/cancelamento", headers=h_mecanico, json={"motivo": "x"}
         )
@@ -405,7 +407,13 @@ class TestFalhaDeCredencialUniforme:
 
         for resposta in respostas:
             assert resposta.status_code == 401
-            assert resposta.json() == {"detail": "Credenciais invalidas"}
+            assert resposta.json() == {
+                "erro": {
+                    "codigo": "NAO_AUTENTICADO",
+                    "mensagem": "Credenciais invalidas",
+                    "id_requisicao": resposta.headers["X-Request-ID"],
+                }
+            }
             assert resposta.headers["WWW-Authenticate"] == "Bearer"
 
     def test_login_e_refresh_usam_a_mesma_mensagem(
@@ -425,7 +433,7 @@ class TestFalhaDeCredencialUniforme:
 
         for resposta in (senha_errada, email_desconhecido, refresh_invalido):
             assert resposta.status_code == 401
-            assert resposta.json()["erro"]["codigo"] == "FALHA_AUTENTICACAO"
+            assert resposta.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
             assert resposta.json()["erro"]["mensagem"] == "Credenciais invalidas"
 
 

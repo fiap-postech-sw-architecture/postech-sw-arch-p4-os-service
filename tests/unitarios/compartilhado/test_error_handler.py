@@ -16,6 +16,7 @@ from src.autenticacao.dominio.exceptions import (
     EmailDuplicadoException,
 )
 from src.compartilhado.dominio.exceptions import (
+    AcessoNegadoException,
     ConflitoDeConcorrenciaException,
     DomainException,
     EntidadeDuplicadaException,
@@ -52,6 +53,7 @@ _CASOS_EXCECAO = [
     ),
     pytest.param(EntidadeDuplicadaException(), 409, id="entidade-duplicada-409"),
     pytest.param(FalhaAutenticacaoException(), 401, id="autenticacao-401"),
+    pytest.param(AcessoNegadoException(), 403, id="acesso-negado-403"),
 ]
 
 
@@ -81,6 +83,26 @@ def test_subclasse_resolve_status_do_ancestral_por_mro(
     client = _criar_app_com_excecao(exc)
     resp = client.get("/test")
     assert resp.status_code == status_code
+
+
+def test_falha_de_autenticacao_responde_nao_autenticado_sem_o_motivo() -> None:
+    client = _criar_app_com_excecao(FalhaAutenticacaoException(motivo="expired_token"))
+    resp = client.get("/test")
+    assert resp.status_code == 401
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+    erro = resp.json()["erro"]
+    assert (erro["codigo"], erro["mensagem"]) == (
+        "NAO_AUTENTICADO",
+        "Credenciais invalidas",
+    )
+    assert "expired" not in resp.text
+
+
+def test_acesso_negado_responde_403_sem_www_authenticate() -> None:
+    resp = _criar_app_com_excecao(AcessoNegadoException()).get("/test")
+    assert resp.status_code == 403
+    assert "WWW-Authenticate" not in resp.headers
+    assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
 
 
 def test_dominio_excecao_default_409_quando_fora_do_mapa() -> None:

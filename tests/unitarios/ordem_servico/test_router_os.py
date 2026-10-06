@@ -181,6 +181,7 @@ class TestPapeis:
         resp = client_como("mecanico").request(metodo, url, json=corpo)
 
         assert resp.status_code == 403
+        assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
         assert repo.salvas == []
 
 
@@ -375,6 +376,7 @@ def test_sem_token_401(repo: RepoEmMemoria) -> None:
     app.dependency_overrides[obter_session] = lambda: MagicMock()
     resp = TestClient(app).get(_BASE)
     assert resp.status_code == 401
+    assert resp.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
 
 
 _CORPO_PUBLICO = {"placa": "ABC1D23", "documento": "529.982.247-25"}

@@ -25,6 +25,7 @@ from src.cliente_veiculo.interfaces.router import router
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.interfaces.dependencies import obter_session
+from src.compartilhado.interfaces.error_handler import registrar_error_handlers
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -34,6 +35,7 @@ def _app_com_papel(session: Session, papel: str) -> FastAPI:
     """App com a sessão REAL e o papel do usuário injetados por override."""
     app = FastAPI()
     app.include_router(router)
+    registrar_error_handlers(app)
     app.dependency_overrides[obter_session] = lambda: session
     app.dependency_overrides[obter_usuario_atual] = lambda: {
         "sub": str(uuid4()),
@@ -98,6 +100,7 @@ class TestErasureEndpointAnonimiza:
         )
 
         assert resp.status_code == 403
+        assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
         session.expire_all()
         resultado = ClienteSQLAlchemyRepository(session=session).obter_por_id(
             cliente_id

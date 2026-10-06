@@ -4,8 +4,7 @@ from contextlib import suppress
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated
 
-import structlog
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # Runtime import (nao TYPE_CHECKING): com `from __future__ import annotations`,
@@ -19,24 +18,16 @@ from src.autenticacao.interfaces.dependencies import (
     obter_jwt_service,
     obter_token_revogado_repo,
 )
-from src.compartilhado.dominio.exceptions import FalhaAutenticacaoException
+from src.compartilhado.dominio.exceptions import (
+    AcessoNegadoException,
+    FalhaAutenticacaoException,
+)
 from src.compartilhado.interfaces.dependencies import obter_session
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 _bearer_scheme = HTTPBearer(auto_error=False)
-_log = structlog.get_logger(__name__)
-
-
-def _nao_autenticado(motivo: str) -> HTTPException:
-    """401 com a mensagem unica (ADR-039); o motivo vai so para o log."""
-    _log.warning("authentication_failed", reason=motivo)
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=FalhaAutenticacaoException.MENSAGEM,
-        headers={"WWW-Authenticate": "Bearer"},
-    )
 
 
 def obter_usuario_atual(
@@ -45,24 +36,27 @@ def obter_usuario_atual(
     ],
     session: Annotated[Session, Depends(obter_session)],
 ) -> dict[str, object]:
+    """Claims do access token do header ``Authorization``.
+
+    Toda falha de credencial levanta ``FalhaAutenticacaoException``: o handler
+    responde o 401 `NAO_AUTENTICADO` com a mensagem unica (ADR-039) e o motivo
+    so vai para o log.
+    """
     if credentials is None:
-        raise _nao_autenticado("missing_token")
-    try:
-        payload = obter_jwt_service().validar_token(credentials.credentials)
-    except FalhaAutenticacaoException as e:
-        raise _nao_autenticado(e.motivo) from None
+        raise FalhaAutenticacaoException("missing_token")
+    payload = obter_jwt_service().validar_token(credentials.credentials)
     # TD-029: o gate de acesso so aceita access tokens; um refresh token
     # (type="refresh") nao pode autenticar uma requisicao -- espelha o check
     # `type == refresh` do fluxo de refresh. Defense-in-depth alem do RBAC.
     if payload.get("type") != "access":
-        raise _nao_autenticado("not_an_access_token")
+        raise FalhaAutenticacaoException("not_an_access_token")
     # Fail-closed: um payload sem jti nao consegue provar que NAO foi
     # revogado -- rejeitar em vez de pular a checagem de revogacao.
     jti = payload.get("jti")
     if jti is None:
-        raise _nao_autenticado("missing_jti")
+        raise FalhaAutenticacaoException("missing_jti")
     if obter_token_revogado_repo(session).esta_revogado(str(jti)):
-        raise _nao_autenticado("revoked_token")
+        raise FalhaAutenticacaoException("revoked_token")
     return payload
 
 
@@ -90,12 +84,17 @@ def _papel_do_token(usuario: dict[str, object]) -> Papel:
     if isinstance(bruto, str):
         with suppress(ValueError):
             return Papel(bruto)
-    raise _nao_autenticado("invalid_role_claim")
+    raise FalhaAutenticacaoException("invalid_role_claim")
 
 
 def exigir_papel(
     *papeis: str,
 ) -> Callable[..., dict[str, object]]:
+    """Dependency de RBAC: ``admin`` herda ``atendente`` e ``mecanico``.
+
+    Papel valido sem permissao na rota levanta ``AcessoNegadoException`` (403,
+    `ACESSO_NEGADO`); papel ausente ou invalido no token e 401.
+    """
     if not papeis:
         raise ValueError("exigir_papel requer ao menos um papel")
     try:
@@ -108,10 +107,7 @@ def exigir_papel(
     ) -> dict[str, object]:
         papel = _papel_do_token(usuario)
         if not _PERMISSOES.get(papel, frozenset()) & papeis_exigidos:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Papel nao autorizado",
-            )
+            raise AcessoNegadoException()
         return usuario
 
     return verificar

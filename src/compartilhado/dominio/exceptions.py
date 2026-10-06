@@ -59,6 +59,8 @@ class EntidadeDuplicadaException(DomainException):
 class FalhaAutenticacaoException(DomainException):
     """401 de credencial: a mensagem publica e sempre a mesma (ADR-039).
 
+    Vale para o login, o refresh e o gate de qualquer rota autenticada: o
+    codigo da resposta e ``NAO_AUTENTICADO``, o mesmo dos outros servicos.
     ``motivo`` (identificador em ingles) diz o que falhou e vai so para o
     log: a resposta nao da dica a quem testa credenciais.
     """
@@ -66,5 +68,16 @@ class FalhaAutenticacaoException(DomainException):
     MENSAGEM: ClassVar[str] = "Credenciais invalidas"
 
     def __init__(self, motivo: str = "authentication_failed") -> None:
-        super().__init__(codigo="FALHA_AUTENTICACAO", mensagem=self.MENSAGEM)
+        super().__init__(codigo="NAO_AUTENTICADO", mensagem=self.MENSAGEM)
         self.motivo = motivo
+
+
+class AcessoNegadoException(DomainException):
+    """403: papel valido, mas sem permissao para a rota (ADR-039).
+
+    Papel ausente ou desconhecido no token e falha de credencial
+    (``FalhaAutenticacaoException``), nao esta.
+    """
+
+    def __init__(self, mensagem: str = "Papel nao autorizado") -> None:
+        super().__init__(codigo="ACESSO_NEGADO", mensagem=mensagem)

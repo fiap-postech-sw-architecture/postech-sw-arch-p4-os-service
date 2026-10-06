@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.compartilhado.dominio.exceptions import (
+    AcessoNegadoException,
     ConflitoDeConcorrenciaException,
     DomainException,
     EntidadeDuplicadaException,
@@ -56,8 +57,13 @@ class TestExceptionsEspecificas:
             ),
             (
                 FalhaAutenticacaoException,
-                "FALHA_AUTENTICACAO",
+                "NAO_AUTENTICADO",
                 "Credenciais invalidas",
+            ),
+            (
+                AcessoNegadoException,
+                "ACESSO_NEGADO",
+                "Papel nao autorizado",
             ),
         ],
     )
@@ -80,6 +86,7 @@ class TestExceptionsEspecificas:
             TransicaoStatusInvalidaException,
             ConflitoDeConcorrenciaException,
             EntidadeDuplicadaException,
+            AcessoNegadoException,
         ],
     )
     def test_excecao_com_mensagem_customizada(
@@ -106,6 +113,7 @@ class TestExceptionsEspecificas:
             ConflitoDeConcorrenciaException,
             EntidadeDuplicadaException,
             FalhaAutenticacaoException,
+            AcessoNegadoException,
         ],
     )
     def test_excecao_pode_ser_levantada(

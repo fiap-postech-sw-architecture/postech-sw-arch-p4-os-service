@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DBAPIError
 
 from src.compartilhado.dominio.exceptions import (
+    AcessoNegadoException,
     ConflitoDeConcorrenciaException,
     DomainException,
     EntidadeDuplicadaException,
@@ -33,6 +34,7 @@ _EXCEPTION_STATUS_MAP: dict[type[DomainException], int] = {
     ConflitoDeConcorrenciaException: 409,
     EntidadeDuplicadaException: 409,
     FalhaAutenticacaoException: 401,
+    AcessoNegadoException: 403,
     ValorInvalidoException: 422,
 }
 
@@ -77,7 +79,7 @@ def registrar_error_handlers(app: FastAPI) -> None:
 
     Cada DomainException levantada no request vira um JSONResponse com o envelope
     `{erro: {codigo, mensagem, id_requisicao}}`. Os codigos suportados sao 401,
-    404, 409 e 422. ValueError (invariantes de value object/aggregate) vira
+    403, 404, 409 e 422. ValueError (invariantes de value object/aggregate) vira
     422 VALOR_INVALIDO -- ver p3 #83. Excecoes nao tratadas viram 500 com traceback
     no log e o request_id.
     """

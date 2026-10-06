@@ -20,7 +20,7 @@ from uuid import uuid4
 import jwt
 import pytest
 from cryptography.fernet import Fernet
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
@@ -48,6 +48,10 @@ from src.cliente_veiculo.interfaces.schemas import (
     AtualizarClienteRequest,
     ConsentimentoRequest,
     CriarClienteRequest,
+)
+from src.compartilhado.dominio.exceptions import (
+    AcessoNegadoException,
+    FalhaAutenticacaoException,
 )
 from src.compartilhado.infraestrutura.encryption import EncryptionService
 from src.compartilhado.infraestrutura.logging import scrub_pii
@@ -262,11 +266,11 @@ class TestJWTTokenRevocation:
         jti = str(payload["jti"])
         with _patch_revocation(revogados={jti}):
             creds = _FakeCredentials(token=token)
-            with pytest.raises(HTTPException) as exc:
+            with pytest.raises(FalhaAutenticacaoException) as exc:
                 obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
-            assert exc.value.status_code == 401
             # ADR-039: a mesma mensagem de qualquer outra falha de credencial.
-            assert exc.value.detail == "Credenciais invalidas"
+            assert exc.value.mensagem == "Credenciais invalidas"
+            assert exc.value.motivo == "revoked_token"
 
     def test_non_revoked_token_accepted(self) -> None:
         svc = _jwt_service()
@@ -769,10 +773,10 @@ class TestRBACExigirPapel:
 
     def test_single_role_rejected(self) -> None:
         verificar = exigir_papel("admin")
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(AcessoNegadoException) as exc:
             verificar({"papel": "mecanico", "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
-        assert "nao autorizado" in str(exc.value.detail).lower()
+        assert exc.value.codigo == "ACESSO_NEGADO"
+        assert "nao autorizado" in exc.value.mensagem.lower()
 
     def test_multiple_roles_first_accepted(self) -> None:
         verificar = exigir_papel("admin", "mecanico")
@@ -786,29 +790,26 @@ class TestRBACExigirPapel:
 
     def test_multiple_roles_unlisted_rejected(self) -> None:
         verificar = exigir_papel("admin", "mecanico")
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(AcessoNegadoException):
             verificar({"papel": "atendente", "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
 
     def test_empty_papel_is_a_credential_failure(self) -> None:
         verificar = exigir_papel("admin")
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(FalhaAutenticacaoException) as exc:
             verificar({"papel": "", "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 401
-        assert exc.value.detail == "Credenciais invalidas"
+        assert exc.value.mensagem == "Credenciais invalidas"
 
     def test_missing_papel_key_is_a_credential_failure(self) -> None:
         verificar = exigir_papel("admin")
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(FalhaAutenticacaoException) as exc:
             verificar({"sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 401
-        assert exc.value.detail == "Credenciais invalidas"
+        assert exc.value.mensagem == "Credenciais invalidas"
 
     def test_no_credentials_returns_401(self) -> None:
         """obter_usuario_atual with None credentials raises 401."""
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(FalhaAutenticacaoException) as exc:
             obter_usuario_atual(credentials=None, session=_MOCK_SESSION)
-        assert exc.value.status_code == 401
+        assert exc.value.codigo == "NAO_AUTENTICADO"
 
 
 class TestRBACRouteDeclarations:
