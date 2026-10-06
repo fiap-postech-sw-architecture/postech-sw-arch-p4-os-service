@@ -54,7 +54,7 @@ def serializar_integration_event(evento: IntegrationEvent) -> OutboxRegistro:
 
     Percorre os ``dataclasses.fields`` do evento (inclui ``agregado_id`` e
     ``ocorrido_em`` herdados de ``DomainEvent`` e quaisquer campos da
-    subclasse, ex.: ``OrdemCanceladaEvent.motivo``), normalizando UUID/
+    subclasse, ex.: ``StatusDaOrdemAlteradoEvent.status_novo``), normalizando UUID/
     datetime/date/Decimal/Enum para tipos JSON. Campo de tipo nao suportado
     -> ``TypeError`` imediato (fail-fast no commit, nao no relay).
 

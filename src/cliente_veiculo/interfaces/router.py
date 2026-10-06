@@ -50,7 +50,15 @@ from src.cliente_veiculo.interfaces.schemas import (
 from src.compartilhado.interfaces.auditoria import ator_de
 from src.compartilhado.interfaces.dependencies import obter_session
 
-router = APIRouter(prefix="/api/v1/clientes", tags=["clientes"])
+# 401 e 403 valem para toda rota do router (todas autenticadas).
+router = APIRouter(
+    prefix="/api/v1/clientes",
+    tags=["clientes"],
+    responses={
+        401: {"description": "Credencial ausente, invalida, expirada ou revogada."},
+        403: {"description": "Papel sem acesso a rota."},
+    },
+)
 _log = structlog.get_logger(__name__)
 
 

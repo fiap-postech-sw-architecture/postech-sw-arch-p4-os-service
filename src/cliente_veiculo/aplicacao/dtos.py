@@ -22,9 +22,10 @@ class AtualizarClienteDTO:
     contato: str = field(repr=False)
 
 
+# Placa e dado pessoal (identifica o dono): fora do repr, como o VO Placa.
 @dataclass(frozen=True, slots=True)
 class AdicionarVeiculoDTO:
-    placa: str
+    placa: str = field(repr=False)
     marca: str
     modelo: str
     ano: int
@@ -33,7 +34,7 @@ class AdicionarVeiculoDTO:
 @dataclass(frozen=True, slots=True)
 class VeiculoDTO:
     id: UUID
-    placa: str
+    placa: str = field(repr=False)
     marca: str
     modelo: str
     ano: int

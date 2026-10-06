@@ -409,3 +409,18 @@ class TestAcompanhamentoPublico:
         resp = client.post(self._ROTA, json=_CORPO_PUBLICO)
         assert resp.status_code == 429
         assert resp.json()["erro"]["codigo"] == "RATE_LIMIT_EXCEDIDO"
+
+
+def test_openapi_documenta_401_403_e_404_das_rotas_de_os() -> None:
+    caminhos = TestClient(criar_app()).get("/openapi.json").json()["paths"]
+    for rota, metodo in [
+        ("/api/v1/ordens-de-servico/{ordem_id}", "get"),
+        ("/api/v1/ordens-de-servico/{ordem_id}/historico", "get"),
+        ("/api/v1/ordens-de-servico/{ordem_id}/cancelamento", "post"),
+        ("/api/v1/ordens-de-servico/{ordem_id}/entrega", "post"),
+    ]:
+        assert {"401", "403", "404"} <= set(caminhos[rota][metodo]["responses"])
+    assert {"401", "403"} <= set(
+        caminhos["/api/v1/ordens-de-servico"]["get"]["responses"]
+    )
+    assert {"401", "403"} <= set(caminhos["/api/v1/clientes"]["post"]["responses"])

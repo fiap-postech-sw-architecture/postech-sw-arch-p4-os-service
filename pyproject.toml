@@ -18,6 +18,10 @@ dependencies = [
     "structlog>=24.0",
     "slowapi>=0.1",
     "cryptography>=42.0",
+    # Importados direto (middlewares, readiness, validacao do RATE_LIMIT):
+    # declarados para nao depender das transitivas do FastAPI e do slowapi.
+    "starlette>=1.7",
+    "limits>=5.8",
 ]
 
 [project.optional-dependencies]
@@ -166,6 +170,34 @@ forbidden_modules = [
     "src.compartilhado.infraestrutura",
 ]
 
+# A camada HTTP so e importada pelos composition roots (as proprias
+# `interfaces` e o `main`): dominio, aplicacao e infraestrutura de qualquer
+# contexto nao dependem de rota, schema ou dependency do FastAPI. O contrato de
+# camadas acima so cobre o sentido dentro de um mesmo contexto.
+[[tool.importlinter.contracts]]
+name = "Nucleo e infraestrutura nao importam interfaces de nenhum contexto"
+type = "forbidden"
+source_modules = [
+    "src.cliente_veiculo.dominio",
+    "src.ordem_servico.dominio",
+    "src.autenticacao.dominio",
+    "src.compartilhado.dominio",
+    "src.cliente_veiculo.aplicacao",
+    "src.ordem_servico.aplicacao",
+    "src.autenticacao.aplicacao",
+    "src.compartilhado.aplicacao",
+    "src.cliente_veiculo.infraestrutura",
+    "src.ordem_servico.infraestrutura",
+    "src.autenticacao.infraestrutura",
+    "src.compartilhado.infraestrutura",
+]
+forbidden_modules = [
+    "src.cliente_veiculo.interfaces",
+    "src.ordem_servico.interfaces",
+    "src.autenticacao.interfaces",
+    "src.compartilhado.interfaces",
+]
+
 # Independencia entre bounded contexts: o `dominio` e a `aplicacao` de cada
 # contexto nao importam o nucleo de outro; a comunicacao passa por ports/
 # adapters (ACL). Infraestrutura e interfaces (composition roots) cruzam
@@ -230,7 +262,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 markers = [
     "integracao: testes de integracao (Postgres via testcontainers)",
-    "lento: testes que sobem container proprio ou demoram mais de 1s",
 ]
 # `uv run pytest` e o gate completo: unitarios + integracao com cobertura e
 # fail_under do .coveragerc. Para rodar um subconjunto sem o gate, use --no-cov.

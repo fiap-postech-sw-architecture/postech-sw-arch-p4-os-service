@@ -181,7 +181,7 @@ class Cliente(AggregateRoot):
         if contato is None:
             # Espelha o guard de __post_init__: sem isso o agregado aceitaria
             # estado invalido em memoria e o erro so apareceria no flush
-            # (mesma classe do catch de ServicoOferecido.atualizar, p3 PR #59).
+            # (o p3 PR #59 fechou o mesmo buraco no catalogo de servicos).
             msg = "Contato do cliente e obrigatorio"
             raise ValueError(msg)
         if nome == self._nome and contato == self._contato:

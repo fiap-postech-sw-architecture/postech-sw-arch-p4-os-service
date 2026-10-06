@@ -47,14 +47,15 @@ from src.ordem_servico.interfaces.schemas import (
 
 _log = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/api/v1/ordens-de-servico", tags=["ordens-de-servico"])
-router_publico = APIRouter(prefix="/api/v1/publico", tags=["publico"])
-
-# Toda rota de OS e do atendente (admin herda); o mecanico nao tem rota no
-# OS Service: trabalha pela fila do Execution Service (ADR-039).
-_Atendente = Annotated[dict[str, object], Depends(exigir_papel(Papel.ATENDENTE))]
-_Sessao = Annotated[Session, Depends(obter_session)]
-
+# Respostas documentadas no OpenAPI (Any: e o tipo do parametro `responses`
+# do FastAPI). 401 e 403 valem para toda rota autenticada do router.
+_RESPOSTAS_AUTENTICADAS: dict[int | str, dict[str, Any]] = {
+    401: {"description": "Credencial ausente, invalida, expirada ou revogada."},
+    403: {"description": "Papel sem acesso: so atendente e admin."},
+}
+_RESPOSTA_404: dict[int | str, dict[str, Any]] = {
+    404: {"description": "Ordem inexistente."}
+}
 _RESPOSTA_409: dict[int | str, dict[str, Any]] = {
     409: {
         "description": (
@@ -63,6 +64,18 @@ _RESPOSTA_409: dict[int | str, dict[str, Any]] = {
         )
     }
 }
+
+router = APIRouter(
+    prefix="/api/v1/ordens-de-servico",
+    tags=["ordens-de-servico"],
+    responses=_RESPOSTAS_AUTENTICADAS,
+)
+router_publico = APIRouter(prefix="/api/v1/publico", tags=["publico"])
+
+# Toda rota de OS e do atendente (admin herda); o mecanico nao tem rota no
+# OS Service: trabalha pela fila do Execution Service (ADR-039).
+_Atendente = Annotated[dict[str, object], Depends(exigir_papel(Papel.ATENDENTE))]
+_Sessao = Annotated[Session, Depends(obter_session)]
 
 
 @router.post(
@@ -113,7 +126,7 @@ def listar_ordens(
     )
 
 
-@router.get("/{ordem_id}", summary="Consulta uma ordem")
+@router.get("/{ordem_id}", summary="Consulta uma ordem", responses=_RESPOSTA_404)
 def obter_ordem(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
@@ -123,7 +136,11 @@ def obter_ordem(
     )
 
 
-@router.get("/{ordem_id}/historico", summary="Linha do tempo de status da ordem")
+@router.get(
+    "/{ordem_id}/historico",
+    summary="Linha do tempo de status da ordem",
+    responses=_RESPOSTA_404,
+)
 def obter_historico(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> HistoricoResponse:
@@ -138,7 +155,7 @@ def obter_historico(
 @router.post(
     "/{ordem_id}/cancelamento",
     summary="Cancela a ordem antes do inicio da execucao",
-    responses=_RESPOSTA_409,
+    responses={**_RESPOSTA_404, **_RESPOSTA_409},
 )
 def cancelar_ordem(
     ordem_id: UUID, body: CancelarOrdemRequest, usuario: _Atendente, session: _Sessao
@@ -152,7 +169,7 @@ def cancelar_ordem(
 @router.post(
     "/{ordem_id}/entrega",
     summary="Registra a entrega do veiculo (FINALIZADA -> ENTREGUE)",
-    responses=_RESPOSTA_409,
+    responses={**_RESPOSTA_404, **_RESPOSTA_409},
 )
 def registrar_entrega(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao

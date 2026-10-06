@@ -24,14 +24,9 @@ reports/
 .env.*
 !.env.example
 *.local.*
+# Credencial de cluster (deploy no kind/k3s do ADR-042) nunca entra no git.
 kubeconfig*
 *-kubeconfig
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfplan
 
 # Editores e SO
 .idea/

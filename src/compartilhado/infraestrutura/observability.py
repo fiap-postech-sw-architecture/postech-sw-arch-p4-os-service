@@ -43,9 +43,10 @@ _QUERY_REDIGIDA = "REDACTED"
 def _redigir_pii_da_span(span: object, scope: object) -> None:
     """``server_request_hook`` do FastAPIInstrumentor: remove PII da query.
 
-    A consulta publica de acompanhamento recebe ``placa``/``documento`` como
-    query params; a instrumentacao HTTP grava ``url.query``/``http.target`` nos
-    spans, levando PII (CPF/CNPJ/placa) ao Jaeger (TD-017). Este hook roda na
+    A instrumentacao HTTP grava ``url.query``/``http.target`` nos spans, e uma
+    query com PII (CPF/CNPJ/placa) chegaria ao Jaeger (TD-017, do tempo em que
+    o acompanhamento publico usava query params; hoje placa e documento vao no
+    corpo do POST e o hook segue como defesa para qualquer rota). Ele roda na
     criacao do span server — DEPOIS de a instrumentacao setar os atributos
     padrao — e sobrescreve os que carregam a query: ``url.query`` vira
     ``REDACTED`` e ``http.target`` fica so com o path.
