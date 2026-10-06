@@ -8,6 +8,12 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Recent decisions
 
+- 2026-10-06 - Decisoes do recorte fora do brief, que o PR so tinha no codigo: motivo de cancelamento vazio e descricao so com espacos dao 422 `VALOR_INVALIDO` (invariante do agregado, nao 409); a fila mantem a prioridade por status do p3 (RN-019/020: EM_EXECUCAO primeiro, RECEBIDA por ultimo, encerradas so com `incluir_encerradas`); cada linha do historico e o evento levam a `OrigemMudanca` (ATENDIMENTO, EXECUCAO, BILLING, SAGA) - review deep do PR #2
+- 2026-10-06 - Contrato de erro dos tres servicos: "nao encontrado" generico e `ENTIDADE_NAO_ENCONTRADA` no envelope `{erro: {codigo, mensagem, id_requisicao}}`; o 422 de schema segue o formato do p3 (`{detail, id_requisicao}`) e o 404 do acompanhamento publico segue `{"detail": "Ordem nao encontrada"}` (anti-enumeracao) - coordenador, depois da triagem
+- 2026-10-06 - Access token de 15 min por padrao com o nome da tabela de parametros da RFC-004 (`JWT_EXPIRATION_MINUTES=15`; o coordenador citou `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`, nome do RFC-001 do p3 que o codigo nunca leu) - coordenador, depois da triagem
+- 2026-10-06 - URL do banco com fonte unica (`database.resolver_database_url`: DATABASE_URL, ou POSTGRES_* so em development/test) para API, Alembic e seed; a senha de demo so existe no compose e no `.env.example`. Engine com `hide_parameters=True` e `connect_timeout` (DB_CONNECT_TIMEOUT, 5 s); o 500 de `DBAPIError` loga so tipo, pgcode e constraint, e todo 500 nao tratado sai pelo `SecurityHeadersMiddleware` (headers e X-Request-ID) - review deep do PR #2
+- 2026-10-06 - Imagem sobe com `ENVIRONMENT=production` (so compose e testes declaram development) e a guarda de boot tambem valida chave Fernet, minutos do JWT e a senha do Postgres de demo na DATABASE_URL. Swagger (`/docs`, `/openapi.json`) fica ligado em todo ambiente (entregavel, publicado na borda); o uvicorn sai sem o header `server` - review deep do PR #2
+- 2026-10-06 - Probes: `/api/v1/saude` e liveness (HEALTHCHECK da imagem, sem tocar dependencia) e `/api/v1/saude/pronto` e readiness (`SELECT 1` com teto de 2 s, 503 se falhar), usada pelo compose e pelo `make smoke`; as duas isentas do rate limit - review deep do PR #2
 - 2026-10-06 - Codigo, testes e docs citam so fontes publicas: `RFC-004 secao N` e `ADR-0NN` em `docs/arquitetura` do platform (link no README). O design brief mora no repo privado `postech-sw-arch-p4` e nao serve de referencia para a banca. Nas entradas abaixo, "brief secao 2" = RFC-004 secoes 4.2 (status) e 4.5 (*reread value*), "secao 3" = 4.4 (pivot), "secao 4" = secao 5 e ADR-036, "secao 5" = ADR-038, "secao 6" = 6.1 e "secao 7" = ADR-039 - review deep do PR #2
 - 2026-10-06 - Rotas de colecao sem barra final (`/api/v1/clientes`, `/api/v1/ordens-de-servico`) e `FastAPI(redirect_slashes=False)`: a variante com barra da 404, nunca 307 (atras do Kong o `Location` absoluto sairia com esquema errado). `/metrics` virou rota (`generate_latest`), nao mais mount - review deep do PR #2
 - 2026-10-06 - Resumos da OS completos e instrumentados: orcamento com `valido_ate`, pagamento com `valor` (Dinheiro) e `expira_em`, `StatusPagamento` com o ciclo do Billing (solicitado, confirmado, recusado, expirado, cancelado, estornado) e `registrar_status_do_pagamento` (so o resumo muda, sem historico nem evento). O mapping usa `composite()` com fabrica que devolve `None` quando a coluna-id e nula; o `__composite_values__` e pendurado no VO pelo `iniciar_mapeamentos` (o dominio nao conhece a ordem das colunas). Invariantes do agregado levantam `ValorInvalidoException` (422 `VALOR_INVALIDO`), texto livre recusa caractere de controle (CRLF vira LF), `Dinheiro` tem teto 9.999.999.999,99 (`Numeric(12, 2)`) - review deep do PR #2
@@ -25,6 +31,8 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Discovered conventions
 
+- 2026-10-06 - Politica de warnings do pytest: so dois warnings conhecidos de terceiros (httpx do TestClient do starlette, `asyncio.iscoroutinefunction` do slowapi) ficam no `filterwarnings`; a suite roda sem warning, entao um novo aparece. Segredos de JWT dos testes tem o tamanho do hash (32, 48 ou 64 bytes)
+- 2026-10-06 - `ci.yml`, `security.yml` e `scripts/sonar/analisar.sh` sao copia literal do template do coordenador: mudanca vai no template e e recopiada nos tres servicos. `make check` = jobs lint, type-check, security e test (com `uv lock --check`); `make smoke` = job build (projeto compose `pytstop-os-smoke`, porta 18000, `down -v` ate em falha, logs antes); `make audit` = pip-audit com os extras da imagem
 - 2026-10-06 - CI vem dos templates do coordenador (`ci.yml`: lint, type-check, security, test, sonarqube, build; `security.yml`: pip-audit, gitleaks, trivy). Os nomes dos jobs sao os checks obrigatorios da branch protection: nao renomear. `make test` gera `coverage.xml`, `htmlcov/` e `reports/junit.xml` (o job `sonarqube` le o coverage.xml do artefato do `test`)
 
 - 2026-10-06 - `uv run pytest` e o gate completo (addopts liga `--cov=src` e o `fail_under=90` do `.coveragerc`); para rodar subconjunto sem o gate use `--no-cov`. O schema da integracao vem de `alembic upgrade head` (nao `create_all`) e `test_migracao.py` compara migracao x metadata (`compare_metadata == []`): mudou mapping, escreva a migracao
@@ -32,6 +40,10 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Gotchas
 
+- 2026-10-06 - O indice da UNIQUE `(ordem_id, sequencia)` devolve o historico ordenado mesmo sem `order_by`: teste de ordenacao precisa de `SET LOCAL enable_indexscan/enable_indexonlyscan/enable_bitmapscan = off` para o Postgres ler na ordem fisica
+- 2026-10-06 - SQLite `:memory:` (SingletonThreadPool) com rota que consulta em thread (readiness, `run_in_threadpool`): o `dispose()` da thread principal nao fecha a conexao da outra (check_same_thread) e sobra `ResourceWarning`; nos testes use `StaticPool` com `check_same_thread=False`
+- 2026-10-06 - `StarletteDeprecationWarning` e subclasse de `UserWarning`, nao de `DeprecationWarning`: o `filterwarnings` precisa da categoria certa
+- 2026-10-06 - `uvx pip-audit -r requirements.txt` cria um venv temporario cujo `ensurepip` aborta (SIGABRT) no Python 3.14 do uv no macOS; o `make audit` exporta com hashes e roda com `--disable-pip` (mesmo conjunto de pacotes, sem venv)
 - 2026-10-06 - `composite()` do SQLAlchemy 2.0 remonta o VO no primeiro acesso depois de cada INSERT/UPDATE e dispara um evento `refresh` sintetico (contexto `_COMPOSITE_FGET`, atributos = so a chave do composite). Listener de `refresh` que zera estado em memoria (ex.: `_eventos_pendentes`) apaga eventos ainda nao enfileirados: o `_ao_recarregar` do mapping de OS ignora refresh cujos atributos sao so os resumos
 - 2026-10-06 - O `\D`/`\d` do Python sao Unicode: sem `re.ASCII`, digitos arabe-indicos passavam na normalizacao de CPF/CNPJ e no formato da placa, e o `brutils` os aceita (no CNPJ, ate so no DV: `int()` le U+0668 como 8). O mesmo documento em outro alfabeto viraria outro `documento_hash` e furaria a UK. `compartilhado/dominio/documento.py` usa `re.ASCII` e exige resultado ASCII; a placa usa `fullmatch` (o `$` casa antes do `\n` final)
 - 2026-10-06 - Falha de flush (`StaleDataError` do lock otimista) expira a instancia: ler `ordem.id` depois exige rollback (`PendingRollbackError`). Capture ids antes do `flush`
@@ -43,6 +55,9 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Tech debt / TODO
 
+- 2026-10-06 - LOW - Sugestoes para o template do coordenador, nao aplicadas aqui para o CI seguir copia literal: resultado do pip-audit e do trivy no `$GITHUB_STEP_SUMMARY` e pip-audit com export com hashes e `--disable-pip`. O total do gate no `cobertura_resumo.py` ja foi feito aqui
+- 2026-10-06 - LOW - BDD de componente (ADR-041: a saga com barramento falso) entra com a saga; o comentario do job `test` do template ja o anuncia
+- 2026-10-06 - LOW - `mensagens_processadas` ainda sem consumidor (entra com o consumidor RabbitMQ da onda B) e com `id`/`tipo` no lugar de `mensagem_id`/`processada_em` do ER da RFC-004 secao 7.2; a migracao 002 da onda B alinha, como o ER da outbox
 - 2026-10-06 - RESOLVIDO - `/metrics` responde 200 direto (rota com `generate_latest`, sem o 307 do mount); o scrape usa `/metrics` sem barra (corrige a entrada do 307 abaixo)
 - 2026-10-06 - RESOLVIDO - `StatusPagamento` completo e metodo de dominio que atualiza o resumo sem transicao (`registrar_status_do_pagamento`), com persistencia instrumentada por `composite()` (corrige a entrada de `StatusPagamento` abaixo)
 - 2026-10-06 - LOW - O erasure faz UPDATE do `motivo` em `historico_status_ordem`, unica excecao a regra de historico so com insercao (ADR-037, RFC-004). O codigo documenta a excecao (`cliente_veiculo/infraestrutura/adapters.py`); falta registra-la no ADR/RFC do platform (repassado ao coordenador)
@@ -54,5 +69,9 @@ Updated by AI agents at task end per `postech-ai-helper/ai/canonical/task-end-re
 
 ## Review lessons
 
+- 2026-10-06 - Comentario ou docstring que afirma propriedade ("toda resposta" leva os headers, "o CI nao instala o extra") precisa de teste ou vira mentira: o 500 saia sem headers e o CI instalava o extra - review deep do PR #2
+- 2026-10-06 - "Validar antes do banco" se prova com espiao (zero chamadas ao repositorio), nao com teste do VO: a rota publica so limitava tamanho e a suite inteira passava - review deep do PR #2
+- 2026-10-06 - RBAC conferido rota a rota contra a tabela de papeis do ADR-039 (celula vazia = nenhuma rota): o PR deixava o mecanico ler OS e historico - review deep do PR #2
+- 2026-10-06 - Recorte de outro repositorio se confere contra a main ATUAL da origem, nao so contra o commit de corte: a correcao ASCII do p3 #32 entrou depois do 08dcffe e ficou de fora - review deep do PR #2
 - 2026-10-06 - Texto livre novo classificado como possivel PII (descricao do problema, motivos) tem de entrar no erasure LGPD do cliente na mesma transacao; o autor so tinha tirado o texto do payload da outbox - PR do recorte
 - 2026-10-06 - Teste de listener `refresh` precisa mudar a linha por fora do ORM antes do `session.refresh`; comparar com o valor em memoria passa mesmo sem o listener (atributo nao mapeado) - PR do recorte

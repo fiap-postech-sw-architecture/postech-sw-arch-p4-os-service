@@ -214,6 +214,7 @@ class TestAbertura:
             campo: None,
         }
         with pytest.raises(ValorInvalidoException, match=f"{campo} e obrigatorio"):
+            # None de proposito: a guarda de runtime e o que esta sob teste.
             OrdemDeServico.abrir(**kwargs)  # type: ignore[arg-type]
 
     def test_repr_nao_expoe_texto_livre(self) -> None:
@@ -416,6 +417,7 @@ class TestStatusDoPagamento:
         antes = _fotografia(ordem)
 
         with pytest.raises(ValueError, match="status do pagamento"):
+            # str de proposito: so o StatusPagamento passa na guarda.
             ordem.registrar_status_do_pagamento("confirmado")  # type: ignore[arg-type]
 
         assert _fotografia(ordem) == antes
@@ -511,5 +513,6 @@ class TestCancelamento:
 def test_ocorrido_em_e_utc() -> None:
     ordem = abrir_ordem()
     assert isinstance(ordem.criado_em, datetime)
-    assert ordem.criado_em.utcoffset() is not None
-    assert ordem.criado_em.utcoffset().total_seconds() == 0  # type: ignore[union-attr]
+    deslocamento = ordem.criado_em.utcoffset()
+    assert deslocamento is not None
+    assert deslocamento.total_seconds() == 0
