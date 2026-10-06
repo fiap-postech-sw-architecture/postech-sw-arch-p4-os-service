@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated
 
@@ -78,6 +79,20 @@ _PERMISSOES: MappingProxyType[Papel, frozenset[Papel]] = MappingProxyType(
 )
 
 
+def _papel_do_token(usuario: dict[str, object]) -> Papel:
+    """Claim ``papel`` do token.
+
+    Ausente, desconhecido ou de tipo errado e falha de credencial (401, ADR-039):
+    nenhum token emitido por este servico e assim. O 403 fica para o papel
+    valido sem permissao na rota.
+    """
+    bruto = usuario.get("papel")
+    if isinstance(bruto, str):
+        with suppress(ValueError):
+            return Papel(bruto)
+    raise _nao_autenticado("invalid_role_claim")
+
+
 def exigir_papel(
     *papeis: str,
 ) -> Callable[..., dict[str, object]]:
@@ -91,22 +106,8 @@ def exigir_papel(
     def verificar(
         usuario: Annotated[dict[str, object], Depends(obter_usuario_atual)],
     ) -> dict[str, object]:
-        raw = usuario.get("papel")
-        papel: Papel | None
-        if isinstance(raw, str):
-            try:
-                papel = Papel(raw)
-            except ValueError:
-                papel = None
-        else:
-            papel = None
-        if papel is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Papel nao autorizado",
-            )
-        permissoes = _PERMISSOES.get(papel, frozenset())
-        if not permissoes & papeis_exigidos:
+        papel = _papel_do_token(usuario)
+        if not _PERMISSOES.get(papel, frozenset()) & papeis_exigidos:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Papel nao autorizado",

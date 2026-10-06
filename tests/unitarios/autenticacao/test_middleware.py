@@ -235,7 +235,6 @@ class TestHierarquiaDePapeis:
             pytest.param("atendente", "mecanico", id="atendente-nega-mecanico"),
             pytest.param("mecanico", "admin", id="mecanico-nega-admin"),
             pytest.param("mecanico", "atendente", id="mecanico-nega-atendente"),
-            pytest.param("cliente", "atendente", id="papel-fora-do-enum-nega"),
         ],
     )
     def test_papel_nao_herda_para_cima_ou_lateral(
@@ -247,20 +246,44 @@ class TestHierarquiaDePapeis:
         assert exc.value.status_code == 403
 
 
+def _afirma_401_por_papel_invalido(
+    claims: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Papel ausente, desconhecido ou de tipo errado: o mesmo 401 do gate."""
+    monkeypatch.setattr(f"{_MIDDLEWARE}._log", structlog.get_logger())
+    verificar = exigir_papel("admin")
+    with (
+        structlog.testing.capture_logs() as logs,
+        pytest.raises(HTTPException) as exc,
+    ):
+        verificar(claims)  # type: ignore[operator]
+
+    assert (exc.value.status_code, exc.value.detail, exc.value.headers) == (
+        401,
+        "Credenciais invalidas",
+        {"WWW-Authenticate": "Bearer"},
+    )
+    assert {
+        "event": "authentication_failed",
+        "reason": "invalid_role_claim",
+        "log_level": "warning",
+    } in logs
+
+
 class TestEdgeCasesExigirPapel:
     @pytest.mark.parametrize(
         "papel_valor",
         [
             pytest.param("desconhecido", id="papel-desconhecido"),
+            pytest.param("cliente", id="papel-fora-do-enum"),
             pytest.param("", id="papel-string-vazia"),
             pytest.param("ADMIN", id="papel-case-incorreto"),
         ],
     )
-    def test_papel_string_fora_do_enum_retorna_403(self, papel_valor: str) -> None:
-        verificar = exigir_papel("admin")
-        with pytest.raises(HTTPException) as exc:
-            verificar({"papel": papel_valor, "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
+    def test_papel_string_fora_do_enum_retorna_401(
+        self, papel_valor: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _afirma_401_por_papel_invalido({"papel": papel_valor, "sub": "u1"}, monkeypatch)
 
     @pytest.mark.parametrize(
         "papel_valor",
@@ -271,17 +294,15 @@ class TestEdgeCasesExigirPapel:
             pytest.param({"nome": "admin"}, id="papel-dict"),
         ],
     )
-    def test_papel_tipo_nao_string_retorna_403(self, papel_valor: object) -> None:
-        verificar = exigir_papel("admin")
-        with pytest.raises(HTTPException) as exc:
-            verificar({"papel": papel_valor, "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
+    def test_papel_tipo_nao_string_retorna_401(
+        self, papel_valor: object, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _afirma_401_por_papel_invalido({"papel": papel_valor, "sub": "u1"}, monkeypatch)
 
-    def test_payload_sem_papel_retorna_403(self) -> None:
-        verificar = exigir_papel("admin")
-        with pytest.raises(HTTPException) as exc:
-            verificar({"sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
+    def test_payload_sem_papel_retorna_401(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _afirma_401_por_papel_invalido({"sub": "u1"}, monkeypatch)
 
     def test_exigir_papel_sem_argumentos_levanta_value_error(self) -> None:
         with pytest.raises(ValueError, match="requer ao menos um papel"):

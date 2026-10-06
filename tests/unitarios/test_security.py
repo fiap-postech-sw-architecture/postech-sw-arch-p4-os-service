@@ -790,17 +790,19 @@ class TestRBACExigirPapel:
             verificar({"papel": "atendente", "sub": "u1"})  # type: ignore[operator]
         assert exc.value.status_code == 403
 
-    def test_empty_papel_rejected(self) -> None:
+    def test_empty_papel_is_a_credential_failure(self) -> None:
         verificar = exigir_papel("admin")
         with pytest.raises(HTTPException) as exc:
             verificar({"papel": "", "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 401
+        assert exc.value.detail == "Credenciais invalidas"
 
-    def test_missing_papel_key_rejected(self) -> None:
+    def test_missing_papel_key_is_a_credential_failure(self) -> None:
         verificar = exigir_papel("admin")
         with pytest.raises(HTTPException) as exc:
             verificar({"sub": "u1"})  # type: ignore[operator]
-        assert exc.value.status_code == 403
+        assert exc.value.status_code == 401
+        assert exc.value.detail == "Credenciais invalidas"
 
     def test_no_credentials_returns_401(self) -> None:
         """obter_usuario_atual with None credentials raises 401."""

@@ -368,6 +368,17 @@ class TestFalhaDeCredencialUniforme:
             segredo,
             algorithm="HS384",
         )
+        # Assinatura, type e exp validos; o claim `papel` e que nao e de quem
+        # emite aqui (ausente, desconhecido ou de tipo errado).
+        valido = {**claims, "type": "access", "exp": datetime.now(UTC) + timedelta(1)}
+        papel_invalido = [
+            jwt.encode(corpo, segredo, algorithm="HS256")
+            for corpo in (
+                {k: v for k, v in valido.items() if k != "papel"},
+                {**valido, "papel": "cliente"},
+                {**valido, "papel": 42},
+            )
+        ]
         login = api_client.post(
             "/api/v1/autenticacao/login",
             json={"email": admin_user.email, "senha": SENHA_PADRAO},
@@ -388,6 +399,7 @@ class TestFalhaDeCredencialUniforme:
                 {"Authorization": f"Bearer {outro_algoritmo}"},
                 {"Authorization": f"Bearer {login['refresh_token']}"},
                 {"Authorization": f"Bearer {revogado}"},
+                *({"Authorization": f"Bearer {token}"} for token in papel_invalido),
             )
         ]
 
