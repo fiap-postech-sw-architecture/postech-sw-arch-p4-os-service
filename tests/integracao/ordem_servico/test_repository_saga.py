@@ -18,6 +18,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 )
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
+from src.ordem_servico.infraestrutura.consultas import ConsultaDaOrdemSQLAlchemy
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
 from src.ordem_servico.interfaces.dependencies import obter_obter_ordem
 from tests.eventos import evento
@@ -139,6 +140,10 @@ def test_round_trip_com_os_jsonb_e_os_instantes(
 
 def test_obter_saga_inexistente_devolve_none(session: Session) -> None:
     assert SagaSQLAlchemyRepository(session).obter(uuid4()) is None
+
+
+def test_consulta_da_os_inexistente_devolve_none(session: Session) -> None:
+    assert ConsultaDaOrdemSQLAlchemy(session).com_saga(uuid4()) is None
 
 
 def test_segunda_escrita_sobre_a_versao_lida_vira_conflito(
