@@ -1,9 +1,10 @@
-"""Instrumentacao OpenTelemetry minima (ADR-020, diferencial opcional).
+"""Instrumentacao OpenTelemetry (ADR-020 do p3, ADR-043).
 
 Auto-instrumentation de FastAPI + SQLAlchemy exportando traces OTLP/gRPC
 direto para o Jaeger all-in-one do cluster de demo. Telemetria e detalhe de
-borda (ADR-015): nenhuma camada interna importa OTel — este modulo e o unico
-ponto de contato, chamado pelo lifespan em ``src/main.py``.
+borda (ADR-015): nenhuma camada interna importa OTel. ``configurar_otel`` e
+chamado pelo lifespan em ``src/main.py``; ``criar_tracer``, pelo relay e pelo
+consumidor, que abrem os spans de mensagem (ADR-043).
 
 Default OFF: sem ``OTEL_ENABLED=true`` a funcao retorna antes de qualquer
 import de OpenTelemetry — custo zero para compose, CI e testes. Os imports
@@ -24,6 +25,7 @@ import structlog
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+    from opentelemetry.trace import Tracer
     from sqlalchemy import Engine
 
 _log = structlog.get_logger(__name__)
@@ -35,6 +37,7 @@ _log = structlog.get_logger(__name__)
 # modo insecure automaticamente (hotspot SonarQube revisado como seguro).
 _ENDPOINT_PADRAO = "http://jaeger:4317"
 _VALORES_VERDADEIROS = frozenset({"true", "1"})
+_NOME_DO_SERVICO = "pytstop-os-service"
 
 # Marcador que substitui a query string nos spans (TD-017).
 _QUERY_REDIGIDA = "REDACTED"
@@ -88,10 +91,7 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
         True quando a instrumentacao foi ativada; False quando a flag esta
         desligada ou o extra ``otel`` nao esta instalado (warning logado).
     """
-    habilitado = (
-        os.environ.get("OTEL_ENABLED", "false").strip().lower() in _VALORES_VERDADEIROS
-    )
-    if not habilitado:
+    if not _habilitado():
         return False
 
     try:
@@ -113,7 +113,7 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", _ENDPOINT_PADRAO)
     resource = Resource.create(
         {
-            "service.name": "pytstop-os-service",
+            "service.name": _NOME_DO_SERVICO,
             # Mesmo SHA curto do banner de boot e dos logs (logging.py).
             "service.version": os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12],
         }
@@ -157,3 +157,54 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
     SQLAlchemyInstrumentor().instrument(engine=engine, tracer_provider=provider)
     _log.info("otel configurado: traces OTLP ativos", endpoint=endpoint)
     return True
+
+
+def _habilitado() -> bool:
+    return (
+        os.environ.get("OTEL_ENABLED", "false").strip().lower() in _VALORES_VERDADEIROS
+    )
+
+
+def criar_tracer(processo: str) -> Tracer:
+    """Tracer do relay ou do consumidor (spans de mensagem, ADR-043).
+
+    O SDK fica sempre ligado: os spans dao o ``traceparent`` que segue pela
+    outbox e pelo AMQP e o ``trace_id`` dos logs. A exportacao OTLP so liga com
+    ``OTEL_ENABLED=true`` e o extra ``otel`` instalado (a imagem o instala);
+    sem ela os spans nao saem do processo.
+    """
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+
+    provider = TracerProvider(
+        resource=Resource.create(
+            {
+                "service.name": _NOME_DO_SERVICO,
+                "service.version": os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12],
+            }
+        )
+    )
+    if _habilitado():
+        try:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,
+            )
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        except ImportError:
+            _log.warning(
+                "otel export disabled: OTEL_ENABLED=true but the 'otel' extra is "
+                "not installed",
+            )
+        else:
+            endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", _ENDPOINT_PADRAO)
+            provider.add_span_processor(
+                BatchSpanProcessor(
+                    OTLPSpanExporter(
+                        endpoint=endpoint, insecure=endpoint.startswith("http://")
+                    )
+                )
+            )
+            _log.info("otel export enabled", endpoint=endpoint, processo=processo)
+    # Encerramento gracioso descarrega o ultimo lote de spans.
+    atexit.register(provider.shutdown)
+    return provider.get_tracer(f"{_NOME_DO_SERVICO}.{processo}")

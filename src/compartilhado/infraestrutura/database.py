@@ -68,6 +68,11 @@ _DB_POOL_RECYCLE_PADRAO = "1800"
 _DB_CONNECT_TIMEOUT_PADRAO = "5"
 
 
+def tempo_de_conexao() -> int:
+    """Segundos de ``DB_CONNECT_TIMEOUT`` para abrir uma conexao (padrao 5)."""
+    return int(os.environ.get("DB_CONNECT_TIMEOUT", _DB_CONNECT_TIMEOUT_PADRAO))
+
+
 def criar_engine(url: str) -> Engine:
     # pool_pre_ping valida a conexao no checkout (descarta conexoes mortas
     # apos restart do banco ou ociosidade) — aplicavel a qualquer pool.
@@ -88,11 +93,7 @@ def criar_engine(url: str) -> Engine:
             pool_recycle=int(
                 os.environ.get("DB_POOL_RECYCLE", _DB_POOL_RECYCLE_PADRAO)
             ),
-            connect_args={
-                "connect_timeout": int(
-                    os.environ.get("DB_CONNECT_TIMEOUT", _DB_CONNECT_TIMEOUT_PADRAO)
-                )
-            },
+            connect_args={"connect_timeout": tempo_de_conexao()},
         )
     # SQLite (testes) usa SingletonThreadPool e rejeita pool_size/max_overflow.
     return create_engine(

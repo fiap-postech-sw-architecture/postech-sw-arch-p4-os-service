@@ -362,3 +362,91 @@ class TestRedacaoDePII:
     def test_span_none_nao_quebra(self) -> None:
         # Defensivo: o hook nunca pode derrubar o request por causa do trace.
         _redigir_pii_da_span(None, {"path": "/x"})
+
+
+class TestTracerDoRelayEDoConsumidor:
+    """``criar_tracer``: o SDK sempre ligado; o OTLP so com OTEL_ENABLED."""
+
+    @pytest.fixture
+    def exportador(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        """Troca o exporter OTLP por um que guarda os spans e o endpoint."""
+        from opentelemetry.sdk.trace.export import SpanExportResult
+
+        registro: dict = {"spans": [], "finalizadores": []}
+
+        class ExportadorFalso:
+            def __init__(self, endpoint: str, insecure: bool) -> None:
+                registro["endpoint"] = endpoint
+                registro["insecure"] = insecure
+
+            def export(self, spans: list) -> SpanExportResult:
+                registro["spans"].extend(spans)
+                return SpanExportResult.SUCCESS
+
+            def shutdown(self) -> None:
+                pass
+
+            def force_flush(self, timeout_millis: int = 30000) -> bool:
+                return True
+
+        modulo = types.ModuleType("trace_exporter")
+        modulo.OTLPSpanExporter = ExportadorFalso  # type: ignore[attr-defined]
+        monkeypatch.setitem(
+            sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", modulo
+        )
+        monkeypatch.setattr(atexit, "register", registro["finalizadores"].append)
+        return registro
+
+    def _encerrar(self, exportador: dict) -> None:
+        for finalizar in exportador["finalizadores"]:
+            finalizar()
+
+    def test_sem_flag_o_span_existe_mas_nao_sai_do_processo(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+
+        tracer = observability_modulo.criar_tracer("relay")
+        with tracer.start_as_current_span("publish X") as span:
+            valido = span.get_span_context().is_valid
+        self._encerrar(exportador)
+
+        assert valido
+        assert "endpoint" not in exportador
+        assert exportador["spans"] == []
+
+    def test_com_flag_exporta_por_otlp_para_o_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
+
+        tracer = observability_modulo.criar_tracer("consumidor")
+        with tracer.start_as_current_span("process X"):
+            pass
+        self._encerrar(exportador)
+
+        assert (exportador["endpoint"], exportador["insecure"]) == (
+            "http://jaeger:4317",
+            True,
+        )
+        (span,) = exportador["spans"]
+        assert span.name == "process X"
+        assert span.resource.attributes["service.name"] == "pytstop-os-service"
+
+    def test_com_flag_e_sem_o_extra_avisa_e_segue_sem_exportar(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+        monkeypatch.setitem(
+            sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", None
+        )
+
+        with capture_logs() as logs:
+            tracer = observability_modulo.criar_tracer("relay")
+        with tracer.start_as_current_span("publish X"):
+            pass
+        self._encerrar(exportador)
+
+        assert [log["log_level"] for log in logs] == ["warning"]
+        assert exportador["spans"] == []

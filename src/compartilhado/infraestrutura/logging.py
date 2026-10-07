@@ -7,6 +7,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from opentelemetry import trace
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
@@ -29,6 +30,23 @@ def adicionar_versao_imagem(
     """Injeta git_sha/git_date em todo evento (sem sobrescrever explicit)."""
     event_dict.setdefault("git_sha", _GIT_SHA)
     event_dict.setdefault("git_date", _GIT_DATE)
+    return event_dict
+
+
+def adicionar_contexto_de_trace(
+    _logger: object,
+    _method_name: str,
+    event_dict: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
+    """Injeta ``trace_id``/``span_id`` do span OpenTelemetry corrente (ADR-043).
+
+    Sem span valido (laco ocioso, teste, OTel da API desligado) nada muda: a
+    linha de log so ganha os ids quando ha trace para correlacionar.
+    """
+    contexto = trace.get_current_span().get_span_context()
+    if contexto.is_valid:
+        event_dict.setdefault("trace_id", format(contexto.trace_id, "032x"))
+        event_dict.setdefault("span_id", format(contexto.span_id, "016x"))
     return event_dict
 
 
@@ -226,9 +244,8 @@ def redigir_pii_erro(erro: str) -> str:
 
     Complementa o scrubber de log (``scrub_pii``): aquele atua no pipeline de
     structlog em memoria; esta funcao atua nas strings de erro que saem do
-    processo por outro caminho: a mensagem do 422 de ``ValueError`` devolvida
-    ao cliente e, quando o relay da outbox chegar, a ``outbox.ultimo_erro``
-    gravada no banco (LGPD: o scrubber de log nao alcanca nenhum dos dois).
+    processo por outro caminho, como a mensagem do 422 de ``ValueError``
+    devolvida ao cliente (LGPD: o scrubber de log nao a alcanca).
 
     Trunca o resultado em ``_MAX_ERRO_LEN`` caracteres para evitar que
     mensagens de excepcao excessivamente longas ocupem espaco excessivo.
@@ -249,6 +266,7 @@ def redigir_pii_erro(erro: str) -> str:
 def _cadeia_compartilhada() -> list[Any]:
     return [
         structlog.contextvars.merge_contextvars,
+        adicionar_contexto_de_trace,
         adicionar_versao_imagem,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,

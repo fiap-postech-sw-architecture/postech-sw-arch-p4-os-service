@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.integracao.broker import Broker, subir_broker
 from tests.integracao.seed_helpers import criar_usuario
 
 if TYPE_CHECKING:
@@ -189,3 +190,20 @@ def ambiente_da_app(engine: Engine) -> Iterator[None]:
         yield
     finally:
         mp.undo()
+
+
+@pytest.fixture(scope="session")
+def _broker_da_sessao() -> Iterator[Broker]:
+    container, broker = subir_broker()
+    try:
+        yield broker
+    finally:
+        container.stop()
+
+
+@pytest.fixture
+def broker(_broker_da_sessao: Broker) -> Iterator[Broker]:
+    """RabbitMQ com a topologia do platform; as filas comecam e terminam vazias."""
+    _broker_da_sessao.esvaziar()
+    yield _broker_da_sessao
+    _broker_da_sessao.esvaziar()

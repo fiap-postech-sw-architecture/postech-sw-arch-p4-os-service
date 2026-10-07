@@ -717,3 +717,21 @@ class TestLoggersDoUvicorn:
         configurar_logging(stream=buffer_com_uvicorn_restaurado)
 
         assert not logging.getLogger("uvicorn.access").hasHandlers()
+
+
+def test_log_dentro_de_um_span_leva_trace_id_e_span_id() -> None:
+    from src.compartilhado.infraestrutura.logging import adicionar_contexto_de_trace
+    from tests.rastreamento import Rastreador
+
+    rastreador = Rastreador()
+    with rastreador.tracer.start_as_current_span("process X") as span:
+        dentro = adicionar_contexto_de_trace(None, "info", {"event": "x"})
+    fora = adicionar_contexto_de_trace(None, "info", {"event": "y"})
+
+    contexto = span.get_span_context()
+    assert dentro == {
+        "event": "x",
+        "trace_id": f"{contexto.trace_id:032x}",
+        "span_id": f"{contexto.span_id:016x}",
+    }
+    assert fora == {"event": "y"}
