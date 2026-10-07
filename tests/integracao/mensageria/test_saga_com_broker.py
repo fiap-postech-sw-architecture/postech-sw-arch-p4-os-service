@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import structlog
-from prometheus_client import REGISTRY
+from prometheus_client import REGISTRY, generate_latest
 from sqlalchemy import event, text
 from structlog.testing import capture_logs
 
@@ -34,6 +34,7 @@ from src.consumidor import montar_despachante
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import (
     obter_abrir_ordem,
+    obter_obter_saga,
     obter_registrar_entrega,
 )
 from tests.eventos import envelope_de_evento
@@ -97,10 +98,12 @@ class Atendimento:
         self.comandos: dict[str, tuple[Any, dict[str, Any]]] = {}
         self.ordem_id = UUID(int=0)
 
-    def abrir(self) -> UUID:
+    def abrir(
+        self, *, placa: str | None = None, descricao: str = "Barulho na suspensao"
+    ) -> UUID:
         """POST de abertura: o span dele e a raiz do trace da saga."""
         with self._session_factory() as sess:
-            cliente = criar_cliente_com_veiculo(sess)
+            cliente = criar_cliente_com_veiculo(sess, placa=placa)
             sess.commit()
             cliente_id, veiculo_id = cliente.id, cliente.veiculos[0].id
         with (
@@ -115,7 +118,7 @@ class Atendimento:
                     AbrirOrdemDTO(
                         cliente_id=cliente_id,
                         veiculo_id=veiculo_id,
-                        descricao_problema="Barulho na suspensao",
+                        descricao_problema=descricao,
                         ator=_ATENDENTE,
                     )
                 )
@@ -305,6 +308,53 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
         "pytstop.saga.etapa_nova": "aguardando_pagamento",
         "pytstop.saga.desfecho": "processada",
     }
+
+
+def test_placa_e_descricao_so_no_comando_da_execucao(
+    atendimento: Atendimento,
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    rastreador: Rastreador,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    # Valores sentinela no caminho real (abertura, relay, consumidor,
+    # orquestrador, entrega): a placa e o texto livre so podem aparecer no
+    # envelope do SolicitarDiagnostico, por contrato (RFC-004 secao 5.3).
+    placa, descricao = "QZX7W42", "Sentinela 7f3a do problema relatado"
+    ordem_id = atendimento.abrir(placa=placa, descricao=descricao)
+    atendimento.ate_aguardando_agendamento()
+    for tipo in ("ExecucaoAgendada", "ExecucaoIniciada"):
+        atendimento.responder("AgendarExecucao", tipo)
+        atendimento.esperar_passo(tipo)
+    atendimento.responder("AgendarExecucao", "ExecucaoFinalizada")
+    esperar_ate(lambda: atendimento.etapa() == "concluida")
+    with session_factory() as sess:
+        obter_registrar_entrega(sess).executar(ordem_id, ator=_ATENDENTE)
+        saga = obter_obter_saga(sess).executar(ordem_id)
+    esperar_ate(lambda: rastreador.spans("process ExecucaoFinalizada"))
+
+    saidas = capfd.readouterr()
+    # Os logs do servico sairam (e foram lidos) nesta captura.
+    assert "saga transition" in saidas.out + saidas.err
+    textos = [saidas.out, saidas.err, generate_latest(REGISTRY).decode(), repr(saga)]
+    for span in rastreador.spans():
+        textos += [span.name, str(span.attributes), str(span.status.description)]
+        textos += [str(evento.attributes) for evento in span.events]
+    with engine.connect() as conexao:
+        for consulta in (
+            "SELECT passos::text, comando_em_voo::text, itens::text FROM sagas",
+            "SELECT * FROM mensagens_processadas",
+            "SELECT * FROM historico_status_ordem",
+            "SELECT ultimo_erro FROM outbox",
+        ):
+            textos += [str(linha) for linha in conexao.execute(text(consulta))]
+        com_placa = conexao.execute(
+            text("SELECT envelope ->> 'tipo' FROM outbox WHERE envelope::text LIKE :p"),
+            {"p": f"%{placa}%"},
+        ).scalars()
+        assert list(com_placa) == ["SolicitarDiagnostico"]
+    vazamentos = [t for t in textos if placa in t or descricao in t]
+    assert vazamentos == []
 
 
 def test_execucao_iniciada_antes_da_agendada_volta_pela_retry_e_passa(
