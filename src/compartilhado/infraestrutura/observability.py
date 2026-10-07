@@ -6,13 +6,16 @@ borda (ADR-015): nenhuma camada interna importa OTel. ``configurar_otel`` e
 chamado pelo lifespan em ``src/main.py``; ``criar_tracer``, pelo relay e pelo
 consumidor, que abrem os spans de mensagem (ADR-043).
 
-Default OFF: sem ``OTEL_ENABLED=true`` a funcao retorna antes de qualquer
-import de OpenTelemetry — custo zero para compose, CI e testes. Os imports
-sao lazy (dentro da funcao) porque o extra ``otel`` e opcional: o ``uv sync``
-padrao (grupo ``dev``) nao traz SDK + grpcio, e o mypy desse ambiente so
-enxerga estes modulos via override ``ignore_missing_imports`` no
-``pyproject.toml``; o CI e a imagem instalam o extra. Flag ligada sem o extra
-instalado degrada para warning + no-op — nunca quebra o boot.
+O SDK do OpenTelemetry e dependencia principal (o relay e o consumidor abrem
+spans sempre, para o ``traceparent`` seguir pela outbox e pelo AMQP). O extra
+``otel``, opcional, traz so o exportador OTLP (com o grpcio) e as
+instrumentacoes da API: os imports deles sao lazy, e a flag
+``OTEL_ENABLED=true`` sem o extra instalado degrada para warning, sem
+exportar, e nunca quebra o boot. Sem a flag a API nem monta o provider.
+
+O recurso de todo span leva ``service.name`` de ``OTEL_SERVICE_NAME`` (padrao
+``pytstop-os-service``), como Billing e Execucao, e ``pytstop.processo``
+(``api``, ``relay`` ou ``consumidor``), que separa os spans de cada processo.
 """
 
 from __future__ import annotations
@@ -81,8 +84,8 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
     """Liga a auto-instrumentacao FastAPI + SQLAlchemy com export OTLP.
 
     Le ``OTEL_ENABLED`` (default ``"false"``); quando ligada, monta
-    TracerProvider (service.name=pytstop-os-service, service.version=PYTSTOP_GIT_SHA
-    curto) com BatchSpanProcessor -> OTLPSpanExporter gRPC no endpoint
+    TracerProvider (recurso de ``atributos_do_recurso("api")``) com
+    BatchSpanProcessor -> OTLPSpanExporter gRPC no endpoint
     ``OTEL_EXPORTER_OTLP_ENDPOINT`` (default ``http://jaeger:4317``; o scheme
     ``http://`` seleciona canal gRPC sem TLS). ``/api/v1/saude`` fica fora do
     trace — probes do kubelet e healthchecks gerariam ruido continuo.
@@ -111,14 +114,7 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
         return False
 
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", _ENDPOINT_PADRAO)
-    resource = Resource.create(
-        {
-            "service.name": _NOME_DO_SERVICO,
-            # Mesmo SHA curto do banner de boot e dos logs (logging.py).
-            "service.version": os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12],
-        }
-    )
-    provider = TracerProvider(resource=resource)
+    provider = TracerProvider(resource=Resource.create(atributos_do_recurso("api")))
     provider.add_span_processor(
         BatchSpanProcessor(
             OTLPSpanExporter(
@@ -159,6 +155,21 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
     return True
 
 
+def atributos_do_recurso(processo: str) -> dict[str, str]:
+    """``service.name``, ``service.version`` e o processo, para o ``Resource``.
+
+    O nome explicito venceria o ``OTEL_SERVICE_NAME`` que o SDK le sozinho:
+    por isso ele e lido aqui, com o padrao do servico.
+    """
+    return {
+        "service.name": os.environ.get("OTEL_SERVICE_NAME", "").strip()
+        or _NOME_DO_SERVICO,
+        # Mesmo SHA curto do banner de boot e dos logs (logging.py).
+        "service.version": os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12],
+        "pytstop.processo": processo,
+    }
+
+
 def _habilitado() -> bool:
     return (
         os.environ.get("OTEL_ENABLED", "false").strip().lower() in _VALORES_VERDADEIROS
@@ -176,14 +187,7 @@ def criar_tracer(processo: str) -> Tracer:
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
 
-    provider = TracerProvider(
-        resource=Resource.create(
-            {
-                "service.name": _NOME_DO_SERVICO,
-                "service.version": os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12],
-            }
-        )
-    )
+    provider = TracerProvider(resource=Resource.create(atributos_do_recurso(processo)))
     if _habilitado():
         try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (

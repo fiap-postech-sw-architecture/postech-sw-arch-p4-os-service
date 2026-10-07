@@ -199,6 +199,7 @@ class TestFlagLigadaComDependencias:
     ) -> None:
         monkeypatch.setenv("OTEL_ENABLED", "true")
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+        monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
         monkeypatch.setenv("PYTSTOP_GIT_SHA", "abcdef0123456789")
         app = FastAPI()
         engine = object()
@@ -206,10 +207,11 @@ class TestFlagLigadaComDependencias:
         resultado = configurar_otel(app, engine)
 
         assert resultado is True
-        # Resource identifica o servico na UI do Jaeger.
+        # Resource identifica o servico e o processo na UI do Jaeger.
         atributos = otel_stubs["resource_attributes"]
         assert atributos["service.name"] == "pytstop-os-service"
         assert atributos["service.version"] == "abcdef012345"  # sha truncado [:12]
+        assert atributos["pytstop.processo"] == "api"
         # FastAPI instrumentado no app certo, com saude fora do trace.
         assert otel_stubs["fastapi_app"] is app
         kwargs_fastapi = otel_stubs["fastapi_kwargs"]
@@ -420,6 +422,7 @@ class TestTracerDoRelayEDoConsumidor:
     ) -> None:
         monkeypatch.setenv("OTEL_ENABLED", "true")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
+        monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
 
         tracer = observability_modulo.criar_tracer("consumidor")
         with tracer.start_as_current_span("process X"):
@@ -433,6 +436,43 @@ class TestTracerDoRelayEDoConsumidor:
         (span,) = exportador["spans"]
         assert span.name == "process X"
         assert span.resource.attributes["service.name"] == "pytstop-os-service"
+        assert span.resource.attributes["pytstop.processo"] == "consumidor"
+
+    def test_service_name_vem_de_otel_service_name(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        # O nome que o platform injeta (o mesmo de Billing e Execucao).
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "os-service")
+
+        tracer = observability_modulo.criar_tracer("relay")
+        with tracer.start_as_current_span("publish X"):
+            pass
+        self._encerrar(exportador)
+
+        (span,) = exportador["spans"]
+        assert span.resource.attributes["service.name"] == "os-service"
+        assert span.resource.attributes["pytstop.processo"] == "relay"
+
+    @pytest.mark.parametrize(
+        ("valor", "esperado"),
+        [
+            pytest.param(None, "pytstop-os-service", id="ausente"),
+            pytest.param("  ", "pytstop-os-service", id="em-branco"),
+            pytest.param("os-service", "os-service", id="definido"),
+        ],
+    )
+    def test_nome_do_servico_tem_padrao(
+        self, monkeypatch: pytest.MonkeyPatch, valor: str | None, esperado: str
+    ) -> None:
+        if valor is None:
+            monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+        else:
+            monkeypatch.setenv("OTEL_SERVICE_NAME", valor)
+
+        atributos = observability_modulo.atributos_do_recurso("api")
+
+        assert atributos["service.name"] == esperado
 
     def test_com_flag_e_sem_o_extra_avisa_e_segue_sem_exportar(
         self, monkeypatch: pytest.MonkeyPatch, exportador: dict
