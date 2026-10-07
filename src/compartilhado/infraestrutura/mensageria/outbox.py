@@ -93,11 +93,13 @@ _SQL_LIMPEZA_ENTREGUES: Final = text(
     "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status = 'entregue' "
     "AND entregue_em < now() - interval '7 days' LIMIT :lote)"
 )
-# A linha morre minutos depois de criada (a quinta falha vem em menos de 2 min;
-# broker fora nao gasta tentativa), entao `criado_em` marca o inicio da janela.
+# A janela conta da morte da linha, e nao da criacao: com o broker ou o relay
+# fora, a linha fica `pendente` por dias sem gastar tentativa e so morre depois.
+# Na `dead`, `proxima_tentativa_em` e o fim do ultimo lease, gravado a menos de
+# um lease da morte (e coberto pelo indice do claim).
 _SQL_LIMPEZA_DEAD: Final = text(
     "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status = 'dead' "
-    "AND criado_em < now() - interval '30 days' LIMIT :lote)"
+    "AND proxima_tentativa_em < now() - interval '30 days' LIMIT :lote)"
 )
 _SQL_CONTAGEM: Final = text("SELECT count(*) FROM outbox WHERE status = :status")
 

@@ -521,10 +521,15 @@ def test_apaga_entregues_com_mais_de_7_dias_e_dead_com_mais_de_30_e_nunca_penden
     _envelhecer(engine, entregue_antiga, "entregue_em", "7 days 1 minute")
     entregue_recente = _inserir(engine, status="entregue")
     _envelhecer(engine, entregue_recente, "entregue_em", "6 days 23 hours 59 minutes")
+    # A janela da `dead` conta do fim do ultimo lease (a morte), nao da criacao:
+    # a recente ficou pendente 10 dias antes de morrer.
     dead_antiga = _inserir(engine, status="dead")
-    _envelhecer(engine, dead_antiga, "criado_em", "30 days 1 minute")
+    _envelhecer(engine, dead_antiga, "proxima_tentativa_em", "30 days 1 minute")
     dead_recente = _inserir(engine, status="dead")
-    _envelhecer(engine, dead_recente, "criado_em", "29 days 23 hours 59 minutes")
+    _envelhecer(engine, dead_recente, "criado_em", "40 days")
+    _envelhecer(
+        engine, dead_recente, "proxima_tentativa_em", "29 days 23 hours 59 minutes"
+    )
     # Pendente criada ha 40 dias (e so elegivel amanha): nunca expira.
     pendente = _inserir(engine)
     _envelhecer(engine, pendente, "criado_em", "40 days")
