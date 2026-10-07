@@ -125,6 +125,26 @@ def criar_engine(
     )
 
 
+# Engine das metricas por consulta (gauges da saga): uma conexao so, fora do
+# pool das requisicoes, com prazo curto para conectar e para esperar a vez. A
+# raspagem do /metrics (10 s no Prometheus) nunca fica presa ao banco lento.
+_METRICAS_POOL_TIMEOUT_S = 1
+_METRICAS_CONNECT_TIMEOUT_S = 2
+
+
+def criar_engine_de_metricas(url: str) -> Engine:
+    """Engine pequena e com prazos curtos, so para as consultas do ``/metrics``."""
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        hide_parameters=True,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=_METRICAS_POOL_TIMEOUT_S,
+        connect_args={"connect_timeout": _METRICAS_CONNECT_TIMEOUT_S},
+    )
+
+
 def criar_session_factory(engine: Engine) -> sessionmaker[Session]:
     # expire_on_commit=False mantem atributos utilizaveis apos uow.commit().
     # Essencial porque use cases fazem: with uow: repo.salvar(x); uow.commit();

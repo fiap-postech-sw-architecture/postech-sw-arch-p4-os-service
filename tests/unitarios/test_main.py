@@ -32,7 +32,7 @@ class TestMain:
         assert "/api/v1/saude" in paths
         assert any("/api/v1/clientes" in p for p in paths)
         assert any("/api/v1/autenticacao" in p for p in paths)
-        # Superficie de OS da fase 4 (RFC-004 secao 6.1), sem saga.
+        # Superficie de OS da fase 4 (RFC-004 secao 6.1).
         assert {
             "/.well-known/jwks.json",
             "/api/v1/ordens-de-servico",
@@ -40,6 +40,7 @@ class TestMain:
             "/api/v1/ordens-de-servico/{ordem_id}/historico",
             "/api/v1/ordens-de-servico/{ordem_id}/cancelamento",
             "/api/v1/ordens-de-servico/{ordem_id}/entrega",
+            "/api/v1/sagas/{ordem_id}",
             "/api/v1/publico/acompanhamento",
         } <= paths
 
@@ -86,7 +87,8 @@ class TestMain:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Wiring do composition root: quando configurar_metricas_api
-        # ativa, criar_app registra o listener de metricas de negocio de OS.
+        # ativa, criar_app registra o listener de metricas de negocio de OS e
+        # o coletor dos gauges da saga.
         # Os dois imports em criar_app sao locais e resolvem o atributo do
         # modulo na chamada — o monkeypatch na origem e efetivo.
         chamadas: list[str] = []
@@ -98,10 +100,14 @@ class TestMain:
             "src.ordem_servico.infraestrutura.metrics.instrumentar_metricas_de_ordens",
             lambda: chamadas.append("instrumentar"),
         )
+        monkeypatch.setattr(
+            "src.ordem_servico.infraestrutura.metricas_da_saga.registrar_coletor",
+            lambda abrir_sessao: chamadas.append("coletor da saga"),
+        )
 
         criar_app()
 
-        assert chamadas == ["configurar", "instrumentar"]
+        assert chamadas == ["configurar", "instrumentar", "coletor da saga"]
 
     def test_docs_url_em_development(self) -> None:
         with patch.dict(os.environ, {"ENVIRONMENT": "development"}, clear=False):

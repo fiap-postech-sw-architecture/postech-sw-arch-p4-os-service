@@ -9,7 +9,8 @@ registro da mensagem entram juntos ou nao entram. Voltam pela fila de retry:
 ``FalhaTransitoriaError``, conflito de versao (``ConflitoDeConcorrenciaException``),
 erro de banco (``SQLAlchemyError``), ``TimeoutError`` e ``ConnectionError``;
 qualquer outra excecao do handler e erro permanente e manda a mensagem para a
-DLQ. Fora do consumidor (API, prazos), o caso de uso publica pela
+DLQ, com o motivo em codigo quando o handler levanta ``FalhaPermanenteError``.
+Fora do consumidor (API, prazos), o caso de uso publica pela
 ``UnitOfWork``, que comita. Comando fora do contrato levanta
 ``ContratoInvalidoError``.
 """
@@ -92,6 +93,21 @@ class FalhaTransitoriaError(Exception):
     Banco ou dependencia fora do ar e evento adiantado em relacao a etapa da
     saga (RFC-004 secao 4) sao os casos previstos.
     """
+
+
+class FalhaPermanenteError(Exception):
+    """Falha que nenhuma nova tentativa resolve: a mensagem vai direto para a DLQ.
+
+    ``motivo`` e um codigo fixo (``saga_inexistente``, ``sem_tratador_nesta_versao``)
+    que o consumidor leva ao log e ao span: cada causa pede uma acao do operador
+    (corrigir o dado, esperar a versao que trata o evento e fazer o redrive). A
+    mensagem nao entra em ``mensagens_processadas``, entao o redrive a trata de
+    novo.
+    """
+
+    def __init__(self, motivo: str) -> None:
+        super().__init__(motivo)
+        self.motivo = motivo
 
 
 class ContratoInvalidoError(Exception):

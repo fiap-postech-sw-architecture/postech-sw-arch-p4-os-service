@@ -1,27 +1,36 @@
 """Casos de uso da aplicacao Ordem de Servico.
 
 Cada classe expoe ``executar(...)``: compoe repositorio, ``UnitOfWork`` e
-ports; as regras ficam no agregado. Comandos para Billing e Execucao e
-compensacoes sao papel da saga, fora destes casos de uso: ela os grava na
-outbox com ``UnitOfWork.publicar_comando``, no mesmo commit do efeito.
+ports; as regras ficam no agregado. A abertura inicia a saga e grava o
+``SolicitarDiagnostico`` na outbox com ``UnitOfWork.publicar_comando``, no
+mesmo commit da OS; os passos seguintes sao do ``OrquestradorDaSaga``.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Final
 
+import structlog
+
+from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.cnpj import CNPJ
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.documento import normalizar_cnpj
+from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaException
 from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.aplicacao.dtos import (
     AcompanhamentoDTO,
+    ComandoEmVooDTO,
     MudancaDeStatusDTO,
     OrdemDeServicoDTO,
     OrdemResumoDTO,
     ResumoOrcamentoDTO,
     ResumoPagamentoDTO,
+    SagaDTO,
 )
+from src.ordem_servico.aplicacao.saga.modelo import Envio, SagaNaoEncontradaException
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.exceptions import (
     ClienteNaoEncontradoException,
     OrdemNaoEncontradaException,
@@ -36,12 +45,19 @@ if TYPE_CHECKING:
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
     from src.compartilhado.dominio.documento import Documento
     from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
-    from src.ordem_servico.aplicacao.ports import ClientePort, ConsultaAcompanhamento
+    from src.ordem_servico.aplicacao.ports import (
+        ClientePort,
+        ConsultaAcompanhamento,
+        ConsultaDaOrdem,
+        SagaRepository,
+    )
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
+_log = structlog.get_logger(__name__)
 
-def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
-    """Projeta o agregado para ``OrdemDeServicoDTO`` (com o historico)."""
+
+def _ordem_dto(ordem: OrdemDeServico, saga: Saga | None) -> OrdemDeServicoDTO:
+    """Projeta a OS para ``OrdemDeServicoDTO``, com o historico e a etapa da saga."""
     orcamento = ordem.resumo_orcamento
     pagamento = ordem.resumo_pagamento
     return OrdemDeServicoDTO(
@@ -84,10 +100,13 @@ def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
                 para=m.para.value,
                 origem=m.origem.value,
                 motivo=m.motivo,
+                ator=m.ator,
                 ocorrido_em=m.ocorrido_em,
             )
             for m in ordem.historico
         ),
+        etapa=saga.etapa.value if saga is not None else None,
+        passos=saga.passos if saga is not None else (),
     )
 
 
@@ -99,20 +118,26 @@ def _obter_ordem(repo: OrdemDeServicoRepository, ordem_id: UUID) -> OrdemDeServi
 
 
 class AbrirOrdem:
-    """Abre a OS em RECEBIDA para um cliente ativo e um veiculo dele."""
+    """T1 da saga: abre a OS em RECEBIDA para um cliente ativo e um veiculo dele.
+
+    Na mesma transacao, a saga nasce em ``aguardando_diagnostico`` e o
+    ``SolicitarDiagnostico`` vai para a outbox (RFC-004 secao 4).
+    """
 
     def __init__(
         self,
         repo: OrdemDeServicoRepository,
         uow: UnitOfWork,
         cliente_port: ClientePort,
+        sagas: SagaRepository,
     ) -> None:
         self._repo = repo
         self._uow = uow
         self._cliente_port = cliente_port
+        self._sagas = sagas
 
     def executar(self, dto: AbrirOrdemDTO) -> OrdemDeServicoDTO:
-        """Valida cliente e veiculo e persiste a OS.
+        """Valida cliente e veiculo, persiste OS e saga e grava o comando.
 
         Raises:
             ClienteNaoEncontradoException: cliente inexistente ou inativo (404).
@@ -123,19 +148,43 @@ class AbrirOrdem:
         """
         if not self._cliente_port.cliente_existe(dto.cliente_id):
             raise ClienteNaoEncontradoException(dto.cliente_id)
-        if not self._cliente_port.veiculo_pertence_ao_cliente(
-            dto.cliente_id, dto.veiculo_id
-        ):
+        veiculo = self._cliente_port.retrato_do_veiculo(dto.cliente_id, dto.veiculo_id)
+        if veiculo is None:
             raise VeiculoNaoEncontradoException(dto.veiculo_id)
         ordem = OrdemDeServico.abrir(
             cliente_id=dto.cliente_id,
             veiculo_id=dto.veiculo_id,
             descricao_problema=dto.descricao_problema,
+            ator=dto.ator,
         )
         with self._uow:
             self._repo.salvar(ordem)
+            # Causa e a requisicao HTTP: sem causation_id (RFC-004 secao 5.2).
+            comando_id = self._uow.publicar_comando(
+                Comando.SOLICITAR_DIAGNOSTICO,
+                {
+                    "ordem_id": ordem.id,
+                    "veiculo_id": ordem.veiculo_id,
+                    "veiculo": {
+                        "placa": veiculo.placa,
+                        "marca": veiculo.marca,
+                        "modelo": veiculo.modelo,
+                        "ano": veiculo.ano,
+                    },
+                    "descricao_problema": ordem.descricao_problema,
+                },
+                correlation_id=ordem.id,
+            )
+            saga = Saga.iniciar(
+                ordem.id,
+                envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=comando_id),
+                ator=dto.ator,
+                agora=ordem.criado_em,
+            )
+            self._sagas.salvar(saga)
             self._uow.commit()
-        return _ordem_dto(ordem)
+        _log.info("saga started", correlation_id=str(ordem.id), etapa=saga.etapa.value)
+        return _ordem_dto(ordem, saga)
 
 
 class ListarOrdens:
@@ -168,55 +217,113 @@ class ListarOrdens:
 
 
 class ObterOrdem:
-    """Projecao completa de uma ordem, historico incluso."""
+    """Projecao completa de uma ordem: historico, etapa e passos da saga.
 
-    def __init__(self, repo: OrdemDeServicoRepository) -> None:
-        self._repo = repo
+    A OS e a saga vem de uma consulta so: o status e a etapa do mesmo instante.
+    """
+
+    def __init__(self, consulta: ConsultaDaOrdem) -> None:
+        self._consulta = consulta
 
     def executar(self, ordem_id: UUID) -> OrdemDeServicoDTO:
         """Projeta a ordem; ``OrdemNaoEncontradaException`` (404) se nao existe."""
-        return _ordem_dto(_obter_ordem(self._repo, ordem_id))
+        lida = self._consulta.com_saga(ordem_id)
+        if lida is None:
+            raise OrdemNaoEncontradaException(ordem_id)
+        return _ordem_dto(*lida)
+
+
+class ObterSaga:
+    """Estado da saga de uma ordem, para a operacao (RFC-004 secao 4.7)."""
+
+    def __init__(self, sagas: SagaRepository) -> None:
+        self._sagas = sagas
+
+    def executar(self, ordem_id: UUID) -> SagaDTO:
+        """Projeta a saga; ``SagaNaoEncontradaException`` (404) se nao existe."""
+        saga = self._sagas.obter(ordem_id)
+        if saga is None:
+            raise SagaNaoEncontradaException(ordem_id)
+        em_voo = saga.comando_em_voo
+        return SagaDTO(
+            ordem_id=saga.ordem_id,
+            etapa=saga.etapa.value,
+            motivo=saga.motivo,
+            falha=saga.falha,
+            plano_compensacao=saga.plano_compensacao,
+            comando_em_voo=(
+                ComandoEmVooDTO(
+                    tipo=em_voo["tipo"],
+                    enviado_em=datetime.fromisoformat(em_voo["enviado_em"]),
+                )
+                if em_voo is not None
+                else None
+            ),
+            reenvios=saga.reenvios,
+            prazo_resposta_em=saga.prazo_resposta_em,
+            passos=saga.passos,
+        )
+
+
+# Ate o cancelamento passar pela saga (compensacoes, RFC-004 secao 4.4).
+CANCELAMENTO_INDISPONIVEL: Final = (
+    "Cancelamento de OS com atendimento em andamento ainda nao disponivel"
+)
 
 
 class CancelarOrdem:
     """Cancelamento pelo atendimento antes do inicio da execucao.
 
-    Enquanto a saga nao existe, a OS vai direto para CANCELADA; com ela, o
-    cancelamento dispara as compensacoes antes (RFC-004 secao 4.4).
+    Sem saga, a OS vai direto para CANCELADA. Com a saga em andamento, o
+    cancelamento passa pelas compensacoes (RFC-004 secao 4.4), que esta versao
+    ainda nao tem: responde 409 sem mudar nada, para a OS nunca ficar cancelada
+    com a saga viva (os eventos seguintes emitiriam comandos para uma OS morta).
     """
 
-    def __init__(self, repo: OrdemDeServicoRepository, uow: UnitOfWork) -> None:
+    def __init__(
+        self, repo: OrdemDeServicoRepository, uow: UnitOfWork, sagas: SagaRepository
+    ) -> None:
         self._repo = repo
         self._uow = uow
+        self._sagas = sagas
 
-    def executar(self, ordem_id: UUID, motivo: str) -> OrdemDeServicoDTO:
-        """Cancela a ordem com origem ATENDIMENTO.
+    def executar(self, ordem_id: UUID, motivo: str, *, ator: str) -> OrdemDeServicoDTO:
+        """Cancela a ordem com origem ATENDIMENTO; ``ator`` e o sub do JWT.
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
-            TransicaoStatusInvalidaException: execucao ja iniciada ou ordem
-                encerrada (409).
+            TransicaoStatusInvalidaException: saga em andamento, execucao ja
+                iniciada ou ordem encerrada (409).
             ConflitoDeConcorrenciaException: escrita concorrente (409).
             ValorInvalidoException: motivo vazio, longo demais ou com
                 caractere de controle (422).
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
-            ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO)
+            # Lida na mesma transacao: nada fica aberto depois do commit.
+            saga = self._sagas.obter(ordem_id)
+            if saga is not None and not saga.encerrada:
+                raise TransicaoStatusInvalidaException(
+                    mensagem=CANCELAMENTO_INDISPONIVEL
+                )
+            ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
-        return _ordem_dto(ordem)
+        return _ordem_dto(ordem, saga)
 
 
 class RegistrarEntrega:
-    """Entrega do veiculo ao cliente: FINALIZADA -> ENTREGUE."""
+    """Entrega do veiculo ao cliente (T10, fora da saga): FINALIZADA -> ENTREGUE."""
 
-    def __init__(self, repo: OrdemDeServicoRepository, uow: UnitOfWork) -> None:
+    def __init__(
+        self, repo: OrdemDeServicoRepository, uow: UnitOfWork, sagas: SagaRepository
+    ) -> None:
         self._repo = repo
         self._uow = uow
+        self._sagas = sagas
 
-    def executar(self, ordem_id: UUID) -> OrdemDeServicoDTO:
-        """Registra a entrega com origem ATENDIMENTO.
+    def executar(self, ordem_id: UUID, *, ator: str) -> OrdemDeServicoDTO:
+        """Registra a entrega com origem ATENDIMENTO; ``ator`` e o sub do JWT.
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
@@ -225,10 +332,11 @@ class RegistrarEntrega:
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
-            ordem.registrar_entrega()
+            saga = self._sagas.obter(ordem_id)
+            ordem.registrar_entrega(ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
-        return _ordem_dto(ordem)
+        return _ordem_dto(ordem, saga)
 
 
 _TAMANHO_CNPJ: Final = 14

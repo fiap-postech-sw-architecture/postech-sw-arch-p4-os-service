@@ -8,11 +8,14 @@ from uuid import uuid4
 import pytest
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
+from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
 from src.ordem_servico.dominio.resumos import (
     TAMANHO_MAXIMO_URL,
     ResumoOrcamento,
     ResumoPagamento,
     StatusPagamento,
+    pagamento_confirmado,
+    pagamento_solicitado,
 )
 from tests.fabricas import EXPIRA_EM, VALIDO_ATE
 
@@ -135,6 +138,45 @@ class TestResumoPagamento:
 
     def test_repr_nao_expoe_o_checkout(self) -> None:
         assert "billing.pytstop" not in repr(_pagamento())
+
+
+class TestCicloDoPagamento:
+    def test_confirmado_e_o_mesmo_pagamento_com_outro_estado(self) -> None:
+        solicitado = _pagamento()
+
+        confirmado = solicitado.confirmado()
+
+        assert confirmado == _pagamento(
+            pagamento_id=solicitado.pagamento_id, status=StatusPagamento.CONFIRMADO
+        )
+        assert solicitado.status is StatusPagamento.SOLICITADO
+
+    def test_o_primeiro_resumo_e_o_solicitado(self) -> None:
+        novo = _pagamento()
+
+        assert pagamento_solicitado(None, novo) is novo
+
+    def test_segundo_pedido_levanta(self) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
+            pagamento_solicitado(_pagamento(), _pagamento())
+
+    @pytest.mark.parametrize(
+        "status", [s for s in StatusPagamento if s is not StatusPagamento.SOLICITADO]
+    )
+    def test_primeiro_resumo_em_outro_estado_levanta(
+        self, status: StatusPagamento
+    ) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match=status.value):
+            pagamento_solicitado(None, _pagamento(status=status))
+
+    def test_confirmado_parte_do_solicitado(self) -> None:
+        solicitado = _pagamento()
+
+        assert pagamento_confirmado(solicitado) == solicitado.confirmado()
+
+    def test_confirmado_sem_solicitado_levanta(self) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
+            pagamento_confirmado(None)
 
 
 def test_status_de_pagamento_cobre_o_ciclo_do_billing() -> None:

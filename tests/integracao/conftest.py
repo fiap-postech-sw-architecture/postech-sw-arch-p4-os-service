@@ -5,15 +5,24 @@ migracao, e ``test_migracao.py`` confere que ela bate com o metadata.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
+from src.compartilhado.infraestrutura.logging import configurar_logging
+from src.compartilhado.infraestrutura.mensageria import amqp, consumidor, relay
+from src.ordem_servico.aplicacao import use_cases as use_cases_os
+from src.ordem_servico.aplicacao.saga import orquestrador
+from src.ordem_servico.infraestrutura import metricas_da_saga
 from tests.integracao.broker import Broker, subir_broker
 from tests.integracao.seed_helpers import criar_usuario
+from tests.rastreamento import RegistrosDoLog, Saidas
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -133,9 +142,12 @@ def session_factory(engine: Engine) -> Generator[sessionmaker[Session]]:
     yield factory
 
     # Testes de API e de concorrencia commitam de verdade: o rollback da
-    # fixture `session` nao os alcanca.
+    # fixture `session` nao os alcanca. Uma sessao esquecida ociosa em
+    # transacao seguraria o TRUNCATE para sempre: com o lock_timeout ele
+    # falha em segundos e aponta o teste.
     tabelas = ", ".join(t.name for t in reversed(metadata.sorted_tables))
     with factory() as sess:
+        sess.execute(text("SET LOCAL lock_timeout = '5s'"))
         sess.execute(text(f"TRUNCATE TABLE {tabelas} CASCADE"))
         sess.commit()
 
@@ -231,3 +243,26 @@ def broker_avulso(_broker_avulso_da_sessao: Broker) -> Iterator[Broker]:
     finally:
         _broker_avulso_da_sessao.rabbitmqctl("set_vm_memory_high_watermark", "0.4")
         _broker_avulso_da_sessao.esvaziar()
+
+
+@pytest.fixture
+def saidas(monkeypatch: pytest.MonkeyPatch) -> Iterator[Saidas]:
+    """Logs dos processos capturados no teste, para as provas de LGPD.
+
+    O logging como nos processos (o pika so em ERROR), com um registrador a mais
+    no root, e os eventos do structlog capturados antes de renderizar (sem o
+    scrubber, que mascararia o que o codigo nao deveria ter posto no log). O
+    ``_log`` de cada modulo do caminho de uma mensagem e trocado: um logger ja em
+    cache escaparia do ``capture_logs``.
+    """
+    configurar_logging()
+    registros = RegistrosDoLog()
+    logging.getLogger().addHandler(registros)
+    caminho = (amqp, consumidor, relay, orquestrador, use_cases_os, metricas_da_saga)
+    for modulo in caminho:
+        monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    try:
+        with capture_logs() as eventos:
+            yield Saidas(registros, eventos)
+    finally:
+        logging.getLogger().removeHandler(registros)

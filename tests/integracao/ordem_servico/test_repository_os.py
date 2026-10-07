@@ -19,7 +19,7 @@ from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.infraestrutura.metrics import metricas_api
-from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
 from src.ordem_servico.dominio.events import OrdemAbertaEvent
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
@@ -40,6 +40,7 @@ from tests.fabricas import (
     LINK_DECISAO,
     VALIDO_ATE,
     aplicar_fato,
+    resumo_do_pagamento,
 )
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
@@ -57,6 +58,7 @@ def _abrir(session: Session, cliente: Cliente | None = None) -> OrdemDeServico:
         cliente_id=cliente.id,
         veiculo_id=cliente.veiculos[0].id,
         descricao_problema="Vazamento de oleo",
+        ator="atendente-teste",
     )
     OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
     return ordem
@@ -67,6 +69,15 @@ def _avancar(session: Session, ordem: OrdemDeServico, ate: StatusOrdem) -> None:
     for proximo in FLUXO[FLUXO.index(ordem.status) + 1 : FLUXO.index(ate) + 1]:
         aplicar_fato(ordem, proximo)
         repo.salvar(ordem)
+
+
+def _aguardando_pagamento_sem_resumo(session: Session) -> OrdemDeServico:
+    """``PecasReservadas`` gravado e ``PagamentoSolicitado`` ainda nao."""
+    ordem = _abrir(session)
+    _avancar(session, ordem, S.AGUARDANDO_APROVACAO)
+    ordem.registrar_pecas_reservadas(ator="consumidor")
+    OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
+    return ordem
 
 
 def _recarregar(session: Session, ordem: OrdemDeServico) -> OrdemDeServico:
@@ -98,11 +109,25 @@ class TestMapping:
         assert pagamento.valor == Dinheiro(Decimal("350.00"), "BRL")
         assert pagamento.checkout_url == CHECKOUT_URL
         assert pagamento.expira_em == EXPIRA_EM
-        assert [(m.sequencia, m.de, m.para, m.origem) for m in lida.historico] == [
-            (1, None, S.RECEBIDA, OrigemMudanca.ATENDIMENTO),
-            (2, S.RECEBIDA, S.EM_DIAGNOSTICO, OrigemMudanca.EXECUCAO),
-            (3, S.EM_DIAGNOSTICO, S.AGUARDANDO_APROVACAO, OrigemMudanca.BILLING),
-            (4, S.AGUARDANDO_APROVACAO, S.AGUARDANDO_PAGAMENTO, OrigemMudanca.BILLING),
+        assert [
+            (m.sequencia, m.de, m.para, m.origem, m.ator) for m in lida.historico
+        ] == [
+            (1, None, S.RECEBIDA, OrigemMudanca.ATENDIMENTO, "atendente-teste"),
+            (2, S.RECEBIDA, S.EM_DIAGNOSTICO, OrigemMudanca.EXECUCAO, "consumidor"),
+            (
+                3,
+                S.EM_DIAGNOSTICO,
+                S.AGUARDANDO_APROVACAO,
+                OrigemMudanca.BILLING,
+                "consumidor",
+            ),
+            (
+                4,
+                S.AGUARDANDO_APROVACAO,
+                S.AGUARDANDO_PAGAMENTO,
+                OrigemMudanca.EXECUCAO,
+                "consumidor",
+            ),
         ]
         assert lida.historico[0].ocorrido_em.utcoffset() is not None
 
@@ -139,7 +164,7 @@ class TestMapping:
 
     def test_cancelada_persiste_motivo(self, session: Session) -> None:
         ordem = _abrir(session)
-        ordem.cancelar("cliente desistiu", OrigemMudanca.SAGA)
+        ordem.cancelar("cliente desistiu", OrigemMudanca.SAGA, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         lida = _recarregar(session, ordem)
@@ -186,21 +211,20 @@ class TestMapping:
     def test_trocar_so_o_resumo_suja_a_instancia_e_persiste(
         self, session: Session
     ) -> None:
-        ordem = _abrir(session)
-        _avancar(session, ordem, S.AGUARDANDO_PAGAMENTO)
+        ordem = _aguardando_pagamento_sem_resumo(session)
         lida = _recarregar(session, ordem)
         versao = lida.versao
 
-        lida.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
+        lida.registrar_pagamento_solicitado(resumo_do_pagamento())
 
         # O composite leva o VO novo para a coluna na hora (sem esperar um
         # flush disparado por outra mudanca da instancia).
         historia = inspect(lida).attrs["_pagamento_status"].history
-        assert historia.added == [StatusPagamento.CONFIRMADO]
+        assert historia.added == [StatusPagamento.SOLICITADO]
         OrdemDeServicoSQLAlchemyRepository(session).salvar(lida)
         relida = _recarregar(session, lida)
         assert relida.resumo_pagamento is not None
-        assert relida.resumo_pagamento.status is StatusPagamento.CONFIRMADO
+        assert relida.resumo_pagamento.status is StatusPagamento.SOLICITADO
         assert relida.status is S.AGUARDANDO_PAGAMENTO
         assert relida.versao == versao + 1
 
@@ -208,7 +232,7 @@ class TestMapping:
         ordem = _abrir(session)
         lida = _recarregar(session, ordem)
 
-        lida.registrar_diagnostico_iniciado()
+        lida.registrar_diagnostico_iniciado(ator="consumidor")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(lida)
 
         assert len(lida.coletar_eventos()) == 1
@@ -279,7 +303,7 @@ class TestConsultaAcompanhamento:
         self, session: Session, cliente: Cliente
     ) -> None:
         ordem = _abrir(session, cliente)
-        ordem.cancelar("encerrada", OrigemMudanca.ATENDIMENTO)
+        ordem.cancelar("encerrada", OrigemMudanca.ATENDIMENTO, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
         ClienteSQLAlchemyRepository(session).anonimizar_dados(cliente.id)
         session.flush()
@@ -295,8 +319,12 @@ class TestAdaptersEntreContextos:
 
         assert adapter.cliente_existe(cliente.id) is True
         assert adapter.cliente_existe(uuid4()) is False
-        assert adapter.veiculo_pertence_ao_cliente(cliente.id, cliente.veiculos[0].id)
-        assert not adapter.veiculo_pertence_ao_cliente(cliente.id, outro.veiculos[0].id)
+        veiculo = cliente.veiculos[0]
+        assert adapter.retrato_do_veiculo(cliente.id, veiculo.id) == RetratoDoVeiculo(
+            placa=veiculo.placa.valor, marca="Fiat", modelo="Uno", ano=2020
+        )
+        assert adapter.retrato_do_veiculo(cliente.id, outro.veiculos[0].id) is None
+        assert adapter.retrato_do_veiculo(cliente.id, uuid4()) is None
 
         cliente.desativar()
         ClienteSQLAlchemyRepository(session).salvar(cliente)
@@ -324,7 +352,7 @@ class TestAdaptersEntreContextos:
 
     def test_cancelada_nao_conta_como_ativa(self, session: Session) -> None:
         ordem = _abrir(session)
-        ordem.cancelar("x", OrigemMudanca.ATENDIMENTO)
+        ordem.cancelar("x", OrigemMudanca.ATENDIMENTO, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         adapter = OrdemDeServicoSQLAlchemyAdapter(session)
@@ -362,7 +390,7 @@ class TestMetricasDeNegocio:
         assert criadas == [1]
         assert duracoes == []
 
-        ordem.registrar_diagnostico_iniciado()
+        ordem.registrar_diagnostico_iniciado(ator="consumidor")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         assert criadas == [1]
@@ -376,8 +404,7 @@ class TestMetricasDeNegocio:
     def test_escrita_sem_troca_de_status_nao_mede(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ordem = _abrir(session)
-        _avancar(session, ordem, S.AGUARDANDO_PAGAMENTO)
+        ordem = _aguardando_pagamento_sem_resumo(session)
         duracoes: list[tuple[str, float]] = []
         monkeypatch.setattr(
             metricas_api,
@@ -387,7 +414,7 @@ class TestMetricasDeNegocio:
         instrumentar_metricas_de_ordens()
 
         # So o resumo do pagamento muda (escrita sem transicao de status).
-        ordem.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
+        ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         assert duracoes == []

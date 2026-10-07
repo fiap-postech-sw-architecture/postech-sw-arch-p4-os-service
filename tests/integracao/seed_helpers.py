@@ -10,7 +10,10 @@ propria com commit real).
 from __future__ import annotations
 
 import itertools
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
+
+from sqlalchemy import text
 
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.contato import Contato
@@ -19,8 +22,10 @@ from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from uuid import UUID
 
+    from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
     from src.autenticacao.dominio.papel import Papel
@@ -97,6 +102,7 @@ def criar_ordem_recebida(
         cliente_id=cliente_id,
         veiculo_id=veiculo_id,
         descricao_problema="Barulho na suspensao dianteira",
+        ator="atendente-teste",
     )
     if limpar_eventos:
         ordem.limpar_eventos()
@@ -124,3 +130,83 @@ def criar_usuario(
         UsuarioSQLAlchemyRepository(session=sess).salvar(usuario)
         sess.commit()
     return usuario
+
+
+@contextmanager
+def outbox_recusando_insert(engine: Engine) -> Iterator[None]:
+    """Trigger que falha todo INSERT na outbox: a transacao inteira tem de cair."""
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_outbox() RETURNS trigger LANGUAGE plpgsql "
+                "AS $$ BEGIN RAISE EXCEPTION 'outbox indisponivel'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE TRIGGER recusar_outbox BEFORE INSERT ON outbox "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_outbox()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER recusar_outbox ON outbox"))
+            conexao.execute(text("DROP FUNCTION recusar_outbox()"))
+
+
+@contextmanager
+def outbox_recusando_no_commit(engine: Engine) -> Iterator[None]:
+    """Trigger DEFERIDO: o INSERT na outbox passa e o COMMIT falha.
+
+    A falha vem depois de todas as escritas da transacao (OS, saga, historico e
+    a propria linha da outbox), entao so a transacao unica desfaz tudo.
+    """
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_outbox_no_commit() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'outbox indisponivel no commit'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER recusar_outbox_no_commit "
+                "AFTER INSERT ON outbox DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_outbox_no_commit()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER recusar_outbox_no_commit ON outbox"))
+            conexao.execute(text("DROP FUNCTION recusar_outbox_no_commit()"))
+
+
+@contextmanager
+def sagas_recusando_no_commit(engine: Engine) -> Iterator[None]:
+    """Trigger DEFERIDO em ``sagas``: o UPDATE passa e o COMMIT falha."""
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_saga_no_commit() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'sagas indisponivel no commit'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER recusar_saga_no_commit "
+                "AFTER UPDATE ON sagas DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_saga_no_commit()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER recusar_saga_no_commit ON sagas"))
+            conexao.execute(text("DROP FUNCTION recusar_saga_no_commit()"))

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
 
 from src.compartilhado.infraestrutura.database import metadata
 from tests.integracao.conftest import alembic
@@ -27,6 +29,7 @@ _TABELAS = {
     "historico_status_ordem",
     "outbox",
     "mensagens_processadas",
+    "sagas",
 }
 
 
@@ -44,6 +47,28 @@ def test_schema_da_fase_4(engine: Engine) -> None:
     assert "versao" in colunas_os
     assert {"orcamento_id", "pagamento_id", "motivo_cancelamento"} <= colunas_os
     assert not {"orcamento_json", "escopo_aprovado_json"} & colunas_os
+    assert "ator" in {c["name"] for c in inspetor.get_columns("historico_status_ordem")}
+
+
+def test_indices_parciais_da_saga(engine: Engine) -> None:
+    # O compare_metadata nao confere o WHERE de indice parcial.
+    with engine.connect() as conn:
+        definicoes = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE tablename = 'sagas' AND indexname LIKE 'ix_%'"
+                )
+            ).all()
+        )
+    assert definicoes["ix_sagas_prazo"].endswith(
+        "(prazo_resposta_em) WHERE (prazo_resposta_em IS NOT NULL)"
+    )
+    assert definicoes["ix_sagas_ativas"].endswith(
+        "(etapa, etapa_desde) WHERE ((etapa)::text <> ALL "
+        "((ARRAY['concluida'::character varying, "
+        "'compensada'::character varying])::text[]))"
+    )
 
 
 @pytest.fixture
@@ -70,5 +95,24 @@ def test_upgrade_downgrade_upgrade(banco_vazio: str) -> None:
 
         alembic(banco_vazio)
         assert set(inspect(eng).get_table_names()) >= _TABELAS
+    finally:
+        eng.dispose()
+
+
+def test_migracao_da_saga_desiste_do_lock_em_segundos(banco_vazio: str) -> None:
+    # Uma leitura longa segura o historico: o ALTER TABLE da 003 espera o
+    # lock_timeout e falha (o Job tenta de novo), sem enfileirar as leituras
+    # da app atras dele indefinidamente.
+    eng = create_engine(banco_vazio)
+    try:
+        alembic(banco_vazio, "002")
+        with eng.connect() as leitura, leitura.begin():
+            leitura.execute(text("SELECT count(*) FROM historico_status_ordem"))
+            inicio = time.monotonic()
+            with pytest.raises(OperationalError, match="lock"):
+                alembic(banco_vazio)
+            assert time.monotonic() - inicio < 15
+        alembic(banco_vazio)
+        assert "sagas" in inspect(eng).get_table_names()
     finally:
         eng.dispose()

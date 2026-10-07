@@ -3,12 +3,13 @@
 O orcamento e o pagamento pertencem ao Billing; a OS guarda so o resumo que
 chega pelos fatos da saga (``OrcamentoGerado``, ``PagamentoSolicitado`` e os
 estados seguintes do pagamento), para a consulta de status nao depender de
-outro servico (RFC-004 secao 7.1).
+outro servico (RFC-004 secao 7.1). O ciclo do resumo do pagamento (o primeiro
+e o solicitado; o confirmado parte dele) fica nas funcoes do fim do modulo.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
@@ -16,6 +17,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
+from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
 from src.compartilhado.dominio.value_object import ValueObject
 
 # Tamanho da coluna; URLs do Billing/Mercado Pago ficam bem abaixo disso.
@@ -109,3 +111,37 @@ class ResumoPagamento(ValueObject):
         _exigir_tipo(self.valor, Dinheiro, "valor do pagamento")
         _exigir_url_http(self.checkout_url, "checkout_url do pagamento")
         _exigir_instante(self.expira_em, "expiracao do pagamento")
+
+    def confirmado(self) -> ResumoPagamento:
+        """O mesmo pagamento, confirmado pelo Billing."""
+        return replace(self, status=StatusPagamento.CONFIRMADO)
+
+
+def pagamento_solicitado(
+    atual: ResumoPagamento | None, novo: ResumoPagamento
+) -> ResumoPagamento:
+    """O resumo do ``PagamentoSolicitado``: o primeiro do pagamento, solicitado.
+
+    Raises:
+        ViolacaoRegraDeNegocioException: pagamento ja solicitado, ou ``novo``
+            em outro estado.
+    """
+    if atual is not None:
+        msg = "Pagamento ja solicitado para esta ordem"
+        raise ViolacaoRegraDeNegocioException(msg)
+    if novo.status is not StatusPagamento.SOLICITADO:
+        msg = f"Resumo do pagamento solicitado em {novo.status.value}"
+        raise ViolacaoRegraDeNegocioException(msg)
+    return novo
+
+
+def pagamento_confirmado(atual: ResumoPagamento | None) -> ResumoPagamento:
+    """O resumo do ``PagamentoConfirmado``: o solicitado, agora confirmado.
+
+    Raises:
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado.
+    """
+    if atual is None:
+        msg = "Ordem sem pagamento solicitado"
+        raise ViolacaoRegraDeNegocioException(msg)
+    return atual.confirmado()
