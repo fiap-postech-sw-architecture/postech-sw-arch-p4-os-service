@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Any, Self
 
-from src.compartilhado.aplicacao.outbox import serializar_integration_event
-from src.compartilhado.dominio.aggregate_root import AggregateRoot
-from src.compartilhado.dominio.integration_event import IntegrationEvent
-from src.compartilhado.infraestrutura.outbox_mapping import (
-    inserir_na_outbox,
-    pg_notify_outbox,
-)
+from src.compartilhado.infraestrutura.outbox_mapping import gravar_comando
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from types import TracebackType
+    from uuid import UUID
 
     from sqlalchemy.orm import Session
+
+    from src.compartilhado.aplicacao.mensageria import Comando
 
 
 class SQLAlchemyUnitOfWork:
@@ -44,55 +41,60 @@ class SQLAlchemyUnitOfWork:
         self._fechar_sessao()
 
     def commit(self) -> None:
-        """Comita o estado e, na MESMA transacao, enfileira a outbox (RF-018).
-
-        Antes do commit: varre os agregados pendentes na session
-        (``new | identity_map``), coleta seus ``IntegrationEvent`` e os
-        insere na ``outbox``; emite ``pg_notify('outbox_novo')``
-        (transacional -- so chega ao relay no COMMIT). Apos o commit: remove
-        do agregado APENAS os ``IntegrationEvent`` enfileirados -- os domain
-        events puros permanecem em ``_eventos_pendentes`` disponiveis para
-        consumidores sincronos in-process (hoje nenhum registrado; F9).
-        """
-        agregados = self._agregados_pendentes()
-        por_agregado = {
-            agregado: [
-                ev
-                for ev in agregado.coletar_eventos()
-                if isinstance(ev, IntegrationEvent)
-            ]
-            for agregado in agregados
-        }
-        integration_events = [ev for eventos in por_agregado.values() for ev in eventos]
-        if integration_events:
-            registros = [serializar_integration_event(ev) for ev in integration_events]
-            inserir_na_outbox(self.session, registros)
-            pg_notify_outbox(self.session)
         self.session.commit()
-        for agregado, enfileirados in por_agregado.items():
-            agregado.remover_eventos(enfileirados)
 
     def rollback(self) -> None:
         self.session.rollback()
 
-    def _agregados_pendentes(self) -> list[AggregateRoot]:
-        """Agregados raiz tocados na transacao (novos ou ja flushados).
-
-        Varre ``session.new`` (agregados ainda pendentes) UNIDO ao
-        ``session.identity_map`` (agregados ja persistidos/flushados nesta
-        transacao). Um agregado novo seguido de autoflush sai de
-        ``session.new`` e, se nao for re-modificado, NAO aparece em
-        ``session.dirty`` -- varrer ``identity_map`` garante que seu evento
-        nao se perca (F1). Deduplica por identidade de objeto (um agregado
-        pode estar em ambos).
-        """
-        vistos: dict[int, AggregateRoot] = {}
-        for obj in (*self.session.new, *self.session.identity_map.values()):
-            if isinstance(obj, AggregateRoot):
-                vistos.setdefault(id(obj), obj)
-        return list(vistos.values())
+    def publicar_comando(
+        self,
+        tipo: Comando,
+        dados: Mapping[str, Any],
+        *,
+        correlation_id: UUID,
+        causation_id: UUID | None = None,
+    ) -> UUID:
+        """Grava o comando na outbox desta transacao (ver ``PublicadorDeComandos``)."""
+        return gravar_comando(
+            self.session,
+            tipo,
+            dados,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
 
     def _fechar_sessao(self) -> None:
         if self._session is not None:
             self._session.close()
             self._session = None
+
+
+class TransacaoDaMensagem:
+    """A unidade de trabalho que o consumidor entrega ao handler de uma mensagem.
+
+    Presa a transacao da mensagem: o handler monta os repositorios sobre
+    ``session``, grava o efeito e publica os comandos (``publicar_comando``)
+    nela, e o consumidor comita tudo uma vez, junto com
+    ``mensagens_processadas``. Nao ha ``commit`` aqui, e o consumidor recusa o
+    commit e o fim da transacao pela ``session`` enquanto o handler roda.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def publicar_comando(
+        self,
+        tipo: Comando,
+        dados: Mapping[str, Any],
+        *,
+        correlation_id: UUID,
+        causation_id: UUID | None = None,
+    ) -> UUID:
+        """Grava o comando na outbox da transacao da mensagem."""
+        return gravar_comando(
+            self.session,
+            tipo,
+            dados,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )

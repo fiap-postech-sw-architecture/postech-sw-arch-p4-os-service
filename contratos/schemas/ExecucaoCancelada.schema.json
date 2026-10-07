@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecucaoCancelada (dados)",
+  "description": "Campo dados da mensagem ExecucaoCancelada (evento, execution-service -> os-service). Confirma a compensação CancelarExecucao.",
+  "type": "object",
+  "required": [
+    "ordem_id"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

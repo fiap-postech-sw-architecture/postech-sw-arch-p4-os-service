@@ -199,6 +199,7 @@ class TestFlagLigadaComDependencias:
     ) -> None:
         monkeypatch.setenv("OTEL_ENABLED", "true")
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+        monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
         monkeypatch.setenv("PYTSTOP_GIT_SHA", "abcdef0123456789")
         app = FastAPI()
         engine = object()
@@ -206,10 +207,11 @@ class TestFlagLigadaComDependencias:
         resultado = configurar_otel(app, engine)
 
         assert resultado is True
-        # Resource identifica o servico na UI do Jaeger.
+        # Resource identifica o servico e o processo na UI do Jaeger.
         atributos = otel_stubs["resource_attributes"]
         assert atributos["service.name"] == "pytstop-os-service"
         assert atributos["service.version"] == "abcdef012345"  # sha truncado [:12]
+        assert atributos["pytstop.processo"] == "api"
         # FastAPI instrumentado no app certo, com saude fora do trace.
         assert otel_stubs["fastapi_app"] is app
         kwargs_fastapi = otel_stubs["fastapi_kwargs"]
@@ -362,3 +364,129 @@ class TestRedacaoDePII:
     def test_span_none_nao_quebra(self) -> None:
         # Defensivo: o hook nunca pode derrubar o request por causa do trace.
         _redigir_pii_da_span(None, {"path": "/x"})
+
+
+class TestTracerDoRelayEDoConsumidor:
+    """``criar_tracer``: o SDK sempre ligado; o OTLP so com OTEL_ENABLED."""
+
+    @pytest.fixture
+    def exportador(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        """Troca o exporter OTLP por um que guarda os spans e o endpoint."""
+        from opentelemetry.sdk.trace.export import SpanExportResult
+
+        registro: dict = {"spans": [], "finalizadores": []}
+
+        class ExportadorFalso:
+            def __init__(self, endpoint: str, insecure: bool) -> None:
+                registro["endpoint"] = endpoint
+                registro["insecure"] = insecure
+
+            def export(self, spans: list) -> SpanExportResult:
+                registro["spans"].extend(spans)
+                return SpanExportResult.SUCCESS
+
+            def shutdown(self) -> None:
+                pass
+
+            def force_flush(self, timeout_millis: int = 30000) -> bool:
+                return True
+
+        modulo = types.ModuleType("trace_exporter")
+        monkeypatch.setattr(modulo, "OTLPSpanExporter", ExportadorFalso, raising=False)
+        monkeypatch.setitem(
+            sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", modulo
+        )
+        monkeypatch.setattr(atexit, "register", registro["finalizadores"].append)
+        return registro
+
+    def _encerrar(self, exportador: dict) -> None:
+        for finalizar in exportador["finalizadores"]:
+            finalizar()
+
+    def test_sem_flag_o_span_existe_mas_nao_sai_do_processo(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+
+        tracer = observability_modulo.criar_tracer("relay")
+        with tracer.start_as_current_span("publish X") as span:
+            valido = span.get_span_context().is_valid
+        self._encerrar(exportador)
+
+        assert valido
+        assert "endpoint" not in exportador
+        assert exportador["spans"] == []
+
+    def test_com_flag_exporta_por_otlp_para_o_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
+        monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+
+        tracer = observability_modulo.criar_tracer("consumidor")
+        with tracer.start_as_current_span("process X"):
+            pass
+        self._encerrar(exportador)
+
+        assert (exportador["endpoint"], exportador["insecure"]) == (
+            "http://jaeger:4317",
+            True,
+        )
+        (span,) = exportador["spans"]
+        assert span.name == "process X"
+        assert span.resource.attributes["service.name"] == "pytstop-os-service"
+        assert span.resource.attributes["pytstop.processo"] == "consumidor"
+
+    def test_service_name_vem_de_otel_service_name(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        # O nome que o platform injeta (o mesmo de Billing e Execucao).
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "os-service")
+
+        tracer = observability_modulo.criar_tracer("relay")
+        with tracer.start_as_current_span("publish X"):
+            pass
+        self._encerrar(exportador)
+
+        (span,) = exportador["spans"]
+        assert span.resource.attributes["service.name"] == "os-service"
+        assert span.resource.attributes["pytstop.processo"] == "relay"
+
+    @pytest.mark.parametrize(
+        ("valor", "esperado"),
+        [
+            pytest.param(None, "pytstop-os-service", id="ausente"),
+            pytest.param("  ", "pytstop-os-service", id="em-branco"),
+            pytest.param("os-service", "os-service", id="definido"),
+        ],
+    )
+    def test_nome_do_servico_tem_padrao(
+        self, monkeypatch: pytest.MonkeyPatch, valor: str | None, esperado: str
+    ) -> None:
+        if valor is None:
+            monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+        else:
+            monkeypatch.setenv("OTEL_SERVICE_NAME", valor)
+
+        atributos = observability_modulo.atributos_do_recurso("api")
+
+        assert atributos["service.name"] == esperado
+
+    def test_com_flag_e_sem_o_extra_avisa_e_segue_sem_exportar(
+        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    ) -> None:
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+        monkeypatch.setitem(
+            sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", None
+        )
+
+        with capture_logs() as logs:
+            tracer = observability_modulo.criar_tracer("relay")
+        with tracer.start_as_current_span("publish X"):
+            pass
+        self._encerrar(exportador)
+
+        assert [log["log_level"] for log in logs] == ["warning"]
+        assert exportador["spans"] == []

@@ -189,6 +189,9 @@ class TestMain:
                 patch(
                     "src.compartilhado.interfaces.dependencies.configurar_session_factory"
                 ) as mock_configurar,
+                patch(
+                    "src.compartilhado.infraestrutura.mensageria.contratos.catalogo"
+                ) as mock_catalogo,
                 # Fixa ambiente de teste para que o ramo de fail-fast de
                 # DATABASE_URL em producao nao interfira (o ramo e coberto
                 # em test_lifespan_sem_database_url_em_producao_falha).
@@ -207,6 +210,8 @@ class TestMain:
                 async with lifespan(app):
                     pass
                 mock_mapeamentos.assert_called_once()
+                # Os contratos sao lidos no boot (fail-fast sem contratos/).
+                mock_catalogo.assert_called_once_with()
                 mock_engine.assert_called_once()
                 mock_factory.assert_called_once()
                 mock_configurar.assert_called_once()

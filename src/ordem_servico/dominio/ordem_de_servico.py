@@ -71,7 +71,7 @@ class OrdemDeServico(AggregateRoot):
 
     Construir via ``OrdemDeServico.abrir``. Cada metodo de transicao valida a
     ``MaquinaDeStatus`` antes de mutar, registra a ``MudancaDeStatus`` no
-    historico e emite ``StatusDaOrdemAlteradoEvent`` para a outbox. A
+    historico e registra o ``StatusDaOrdemAlteradoEvent``. A
     ``versao`` e controlada pela persistencia (lock otimista): escrita
     concorrente sobre a mesma versao vira ``ConflitoDeConcorrenciaException``.
     """

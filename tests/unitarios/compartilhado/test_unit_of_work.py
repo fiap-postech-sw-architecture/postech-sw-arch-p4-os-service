@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -53,6 +54,29 @@ class TestSQLAlchemyUnitOfWork:
         session_mock.rollback.assert_called_once()
         session_mock.close.assert_called_once()
 
+    def test_publicar_comando_grava_na_sessao_aberta(self) -> None:
+        uow, session_mock = self._criar_uow()
+        veiculo_id = uuid4()
+        with (
+            patch(
+                "src.compartilhado.infraestrutura.unit_of_work.gravar_comando"
+            ) as gravar,
+            uow,
+        ):
+            uow.publicar_comando(
+                "AnonimizarVeiculo",
+                {"veiculo_id": veiculo_id},
+                correlation_id=veiculo_id,
+            )
+
+        gravar.assert_called_once_with(
+            session_mock,
+            "AnonimizarVeiculo",
+            {"veiculo_id": veiculo_id},
+            correlation_id=veiculo_id,
+            causation_id=None,
+        )
+
     def test_session_none_apos_exit(self) -> None:
         uow, _ = self._criar_uow()
         with uow:
@@ -69,5 +93,11 @@ class TestUnitOfWorkProtocol:
         # Protocol sem @runtime_checkable (a conformidade e do mypy):
         # verificacao estrutural minima dos membros exigidos.
         uow = SQLAlchemyUnitOfWork(session_factory=MagicMock())
-        for membro in ("__enter__", "__exit__", "commit", "rollback"):
+        for membro in (
+            "__enter__",
+            "__exit__",
+            "commit",
+            "rollback",
+            "publicar_comando",
+        ):
             assert callable(getattr(uow, membro)), membro

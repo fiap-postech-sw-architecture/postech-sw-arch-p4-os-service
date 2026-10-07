@@ -1,0 +1,13 @@
+{
+  "id": "9679cd4d-e061-4e62-b1cb-5430bfa40a03",
+  "tipo": "AgendarExecucao",
+  "versao": 1,
+  "origem": "os-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "fc1bc816-7f44-40d2-9131-ded42f5b55f3",
+  "ocorrido_em": "2026-10-06T13:50:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "prioridade": "normal"
+  }
+}

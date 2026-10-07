@@ -58,6 +58,16 @@ class TestLogging:
     def test_configurar_logging(self) -> None:
         configurar_logging()
 
+    def test_configurar_logging_deixa_do_pika_so_o_error(self) -> None:
+        # O WARNING do pika na devolucao de uma mensagem traz o corpo dela.
+        logging.getLogger("pika").setLevel(logging.NOTSET)
+
+        configurar_logging()
+
+        pika = logging.getLogger("pika.adapters.blocking_connection")
+        assert not pika.isEnabledFor(logging.WARNING)
+        assert pika.isEnabledFor(logging.ERROR)
+
     def test_adicionar_versao_imagem_injeta_git_sha_e_date(self) -> None:
         # Defaults vem do env do processo (PYTSTOP_GIT_SHA/DATE); em
         # tests sem essas vars setadas, valor esperado e "unknown".
@@ -245,6 +255,42 @@ class TestScrubTelefone:
 
 # UUID v4 de verdade cujo trecho "02-3465-4237" (dd-dddd-dddd) casava com o telefone.
 _UUID_COM_SPLIT_DE_TELEFONE = "732ffc02-3465-4237-a5f6-12fd4a2b3be0"
+
+
+class TestScrubEmailHostil:
+    """O scrub de e-mail e linear: entrada hostil de 80 KB sai em menos de 100 ms.
+
+    Com o local-part sem teto, ``a.a.a.`` de 80 KB levava segundos (e 900 KB
+    prenderiam o processo por minutos a 100% de CPU).
+    """
+
+    @pytest.mark.parametrize(
+        "hostil",
+        [
+            pytest.param("a." * 40_000, id="pontos-sem-arroba"),
+            pytest.param("a" * 80_000, id="local-part-sem-fim"),
+            pytest.param("a@" + "a." * 40_000, id="dominio-sem-fim"),
+            pytest.param("a@a" + ".a" * 40_000, id="labels-sem-fim"),
+            pytest.param("x@" * 40_000, id="arrobas"),
+        ],
+    )
+    def test_entrada_hostil_de_80_kb_em_menos_de_100_ms(self, hostil: str) -> None:
+        inicio = time.perf_counter()
+        scrub_pii(None, "info", {"event": "x", "id": hostil})
+        assert time.perf_counter() - inicio < 0.1
+
+    @pytest.mark.parametrize(
+        "email",
+        [
+            pytest.param("joao.silva+tag@sub.exemplo.com.br", id="comum"),
+            pytest.param("a_b@x.io", id="sublinhado"),
+            pytest.param("x" * 64 + "@exemplo.com", id="local-part-de-64"),
+        ],
+    )
+    def test_email_continua_mascarado(self, email: str) -> None:
+        resultado = scrub_pii(None, "info", {"event": f"contato {email} fim"})
+        assert email not in str(resultado["event"])
+        assert "***@" in str(resultado["event"])
 
 
 class TestScrubUuid:
@@ -717,3 +763,21 @@ class TestLoggersDoUvicorn:
         configurar_logging(stream=buffer_com_uvicorn_restaurado)
 
         assert not logging.getLogger("uvicorn.access").hasHandlers()
+
+
+def test_log_dentro_de_um_span_leva_trace_id_e_span_id() -> None:
+    from src.compartilhado.infraestrutura.logging import adicionar_contexto_de_trace
+    from tests.rastreamento import Rastreador
+
+    rastreador = Rastreador()
+    with rastreador.tracer.start_as_current_span("process X") as span:
+        dentro = adicionar_contexto_de_trace(None, "info", {"event": "x"})
+    fora = adicionar_contexto_de_trace(None, "info", {"event": "y"})
+
+    contexto = span.get_span_context()
+    assert dentro == {
+        "event": "x",
+        "trace_id": f"{contexto.trace_id:032x}",
+        "span_id": f"{contexto.span_id:016x}",
+    }
+    assert fora == {"event": "y"}

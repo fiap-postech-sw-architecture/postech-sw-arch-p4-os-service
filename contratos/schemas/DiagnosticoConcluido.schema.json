@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DiagnosticoConcluido (dados)",
+  "description": "Campo dados da mensagem DiagnosticoConcluido (evento, execution-service -> os-service). Diagnóstico registrado com os serviços e peças necessários; o OS pede o orçamento ao Billing.",
+  "type": "object",
+  "required": [
+    "ordem_id",
+    "itens",
+    "observacoes",
+    "concluido_em"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "itens": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/item"
+      },
+      "maxItems": 50
+    },
+    "observacoes": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "concluido_em": {
+      "$ref": "#/$defs/data_hora"
+    }
+  },
+  "$defs": {
+    "codigo": {
+      "type": "string",
+      "maxLength": 50,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Código do serviço ou SKU da peça na tabela de preços do Billing (até 50 caracteres)."
+    },
+    "data_hora": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "(Z|\\+00:00)$",
+      "description": "Instante em UTC (RFC 3339 com Z ou +00:00)."
+    },
+    "item": {
+      "type": "object",
+      "required": [
+        "tipo",
+        "codigo",
+        "quantidade"
+      ],
+      "properties": {
+        "tipo": {
+          "$ref": "#/$defs/tipo_item"
+        },
+        "codigo": {
+          "$ref": "#/$defs/codigo"
+        },
+        "quantidade": {
+          "$ref": "#/$defs/quantidade"
+        }
+      }
+    },
+    "quantidade": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "tipo_item": {
+      "enum": [
+        "servico",
+        "peca"
+      ]
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

@@ -7,6 +7,7 @@ import sys
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from opentelemetry import trace
 
 if TYPE_CHECKING:
     from collections.abc import MutableMapping
@@ -32,6 +33,23 @@ def adicionar_versao_imagem(
     return event_dict
 
 
+def adicionar_contexto_de_trace(
+    _logger: object,
+    _method_name: str,
+    event_dict: MutableMapping[str, Any],
+) -> MutableMapping[str, Any]:
+    """Injeta ``trace_id``/``span_id`` do span OpenTelemetry corrente (ADR-043).
+
+    Sem span valido (laco ocioso, teste, OTel da API desligado) nada muda: a
+    linha de log so ganha os ids quando ha trace para correlacionar.
+    """
+    contexto = trace.get_current_span().get_span_context()
+    if contexto.is_valid:
+        event_dict.setdefault("trace_id", format(contexto.trace_id, "032x"))
+        event_dict.setdefault("span_id", format(contexto.span_id, "016x"))
+    return event_dict
+
+
 _CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
 # CNPJ numerico ou alfanumerico (IN RFB 2.229/2024): letras maiusculas e digitos
 # nas 12 primeiras posicoes, so digitos nas 2 ultimas. Sem minusculas de
@@ -40,12 +58,14 @@ _CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
 _CNPJ_PATTERN = re.compile(
     r"\b[0-9A-Z]{2}\.?[0-9A-Z]{3}\.?[0-9A-Z]{3}/?[0-9A-Z]{4}-?\d{2}\b"
 )
-# Dominio casado label a label (`.` fora da classe) -- correcao do hotspot S5852
-# (backtracking polinomial): o scrubber roda sobre o event_dict inteiro,
-# tracebacks inclusos, sem cap de tamanho.
-# O `[A-Z|a-z]` antigo ainda embutia um `|` literal na classe do TLD.
+# Local-part de ate 64 caracteres e dominio de ate 10 labels de ate 63 (os
+# tetos da RFC 5321): sem teto, cada inicio possivel relia o resto da linha e o
+# tempo era quadratico (um `id` de 80 KB com `a.a.a.` levava segundos, e o
+# scrubber roda sobre o event_dict inteiro, tracebacks inclusos). Sem `\b` no
+# inicio: o e-mail colado a `_` ou a um local-part longo tambem e mascarado.
 _EMAIL_PATTERN = re.compile(
-    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+    r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}"
+    r"\.[A-Za-z]{2,63}\b"
 )
 
 # Chave privada em PEM solta no texto (mensagem de erro, traceback, repr, JSON):
@@ -226,9 +246,8 @@ def redigir_pii_erro(erro: str) -> str:
 
     Complementa o scrubber de log (``scrub_pii``): aquele atua no pipeline de
     structlog em memoria; esta funcao atua nas strings de erro que saem do
-    processo por outro caminho: a mensagem do 422 de ``ValueError`` devolvida
-    ao cliente e, quando o relay da outbox chegar, a ``outbox.ultimo_erro``
-    gravada no banco (LGPD: o scrubber de log nao alcanca nenhum dos dois).
+    processo por outro caminho, como a mensagem do 422 de ``ValueError``
+    devolvida ao cliente (LGPD: o scrubber de log nao a alcanca).
 
     Trunca o resultado em ``_MAX_ERRO_LEN`` caracteres para evitar que
     mensagens de excepcao excessivamente longas ocupem espaco excessivo.
@@ -249,6 +268,7 @@ def redigir_pii_erro(erro: str) -> str:
 def _cadeia_compartilhada() -> list[Any]:
     return [
         structlog.contextvars.merge_contextvars,
+        adicionar_contexto_de_trace,
         adicionar_versao_imagem,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
@@ -325,3 +345,10 @@ def configurar_logging(stream: TextIO | None = None) -> None:
             continue
         uvlog.handlers = []
         uvlog.propagate = True
+
+    # O pika loga em WARNING a mensagem que o broker devolve (publish com
+    # mandatory sem rota): propriedades e os 255 primeiros bytes do corpo, com
+    # placa e texto livre. Os processos ja logam a devolucao e a queda do broker
+    # com o tipo do erro; do pika fica so o ERROR (e o INFO dele narra cada
+    # etapa da conexao).
+    logging.getLogger("pika").setLevel(logging.ERROR)

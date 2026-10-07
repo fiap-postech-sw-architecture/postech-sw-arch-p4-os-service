@@ -1,0 +1,12 @@
+{
+  "id": "4121f5b1-9c05-4fc3-b7b8-f2e0f1f1bf6c",
+  "tipo": "ExecucaoCancelada",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "d86196ff-cfa2-47cc-ad5e-982777606675",
+  "ocorrido_em": "2026-10-06T14:11:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c"
+  }
+}

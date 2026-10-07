@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecucaoIniciada (dados)",
+  "description": "Campo dados da mensagem ExecucaoIniciada (evento, execution-service -> os-service). Pivot da saga (T8): o mecânico começou o serviço e não há mais compensação; a OS passa a EM_EXECUCAO.",
+  "type": "object",
+  "required": [
+    "ordem_id",
+    "mecanico_id",
+    "iniciada_em"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "mecanico_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "iniciada_em": {
+      "$ref": "#/$defs/data_hora"
+    }
+  },
+  "$defs": {
+    "data_hora": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "(Z|\\+00:00)$",
+      "description": "Instante em UTC (RFC 3339 com Z ou +00:00)."
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

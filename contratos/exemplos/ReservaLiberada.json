@@ -1,0 +1,12 @@
+{
+  "id": "87d7fc6d-1dfa-4f1c-adbc-5c1459ed2abd",
+  "tipo": "ReservaLiberada",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "c96153c0-9b0d-437e-8a6e-b5c4b68db2e1",
+  "ocorrido_em": "2026-10-06T14:14:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c"
+  }
+}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.orm import sessionmaker
@@ -18,6 +18,15 @@ metadata = MetaData()
 # Ambientes em que a URL do banco pode ser montada das variaveis POSTGRES_*
 # (compose e dev local); qualquer outro exige DATABASE_URL explicita.
 AMBIENTES_DEV = frozenset({"development", "test"})
+# Senha do Postgres de demonstracao (compose e .env.example): proibida fora de
+# development/test na API, no relay e no consumidor.
+SENHA_DO_BANCO_DEMO = "pytstop"  # gitleaks:allow - senha do compose local
+
+
+def url_com_senha(url: str, senha: str) -> bool:
+    """A URL traz essa senha, comparada ja decodificada (``%40`` e ``@``)."""
+    bruta = urlsplit(url).password
+    return bruta is not None and unquote(bruta) == senha
 
 
 def _url_por_variaveis_postgres(fonte: Mapping[str, str]) -> str:
@@ -54,10 +63,11 @@ def resolver_database_url(env: Mapping[str, str] | None = None) -> str:
     raise RuntimeError(msg)
 
 
-# Dimensionamento do pool para escala horizontal. Os defaults sao os do
+# Dimensionamento do pool para escala horizontal. Os defaults da API sao os do
 # SQLAlchemy (5 + 10): com ate 5 replicas no HPA, (pool_size + max_overflow) *
-# replicas = 75 conexoes, dentro do max_connections=100 do postgres:16 padrao.
-# Sobrescritiveis por env (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_RECYCLE).
+# replicas = 75 conexoes, dentro do max_connections=100 do postgres:16 padrao;
+# relay e consumidor usam 2 + 2 cada (``preparar``), mais a conexao de LISTEN do
+# relay. Sobrescritiveis por env (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_RECYCLE).
 _DB_POOL_SIZE_PADRAO = "5"
 _DB_MAX_OVERFLOW_PADRAO = "10"
 # Recicla conexoes a cada 30min para evitar conexoes presas/stale em pods
@@ -68,7 +78,22 @@ _DB_POOL_RECYCLE_PADRAO = "1800"
 _DB_CONNECT_TIMEOUT_PADRAO = "5"
 
 
-def criar_engine(url: str) -> Engine:
+def tempo_de_conexao() -> int:
+    """Segundos de ``DB_CONNECT_TIMEOUT`` para abrir uma conexao (padrao 5)."""
+    return int(os.environ.get("DB_CONNECT_TIMEOUT", _DB_CONNECT_TIMEOUT_PADRAO))
+
+
+def criar_engine(
+    url: str,
+    *,
+    pool_size: int | None = None,
+    max_overflow: int | None = None,
+    opcoes: str | None = None,
+) -> Engine:
+    """Engine do servico; o pool sai do ambiente, salvo ``pool_size``/``max_overflow``.
+
+    ``opcoes`` vai para o ``options`` do libpq (ex.: ``-c statement_timeout=...``).
+    """
     # pool_pre_ping valida a conexao no checkout (descarta conexoes mortas
     # apos restart do banco ou ociosidade) — aplicavel a qualquer pool.
     # hide_parameters: erro de statement nao leva os valores (placa, nome,
@@ -81,17 +106,17 @@ def criar_engine(url: str) -> Engine:
             future=True,
             pool_pre_ping=True,
             hide_parameters=True,
-            pool_size=int(os.environ.get("DB_POOL_SIZE", _DB_POOL_SIZE_PADRAO)),
-            max_overflow=int(
-                os.environ.get("DB_MAX_OVERFLOW", _DB_MAX_OVERFLOW_PADRAO)
-            ),
+            pool_size=pool_size
+            or int(os.environ.get("DB_POOL_SIZE", _DB_POOL_SIZE_PADRAO)),
+            max_overflow=max_overflow
+            if max_overflow is not None
+            else int(os.environ.get("DB_MAX_OVERFLOW", _DB_MAX_OVERFLOW_PADRAO)),
             pool_recycle=int(
                 os.environ.get("DB_POOL_RECYCLE", _DB_POOL_RECYCLE_PADRAO)
             ),
             connect_args={
-                "connect_timeout": int(
-                    os.environ.get("DB_CONNECT_TIMEOUT", _DB_CONNECT_TIMEOUT_PADRAO)
-                )
+                "connect_timeout": tempo_de_conexao(),
+                **({"options": opcoes} if opcoes else {}),
             },
         )
     # SQLite (testes) usa SingletonThreadPool e rejeita pool_size/max_overflow.

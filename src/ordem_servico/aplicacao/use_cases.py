@@ -1,9 +1,9 @@
 """Casos de uso da aplicacao Ordem de Servico.
 
 Cada classe expoe ``executar(...)``: compoe repositorio, ``UnitOfWork`` e
-ports; as regras ficam no agregado. Os eventos de integracao registrados no
-agregado vao para a outbox no mesmo commit da UoW. Comandos para Billing e
-Execucao e compensacoes sao papel da saga, fora destes casos de uso.
+ports; as regras ficam no agregado. Comandos para Billing e Execucao e
+compensacoes sao papel da saga, fora destes casos de uso: ela os grava na
+outbox com ``UnitOfWork.publicar_comando``, no mesmo commit do efeito.
 """
 
 from __future__ import annotations

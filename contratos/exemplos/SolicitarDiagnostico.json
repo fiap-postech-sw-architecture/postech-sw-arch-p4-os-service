@@ -1,0 +1,20 @@
+{
+  "id": "76311ccd-41e1-46f6-bda0-015614922259",
+  "tipo": "SolicitarDiagnostico",
+  "versao": 1,
+  "origem": "os-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": null,
+  "ocorrido_em": "2026-10-06T12:00:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "veiculo_id": "3277db7e-8283-4dd9-89e7-df3eeacb8710",
+    "veiculo": {
+      "placa": "BRA2E19",
+      "marca": "Volkswagen",
+      "modelo": "Gol",
+      "ano": 2019
+    },
+    "descricao_problema": "Barulho na suspensão dianteira ao passar em lombadas."
+  }
+}

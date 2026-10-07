@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReservarPecas (dados)",
+  "description": "Campo dados da mensagem ReservarPecas (comando, os-service -> execution-service). Passo T5: a Execução reserva no estoque as peças do orçamento aprovado. Lista vazia vale (orçamento só de serviços).",
+  "type": "object",
+  "required": [
+    "ordem_id",
+    "pecas"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "pecas": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/peca"
+      },
+      "maxItems": 50
+    }
+  },
+  "$defs": {
+    "codigo": {
+      "type": "string",
+      "maxLength": 50,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Código do serviço ou SKU da peça na tabela de preços do Billing (até 50 caracteres)."
+    },
+    "peca": {
+      "type": "object",
+      "required": [
+        "sku",
+        "quantidade"
+      ],
+      "properties": {
+        "sku": {
+          "$ref": "#/$defs/codigo"
+        },
+        "quantidade": {
+          "$ref": "#/$defs/quantidade"
+        }
+      }
+    },
+    "quantidade": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

@@ -7,8 +7,18 @@ title = "PytStop fase 4 gitleaks config"
 useDefault = true
 
 [allowlist]
-description = "Fixtures de teste (nao sao credenciais reais)"
+description = "Fixtures de teste e valores de demonstracao (nao sao credenciais reais)"
 paths = [
   # Senhas ficticias que exercitam as regras de validacao do seed de admin.
   '''^tests/unitarios/scripts/test_seed_admin\.py$''',
+]
+# Copias do platform em contratos/ (mesma regra do .gitleaks.toml de la): JSON
+# nao aceita comentario, entao a regra vale para a linha inteira.
+# - senhas pytstop-<componente>-demo-2026 do RabbitMQ de desenvolvimento;
+# - link de decisao e checkout dos exemplos de contrato, que apontam para
+#   http://localhost e carregam um token ilustrativo.
+regexTarget = "line"
+regexes = [
+  '''pytstop-[a-z-]+-demo-2026''',
+  '''"(link_decisao|checkout_url)": "http://localhost/''',
 ]

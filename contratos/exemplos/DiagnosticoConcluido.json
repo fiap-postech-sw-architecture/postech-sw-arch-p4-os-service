@@ -1,0 +1,26 @@
+{
+  "id": "29dad220-15fd-463d-816d-b3f537bc7c43",
+  "tipo": "DiagnosticoConcluido",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "76311ccd-41e1-46f6-bda0-015614922259",
+  "ocorrido_em": "2026-10-06T12:45:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "itens": [
+      {
+        "tipo": "servico",
+        "codigo": "SRV-SUSPENSAO",
+        "quantidade": 1
+      },
+      {
+        "tipo": "peca",
+        "codigo": "PEC-AMORTECEDOR-D",
+        "quantidade": 2
+      }
+    ],
+    "observacoes": "Amortecedores dianteiros com vazamento de óleo.",
+    "concluido_em": "2026-10-06T12:45:00Z"
+  }
+}

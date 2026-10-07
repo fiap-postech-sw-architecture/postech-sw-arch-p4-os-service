@@ -47,6 +47,11 @@ dist/
 **/*.pem
 **/*.key
 
+# Contratos: a imagem leva o asyncapi.yaml e os schemas (validacao em runtime);
+# exemplos e a topologia do RabbitMQ (com a senha de demo do admin) ficam fora.
+contratos/exemplos/
+contratos/rabbitmq/
+
 # Ambiente local e orquestracao
 .env
 .env.*
