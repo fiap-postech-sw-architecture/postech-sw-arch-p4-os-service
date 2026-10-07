@@ -14,8 +14,8 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 
 - OS da fase 4: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
 - API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}`, `GET /{id}/historico`, `POST /{id}/cancelamento`, `POST /{id}/entrega`, clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
-- Outbox transacional: todo evento da OS é gravado na tabela `outbox` no mesmo commit da mudança.
-- Ainda não: saga, mensageria (RabbitMQ) e manifestos Kubernetes, desenhados na RFC-004.
+- Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
+- Ainda não: os handlers da saga (hoje cada evento recebido só é registrado) e os manifestos Kubernetes, desenhados na RFC-004.
 
 ## Autenticação
 
@@ -60,17 +60,106 @@ A chave nova só assina depois que todos os pods e consumidores a conhecem; por 
 | 3. Aposentar a antiga | K2 | vazio | Só depois de 7 dias, a validade do refresh: a partir daqui os tokens da K1 deixam de valer |
 | Emergência (K1 comprometida) | K2 | vazio | Derruba as sessões: o OS recusa a K1 assim que o rollout termina e Billing e Execução, quando renovarem o JWKS (até 10 min; até 1 h com o OS fora do ar). É o único jeito de uma chave vazada deixar de forjar tokens `admin` aceitos pelos três serviços |
 
+## Mensageria
+
+O OS Service orquestra a saga pelo RabbitMQ da plataforma: publica comandos para Billing e Execução e consome os eventos que eles publicam ([ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md), [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 5). A entrega é pelo menos uma vez e o consumidor é idempotente: cada efeito acontece uma vez (RN-028).
+
+```mermaid
+flowchart LR
+    uc["caso de uso<br/>(uow.publicar_comando)"] -->|"mesmo commit do efeito"| ob[("outbox")]
+    ob -->|"NOTIFY + poll"| relay["relay<br/>python -m src.relay"]
+    relay -->|"confirm + mandatory"| cmd{{"pytstop.comandos"}}
+    cmd --> filas["billing.comandos<br/>execucao.comandos"]
+    evt{{"pytstop.eventos"}} --> q["os.eventos"]
+    q --> cons["consumidor<br/>python -m src.consumidor"]
+    cons -->|"mesma transação"| mp[("mensagens_processadas<br/>+ efeito do handler")]
+    cons -.->|"erro transitório"| rt{{"pytstop.retry"}} -.-> rq["os.eventos.retry.1s ... .300s"] -.->|"TTL vence"| q
+    cons -.->|"erro permanente ou 6ª falha"| dlq["os.eventos.dlq"]
+```
+
+### Contratos
+
+`contratos/` é cópia de arquivos do platform no SHA gravado em `contratos/ORIGEM`: do `contratos/` de lá, o AsyncAPI (`asyncapi.yaml`), um JSON Schema por mensagem e os exemplos; em `contratos/rabbitmq/`, a topologia do broker do `k8s/base/rabbitmq/` (definitions, permissões, configuração e o script que cria os usuários) e o admin de demonstração do `compose/`. O `tests/contratos/test_copia_do_platform.py` baixa cada arquivo pelo raw do GitHub nesse SHA e compara o checksum; atualizar a cópia é copiar de novo e trocar o `ORIGEM`.
+
+O catálogo sai do próprio `asyncapi.yaml`: quem publica cada tipo (o `userId` da operação de envio), em que exchange e routing key, e o que a fila `os.eventos` recebe. O OS publica 11 comandos (`SolicitarDiagnostico`, `DescartarDiagnostico`, `GerarOrcamento`, `CancelarOrcamento`, `ReservarPecas`, `LiberarReserva`, `SolicitarPagamento`, `EstornarPagamento`, `AgendarExecucao`, `CancelarExecucao` e `AnonimizarVeiculo`) e consome os 23 eventos de Billing e Execução; os eventos internos da OS (abertura e mudança de status) ficam no histórico e não vão para o broker.
+
+A validação usa o payload de cada mensagem no AsyncAPI: envelope, `tipo`, `versao` e `origem` constantes e o schema de `dados`. O leitor é tolerante (campo novo não invalida) e `versao` desconhecida reprova. O erro aponta o caminho e a regra (`const em $.versao`), nunca o valor, que pode ser a placa ou texto livre.
+
+### Publicar um comando
+
+O caso de uso grava o comando na outbox pela própria unidade de trabalho, no mesmo commit do efeito:
+
+```python
+with uow:
+    repositorio.salvar(ordem)
+    uow.publicar_comando(
+        "SolicitarDiagnostico",
+        {
+            "ordem_id": ordem.id,
+            "veiculo_id": veiculo.id,
+            "veiculo": {...},
+            "descricao_problema": ...,
+        },
+        correlation_id=ordem.id,  # o id da OS, que também identifica a saga
+        causation_id=evento_recebido.id,  # None quando a causa é uma requisição HTTP
+    )
+    uow.commit()
+```
+
+O envelope (`id`, `tipo`, `versao`, `origem=os-service`, `correlation_id`, `causation_id`, `ocorrido_em` em UTC e `dados`) é validado na hora: comando fora do contrato é bug e sobe como 500. A linha guarda o envelope, o exchange, a routing key e o contexto W3C (`traceparent`, `tracestate`) do span corrente.
+
+### Relay (`python -m src.relay`)
+
+- Acorda com o `NOTIFY` da outbox e, por segurança, a cada `OUTBOX_POLL_SEGUNDOS`. Reivindica lotes com `FOR UPDATE SKIP LOCKED` e um lease, na ordem de cada OS (uma linha em espera segura as seguintes da mesma OS; `dead` não segura), e cada entrega reabre a linha com fencing: duas réplicas nunca publicam a mesma linha ao mesmo tempo (a entrega é pelo menos uma vez: uma linha confirmada cuja marcação falha sai de novo, e o consumidor do destino descarta a repetição).
+- Publica com *publisher confirms* e `mandatory`, com as propriedades AMQP do contrato (`message_id`, `correlation_id`, `type`, `user_id=os`, `content_type`, `delivery_mode=2`) e o `traceparent` no header. A linha só vira `entregue` depois da confirmação.
+- Mensagem devolvida (sem fila para a routing key), recusada (nack) ou com o canal fechado pelo broker conta tentativa e volta depois de 1, 4, 16 e 64 s; na quinta falha vira `dead` (métrica `outbox_dead`).
+- Broker fora do ar não conta tentativa: sem conexão o relay não reivindica linhas, reconecta com backoff de até 30 s, e as linhas de um lote interrompido voltam na hora, sem esperar o lease.
+- Uma vez por hora apaga as linhas entregues há mais de 7 dias.
+
+### Consumidor (`python -m src.consumidor`)
+
+Para cada mensagem da fila `os.eventos`, com prefetch pequeno e ack manual:
+
+1. Origem: o `user_id` (o broker garante que é o usuário da conexão de quem publicou) tem de ser o produtor do `tipo` no catálogo; a cópia que volta da fila de retry traz o `user_id` do próprio consumidor e é aceita com `x-tentativa` de 1 a 5. Qualquer outro caso vai para a DLQ.
+2. Trace: o span CONSUMER é filho do `traceparent` recebido.
+3. Contrato: JSON, envelope e `dados` validados; `message_id` e `type` têm de bater com o envelope.
+4. Efeito: na mesma transação, grava o `id` em `mensagens_processadas` e chama o handler do `tipo` no `DESPACHANTE` (`src/consumidor.py`). Id repetido recebe ack sem efeito.
+
+| Situação | Resultado |
+|---|---|
+| Handler concluiu | ack (`processada`, ou `ignorada` quando a mensagem não corresponde ao estado atual) |
+| Mesmo `id` de novo | ack sem efeito (`duplicada`) |
+| Erro transitório (banco fora, `FalhaTransitoriaError`, conflito de versão) | cópia em `pytstop.retry` com `x-tentativa` + 1 e a routing key da fila do nível (`os.eventos.retry.1s`, `.5s`, `.15s`, `.60s` e `.300s`), com confirmação, e só então o ack (`retry`) |
+| Sexta falha transitória, tipo, versão, contrato ou origem inválidos, ou outra exceção do handler | `reject` sem requeue, e a fila manda para `os.eventos.dlq` (`dlq`) |
+
+Cada nível de atraso tem a sua fila, com o TTL como argumento dela: uma fila só, com `expiration` por mensagem, seguraria a cópia de 1 s atrás da de 300 s, porque a mensagem só expira na cabeça da fila. Os handlers da saga entram com o orquestrador; até lá cada evento só registra o recebimento no log. Uma vez por hora o consumidor apaga as linhas de `mensagens_processadas` com mais de 30 dias.
+
+### Observabilidade, saúde e encerramento
+
+- Spans: `publish <tipo>` (PRODUCER, filho do span que gravou a outbox) e `process <tipo>` (CONSUMER, filho da publicação), com `correlation_id` como atributo; os laços ociosos não abrem span. O SDK do OpenTelemetry fica sempre ligado no relay e no consumidor; `OTEL_ENABLED=true` liga a exportação OTLP para o Jaeger.
+- Logs JSON com `correlation_id`, `trace_id` e `span_id`, sem dados pessoais nem texto livre (o envelope não vai para o log).
+- Métricas no `/metrics` de cada processo (porta `METRICS_PORT`, 9100): `pytstop_mensagens_publicadas_total{tipo}`, `pytstop_mensagens_consumidas_total{tipo,resultado}`, `outbox_pendentes` e `outbox_dead`.
+- Saúde: cada processo toca `/tmp/<processo>-heartbeat` a cada volta do laço (liveness) e mantém `/tmp/<processo>-pronto` enquanto está conectado ao broker (readiness); o healthcheck do compose confere os dois. No SIGTERM o processo termina a mensagem em curso, devolve as pré-buscadas à fila e fecha as conexões.
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `RABBITMQ_URL` | obrigatória | URL AMQP com o usuário `os`; fora de `development` e `test`, a senha de demonstração é recusada no boot |
+| `METRICS_PORT` | 9100 | porta do `/metrics` do relay e do consumidor |
+| `OUTBOX_POLL_SEGUNDOS`, `OUTBOX_LOTE`, `OUTBOX_LEASE_SEGUNDOS` | 5, 10, 60 | poll de segurança, linhas por lote e lease do relay |
+| `CONSUMIDOR_PREFETCH` | 5 | mensagens pré-buscadas por consumidor |
+| `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `false`, `http://jaeger:4317` | exportação OTLP dos spans |
+
 ## Como rodar local
 
 Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/).
 
 ```bash
-make compose-up      # build da imagem, PostgreSQL 16, migrações e admin de demonstração
+make compose-up      # build da imagem, PostgreSQL 16, RabbitMQ, migrações, admin de demonstração, relay e consumidor
 curl -s localhost:8000/api/v1/saude
-make compose-down    # derruba e apaga o volume
+make compose-down    # derruba e apaga os volumes
 ```
 
-A API sobe em `http://localhost:8000` (porta configurável com `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O usuário de demonstração é `admin@pytstop.dev` com a senha de `ADMIN_PASSWORD` no `docker-compose.yml` (valores só de dev; o boot com `ENVIRONMENT=production` recusa esses literais).
+A API sobe em `http://localhost:8000` (porta configurável com `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O RabbitMQ do compose carrega a topologia de `contratos/rabbitmq/` e cria os usuários dos três serviços; o console fica em `http://localhost:15674` (usuário `admin`, senha de demonstração em `contratos/rabbitmq/rabbitmq-admin.json`) e o AMQP em `localhost:5674`, fora das portas do compose do platform. O usuário de demonstração é `admin@pytstop.dev` com a senha de `ADMIN_PASSWORD` no `docker-compose.yml` (valores só de dev; o boot com `ENVIRONMENT=production` recusa esses literais).
 
 ```bash
 TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
@@ -95,11 +184,12 @@ uv run python -m src.main   # http://127.0.0.1:8000
 make check   # uv.lock em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest
 make audit   # pip-audit das dependências de runtime (com os extras da imagem)
 make smoke   # imagem pelo entrypoint real: readiness, login do admin semeado validado pelo JWKS
-             # (e a assinatura adulterada recusada), log de boot em JSON e a imagem de produção
-             # (usuário 1001, ENVIRONMENT=production, sem header server), depois down -v
+             # (e a assinatura adulterada recusada), log de boot em JSON, a imagem de produção
+             # (usuário 1001, ENVIRONMENT=production, sem header server) e relay e consumidor
+             # prontos (conectados ao RabbitMQ, /metrics respondendo), depois down -v
 ```
 
-`make test` (ou `uv run pytest`) roda os testes unitários e os de integração contra um PostgreSQL efêmero (testcontainers, Docker necessário) com gate de cobertura de 90% (`.coveragerc`). O schema dos testes de integração é criado pela própria migração Alembic.
+`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). O schema dos testes de integração é criado pela própria migração Alembic, e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
 No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks e trivy (imagem), em todo PR e toda segunda-feira.
 
