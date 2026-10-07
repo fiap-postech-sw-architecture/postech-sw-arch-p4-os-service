@@ -7,10 +7,14 @@
 -- por uma senha gravada no ConfigMap.
 
 -- O psql troca a variavel pela senha antes de enviar o comando, e o servidor a
--- recebe em claro: a sessao desliga o log de comandos (um log_statement em all
--- ou ddl o gravaria) e a linha STATEMENT de um comando que falha.
+-- recebe em claro: a sessao desliga todo log que leva o texto do comando (o
+-- log_statement em all ou ddl, a linha STATEMENT de um comando que falha e o
+-- log por duracao ou por amostragem).
 SET log_statement = 'none';
 SET log_min_error_statement = 'panic';
+SET log_min_duration_statement = -1;
+SET log_min_duration_sample = -1;
+SET log_transaction_sample_rate = 0;
 
 \getenv senha_dono POSTGRES_OWNER_PASSWORD
 \getenv senha_app POSTGRES_APP_PASSWORD

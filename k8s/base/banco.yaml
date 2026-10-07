@@ -54,11 +54,31 @@ spec:
           ports:
             - name: postgres
               containerPort: 5432
-          # As quatro senhas: a do superusuario e as que o papeis.sql le.
-          envFrom:
-            - secretRef:
-                name: os-postgres
           env:
+            # A do superusuario e as que o papeis.sql le, uma a uma: chave que
+            # falta no Secret para o pod antes do initdb. Com o script falhando
+            # no meio, o volume ficaria inicializado sem os papeis, e a imagem
+            # nao roda o init de novo num volume que ja existe.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_OWNER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_OWNER_PASSWORD
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: POSTGRES_EXPORTER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_EXPORTER_PASSWORD
             - name: POSTGRES_DB
               value: os
             - name: POSTGRES_USER
@@ -139,6 +159,9 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: papeis
           configMap:
