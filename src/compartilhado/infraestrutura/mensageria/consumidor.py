@@ -28,7 +28,6 @@ excecao): ``reject`` sem requeue, e a fila manda a mensagem para a
 from __future__ import annotations
 
 import json
-import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -55,6 +54,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     DIRETORIO_DE_SAUDE,
     Sinalizador,
     inteiro_do_ambiente,
+    onde,
 )
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,
@@ -259,7 +259,7 @@ class Consumidor:
                 _log.error(
                     "message processing crashed; rejected to dlq",
                     erro=type(exc).__name__,
-                    onde=_onde(exc),
+                    onde=onde(exc),
                 )
                 span.set_status(StatusCode.ERROR, type(exc).__name__)
                 self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
@@ -329,7 +329,7 @@ class Consumidor:
                 # e o lugar da excecao vao para o log: a mensagem dela pode
                 # trazer dado da mensagem (placa, texto livre).
                 raise _MensagemRejeitadaError(
-                    "erro_no_handler", erro=type(exc).__name__, onde=_onde(exc)
+                    "erro_no_handler", erro=type(exc).__name__, onde=onde(exc)
                 ) from exc
             sessao.commit()
         return desfecho.value
@@ -418,12 +418,3 @@ class Consumidor:
             return
         if apagadas:
             _log.info("old processed messages deleted", linhas=apagadas)
-
-
-def _onde(exc: BaseException) -> str:
-    """Arquivo e linha em que a excecao nasceu (sem a mensagem dela)."""
-    quadros = traceback.extract_tb(exc.__traceback__)
-    if not quadros:
-        return "desconhecido"
-    ultimo = quadros[-1]
-    return f"{ultimo.filename.rsplit('/', 1)[-1]}:{ultimo.lineno}"

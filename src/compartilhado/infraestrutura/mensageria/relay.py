@@ -36,6 +36,7 @@ from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter, Gauge
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.compartilhado.aplicacao.mensageria import ContratoInvalidoError
 from src.compartilhado.infraestrutura.database import tempo_de_conexao
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
@@ -49,6 +50,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     Sinalizador,
     inteiro_do_ambiente,
     numero_do_ambiente,
+    onde,
 )
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,
@@ -145,9 +147,12 @@ class Relay:
         self._broker = amqp.ConexaoDoProcesso(
             parametros, processo="relay", sinal=self._sinal, declarar=self._declarar
         )
-        contratos = catalogo()
+        self._catalogo = catalogo()
         self._exchanges = sorted(
-            {contratos.destino(tipo).exchange for tipo in contratos.publicados}
+            {
+                self._catalogo.destino(tipo).exchange
+                for tipo in self._catalogo.publicados
+            }
         )
         self._proxima_limpeza = datetime.now(UTC)
         OUTBOX_PENDENTES.set_function(lambda: self._outbox.contar("pendente"))
@@ -215,10 +220,8 @@ class Relay:
                     # caiu, nao foram elas que falharam.
                     self._liberar(linhas[indice:])
                     raise
-                except SQLAlchemyError:
-                    # Erro de banco numa linha nao derruba o lote; ela volta
-                    # quando o lease vencer.
-                    _log.exception("outbox row failed", outbox_id=linha.id)
+                except Exception as exc:  # noqa: BLE001  # a linha falha, o relay segue
+                    self._contar_falha(linha, exc)
 
     def _entregar(self, reivindicada: LinhaDaOutbox) -> None:
         if not self._broker.canal.is_open:
@@ -227,6 +230,50 @@ class Relay:
         if linha is None:
             _log.info("outbox row taken by another replica", outbox_id=reivindicada.id)
             return
+        try:
+            self._catalogo.validar(linha.envelope)
+        except ContratoInvalidoError:
+            # Nenhuma nova tentativa muda o envelope: dead direto.
+            if self._outbox.marcar_dead(linha, "envelope fora do contrato"):
+                _log.error(
+                    "outbox row with an envelope outside the contract; dead",
+                    outbox_id=linha.id,
+                    message_id=str(linha.mensagem_id),
+                    correlation_id=str(linha.correlation_id),
+                )
+            return
+        try:
+            self._publicar_no_span(linha)
+        except _BrokerIndisponivelError:
+            # O lease renovado e o desta linha: o _drenar so libera as outras.
+            self._liberar([linha])
+            raise
+        except Exception as exc:  # noqa: BLE001  # a linha falha, o relay segue
+            self._contar_falha(linha, exc)
+
+    def _contar_falha(self, linha: LinhaDaOutbox, exc: Exception) -> None:
+        """Falha inesperada no caminho da linha: conta tentativa, como uma recusa.
+
+        Se nem a contagem gravar (banco fora), a linha volta quando o lease
+        vencer.
+        """
+        _log.error(
+            "outbox row failed",
+            outbox_id=linha.id,
+            erro=type(exc).__name__,
+            onde=onde(exc),
+        )
+        try:
+            self._outbox.registrar_falha(
+                linha, f"falha ao publicar ({type(exc).__name__})"
+            )
+        except SQLAlchemyError:
+            _log.warning(
+                "outbox row failure not recorded; it returns after the lease",
+                outbox_id=linha.id,
+            )
+
+    def _publicar_no_span(self, linha: LinhaDaOutbox) -> None:
         tipo = linha.envelope["tipo"]
         # O span cobre publicacao, marcacao da linha e logs: as linhas de log
         # saem com o trace_id e o span_id da publicacao.
@@ -247,12 +294,7 @@ class Relay:
             },
             record_exception=False,
         ) as span:
-            try:
-                falha = self._publicar(linha)
-            except _BrokerIndisponivelError:
-                # O lease renovado e o desta linha: o _drenar so libera as outras.
-                self._liberar([linha])
-                raise
+            falha = self._publicar(linha)
             if falha is not None:
                 span.set_status(StatusCode.ERROR, falha)
             self._registrar_desfecho(linha, falha)

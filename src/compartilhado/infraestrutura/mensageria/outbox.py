@@ -185,6 +185,12 @@ class Outbox:
         )
         return "nova_tentativa" if gravada else "perdida"
 
+    def marcar_dead(self, linha: LinhaDaOutbox, motivo: str) -> bool:
+        """``dead`` sem nova tentativa (envelope que nenhuma tentativa conserta)."""
+        return self._marcar(
+            _SQL_DEAD, linha, tentativas=linha.tentativas + 1, erro=motivo
+        )
+
     def liberar(self, linhas: Sequence[LinhaDaOutbox]) -> None:
         """Devolve as linhas ja, sem esperar o lease (o broker caiu)."""
         with self._engine.begin() as conexao:

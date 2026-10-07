@@ -14,6 +14,7 @@ import math
 import os
 import signal
 import tempfile
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
@@ -138,6 +139,18 @@ def preparar(processo: str) -> tuple[Engine, pika.URLParameters]:
 
     iniciar_todos_mapeamentos()
     return criar_engine(resolver_database_url()), amqp.parametros(url, processo)
+
+
+def onde(exc: BaseException) -> str:
+    """Arquivo e linha em que a excecao nasceu, para o log (sem a mensagem dela).
+
+    A mensagem de uma excecao pode trazer dado da mensagem (placa, texto livre):
+    os logs de falha levam so o tipo e este ``arquivo:linha``.
+    """
+    quadros = traceback.extract_tb(exc.__traceback__)
+    if not quadros:
+        return "desconhecido"
+    return f"{quadros[-1].filename.rsplit('/', 1)[-1]}:{quadros[-1].lineno}"
 
 
 def subir_metricas() -> int:

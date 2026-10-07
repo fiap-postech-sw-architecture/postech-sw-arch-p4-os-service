@@ -435,6 +435,79 @@ def test_linha_em_falha_segura_as_seguintes_da_mesma_os_ate_morrer(
     assert broker.contar(_FILA) == 2
 
 
+def _detalhes(engine: Engine, linha_id: int) -> Any:
+    with engine.connect() as conexao:
+        return conexao.execute(
+            text("SELECT status, tentativas, ultimo_erro FROM outbox WHERE id = :id"),
+            {"id": linha_id},
+        ).one()
+
+
+@pytest.mark.usefixtures("session_factory")
+def test_linha_com_envelope_fora_do_contrato_vira_dead_e_o_relay_segue(
+    engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
+) -> None:
+    invalida = _inserir(engine, envelope="{}")
+    valida = _inserir(engine)
+
+    with EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path)):
+        esperar_ate(lambda: _status(engine, valida) == "entregue")
+        esperar_ate(lambda: _status(engine, invalida) == "dead")
+
+    linha = _detalhes(engine, invalida)
+    assert (linha.tentativas, linha.ultimo_erro) == (1, "envelope fora do contrato")
+    assert broker.contar(_FILA) == 1
+
+
+@pytest.mark.usefixtures("session_factory")
+def test_publish_em_exchange_inexistente_conta_tentativa_e_o_relay_segue(
+    engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
+) -> None:
+    # O broker fecha o canal; a linha conta tentativa ate `dead` e o relay abre
+    # outro canal para as demais.
+    inexistente = _inserir(engine, exchange="pytstop.inexistente")
+    valida = _inserir(engine)
+    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+
+    with EmSegundoPlano(relay):
+        esperar_ate(lambda: _status(engine, valida) == "entregue")
+        esperar_ate(lambda: _status(engine, inexistente) == "dead")
+
+    linha = _detalhes(engine, inexistente)
+    assert linha.tentativas == 5
+    assert linha.ultimo_erro.startswith("canal fechado pelo broker")
+
+
+@pytest.mark.usefixtures("session_factory")
+def test_excecao_inesperada_na_publicacao_conta_tentativa_e_nao_derruba_o_relay(
+    engine: Engine,
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linha_id = _inserir(engine)
+    falhas = [TypeError("propriedade invalida")]
+    propriedades = amqp.propriedades
+
+    def propriedades_com_falha(*args: Any, **kwargs: Any) -> Any:
+        if falhas:
+            raise falhas.pop()
+        return propriedades(*args, **kwargs)
+
+    monkeypatch.setattr(amqp, "propriedades", propriedades_com_falha)
+    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+
+    with EmSegundoPlano(relay):
+        primeira = esperar_ate(
+            lambda: (linha := _detalhes(engine, linha_id)).tentativas == 1 and linha
+        )
+        esperar_ate(lambda: _status(engine, linha_id) == "entregue")
+
+    assert primeira.ultimo_erro == "falha ao publicar (TypeError)"
+    assert _detalhes(engine, linha_id).tentativas == 1
+
+
 @pytest.mark.usefixtures("session_factory")
 def test_apaga_as_linhas_entregues_ha_mais_de_7_dias(
     engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path

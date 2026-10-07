@@ -400,6 +400,68 @@ def test_conexao_bloqueada_pelo_broker_para_os_claims_ate_o_desbloqueio(
     assert _linha(engine, mensagem_id).tentativas == 0
 
 
+def test_erro_de_banco_numa_linha_do_lote_conta_tentativa_e_as_demais_saem(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canal = CanalFalso()
+    conexoes.append((ConexaoFalsa(), canal))
+    primeira, segunda = _gravar(session_factory), _gravar(session_factory)
+    falhas = [OperationalError("UPDATE", {}, Exception("banco fora"))]
+    renovar = Outbox.renovar
+
+    def renovar_com_falha(self: Outbox, linha: Any, lease: Any) -> Any:
+        if falhas and linha.mensagem_id == primeira:
+            raise falhas.pop()
+        return renovar(self, linha, lease)
+
+    monkeypatch.setattr(Outbox, "renovar", renovar_com_falha)
+    relay = _relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+
+    with EmSegundoPlano(relay):
+        esperar_ate(
+            lambda: (
+                {_linha(engine, m).status for m in (primeira, segunda)} == {"entregue"}
+            )
+        )
+
+    assert _linha(engine, primeira).tentativas == 1
+    assert _linha(engine, segunda).tentativas == 0
+    assert len(canal.publicadas) == 2
+
+
+def test_falha_ao_liberar_o_lote_interrompido_deixa_as_linhas_para_depois_do_lease(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caiu = CanalFalso(StreamLostError("broker reiniciou"))
+    seguinte = CanalFalso()
+    conexoes.extend([(ConexaoFalsa(), caiu), (ConexaoFalsa(), seguinte)])
+    mensagens = [_gravar(session_factory) for _ in range(2)]
+
+    def liberar_com_falha(self: Outbox, linhas: Any) -> None:
+        raise OperationalError("UPDATE", {}, Exception("banco fora"))
+
+    monkeypatch.setattr(Outbox, "liberar", liberar_com_falha)
+    relay = _relay(engine, rastreador, tmp_path, lease=timedelta(seconds=0.5))
+
+    with EmSegundoPlano(relay):
+        esperar_ate(
+            lambda: all(_linha(engine, m).status == "entregue" for m in mensagens)
+        )
+
+    assert [_linha(engine, m).tentativas for m in mensagens] == [0, 0]
+    assert len(seguinte.publicadas) == 2
+
+
 def test_linha_que_outra_replica_ja_finalizou_e_pulada(
     engine: Engine,
     session_factory: sessionmaker[Session],
