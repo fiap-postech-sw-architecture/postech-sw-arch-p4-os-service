@@ -1,24 +1,26 @@
 """Duas replicas ao mesmo tempo, com Postgres e RabbitMQ reais.
 
 Relay: o claim com ``SKIP LOCKED`` e o lease repartem as linhas sem repetir
-nenhuma nem furar a ordem de cada OS, a linha reivindicada por quem caiu so
-volta depois do lease e a replica cujo lease venceu nao grava nada na linha que
-outra reivindicou (o fim do lease e o token). Consumidor: a mesma mensagem em
-dois consumidores ao mesmo tempo tem efeito uma vez, decidido pela restricao
-unica de ``mensagens_processadas``, sem passar pela fila de retry.
+nenhuma nem furar a ordem de cada OS, uma replica no meio do claim nao trava o
+claim da outra, a linha reivindicada por quem caiu so volta depois do lease e a
+replica cujo lease venceu nao grava nada na linha que outra reivindicou (o fim
+do lease e o token). Consumidor: a mesma mensagem em dois consumidores ao mesmo
+tempo tem efeito uma vez, decidido pela restricao unica de
+``mensagens_processadas``, sem passar pela fila de retry.
 """
 
 from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
 from prometheus_client import REGISTRY
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from src.compartilhado.aplicacao.mensageria import (
     Comando,
@@ -36,7 +38,7 @@ from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
     from sqlalchemy import Engine
@@ -189,6 +191,75 @@ def test_replica_com_o_lease_vencido_nao_grava_nada_na_linha_que_outra_reivindic
     assert marcar(outbox, atrasada) == recusa
     assert _estado(engine, vigente.id) == ("pendente", 0, vigente.lease_ate, None)
     assert outbox.marcar_entregue(vigente)
+
+
+@contextmanager
+def _primeiro_claim_segura_as_linhas(
+    engine: Engine,
+) -> Iterator[tuple[threading.Event, threading.Event]]:
+    """Deixa aberta a transacao do primeiro claim que reivindicar alguma linha.
+
+    Claim e lease saem numa transacao so: o gancho para antes do UPDATE do
+    lease, com as linhas ja travadas pelo ``SELECT ... FOR UPDATE``, ate o teste
+    sinalizar ``liberar``.
+    """
+    segurando, liberar = threading.Event(), threading.Event()
+
+    def segurar(_conexao: object, _cursor: object, sql: str, *_: object) -> None:
+        if sql.startswith("UPDATE outbox SET proxima_tentativa_em = now() +") and (
+            not segurando.is_set()
+        ):
+            segurando.set()
+            liberar.wait(30)
+
+    event.listen(engine, "before_cursor_execute", segurar)
+    try:
+        yield segurando, liberar
+    finally:
+        liberar.set()
+        event.remove(engine, "before_cursor_execute", segurar)
+
+
+def _status(engine: Engine, mensagem_id: UUID) -> str:
+    with engine.connect() as conexao:
+        status: str = conexao.execute(
+            text("SELECT status FROM outbox WHERE mensagem_id = :id"),
+            {"id": mensagem_id},
+        ).scalar_one()
+    return status
+
+
+def test_relay_no_meio_do_claim_nao_trava_o_claim_da_outra_replica(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    # A reivindica a linha da primeira OS e fica com a transacao do claim
+    # aberta; B pula a linha travada (SKIP LOCKED) e publica a da outra OS na
+    # hora. Sem o SKIP LOCKED, B esperaria o lock de A.
+    primeira = _gravar(session_factory, uuid4())
+    segunda = _gravar(session_factory, uuid4())
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+
+    with (
+        _primeiro_claim_segura_as_linhas(engine) as (segurando, liberar),
+        EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path / "a", lote=1)),
+    ):
+        esperar_ate(segurando.is_set)
+        with EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path / "b")):
+            try:
+                esperar_ate(lambda: _status(engine, segunda) == "entregue", prazo_s=10)
+                travada = _status(engine, primeira)
+            finally:
+                liberar.set()
+            esperar_ate(lambda: _status(engine, primeira) == "entregue")
+
+    assert travada == "pendente"
+    publicadas = [p.message_id for p, _ in broker.pegar_todas(_FILA)]
+    assert publicadas == [str(segunda), str(primeira)]
 
 
 def _consumidas(tipo: str, resultado: str) -> float:
