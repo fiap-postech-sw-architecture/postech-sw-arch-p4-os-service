@@ -1,0 +1,64 @@
+# OS Service no namespace pytstop-os (README, "Implantacao"). Nao aplique este
+# diretorio direto: os overlays (kind, kind-ci e k3s) trazem o que muda por
+# ambiente, e o implantar-servicos.sh do platform os aplica na ordem: banco,
+# Job de migracao, Deployments. Nenhum Secret aqui: os do servico nascem no
+# make deploy do platform e entram por secretKeyRef (ADR-042).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: pytstop-os
+
+# Todo objeto, e os pods pelos templates, leva o part-of do servico; os
+# seletores ficam so com o app.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: os-service
+    includeTemplates: true
+
+resources:
+  - namespace.yaml
+  - banco.yaml
+  - job.yaml
+  - api.yaml
+  - relay.yaml
+  - consumidor.yaml
+  - servico.yaml
+  - hpa.yaml
+  - networkpolicy.yaml
+  - borda.yaml
+
+configMapGenerator:
+  # Ambiente da API, do relay, do consumidor e do Job (envFrom); os overlays
+  # acrescentam o TRUSTED_PROXIES, o CIDR de pods do cluster.
+  - name: os-service
+    literals:
+      # Guardas de boot ligadas tambem no kind: os segredos sao gerados.
+      - ENVIRONMENT=production
+      # Prefixo na borda: o entrypoint o passa ao uvicorn (--root-path).
+      - ROOT_PATH=/os
+      - OTEL_ENABLED=true
+      - OTEL_SERVICE_NAME=os-service
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger.pytstop-plataforma.svc.cluster.local:4317
+      # /metrics do relay e do consumidor, a porta `metrics` dos Deployments.
+      - METRICS_PORT=9100
+      # Migracao e semente sao do Job, antes do rollout.
+      - RUN_MIGRATIONS_ON_STARTUP=false
+      - RUN_SEED_ON_STARTUP=false
+      # /metrics da API, na porta http (ADR-043).
+      - API_METRICS_ENABLED=true
+      - ADMIN_EMAIL=admin@pytstop.dev
+      - CORS_ORIGINS=
+      - RATE_LIMIT=60/minute
+      - JWT_EXPIRATION_MINUTES=15
+      - JWT_REFRESH_EXPIRATION_MINUTES=10080
+      - OUTBOX_POLL_SEGUNDOS=5
+      - OUTBOX_LOTE=10
+      - OUTBOX_LEASE_SEGUNDOS=60
+      # Por replica da API; com 3 no HPA do k3s, relay, consumidor, Job e
+      # exporter, ficam abaixo do max_connections 100 do PostgreSQL 16.
+      - DB_POOL_SIZE=5
+      - DB_MAX_OVERFLOW=10
+  # Papeis do PostgreSQL, que a imagem cria no primeiro init do volume.
+  - name: os-postgres-init
+    files:
+      - papeis.sql

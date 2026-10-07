@@ -1,0 +1,159 @@
+# PostgreSQL 16 do OS Service (ADR-037): StatefulSet de uma replica, com
+# volume pela StorageClass padrao do cluster, e o postgres_exporter como
+# sidecar (ADR-043). Papeis por uso, do papeis.sql (ADR-042): o superusuario
+# postgres so inicializa; os (dono, DDL) e do Job de migracao, os_app (DML) dos
+# processos e os_exporter (pg_monitor) do exporter. Sem trust: o loopback e o
+# socket tambem pedem senha (scram-sha-256), e o sidecar nao entra como
+# postgres. Senhas do Secret os-postgres, que o platform gera.
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-postgres
+spec:
+  # Headless: o nome resolve para o pod do banco, e so quando ele esta pronto.
+  clusterIP: None
+  selector:
+    app: os-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: os-postgres
+spec:
+  serviceName: os-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: os-postgres
+  template:
+    metadata:
+      labels:
+        app: os-postgres
+        processo: banco
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16.15
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          # As quatro senhas: a do superusuario e as que o papeis.sql le.
+          envFrom:
+            - secretRef:
+                name: os-postgres
+          env:
+            - name: POSTGRES_DB
+              value: os
+            - name: POSTGRES_USER
+              value: postgres
+            # Subdiretorio: a raiz do volume pode ter lost+found ou dono root.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_INITDB_ARGS
+              value: --auth-host=scram-sha-256 --auth-local=scram-sha-256
+          # pg_isready nao autentica: so confere que o servidor aceita conexao.
+          # O primeiro init (initdb e papeis.sql) cabe nos 2 min da startup.
+          startupProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, os, -d, os]
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, os, -d, os]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -U, os, -d, os]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: dados
+              mountPath: /var/lib/postgresql/data
+            - name: papeis
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: socket
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+        - name: exporter
+          image: prometheuscommunity/postgres-exporter:v0.20.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 9187
+          env:
+            - name: DATA_SOURCE_URI
+              value: 127.0.0.1:5432/os?sslmode=disable
+            - name: DATA_SOURCE_USER
+              value: os_exporter
+            - name: DATA_SOURCE_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_EXPORTER_PASSWORD
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      volumes:
+        - name: papeis
+          configMap:
+            name: os-postgres-init
+        - name: socket
+          emptyDir:
+            sizeLimit: 16Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: dados
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi

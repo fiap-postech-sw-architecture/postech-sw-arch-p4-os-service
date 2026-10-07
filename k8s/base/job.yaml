@@ -1,0 +1,96 @@
+# Migracao, com o dono `os` (DDL), e semente do admin, antes do rollout dos
+# Deployments, que esperam por ela (aguarda-migracao). Job e imutavel: o
+# implantar-servicos.sh do platform apaga os Jobs com o rotulo de
+# inicializacao antes do apply e espera este completar. Idempotente: o alembic
+# em head nao faz nada, e a semente nao recria o admin (que e o unico usuario
+# semeado; atendente e mecanico se cadastram pela API).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: os-migracao
+  labels:
+    app.kubernetes.io/component: inicializacao
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: os-migracao
+        app.kubernetes.io/component: inicializacao
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: aguarda-postgres
+          image: postgres:16.15
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - until pg_isready -h os-postgres -U os -d os; do sleep 2; done
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: migracao
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - alembic upgrade head && python scripts/seed_admin.py
+          envFrom:
+            - configMapRef:
+                name: os-service
+          env:
+            - name: POSTGRES_OWNER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_OWNER_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os:$(POSTGRES_OWNER_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+            # Senha do admin semeado; o e-mail vem do ConfigMap (ADMIN_EMAIL).
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-admin
+                  key: ADMIN_PASSWORD
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi
