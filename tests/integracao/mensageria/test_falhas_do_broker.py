@@ -1078,10 +1078,20 @@ def test_consumo_cancelado_pelo_broker_reconecta_e_segue(
     conexoes: list[Any],
     rastreador: Rastreador,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     envelope = envelope_de_evento("ExecucaoCancelada")
+    cancelada = ConexaoFalsa()
     canal = CanalFalso(entregas=[_entrega(envelope, 9)])
-    conexoes.extend([(ConexaoFalsa(), _CanalCancelado()), (ConexaoFalsa(), canal)])
+    conexoes.extend([(cancelada, _CanalCancelado()), (ConexaoFalsa(), canal)])
+    pronto_ao_conectar: list[bool] = []
+    conectar = amqp.conectar
+
+    def conectar_olhando_o_pronto(params: Any) -> tuple[Any, Any]:
+        pronto_ao_conectar.append((tmp_path / "consumidor-pronto").exists())
+        return conectar(params)
+
+    monkeypatch.setattr(amqp, "conectar", conectar_olhando_o_pronto)
     recebidas: list[Any] = []
 
     def registrar(mensagem: Any, _transacao: Any) -> Desfecho:
@@ -1097,8 +1107,11 @@ def test_consumo_cancelado_pelo_broker_reconecta_e_segue(
 
     assert recebidas == [UUID(envelope["id"])]
     assert canal.confirmadas == [9]
-    # O cancelamento reconecta com backoff, sem laco quente.
+    # O cancelamento reconecta com backoff, sem laco quente, e a conexao
+    # cancelada e fechada antes: durante a espera o processo fica fora de pronto.
     assert parar.esperas[:1] == [0.05]
+    assert not cancelada.is_open
+    assert pronto_ao_conectar[:2] == [False, False]
 
 
 @pytest.mark.parametrize(
