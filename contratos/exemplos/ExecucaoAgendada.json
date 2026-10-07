@@ -1,0 +1,13 @@
+{
+  "id": "1d0fb54e-eb38-47fa-8c75-fdb597f4dc99",
+  "tipo": "ExecucaoAgendada",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "9679cd4d-e061-4e62-b1cb-5430bfa40a03",
+  "ocorrido_em": "2026-10-06T13:51:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "posicao_na_fila": 3
+  }
+}

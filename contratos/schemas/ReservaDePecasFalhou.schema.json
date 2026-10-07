@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReservaDePecasFalhou (dados)",
+  "description": "Campo dados da mensagem ReservaDePecasFalhou (evento, execution-service -> os-service). Estoque insuficiente para ao menos uma peça; o OS compensa a saga.",
+  "type": "object",
+  "required": [
+    "ordem_id",
+    "faltantes"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "faltantes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/faltante"
+      },
+      "maxItems": 50
+    }
+  },
+  "$defs": {
+    "codigo": {
+      "type": "string",
+      "maxLength": 50,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Código do serviço ou SKU da peça na tabela de preços do Billing (até 50 caracteres)."
+    },
+    "faltante": {
+      "type": "object",
+      "required": [
+        "sku",
+        "solicitado",
+        "disponivel"
+      ],
+      "properties": {
+        "sku": {
+          "$ref": "#/$defs/codigo"
+        },
+        "solicitado": {
+          "$ref": "#/$defs/quantidade"
+        },
+        "disponivel": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "quantidade": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

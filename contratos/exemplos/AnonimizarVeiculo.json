@@ -1,0 +1,12 @@
+{
+  "id": "c9ae6487-05dd-4e5c-ae9b-b625b5d6d507",
+  "tipo": "AnonimizarVeiculo",
+  "versao": 1,
+  "origem": "os-service",
+  "correlation_id": "3277db7e-8283-4dd9-89e7-df3eeacb8710",
+  "causation_id": null,
+  "ocorrido_em": "2026-11-05T12:00:00Z",
+  "dados": {
+    "veiculo_id": "3277db7e-8283-4dd9-89e7-df3eeacb8710"
+  }
+}

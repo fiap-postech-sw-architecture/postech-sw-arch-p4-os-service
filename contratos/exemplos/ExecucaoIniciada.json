@@ -1,0 +1,14 @@
+{
+  "id": "8252f4f9-e46d-4b0b-9f0a-9d201af15cdb",
+  "tipo": "ExecucaoIniciada",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": null,
+  "ocorrido_em": "2026-10-06T15:00:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "mecanico_id": "1dd2a4d9-3c3e-42ae-82f0-54911b944d10",
+    "iniciada_em": "2026-10-06T15:00:00Z"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnonimizarVeiculo (dados)",
+  "description": "Campo dados da mensagem AnonimizarVeiculo (comando, os-service -> execution-service). LGPD, fora da saga: a Execução troca a placa guardada do veículo pelo marcador ANONIMIZADO:{veiculo_id}.",
+  "type": "object",
+  "required": [
+    "veiculo_id"
+  ],
+  "properties": {
+    "veiculo_id": {
+      "$ref": "#/$defs/uuid"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

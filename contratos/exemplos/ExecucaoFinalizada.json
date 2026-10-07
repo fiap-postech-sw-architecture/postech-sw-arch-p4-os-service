@@ -1,0 +1,19 @@
+{
+  "id": "6a232c36-131c-4942-acd7-527594fb3a72",
+  "tipo": "ExecucaoFinalizada",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": null,
+  "ocorrido_em": "2026-10-06T17:00:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "finalizada_em": "2026-10-06T17:00:00Z",
+    "pecas_consumidas": [
+      {
+        "sku": "PEC-AMORTECEDOR-D",
+        "quantidade": 2
+      }
+    ]
+  }
+}

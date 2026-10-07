@@ -1,0 +1,19 @@
+{
+  "id": "6d4019fb-0a5b-4f96-ab6b-4ad8ef571f0d",
+  "tipo": "ReservaDePecasFalhou",
+  "versao": 1,
+  "origem": "execution-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "69299c29-f01c-4c79-8a50-48e4eff5ffb1",
+  "ocorrido_em": "2026-10-06T13:31:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "faltantes": [
+      {
+        "sku": "PEC-AMORTECEDOR-D",
+        "solicitado": 2,
+        "disponivel": 1
+      }
+    ]
+  }
+}

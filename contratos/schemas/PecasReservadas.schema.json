@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PecasReservadas (dados)",
+  "description": "Campo dados da mensagem PecasReservadas (evento, execution-service -> os-service). Reserva feita; a OS passa a AGUARDANDO_PAGAMENTO, e o OS pede o pagamento ao Billing.",
+  "type": "object",
+  "required": [
+    "ordem_id",
+    "reserva_id"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "reserva_id": {
+      "$ref": "#/$defs/uuid"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

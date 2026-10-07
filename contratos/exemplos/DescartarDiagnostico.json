@@ -1,0 +1,13 @@
+{
+  "id": "20c8b14b-364e-45ad-a25d-01ad7fa78dc5",
+  "tipo": "DescartarDiagnostico",
+  "versao": 1,
+  "origem": "os-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "1f8456ca-1902-412b-99f0-d45c359e862b",
+  "ocorrido_em": "2026-10-06T14:15:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "motivo": "cancelamento"
+  }
+}

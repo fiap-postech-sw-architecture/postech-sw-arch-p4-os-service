@@ -24,22 +24,35 @@ dependencies = [
     # declarados para nao depender das transitivas do FastAPI e do slowapi.
     "starlette>=1.7",
     "limits>=5.8",
+    # Mensageria (relay e consumidor, RFC-004 secao 5): cliente AMQP, contratos
+    # (JSON Schema + AsyncAPI em YAML; rfc3339-validator liga a checagem de
+    # date-time do FormatChecker, que sem ele ignora o "format" calado).
+    "pika>=1.4.4",
+    "jsonschema>=4.26.0",
+    "referencing>=0.37.0",
+    "rfc3339-validator>=0.1.4",
+    "pyyaml>=6.0.3",
+    # Contexto W3C pela outbox e pelo AMQP e metricas do relay e do consumidor:
+    # sempre ligados (a exportacao OTLP continua no extra `otel`). Mesmo par de
+    # versoes do extra.
+    "opentelemetry-sdk>=1.42,<1.43",
+    "prometheus-client>=0.26.0",
 ]
 
 [project.optional-dependencies]
-# Observabilidade OTLP + metricas Prometheus. Fora do grupo `dev` de
-# proposito: o codigo que consome estes pacotes (observability.py /
-# metrics.py) importa lazy com try/ImportError, entao flag ligada sem o
-# extra degrada para warning + no-op. A imagem Docker instala o extra.
+# Exportacao OTLP, instrumentacao da API e o exportador das metricas da API
+# para o Prometheus. Fora do grupo `dev` de proposito: o codigo que consome
+# estes pacotes (observability.py / metrics.py) importa lazy com
+# try/ImportError, entao flag ligada sem o extra degrada para warning + no-op.
+# A imagem Docker instala o extra.
 otel = [
-    # Par compativel: SDK 1.42.x <-> instrumentation 0.63bx (o sdk exige
-    # semantic-conventions ==0.63bx). Atualizar os 4 juntos, em milestones.
-    "opentelemetry-sdk>=1.42,<1.43",
+    # Par compativel: SDK 1.42.x (dependencia principal) <-> instrumentation
+    # 0.63bx (o sdk exige semantic-conventions ==0.63bx). Atualizar juntos, em
+    # milestones.
     "opentelemetry-exporter-otlp-proto-grpc>=1.42,<1.43",
     "opentelemetry-instrumentation-fastapi>=0.63b1,<0.64",
     "opentelemetry-instrumentation-sqlalchemy>=0.63b1,<0.64",
     "opentelemetry-exporter-prometheus>=0.63b1,<0.64",
-    "prometheus-client>=0.26.0",
 ]
 
 [dependency-groups]
@@ -57,6 +70,8 @@ dev = [
     "mypy>=2.3.0",
     "bandit>=1.7",
     "import-linter>=2.13",
+    "types-jsonschema>=4.26.0",
+    "types-pyyaml>=6.0.12",
 ]
 
 [build-system]
@@ -254,6 +269,11 @@ module = [
 ]
 ignore_missing_imports = true
 
+# pika nao publica tipos (sem py.typed nem stubs mantidos).
+[[tool.mypy.overrides]]
+module = ["pika", "pika.*"]
+ignore_missing_imports = true
+
 # Sem o extra `otel` (o `uv sync` padrao so traz o grupo `dev`), os imports
 # lazy de observability.py / metrics.py apontam para pacotes ausentes; o CI e a
 # imagem instalam o extra.
@@ -263,7 +283,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 markers = [
-    "integracao: testes de integracao (Postgres via testcontainers)",
+    "integracao: testes de integracao (Postgres e RabbitMQ via testcontainers)",
 ]
 # `uv run pytest` e o gate completo: unitarios + integracao com cobertura e
 # fail_under do .coveragerc. Para rodar um subconjunto sem o gate, use --no-cov.

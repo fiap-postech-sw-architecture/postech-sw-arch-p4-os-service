@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecucaoFinalizada (dados)",
+  "description": "Campo dados da mensagem ExecucaoFinalizada (evento, execution-service -> os-service). Serviço concluído e peças baixadas do estoque; a OS passa a FINALIZADA.",
+  "type": "object",
+  "required": [
+    "ordem_id",
+    "finalizada_em",
+    "pecas_consumidas"
+  ],
+  "properties": {
+    "ordem_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "finalizada_em": {
+      "$ref": "#/$defs/data_hora"
+    },
+    "pecas_consumidas": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/peca"
+      },
+      "maxItems": 50
+    }
+  },
+  "$defs": {
+    "codigo": {
+      "type": "string",
+      "maxLength": 50,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+      "description": "Código do serviço ou SKU da peça na tabela de preços do Billing (até 50 caracteres)."
+    },
+    "data_hora": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "(Z|\\+00:00)$",
+      "description": "Instante em UTC (RFC 3339 com Z ou +00:00)."
+    },
+    "peca": {
+      "type": "object",
+      "required": [
+        "sku",
+        "quantidade"
+      ],
+      "properties": {
+        "sku": {
+          "$ref": "#/$defs/codigo"
+        },
+        "quantidade": {
+          "$ref": "#/$defs/quantidade"
+        }
+      }
+    },
+    "quantidade": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

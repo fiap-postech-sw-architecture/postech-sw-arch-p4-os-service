@@ -1,0 +1,13 @@
+{
+  "id": "c96153c0-9b0d-437e-8a6e-b5c4b68db2e1",
+  "tipo": "LiberarReserva",
+  "versao": 1,
+  "origem": "os-service",
+  "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+  "causation_id": "4d1344f5-7bb6-4864-babf-92f9a4dc1a36",
+  "ocorrido_em": "2026-10-06T14:13:00Z",
+  "dados": {
+    "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
+    "motivo": "cancelamento"
+  }
+}
