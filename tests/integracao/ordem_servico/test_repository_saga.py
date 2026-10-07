@@ -11,8 +11,13 @@ from sqlalchemy import text
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.ordem_servico.aplicacao.saga.modelo import Envio, EtapaSaga
+from src.ordem_servico.aplicacao.saga.modelo import (
+    Envio,
+    EtapaSaga,
+    itens_do_diagnostico,
+)
 from src.ordem_servico.aplicacao.saga.saga import Saga
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
 from tests.eventos import evento
 from tests.integracao.seed_helpers import (
@@ -29,6 +34,10 @@ if TYPE_CHECKING:
     from tests.rastreamento import Rastreador
 
 AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
+# OS ja em diagnostico: o DiagnosticoConcluido se classifica para processar.
+_MARCOS = MarcosDaOrdem(
+    diagnostico_iniciado=True, checkout_aberto=False, encerrada=False
+)
 
 
 def _ordem(session: Session) -> UUID:
@@ -48,14 +57,19 @@ def _iniciada(ordem_id: UUID) -> Saga:
 
 
 def _ate_aguardando_orcamento(saga: Saga) -> None:
+    concluido = evento("DiagnosticoConcluido", saga.ordem_id)
     saga.avancar(
-        evento("DiagnosticoConcluido", saga.ordem_id),
+        concluido,
+        _MARCOS,
         agora=AGORA + timedelta(minutes=1),
         ator="consumidor",
         envio=Envio(
             tipo=Comando.GERAR_ORCAMENTO,
             id=uuid4(),
-            dados={"ordem_id": str(saga.ordem_id), "itens": []},
+            dados={
+                "ordem_id": str(saga.ordem_id),
+                "itens": itens_do_diagnostico(concluido.dados),
+            },
             prazo_resposta_em=AGORA + timedelta(minutes=3),
         ),
     )

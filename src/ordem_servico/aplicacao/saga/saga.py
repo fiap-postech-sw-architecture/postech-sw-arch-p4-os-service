@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
 from src.ordem_servico.aplicacao.saga.modelo import (
     ComandoEmVoo,
@@ -26,11 +27,12 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     itens_do_diagnostico,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
-    ETAPA_ESPERADA,
-    ETAPA_SEGUINTE,
+    COMANDOS_COM_PRAZO,
     ETAPAS_FINAIS,
+    FLUXO_NORMAL,
     GATILHO_ABERTURA,
-    PASSO_CONCLUIDO,
+    Classificacao,
+    LinhaDoFluxo,
     classificar,
 )
 
@@ -40,7 +42,6 @@ if TYPE_CHECKING:
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.ordem_servico.aplicacao.saga.modelo import Envio
-    from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 
@@ -48,10 +49,11 @@ if TYPE_CHECKING:
 class Saga(AggregateRoot):
     """Instancia da saga de uma OS; ``id`` e o ``ordem_id``.
 
-    Construir com ``Saga.iniciar``; o fluxo normal anda com ``avancar``. A
-    ``versao`` e o lock otimista da persistencia, como na OS. Listas e dicts
-    sao trocados por novos a cada mudanca (a coluna JSONB nao detecta mutacao
-    no lugar).
+    Construir com ``Saga.iniciar``; o fluxo normal anda com ``avancar``, que
+    impoe a tabela da RFC-004 secao 4.1 (etapa seguinte, comando, dados e
+    prazo). A ``versao`` e o lock otimista da persistencia, como na OS. Listas
+    e dicts sao trocados por novos a cada mudanca (a coluna JSONB nao detecta
+    mutacao no lugar).
     """
 
     _etapa: EtapaSaga = field(kw_only=True)
@@ -74,15 +76,45 @@ class Saga(AggregateRoot):
     traceparent: str | None = field(default=None, kw_only=True, repr=False)
     _versao: int = field(default=1, kw_only=True)
 
+    def __post_init__(self) -> None:
+        """Invariantes do estado, para quem monta a saga por fora do ``iniciar``.
+
+        Prazo se e so se ha comando em voo; ``reenvios`` nunca negativo e zero
+        sem comando em voo; em compensacao, motivo e plano.
+        """
+        super().__post_init__()
+        if (self._prazo_resposta_em is None) is not (self._comando_em_voo is None):
+            msg = "prazo de resposta so com comando em voo, e todo comando em voo tem"
+            raise ValueError(msg)
+        if self._reenvios < 0 or (self._comando_em_voo is None and self._reenvios):
+            msg = f"reenvios {self._reenvios} sem comando em voo ou negativo"
+            raise ValueError(msg)
+        if self._etapa is EtapaSaga.COMPENSANDO and not (
+            self._motivo and self._plano_compensacao
+        ):
+            msg = "compensando exige o motivo e o plano de compensacao"
+            raise ValueError(msg)
+
     @classmethod
     def iniciar(
         cls, ordem_id: UUID, *, envio: Envio, ator: str | None, agora: datetime
     ) -> Saga:
         """T1: abre a saga em ``aguardando_diagnostico``, com o passo ``abertura``.
 
-        O ``SolicitarDiagnostico`` do ``envio`` nao tem resposta automatica
-        (RFC-004 secao 4.3): a saga fica sem comando em voo e sem prazo.
+        O ``envio`` e o ``SolicitarDiagnostico``, sem resposta automatica nem
+        prazo (RFC-004 secao 4.3): a saga fica sem comando em voo.
+
+        Raises:
+            TransicaoDaSagaInvalidaError: outro comando, com prazo, ou instante
+                sem fuso horario.
         """
+        if (
+            envio.tipo is not Comando.SOLICITAR_DIAGNOSTICO
+            or envio.prazo_resposta_em is not None
+            or agora.tzinfo is None
+        ):
+            msg = f"a abertura envia SolicitarDiagnostico sem prazo, nao {envio.tipo}"
+            raise TransicaoDaSagaInvalidaError(msg)
         saga = cls(
             id=ordem_id,
             _etapa=EtapaSaga.AGUARDANDO_DIAGNOSTICO,
@@ -106,10 +138,12 @@ class Saga(AggregateRoot):
 
     @property
     def ordem_id(self) -> UUID:
+        """A OS da saga (o mesmo ``id``, e o ``correlation_id`` das mensagens)."""
         return self.id
 
     @property
     def etapa(self) -> EtapaSaga:
+        """Etapa atual (RFC-004 secao 4.1)."""
         return self._etapa
 
     @property
@@ -134,10 +168,12 @@ class Saga(AggregateRoot):
 
     @property
     def passos_concluidos(self) -> tuple[str, ...]:
+        """Passos T concluidos (T3, T5, T6, T7), que a compensacao desfaz."""
         return tuple(self._passos_concluidos)
 
     @property
     def comando_em_voo(self) -> ComandoEmVoo | None:
+        """Copia do comando com prazo a espera de resposta, ou ``None``."""
         return deepcopy(self._comando_em_voo)
 
     @property
@@ -147,10 +183,17 @@ class Saga(AggregateRoot):
 
     @property
     def itens(self) -> tuple[ItemDoDiagnostico, ...]:
+        """Copia dos itens do ``DiagnosticoConcluido`` (vazio antes dele)."""
         return tuple(deepcopy(self._itens))
 
     @property
+    def pecas(self) -> list[dict[str, Any]]:
+        """As pecas dos itens como o ``ReservarPecas`` as pede (RFC-004 secao 4.1)."""
+        return _pecas(self._itens)
+
+    @property
     def reenvios(self) -> int:
+        """Reenvios do comando em voo; zero no envio e sem comando em voo."""
         return self._reenvios
 
     @property
@@ -160,18 +203,22 @@ class Saga(AggregateRoot):
 
     @property
     def iniciada_em(self) -> datetime:
+        """Instante da abertura da saga (o da OS)."""
         return self._iniciada_em
 
     @property
     def etapa_desde(self) -> datetime:
+        """Instante da entrada na etapa atual (mede a permanencia nela)."""
         return self._etapa_desde
 
     @property
     def atualizada_em(self) -> datetime:
+        """Instante do ultimo passo (o ``em`` dele)."""
         return self._atualizada_em
 
     @property
     def versao(self) -> int:
+        """Versao do lock otimista: comeca em 1 e sobe a cada gravacao."""
         return self._versao
 
     def classificar(self, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
@@ -181,55 +228,111 @@ class Saga(AggregateRoot):
     def avancar(
         self,
         evento: MensagemRecebida,
+        marcos: MarcosDaOrdem,
         *,
         agora: datetime,
         ator: str | None,
         envio: Envio | None = None,
     ) -> None:
-        """Aplica um evento do fluxo normal na etapa em que ele e esperado.
+        """Aplica um evento do fluxo normal pela linha dele na tabela 4.1.
 
-        Anota o passo, vai para a etapa seguinte da tabela da RFC-004 secao
-        4.1, marca o passo concluido (T3, T5, T6, T7), guarda os itens do
-        diagnostico e troca o comando em voo: o ``envio`` com prazo passa a
-        esperar resposta, com ``reenvios`` zerado; sem ele, a saga deixa de
-        esperar resposta automatica.
+        Confere tudo antes de mudar: o evento e desta OS e se classifica para
+        processar (a regra de ``classificar``, com os ``marcos`` da OS de antes
+        do fato), o instante tem fuso e nao volta, e o ``envio`` e o comando da
+        linha (nenhum onde ela nao envia), com o ``ordem_id`` desta OS, os itens
+        ou as pecas que a saga guarda e o prazo de quem tem resposta automatica.
+        Depois anota o passo, vai para a etapa seguinte, marca o passo concluido
+        (T3, T5, T6, T7), guarda os itens do diagnostico e troca o comando em voo
+        (o ``envio`` com prazo passa a esperar resposta, com ``reenvios`` zerado).
 
         Raises:
-            TransicaoDaSagaInvalidaError: o evento nao e do fluxo normal ou a
-                saga nao esta na etapa em que ele e esperado.
+            TransicaoDaSagaInvalidaError: alguma conferencia falhou; nada muda.
         """
-        tipo = evento.tipo
-        seguinte = ETAPA_SEGUINTE.get(tipo)
-        if seguinte is None or ETAPA_ESPERADA[tipo] is not self._etapa:
-            msg = f"{tipo} nao avanca a saga na etapa {self._etapa.value}"
-            raise TransicaoDaSagaInvalidaError(msg)
+        linha = self._conferir_evento(evento, marcos, agora)
+        # Calculados antes de mudar: dado malformado levanta com a saga intacta.
+        diagnostico = evento.tipo == "DiagnosticoConcluido"
+        itens = itens_do_diagnostico(evento.dados) if diagnostico else self._itens
+        posicao = (
+            evento.dados["posicao_na_fila"]
+            if evento.tipo == "ExecucaoAgendada"
+            else None
+        )
+        self._conferir_envio(linha, envio, agora, itens)
         de = self._etapa
-        if seguinte is not de:
+        if linha.seguinte is not de:
             self._registrar_evento(
                 EtapaDaSagaAlteradaEvent(
                     agregado_id=self.id,
                     etapa_anterior=de,
-                    etapa_nova=seguinte,
+                    etapa_nova=linha.seguinte,
                     permanencia=agora - self._etapa_desde,
                     ocorrido_em=agora,
                 )
             )
-            self._etapa = seguinte
+            self._etapa = linha.seguinte
             self._etapa_desde = agora
         self._atualizada_em = agora
         passo = self._passo(
-            gatilho=tipo, de=de, mensagem_id=evento.id, ator=ator, envio=envio
+            gatilho=evento.tipo, de=de, mensagem_id=evento.id, ator=ator, envio=envio
         )
-        if tipo == "ExecucaoAgendada":
-            passo["posicao_na_fila"] = evento.dados["posicao_na_fila"]
+        if posicao is not None:
+            passo["posicao_na_fila"] = posicao
         self._passos = [*self._passos, passo]
-        if tipo == "DiagnosticoConcluido":
-            self._itens = itens_do_diagnostico(evento.dados)
-        if concluido := PASSO_CONCLUIDO.get(tipo):
-            self._passos_concluidos = [*self._passos_concluidos, concluido]
+        self._itens = itens
+        if linha.concluido is not None:
+            self._passos_concluidos = [*self._passos_concluidos, linha.concluido]
         self._esperar_resposta(envio)
 
     # ----- mecanica interna
+
+    def _conferir_evento(
+        self, evento: MensagemRecebida, marcos: MarcosDaOrdem, agora: datetime
+    ) -> LinhaDoFluxo:
+        """A linha do evento, se ele e desta OS, do fluxo e do instante certo."""
+        tipo = evento.tipo
+        linha = FLUXO_NORMAL.get(tipo)
+        if evento.correlation_id != self.id:
+            msg = f"{tipo} de outra ordem"
+        elif linha is None or self.classificar(tipo, marcos) is not (
+            Classificacao.PROCESSAR
+        ):
+            msg = f"{tipo} nao avanca a saga na etapa {self._etapa.value}"
+        elif agora.tzinfo is None or agora < self._atualizada_em:
+            msg = f"{tipo} num instante sem fuso ou anterior ao ultimo passo"
+        else:
+            return linha
+        raise TransicaoDaSagaInvalidaError(msg)
+
+    def _conferir_envio(
+        self,
+        linha: LinhaDoFluxo,
+        envio: Envio | None,
+        agora: datetime,
+        itens: list[ItemDoDiagnostico],
+    ) -> None:
+        """O ``envio`` e o comando da ``linha``, com os dados e o prazo certos."""
+        if envio is None and linha.comando is None:
+            return
+        if envio is None or envio.tipo is not linha.comando:
+            enviado = envio.tipo if envio is not None else "nenhum comando"
+            msg = f"a linha envia {linha.comando or 'nenhum comando'}, nao {enviado}"
+            raise TransicaoDaSagaInvalidaError(msg)
+        # Os dados que a saga guarda: os itens do diagnostico e as pecas deles.
+        da_saga: dict[Comando, dict[str, Any]] = {
+            Comando.GERAR_ORCAMENTO: {"itens": itens},
+            Comando.RESERVAR_PECAS: {"pecas": _pecas(itens)},
+        }
+        esperados = {"ordem_id": str(self.id), **da_saga.get(envio.tipo, {})}
+        if any(envio.dados.get(chave) != valor for chave, valor in esperados.items()):
+            msg = f"{envio.tipo} com dados que nao sao os desta saga"
+            raise TransicaoDaSagaInvalidaError(msg)
+        prazo = envio.prazo_resposta_em
+        com_prazo = envio.tipo in COMANDOS_COM_PRAZO
+        if (prazo is not None) is not com_prazo or (
+            prazo is not None and (prazo.tzinfo is None or prazo <= agora)
+        ):
+            msg = f"{envio.tipo} sem o prazo de resposta depois do envio"
+            raise TransicaoDaSagaInvalidaError(msg)
 
     def _passo(
         self,
@@ -255,16 +358,30 @@ class Saga(AggregateRoot):
         }
 
     def _esperar_resposta(self, envio: Envio | None) -> None:
-        """Comando com prazo vira o comando em voo; sem ele, nada fica em voo."""
-        if envio is None or envio.prazo_resposta_em is None:
+        """O envio conferido vira o comando em voo; sem ele, nada fica em voo.
+
+        Todo comando do fluxo normal tem resposta automatica, entao o envio
+        conferido sempre traz o prazo.
+        """
+        if envio is None:
             self._comando_em_voo = None
             self._prazo_resposta_em = None
+            self._reenvios = 0
             return
         self._comando_em_voo = {
             "tipo": envio.tipo.value,
-            "dados": dict(envio.dados),
+            "dados": deepcopy(dict(envio.dados)),
             "mensagem_ids": [str(envio.id)],
             "enviado_em": self._atualizada_em.isoformat(),
         }
         self._prazo_resposta_em = envio.prazo_resposta_em
         self._reenvios = 0
+
+
+def _pecas(itens: list[ItemDoDiagnostico]) -> list[dict[str, Any]]:
+    """Os itens ``peca`` como ``{sku, quantidade}`` (lista vazia vale)."""
+    return [
+        {"sku": item["codigo"], "quantidade": item["quantidade"]}
+        for item in itens
+        if item["tipo"] == "peca"
+    ]

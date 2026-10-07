@@ -6,7 +6,7 @@ aqui a partir da tabela da RFC e nao importado do modulo testado.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
 
 C = Classificacao
 S = StatusOrdem
-INICIO: Final = datetime(2026, 10, 7, 12, tzinfo=UTC)
 PRAZO: Final = timedelta(seconds=120)
 
 # Os eventos do caminho feliz, na ordem da tabela da RFC-004 secao 4.1.
@@ -173,10 +172,14 @@ def esperado(etapa: str, tipo: str, perfil: str | None = None) -> Classificacao:
 
 
 class Relogio:
-    """Relogio que anda 1 s a cada leitura: instantes distintos e em ordem."""
+    """Relogio que anda 1 s a cada leitura: instantes distintos e em ordem.
 
-    def __init__(self) -> None:
-        self.agora = INICIO
+    Comeca no instante da abertura da OS (que usa o relogio real), para os
+    passos seguintes nunca virem antes dela.
+    """
+
+    def __init__(self, inicio: datetime) -> None:
+        self.agora = inicio
 
     def __call__(self) -> datetime:
         self.agora += timedelta(seconds=1)
@@ -190,25 +193,24 @@ class CenarioDaSaga:
         self.ordens = RepoEmMemoria()
         self.sagas = SagasEmMemoria()
         self.publicador = FakeUnitOfWork()
-        self.relogio = Relogio()
+        aberta = AbrirOrdem(
+            self.ordens, self.publicador, ClientePortFake(), self.sagas
+        ).executar(
+            AbrirOrdemDTO(
+                cliente_id=UUID(int=1),
+                veiculo_id=UUID(int=2),
+                descricao_problema="Barulho na suspensao",
+                ator=ATOR_ATENDENTE,
+            )
+        )
+        self.ordem_id: UUID = aberta.id
+        self.relogio = Relogio(aberta.criado_em)
         self.orquestrador = OrquestradorDaSaga(
             ordens=self.ordens,
             sagas=self.sagas,
             publicador=self.publicador,
             prazo_resposta=PRAZO,
             relogio=self.relogio,
-        )
-        self.ordem_id: UUID = (
-            AbrirOrdem(self.ordens, self.publicador, ClientePortFake(), self.sagas)
-            .executar(
-                AbrirOrdemDTO(
-                    cliente_id=UUID(int=1),
-                    veiculo_id=UUID(int=2),
-                    descricao_problema="Barulho na suspensao",
-                    ator=ATOR_ATENDENTE,
-                )
-            )
-            .id
         )
 
     @classmethod
@@ -222,37 +224,36 @@ class CenarioDaSaga:
         if etapa in LINEAR:
             cenario.levar_ate(etapa)
             return cenario
-        ordem = ordem_em(STATUS_DE_ENTRADA[etapa])
-        cenario.ordens.ordens = {ordem.id: ordem}
-        cenario.sagas.sagas = {
-            ordem.id: Saga(
-                id=ordem.id,
-                _etapa=EtapaSaga(etapa),
-                _iniciada_em=INICIO,
-                _etapa_desde=INICIO,
-                _atualizada_em=INICIO,
-            )
-        }
-        cenario.ordem_id = ordem.id
+        cenario._reidratar(etapa, ordem_em(STATUS_DE_ENTRADA[etapa]))
         return cenario
 
     @classmethod
     def com_os(cls, etapa: str, perfil: str) -> CenarioDaSaga:
         """Saga reidratada na ``etapa`` com a OS no ``perfil`` (par legal ou nao)."""
         cenario = cls()
-        ordem = ordem_no_perfil(perfil)
-        cenario.ordens.ordens = {ordem.id: ordem}
-        cenario.sagas.sagas = {
+        cenario._reidratar(etapa, ordem_no_perfil(perfil))
+        return cenario
+
+    def _reidratar(self, etapa: str, ordem: OrdemDeServico) -> None:
+        """Troca a OS e a saga pelas da ``ordem``, com a saga na ``etapa``.
+
+        Nas etapas da compensacao, a saga leva o motivo e o que resta do plano
+        (a ultima compensacao, que entra sempre).
+        """
+        compensacao = etapa in {"compensando", "falha_na_compensacao"}
+        self.ordens.ordens = {ordem.id: ordem}
+        self.sagas.sagas = {
             ordem.id: Saga(
                 id=ordem.id,
                 _etapa=EtapaSaga(etapa),
-                _iniciada_em=INICIO,
-                _etapa_desde=INICIO,
-                _atualizada_em=INICIO,
+                _iniciada_em=self.relogio.agora,
+                _etapa_desde=self.relogio.agora,
+                _atualizada_em=self.relogio.agora,
+                _motivo="cancelamento" if compensacao else None,
+                _plano_compensacao=["DescartarDiagnostico"] if compensacao else [],
             )
         }
-        cenario.ordem_id = ordem.id
-        return cenario
+        self.ordem_id = ordem.id
 
     @property
     def saga(self) -> Saga:

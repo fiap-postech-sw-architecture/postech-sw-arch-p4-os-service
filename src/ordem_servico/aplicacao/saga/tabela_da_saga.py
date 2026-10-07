@@ -1,12 +1,14 @@
 """Tabela da saga (RFC-004 secao 4.1) e a classificacao dos eventos (secao 4.5).
 
-A ordem das etapas, a etapa em que cada evento e esperado, a etapa seguinte
-de cada evento do fluxo normal e os comandos com prazo; ``classificar`` decide
-se o evento recebido e processado, ignorado ou adiantado.
+A ordem das etapas, a etapa em que cada evento e esperado, a linha de cada
+evento do fluxo normal (etapa seguinte, comando enviado e passo concluido) e os
+comandos com prazo; ``classificar`` decide se o evento recebido e processado,
+ignorado, adiantado ou recusado.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -69,29 +71,42 @@ ETAPA_ESPERADA: Final[Mapping[str, EtapaSaga]] = MappingProxyType(
         "ExecucaoCancelada": _E.COMPENSANDO,
     }
 )
-# Etapa seguinte de cada evento do fluxo normal (RFC-004 secao 4.1).
-ETAPA_SEGUINTE: Final[Mapping[str, EtapaSaga]] = MappingProxyType(
+
+
+@dataclass(frozen=True, slots=True)
+class LinhaDoFluxo:
+    """Linha da tabela da RFC-004 secao 4.1 para um evento do fluxo normal.
+
+    ``seguinte`` e a etapa depois do evento; ``comando``, o que ele envia (com
+    prazo tecnico se estiver em ``COMANDOS_COM_PRAZO``); ``concluido``, o passo
+    T que ele conclui, que o plano de compensacao desfaz (RFC-004 secao 4.4).
+    """
+
+    seguinte: EtapaSaga
+    comando: Comando | None = None
+    concluido: str | None = None
+
+
+FLUXO_NORMAL: Final[Mapping[str, LinhaDoFluxo]] = MappingProxyType(
     {
-        "DiagnosticoIniciado": _E.AGUARDANDO_DIAGNOSTICO,
-        "DiagnosticoConcluido": _E.AGUARDANDO_ORCAMENTO,
-        "OrcamentoGerado": _E.AGUARDANDO_DECISAO,
-        "OrcamentoAprovado": _E.AGUARDANDO_RESERVA,
-        "PecasReservadas": _E.AGUARDANDO_PAGAMENTO,
-        "PagamentoSolicitado": _E.AGUARDANDO_PAGAMENTO,
-        "PagamentoConfirmado": _E.AGUARDANDO_AGENDAMENTO,
-        "ExecucaoAgendada": _E.AGUARDANDO_INICIO,
-        "ExecucaoIniciada": _E.EM_EXECUCAO,
-        "ExecucaoFinalizada": _E.CONCLUIDA,
-    }
-)
-# Passo que cada evento conclui: o plano de compensacao desfaz os concluidos
-# (RFC-004 secao 4.4).
-PASSO_CONCLUIDO: Final = MappingProxyType(
-    {
-        "OrcamentoGerado": "T3",
-        "PecasReservadas": "T5",
-        "PagamentoSolicitado": "T6",
-        "ExecucaoAgendada": "T7",
+        "DiagnosticoIniciado": LinhaDoFluxo(_E.AGUARDANDO_DIAGNOSTICO),
+        "DiagnosticoConcluido": LinhaDoFluxo(
+            _E.AGUARDANDO_ORCAMENTO, Comando.GERAR_ORCAMENTO
+        ),
+        "OrcamentoGerado": LinhaDoFluxo(_E.AGUARDANDO_DECISAO, concluido="T3"),
+        "OrcamentoAprovado": LinhaDoFluxo(
+            _E.AGUARDANDO_RESERVA, Comando.RESERVAR_PECAS
+        ),
+        "PecasReservadas": LinhaDoFluxo(
+            _E.AGUARDANDO_PAGAMENTO, Comando.SOLICITAR_PAGAMENTO, "T5"
+        ),
+        "PagamentoSolicitado": LinhaDoFluxo(_E.AGUARDANDO_PAGAMENTO, concluido="T6"),
+        "PagamentoConfirmado": LinhaDoFluxo(
+            _E.AGUARDANDO_AGENDAMENTO, Comando.AGENDAR_EXECUCAO
+        ),
+        "ExecucaoAgendada": LinhaDoFluxo(_E.AGUARDANDO_INICIO, concluido="T7"),
+        "ExecucaoIniciada": LinhaDoFluxo(_E.EM_EXECUCAO),
+        "ExecucaoFinalizada": LinhaDoFluxo(_E.CONCLUIDA),
     }
 )
 # Comandos com resposta automatica, que ganham prazo tecnico (RFC-004 secoes 4.3

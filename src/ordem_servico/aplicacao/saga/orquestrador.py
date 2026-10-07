@@ -46,7 +46,6 @@ from src.ordem_servico.aplicacao.saga.resumos_do_billing import (
     resumo_do_pagamento,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
-    COMANDOS_COM_PRAZO,
     Classificacao,
 )
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
@@ -113,13 +112,18 @@ class EventoRecusadoError(FalhaPermanenteError):
         self.etapa = etapa
 
 
-type _Aplicacao = Callable[
-    [OrquestradorDaSaga, MensagemRecebida, Saga, OrdemDeServico, datetime], None
-]
+# O comando que a linha da tabela envia: tipo e ``dados`` (sem ele, ``None``).
+type _Pedido = tuple[Comando, dict[str, Any]] | None
+type _Aplicacao = Callable[[MensagemRecebida, Saga, OrdemDeServico], _Pedido]
 
 
 class OrquestradorDaSaga:
-    """Aplica o fluxo normal na OS e na saga (tabela da RFC-004 secao 4.1)."""
+    """Aplica o fluxo normal na OS e na saga (tabela da RFC-004 secao 4.1).
+
+    Le saga e OS, classifica o evento e traduz cada linha da tabela em
+    chamadas: o fato na OS, o comando na outbox e o passo na saga, que confere
+    etapa, comando, dados e prazo antes de mudar.
+    """
 
     def __init__(
         self,
@@ -149,16 +153,12 @@ class OrquestradorDaSaga:
                 resposta de compensacao na etapa em que caberia trata-la) e
                 ``transicao_invalida`` (a OS ou a saga recusam o fato).
         """
-        ordem_id = evento.correlation_id
-        if UUID(evento.dados["ordem_id"]) != ordem_id:
-            raise EventoRecusadoError("ordem_id_divergente")
-        saga = self._sagas.obter(ordem_id)
-        ordem = self._ordens.obter_por_id(ordem_id)
-        if saga is None or ordem is None:
-            raise EventoRecusadoError("saga_inexistente")
+        saga, ordem = self._ler(evento)
         etapa = saga.etapa
-        contexto = {"correlation_id": str(ordem_id), "tipo": evento.tipo}
-        classificacao = saga.classificar(evento.tipo, MarcosDaOrdem.da_ordem(ordem))
+        contexto = {"correlation_id": str(saga.ordem_id), "tipo": evento.tipo}
+        # Os marcos de antes do fato: a saga confere a mesma classificacao.
+        marcos = MarcosDaOrdem.da_ordem(ordem)
+        classificacao = saga.classificar(evento.tipo, marcos)
         if classificacao is Classificacao.ADIANTADO:
             _log.warning("saga event ahead", etapa=etapa.value, **contexto)
             raise EventoAdiantadoError(etapa)
@@ -174,16 +174,7 @@ class OrquestradorDaSaga:
                 **contexto,
             )
             return Tratamento(Desfecho.IGNORADA, etapa, etapa)
-        aplicar = _FLUXO_NORMAL.get(evento.tipo)
-        if aplicar is None:
-            # Falha de negocio ou resposta de compensacao na etapa em que caberia
-            # trata-la: consumida agora, ela se perderia; na DLQ, espera o redrive
-            # da versao com as compensacoes.
-            raise EventoRecusadoError("sem_tratador_nesta_versao", etapa)
-        try:
-            aplicar(self, evento, saga, ordem, self._relogio())
-        except _RECUSAS_DO_DOMINIO as exc:
-            raise EventoRecusadoError("transicao_invalida", etapa) from exc
+        self._aplicar(evento, saga, ordem, marcos)
         self._ordens.salvar(ordem)
         self._sagas.salvar(saga)
         _log.info(
@@ -195,162 +186,168 @@ class OrquestradorDaSaga:
         )
         return Tratamento(Desfecho.PROCESSADA, etapa, saga.etapa)
 
+    def _ler(self, evento: MensagemRecebida) -> tuple[Saga, OrdemDeServico]:
+        """Saga e OS do ``correlation_id``, conferido contra o ``ordem_id``."""
+        ordem_id = evento.correlation_id
+        if UUID(evento.dados["ordem_id"]) != ordem_id:
+            raise EventoRecusadoError("ordem_id_divergente")
+        saga = self._sagas.obter(ordem_id)
+        ordem = self._ordens.obter_por_id(ordem_id)
+        if saga is None or ordem is None:
+            raise EventoRecusadoError("saga_inexistente")
+        return saga, ordem
+
+    def _aplicar(
+        self,
+        evento: MensagemRecebida,
+        saga: Saga,
+        ordem: OrdemDeServico,
+        marcos: MarcosDaOrdem,
+    ) -> None:
+        """A linha do evento: fato na OS, comando na outbox e passo na saga."""
+        aplicar = _FLUXO_NORMAL.get(evento.tipo)
+        if aplicar is None:
+            # Falha de negocio ou resposta de compensacao na etapa em que caberia
+            # trata-la: consumida agora, ela se perderia; na DLQ, espera o redrive
+            # da versao com as compensacoes.
+            raise EventoRecusadoError("sem_tratador_nesta_versao", saga.etapa)
+        agora = self._relogio()
+        try:
+            pedido = aplicar(evento, saga, ordem)
+            envio = self._enviar(pedido, evento, agora) if pedido else None
+            saga.avancar(evento, marcos, agora=agora, ator=_ator(evento), envio=envio)
+        except _RECUSAS_DO_DOMINIO as exc:
+            raise EventoRecusadoError("transicao_invalida", saga.etapa) from exc
+
     def _enviar(
         self,
-        tipo: Comando,
-        dados: Mapping[str, Any],
+        pedido: tuple[Comando, dict[str, Any]],
         evento: MensagemRecebida,
         agora: datetime,
     ) -> Envio:
-        """Grava o comando na outbox, causado pelo ``evento`` (RFC-004 secao 5.2)."""
+        """Grava o comando na outbox, causado pelo ``evento`` (RFC-004 secao 5.2).
+
+        Todo comando do fluxo normal tem resposta automatica: sai com o prazo
+        tecnico (RFC-004 secao 4.6), que a saga confere contra a tabela.
+        """
+        tipo, dados = pedido
         comando_id = self._publicador.publicar_comando(
             tipo,
             dados,
             correlation_id=evento.correlation_id,
             causation_id=evento.id,
         )
-        prazo = agora + self._prazo_resposta if tipo in COMANDOS_COM_PRAZO else None
-        return Envio(tipo=tipo, id=comando_id, dados=dados, prazo_resposta_em=prazo)
-
-    # ----- uma linha da tabela da RFC-004 secao 4.1 por evento
-
-    def _diagnostico_iniciado(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        ordem.registrar_diagnostico_iniciado(ator=ATOR_CONSUMIDOR)
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
-
-    def _diagnostico_concluido(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        dados = {
-            "ordem_id": str(saga.ordem_id),
-            "itens": itens_do_diagnostico(evento.dados),
-        }
-        envio = self._enviar(Comando.GERAR_ORCAMENTO, dados, evento, agora)
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR, envio=envio)
-
-    def _orcamento_gerado(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        ordem.registrar_orcamento_gerado(
-            resumo_do_orcamento(evento.dados), ator=ATOR_CONSUMIDOR
+        return Envio(
+            tipo=tipo,
+            id=comando_id,
+            dados=dados,
+            prazo_resposta_em=agora + self._prazo_resposta,
         )
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
 
-    def _orcamento_aprovado(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        # Decisao registrada pelo atendente em nome do cliente: o passo leva o
-        # sub dele (RFC-004 secao 8).
-        ator = (
-            evento.dados["decidido_por"]
-            if evento.dados["canal"] == "atendente"
-            else ATOR_CONSUMIDOR
-        )
-        pecas = [
-            {"sku": item["codigo"], "quantidade": item["quantidade"]}
-            for item in saga.itens
-            if item["tipo"] == "peca"
-        ]
-        dados = {"ordem_id": str(saga.ordem_id), "pecas": pecas}
-        envio = self._enviar(Comando.RESERVAR_PECAS, dados, evento, agora)
-        saga.avancar(evento, agora=agora, ator=ator, envio=envio)
 
-    def _pecas_reservadas(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        orcamento = ordem.resumo_orcamento
-        # A OS recusa o fato sem o resumo do orcamento, antes de mudar.
-        ordem.registrar_pecas_reservadas(ator=ATOR_CONSUMIDOR)
-        dados = {
-            "ordem_id": str(saga.ordem_id),
-            "orcamento_id": str(cast("ResumoOrcamento", orcamento).orcamento_id),
-        }
-        envio = self._enviar(Comando.SOLICITAR_PAGAMENTO, dados, evento, agora)
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR, envio=envio)
+def _ator(evento: MensagemRecebida) -> str:
+    """Quem provoca o passo: o consumidor, ou o atendente que registrou a decisao.
 
-    def _pagamento_solicitado(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        ordem.registrar_pagamento_solicitado(resumo_do_pagamento(evento.dados))
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
+    A decisao do orcamento registrada pelo atendente em nome do cliente leva o
+    sub dele (RFC-004 secao 8).
+    """
+    if evento.tipo == "OrcamentoAprovado" and evento.dados["canal"] == "atendente":
+        return str(evento.dados["decidido_por"])
+    return ATOR_CONSUMIDOR
 
-    def _pagamento_confirmado(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        ordem.registrar_pagamento_confirmado(ator=ATOR_CONSUMIDOR)
-        dados = {"ordem_id": str(saga.ordem_id), "prioridade": _PRIORIDADE}
-        envio = self._enviar(Comando.AGENDAR_EXECUCAO, dados, evento, agora)
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR, envio=envio)
 
-    def _execucao_agendada(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
+# ----- uma linha da tabela da RFC-004 secao 4.1 por evento: o fato na OS e o
+# comando que a linha envia (a saga confere tipo, dados e prazo)
 
-    def _execucao_iniciada(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        ordem.registrar_execucao_iniciada(ator=ATOR_CONSUMIDOR)
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
 
-    def _execucao_finalizada(
-        self,
-        evento: MensagemRecebida,
-        saga: Saga,
-        ordem: OrdemDeServico,
-        agora: datetime,
-    ) -> None:
-        ordem.finalizar(ator=ATOR_CONSUMIDOR)
-        saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
+def _diagnostico_iniciado(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    ordem.registrar_diagnostico_iniciado(ator=ATOR_CONSUMIDOR)
+    return None
+
+
+def _diagnostico_concluido(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    itens = itens_do_diagnostico(evento.dados)
+    return Comando.GERAR_ORCAMENTO, {"ordem_id": str(saga.ordem_id), "itens": itens}
+
+
+def _orcamento_gerado(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    ordem.registrar_orcamento_gerado(
+        resumo_do_orcamento(evento.dados), ator=ATOR_CONSUMIDOR
+    )
+    return None
+
+
+def _orcamento_aprovado(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    return Comando.RESERVAR_PECAS, {"ordem_id": str(saga.ordem_id), "pecas": saga.pecas}
+
+
+def _pecas_reservadas(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    orcamento = ordem.resumo_orcamento
+    # A OS recusa o fato sem o resumo do orcamento, antes de mudar.
+    ordem.registrar_pecas_reservadas(ator=ATOR_CONSUMIDOR)
+    orcamento_id = cast("ResumoOrcamento", orcamento).orcamento_id
+    return Comando.SOLICITAR_PAGAMENTO, {
+        "ordem_id": str(saga.ordem_id),
+        "orcamento_id": str(orcamento_id),
+    }
+
+
+def _pagamento_solicitado(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    ordem.registrar_pagamento_solicitado(resumo_do_pagamento(evento.dados))
+    return None
+
+
+def _pagamento_confirmado(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    ordem.registrar_pagamento_confirmado(ator=ATOR_CONSUMIDOR)
+    return Comando.AGENDAR_EXECUCAO, {
+        "ordem_id": str(saga.ordem_id),
+        "prioridade": _PRIORIDADE,
+    }
+
+
+def _execucao_agendada(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    return None
+
+
+def _execucao_iniciada(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    ordem.registrar_execucao_iniciada(ator=ATOR_CONSUMIDOR)
+    return None
+
+
+def _execucao_finalizada(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    ordem.finalizar(ator=ATOR_CONSUMIDOR)
+    return None
 
 
 _FLUXO_NORMAL: Final[Mapping[str, _Aplicacao]] = {
-    "DiagnosticoIniciado": OrquestradorDaSaga._diagnostico_iniciado,
-    "DiagnosticoConcluido": OrquestradorDaSaga._diagnostico_concluido,
-    "OrcamentoGerado": OrquestradorDaSaga._orcamento_gerado,
-    "OrcamentoAprovado": OrquestradorDaSaga._orcamento_aprovado,
-    "PecasReservadas": OrquestradorDaSaga._pecas_reservadas,
-    "PagamentoSolicitado": OrquestradorDaSaga._pagamento_solicitado,
-    "PagamentoConfirmado": OrquestradorDaSaga._pagamento_confirmado,
-    "ExecucaoAgendada": OrquestradorDaSaga._execucao_agendada,
-    "ExecucaoIniciada": OrquestradorDaSaga._execucao_iniciada,
-    "ExecucaoFinalizada": OrquestradorDaSaga._execucao_finalizada,
+    "DiagnosticoIniciado": _diagnostico_iniciado,
+    "DiagnosticoConcluido": _diagnostico_concluido,
+    "OrcamentoGerado": _orcamento_gerado,
+    "OrcamentoAprovado": _orcamento_aprovado,
+    "PecasReservadas": _pecas_reservadas,
+    "PagamentoSolicitado": _pagamento_solicitado,
+    "PagamentoConfirmado": _pagamento_confirmado,
+    "ExecucaoAgendada": _execucao_agendada,
+    "ExecucaoIniciada": _execucao_iniciada,
+    "ExecucaoFinalizada": _execucao_finalizada,
 }

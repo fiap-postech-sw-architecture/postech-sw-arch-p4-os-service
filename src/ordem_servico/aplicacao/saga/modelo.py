@@ -6,8 +6,10 @@ pessoal ficam na OS (RFC-004 secao 7.2).
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
 from src.compartilhado.dominio.events import DomainEvent
@@ -91,13 +93,18 @@ class Envio:
     """Comando gravado na outbox num passo: tipo, id do envelope e ``dados``.
 
     Com ``prazo_resposta_em``, o comando tem resposta automatica e vira o
-    comando em voo da saga.
+    comando em voo da saga. ``dados`` e uma copia so de leitura (mudar o dict
+    de quem montou o envio nao muda o VO) e fica fora do ``hash``.
     """
 
     tipo: Comando
     id: UUID
-    dados: Mapping[str, Any] = field(default_factory=dict)
+    dados: Mapping[str, Any] = field(default_factory=dict, hash=False)
     prazo_resposta_em: datetime | None = None
+
+    def __post_init__(self) -> None:
+        congelados = MappingProxyType(deepcopy(dict(self.dados)))
+        object.__setattr__(self, "dados", congelados)
 
 
 @dataclass(frozen=True, slots=True)

@@ -201,6 +201,8 @@ def _conferir_estado(cenario: CenarioDaSaga) -> None:
     em_voo = saga.comando_em_voo
     assert (saga.prazo_resposta_em is None) is (em_voo is None)
     assert em_voo is None or em_voo["tipo"] in COMANDOS_COM_PRAZO
+    # Sem comando em voo, nada a reenviar (e o contador do proximo comeca do zero).
+    assert em_voo is not None or saga.reenvios == 0
     # OS cancelada se e so se saga compensada (nenhuma das duas no caminho feliz)
     # e OS encerrada so com a saga encerrada.
     assert (ordem.status is S.CANCELADA) is (saga.etapa is EtapaSaga.COMPENSADA)

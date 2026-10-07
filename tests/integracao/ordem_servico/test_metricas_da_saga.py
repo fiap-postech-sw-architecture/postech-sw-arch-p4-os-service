@@ -12,9 +12,14 @@ from sqlalchemy import update
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.ordem_servico.aplicacao.saga.modelo import Envio, EtapaSaga
+from src.ordem_servico.aplicacao.saga.modelo import (
+    Envio,
+    EtapaSaga,
+    itens_do_diagnostico,
+)
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPAS_NAO_FINAIS
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 from src.ordem_servico.infraestrutura.metricas_da_saga import ColetorDaSaga
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
@@ -30,6 +35,13 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
 AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
+# Marcos da OS com que cada evento usado aqui se classifica para processar.
+_MARCOS = MarcosDaOrdem(
+    diagnostico_iniciado=True, checkout_aberto=False, encerrada=False
+)
+_MARCOS_DA_EXECUCAO = MarcosDaOrdem(
+    diagnostico_iniciado=True, checkout_aberto=True, encerrada=False
+)
 
 
 def _amostra(nome: str, **labels: str) -> float:
@@ -64,10 +76,21 @@ def _nova_saga(sess: Session) -> Saga:
 
 
 def _concluir_diagnostico(saga: Saga, depois: timedelta) -> None:
+    concluido = evento("DiagnosticoConcluido", saga.ordem_id)
     saga.avancar(
-        evento("DiagnosticoConcluido", saga.ordem_id),
+        concluido,
+        _MARCOS,
         agora=AGORA + depois,
         ator="consumidor",
+        envio=Envio(
+            tipo=Comando.GERAR_ORCAMENTO,
+            id=uuid4(),
+            dados={
+                "ordem_id": str(saga.ordem_id),
+                "itens": itens_do_diagnostico(concluido.dados),
+            },
+            prazo_resposta_em=AGORA + depois + timedelta(minutes=2),
+        ),
     )
 
 
@@ -145,6 +168,7 @@ def test_saga_concluida_conta_nas_finalizadas(
         )
         saga.avancar(
             evento("ExecucaoFinalizada", saga.ordem_id),
+            _MARCOS_DA_EXECUCAO,
             agora=AGORA + timedelta(hours=2),
             ator="consumidor",
         )
