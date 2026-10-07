@@ -10,20 +10,26 @@ espelhando o contrato da ``SQLAlchemyUnitOfWork`` real). Quem nao afere
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from types import TracebackType
-    from uuid import UUID
 
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
     from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+    from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+
+# Veiculo que o ClientePortFake devolve (placa no formato do contrato).
+RETRATO = RetratoDoVeiculo(placa="BRA2E19", marca="Volkswagen", modelo="Gol", ano=2019)
 
 
 class FakeUnitOfWork:
@@ -32,6 +38,8 @@ class FakeUnitOfWork:
         self.rolled_back = False
         # (tipo, dados, correlation_id, causation_id) de cada publicar_comando.
         self.comandos: list[tuple[str, dict[str, Any], UUID, UUID | None]] = []
+        # Envelopes montados e validados pelo contrato, como a outbox os grava.
+        self.envelopes: list[dict[str, Any]] = []
 
     def __enter__(self) -> FakeUnitOfWork:
         return self
@@ -59,8 +67,17 @@ class FakeUnitOfWork:
         correlation_id: UUID,
         causation_id: UUID | None = None,
     ) -> UUID:
+        """Monta o envelope pelo contrato (dados fora do schema levantam)."""
+        envelope = catalogo().montar_envelope(
+            tipo,
+            dados,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+            ocorrido_em=datetime.now(UTC),
+        )
+        self.envelopes.append(envelope)
         self.comandos.append((tipo, dict(dados), correlation_id, causation_id))
-        return uuid4()
+        return UUID(envelope["id"])
 
 
 class RepoEmMemoria:
@@ -115,5 +132,28 @@ class ClientePortFake:
     def cliente_existe(self, cliente_id: UUID) -> bool:
         return self._cliente_ok
 
-    def veiculo_pertence_ao_cliente(self, cliente_id: UUID, veiculo_id: UUID) -> bool:
-        return self._veiculo_ok
+    def retrato_do_veiculo(
+        self, cliente_id: UUID, veiculo_id: UUID
+    ) -> RetratoDoVeiculo | None:
+        return RETRATO if self._veiculo_ok else None
+
+
+class SagasEmMemoria:
+    """``SagaRepository`` em memoria, com o lock otimista simulado por conflito."""
+
+    def __init__(self, *sagas: Saga) -> None:
+        self.sagas = {s.ordem_id: s for s in sagas}
+        self.salvas: list[Saga] = []
+        self._conflito = False
+
+    def provocar_conflito(self) -> None:
+        self._conflito = True
+
+    def obter(self, ordem_id: UUID) -> Saga | None:
+        return self.sagas.get(ordem_id)
+
+    def salvar(self, saga: Saga) -> None:
+        if self._conflito:
+            raise ConflitoDeConcorrenciaException()
+        self.sagas[saga.ordem_id] = saga
+        self.salvas.append(saga)

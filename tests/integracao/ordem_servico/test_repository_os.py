@@ -19,7 +19,7 @@ from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.infraestrutura.metrics import metricas_api
-from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
 from src.ordem_servico.dominio.events import OrdemAbertaEvent
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
@@ -310,8 +310,12 @@ class TestAdaptersEntreContextos:
 
         assert adapter.cliente_existe(cliente.id) is True
         assert adapter.cliente_existe(uuid4()) is False
-        assert adapter.veiculo_pertence_ao_cliente(cliente.id, cliente.veiculos[0].id)
-        assert not adapter.veiculo_pertence_ao_cliente(cliente.id, outro.veiculos[0].id)
+        veiculo = cliente.veiculos[0]
+        assert adapter.retrato_do_veiculo(cliente.id, veiculo.id) == RetratoDoVeiculo(
+            placa=veiculo.placa.valor, marca="Fiat", modelo="Uno", ano=2020
+        )
+        assert adapter.retrato_do_veiculo(cliente.id, outro.veiculos[0].id) is None
+        assert adapter.retrato_do_veiculo(cliente.id, uuid4()) is None
 
         cliente.desativar()
         ClienteSQLAlchemyRepository(session).salvar(cliente)

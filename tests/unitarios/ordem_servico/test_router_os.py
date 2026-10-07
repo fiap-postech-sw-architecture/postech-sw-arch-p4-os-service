@@ -38,6 +38,7 @@ from tests.unitarios.fakes import (
     ConsultaAcompanhamentoEspia,
     FakeUnitOfWork,
     RepoEmMemoria,
+    SagasEmMemoria,
 )
 
 _BASE = "/api/v1/ordens-de-servico"
@@ -60,7 +61,9 @@ def client_como(
 ) -> Iterator[Callable[[str], TestClient]]:
     """Fabrica de clientes com o papel pedido; os casos de uso usam os fakes."""
     fabricas = {
-        "obter_abrir_ordem": AbrirOrdem(repo, FakeUnitOfWork(), ClientePortFake()),
+        "obter_abrir_ordem": AbrirOrdem(
+            repo, FakeUnitOfWork(), ClientePortFake(), SagasEmMemoria()
+        ),
         "obter_listar_ordens": ListarOrdens(repo),
         "obter_obter_ordem": ObterOrdem(repo),
         "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork()),

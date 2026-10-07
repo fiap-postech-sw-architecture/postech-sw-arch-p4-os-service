@@ -28,6 +28,19 @@ class AbrirOrdemDTO:
 
 
 @dataclass(frozen=True, slots=True)
+class RetratoDoVeiculo:
+    """Veiculo como a Execucao o recebe no ``SolicitarDiagnostico`` (RFC-004 secao 5.3).
+
+    A placa e dado pessoal: fora do repr.
+    """
+
+    placa: str = field(repr=False)
+    marca: str
+    modelo: str
+    ano: int
+
+
+@dataclass(frozen=True, slots=True)
 class MudancaDeStatusDTO:
     """Linha da linha do tempo de status (``de`` e ``None`` na abertura)."""
 

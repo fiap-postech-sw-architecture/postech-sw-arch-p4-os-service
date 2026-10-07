@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
-    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
     from src.ordem_servico.aplicacao.saga.saga import Saga
 
 
@@ -28,8 +28,14 @@ class ClientePort(Protocol):
         """Indica se o cliente existe e esta ativo."""
         pass
 
-    def veiculo_pertence_ao_cliente(self, cliente_id: UUID, veiculo_id: UUID) -> bool:
-        """Indica se o veiculo existe e pertence ao cliente informado."""
+    def retrato_do_veiculo(
+        self, cliente_id: UUID, veiculo_id: UUID
+    ) -> RetratoDoVeiculo | None:
+        """Placa, marca, modelo e ano do veiculo do cliente.
+
+        ``None`` se o veiculo nao existe ou e de outro cliente (casos que a
+        abertura nao distingue).
+        """
         pass
 
 

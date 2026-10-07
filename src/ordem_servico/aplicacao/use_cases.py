@@ -1,15 +1,18 @@
 """Casos de uso da aplicacao Ordem de Servico.
 
 Cada classe expoe ``executar(...)``: compoe repositorio, ``UnitOfWork`` e
-ports; as regras ficam no agregado. Comandos para Billing e Execucao e
-compensacoes sao papel da saga, fora destes casos de uso: ela os grava na
-outbox com ``UnitOfWork.publicar_comando``, no mesmo commit do efeito.
+ports; as regras ficam no agregado. A abertura inicia a saga e grava o
+``SolicitarDiagnostico`` na outbox com ``UnitOfWork.publicar_comando``, no
+mesmo commit da OS; os passos seguintes sao do ``OrquestradorDaSaga``.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+import structlog
+
+from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.cnpj import CNPJ
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.documento import normalizar_cnpj
@@ -22,6 +25,7 @@ from src.ordem_servico.aplicacao.dtos import (
     ResumoOrcamentoDTO,
     ResumoPagamentoDTO,
 )
+from src.ordem_servico.aplicacao.saga.saga import Envio, Saga
 from src.ordem_servico.dominio.exceptions import (
     ClienteNaoEncontradoException,
     OrdemNaoEncontradaException,
@@ -36,8 +40,14 @@ if TYPE_CHECKING:
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
     from src.compartilhado.dominio.documento import Documento
     from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
-    from src.ordem_servico.aplicacao.ports import ClientePort, ConsultaAcompanhamento
+    from src.ordem_servico.aplicacao.ports import (
+        ClientePort,
+        ConsultaAcompanhamento,
+        SagaRepository,
+    )
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
+
+_log = structlog.get_logger(__name__)
 
 
 def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
@@ -100,20 +110,26 @@ def _obter_ordem(repo: OrdemDeServicoRepository, ordem_id: UUID) -> OrdemDeServi
 
 
 class AbrirOrdem:
-    """Abre a OS em RECEBIDA para um cliente ativo e um veiculo dele."""
+    """T1 da saga: abre a OS em RECEBIDA para um cliente ativo e um veiculo dele.
+
+    Na mesma transacao, a saga nasce em ``aguardando_diagnostico`` e o
+    ``SolicitarDiagnostico`` vai para a outbox (RFC-004 secao 4).
+    """
 
     def __init__(
         self,
         repo: OrdemDeServicoRepository,
         uow: UnitOfWork,
         cliente_port: ClientePort,
+        sagas: SagaRepository,
     ) -> None:
         self._repo = repo
         self._uow = uow
         self._cliente_port = cliente_port
+        self._sagas = sagas
 
     def executar(self, dto: AbrirOrdemDTO) -> OrdemDeServicoDTO:
-        """Valida cliente e veiculo e persiste a OS.
+        """Valida cliente e veiculo, persiste OS e saga e grava o comando.
 
         Raises:
             ClienteNaoEncontradoException: cliente inexistente ou inativo (404).
@@ -124,9 +140,8 @@ class AbrirOrdem:
         """
         if not self._cliente_port.cliente_existe(dto.cliente_id):
             raise ClienteNaoEncontradoException(dto.cliente_id)
-        if not self._cliente_port.veiculo_pertence_ao_cliente(
-            dto.cliente_id, dto.veiculo_id
-        ):
+        veiculo = self._cliente_port.retrato_do_veiculo(dto.cliente_id, dto.veiculo_id)
+        if veiculo is None:
             raise VeiculoNaoEncontradoException(dto.veiculo_id)
         ordem = OrdemDeServico.abrir(
             cliente_id=dto.cliente_id,
@@ -136,7 +151,31 @@ class AbrirOrdem:
         )
         with self._uow:
             self._repo.salvar(ordem)
+            # Causa e a requisicao HTTP: sem causation_id (RFC-004 secao 5.2).
+            comando_id = self._uow.publicar_comando(
+                Comando.SOLICITAR_DIAGNOSTICO,
+                {
+                    "ordem_id": ordem.id,
+                    "veiculo_id": ordem.veiculo_id,
+                    "veiculo": {
+                        "placa": veiculo.placa,
+                        "marca": veiculo.marca,
+                        "modelo": veiculo.modelo,
+                        "ano": veiculo.ano,
+                    },
+                    "descricao_problema": ordem.descricao_problema,
+                },
+                correlation_id=ordem.id,
+            )
+            saga = Saga.iniciar(
+                ordem.id,
+                envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=comando_id),
+                ator=dto.ator,
+                agora=ordem.criado_em,
+            )
+            self._sagas.salvar(saga)
             self._uow.commit()
+        _log.info("saga started", correlation_id=str(ordem.id), etapa=saga.etapa.value)
         return _ordem_dto(ordem)
 
 

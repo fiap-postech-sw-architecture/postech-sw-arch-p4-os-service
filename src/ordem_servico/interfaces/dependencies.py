@@ -22,6 +22,7 @@ from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
 from src.ordem_servico.infraestrutura.consultas import ConsultaAcompanhamentoSQLAlchemy
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
+    SagaSQLAlchemyRepository,
 )
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ def obter_abrir_ordem(session: Session) -> AbrirOrdem:
         repo=_repo(session),
         uow=_uow(session),
         cliente_port=ClienteSQLAlchemyAdapter(session=session),
+        sagas=SagaSQLAlchemyRepository(session=session),
     )
 
 

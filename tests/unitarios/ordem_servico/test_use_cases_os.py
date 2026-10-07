@@ -40,10 +40,12 @@ from tests.fabricas import (
     ordem_em,
 )
 from tests.unitarios.fakes import (
+    RETRATO,
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
     FakeUnitOfWork,
     RepoEmMemoria,
+    SagasEmMemoria,
 )
 
 
@@ -57,11 +59,11 @@ def _dto() -> AbrirOrdemDTO:
 
 
 class TestAbrirOrdem:
-    def test_abre_persiste_e_projeta(self) -> None:
-        repo, uow = RepoEmMemoria(), FakeUnitOfWork()
+    def test_abre_a_os_e_a_saga_e_grava_o_solicitar_diagnostico(self) -> None:
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
         dto = _dto()
 
-        resultado = AbrirOrdem(repo, uow, ClientePortFake()).executar(dto)
+        resultado = AbrirOrdem(repo, uow, ClientePortFake(), sagas).executar(dto)
 
         assert uow.committed
         (salva,) = repo.salvas
@@ -82,25 +84,57 @@ class TestAbrirOrdem:
             "atendimento",
             ATOR_ATENDENTE,
         )
+        # Comando com o retrato do veiculo; causa e a requisicao (sem causation).
+        (comando,) = uow.comandos
+        assert comando == (
+            "SolicitarDiagnostico",
+            {
+                "ordem_id": salva.id,
+                "veiculo_id": dto.veiculo_id,
+                "veiculo": {
+                    "placa": RETRATO.placa,
+                    "marca": RETRATO.marca,
+                    "modelo": RETRATO.modelo,
+                    "ano": RETRATO.ano,
+                },
+                "descricao_problema": "Freio rangendo",
+            },
+            salva.id,
+            None,
+        )
+        (saga,) = sagas.salvas
+        assert saga.ordem_id == salva.id
+        assert saga.etapa.value == "aguardando_diagnostico"
+        assert saga.iniciada_em == salva.criado_em
+        (passo,) = saga.passos
+        assert (passo["gatilho"], passo["comando"], passo["ator"]) == (
+            "abertura",
+            "SolicitarDiagnostico",
+            ATOR_ATENDENTE,
+        )
+        assert passo["comando_id"] == uow.envelopes[0]["id"]
+        # Sem resposta automatica: nada em voo e nada da placa ou do texto livre.
+        assert (saga.comando_em_voo, saga.prazo_resposta_em) == (None, None)
+        assert "BRA2E19" not in str(saga.passos)
 
     def test_cliente_inexistente_ou_inativo_levanta_sem_persistir(self) -> None:
-        repo, uow = RepoEmMemoria(), FakeUnitOfWork()
-        uc = AbrirOrdem(repo, uow, ClientePortFake(cliente_ok=False))
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+        uc = AbrirOrdem(repo, uow, ClientePortFake(cliente_ok=False), sagas)
 
         with pytest.raises(ClienteNaoEncontradoException):
             uc.executar(_dto())
 
-        assert repo.salvas == []
+        assert (repo.salvas, sagas.salvas, uow.comandos) == ([], [], [])
         assert not uow.committed
 
     def test_veiculo_de_outro_cliente_levanta_sem_persistir(self) -> None:
-        repo, uow = RepoEmMemoria(), FakeUnitOfWork()
-        uc = AbrirOrdem(repo, uow, ClientePortFake(veiculo_ok=False))
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+        uc = AbrirOrdem(repo, uow, ClientePortFake(veiculo_ok=False), sagas)
 
         with pytest.raises(VeiculoNaoEncontradoException):
             uc.executar(_dto())
 
-        assert repo.salvas == []
+        assert (repo.salvas, sagas.salvas, uow.comandos) == ([], [], [])
         assert not uow.committed
 
     def test_descricao_invalida_levanta_valor_invalido(self) -> None:
@@ -110,10 +144,20 @@ class TestAbrirOrdem:
             descricao_problema="   ",
             ator=ATOR_ATENDENTE,
         )
+        uow, sagas = FakeUnitOfWork(), SagasEmMemoria()
         with pytest.raises(ValorInvalidoException, match="descricao do problema"):
-            AbrirOrdem(RepoEmMemoria(), FakeUnitOfWork(), ClientePortFake()).executar(
-                dto
-            )
+            AbrirOrdem(RepoEmMemoria(), uow, ClientePortFake(), sagas).executar(dto)
+        assert (sagas.salvas, uow.comandos) == ([], [])
+
+    def test_conflito_na_saga_desfaz_tudo(self) -> None:
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+        sagas.provocar_conflito()
+
+        with pytest.raises(ConflitoDeConcorrenciaException):
+            AbrirOrdem(repo, uow, ClientePortFake(), sagas).executar(_dto())
+
+        assert not uow.committed
+        assert uow.rolled_back
 
 
 class TestObterOrdem:
