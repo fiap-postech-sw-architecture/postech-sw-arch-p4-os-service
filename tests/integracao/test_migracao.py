@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
 
 from src.compartilhado.infraestrutura.database import metadata
 from tests.integracao.conftest import alembic
@@ -93,5 +95,24 @@ def test_upgrade_downgrade_upgrade(banco_vazio: str) -> None:
 
         alembic(banco_vazio)
         assert set(inspect(eng).get_table_names()) >= _TABELAS
+    finally:
+        eng.dispose()
+
+
+def test_migracao_da_saga_desiste_do_lock_em_segundos(banco_vazio: str) -> None:
+    # Uma leitura longa segura o historico: o ALTER TABLE da 003 espera o
+    # lock_timeout e falha (o Job tenta de novo), sem enfileirar as leituras
+    # da app atras dele indefinidamente.
+    eng = create_engine(banco_vazio)
+    try:
+        alembic(banco_vazio, "002")
+        with eng.connect() as leitura, leitura.begin():
+            leitura.execute(text("SELECT count(*) FROM historico_status_ordem"))
+            inicio = time.monotonic()
+            with pytest.raises(OperationalError, match="lock"):
+                alembic(banco_vazio)
+            assert time.monotonic() - inicio < 15
+        alembic(banco_vazio)
+        assert "sagas" in inspect(eng).get_table_names()
     finally:
         eng.dispose()

@@ -14,6 +14,15 @@ So expansao (nada e removido nem reescrito):
   vencido; ``ix_sagas_ativas`` (parcial, etapas nao finais) serve os gauges.
 - ``historico_status_ordem.ator``: quem provocou a mudanca, o ``sub`` do JWT
   ou o processo; nulo nas linhas anteriores.
+
+O ``ALTER TABLE`` e a chave estrangeira pedem lock forte em tabelas que a API
+le: com ``lock_timeout`` de 5 s, uma leitura longa faz a migracao falhar (o Job
+tenta de novo) em vez de enfileirar as leituras da app atras dela.
+
+Rollback da imagem nao roda o ``downgrade``: o schema 003 so acrescenta e serve
+ao codigo anterior. O ``downgrade`` apaga a tabela ``sagas`` (o estado de todas
+as sagas) e a coluna ``ator`` (quem mudou cada status): so para desfazer a
+migracao num banco descartavel.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column(
         "historico_status_ordem",
         sa.Column("ator", sa.String(length=64), nullable=True),
