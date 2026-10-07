@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
@@ -19,6 +19,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
+from src.ordem_servico.interfaces.dependencies import obter_obter_ordem
 from tests.eventos import evento
 from tests.integracao.seed_helpers import (
     criar_cliente_com_veiculo,
@@ -29,6 +30,7 @@ from tests.rastreamento import traceparent
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
     from tests.rastreamento import Rastreador
@@ -190,3 +192,30 @@ def test_salvar_grava_o_contexto_do_span_corrente(
         {"id": saga.ordem_id},
     ).scalar_one()
     assert gravado == traceparent(abertura)
+
+
+def test_consulta_da_os_le_a_saga_no_mesmo_select(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    with session_factory() as sess:
+        saga = _iniciada(_ordem(sess))
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        sess.commit()
+    lidas: list[str] = []
+
+    def registrar(_conexao: Any, _cursor: Any, sql: str, *_: Any) -> None:
+        if "sagas" in sql:
+            lidas.append(sql)
+
+    event.listen(engine, "before_cursor_execute", registrar)
+    try:
+        with session_factory() as sess:
+            ordem = obter_obter_ordem(sess).executar(saga.ordem_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", registrar)
+
+    # Status e etapa do mesmo instante: um commit do consumidor entre duas
+    # leituras nao faz a consulta mostrar o status velho com a etapa nova.
+    (sql,) = lidas
+    assert "ordens_de_servico" in sql
+    assert (ordem.status, ordem.etapa) == ("recebida", "aguardando_diagnostico")

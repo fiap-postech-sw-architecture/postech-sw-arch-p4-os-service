@@ -20,7 +20,10 @@ from src.ordem_servico.aplicacao.use_cases import (
     RegistrarEntrega,
 )
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
-from src.ordem_servico.infraestrutura.consultas import ConsultaAcompanhamentoSQLAlchemy
+from src.ordem_servico.infraestrutura.consultas import (
+    ConsultaAcompanhamentoSQLAlchemy,
+    ConsultaDaOrdemSQLAlchemy,
+)
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
     SagaSQLAlchemyRepository,
@@ -60,7 +63,7 @@ def obter_listar_ordens(session: Session) -> ListarOrdens:
 
 
 def obter_obter_ordem(session: Session) -> ObterOrdem:
-    return ObterOrdem(repo=_repo(session), sagas=_sagas(session))
+    return ObterOrdem(consulta=ConsultaDaOrdemSQLAlchemy(session=session))
 
 
 def obter_obter_saga(session: Session) -> ObterSaga:

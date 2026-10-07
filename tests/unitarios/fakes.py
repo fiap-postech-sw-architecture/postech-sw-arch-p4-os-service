@@ -157,3 +157,15 @@ class SagasEmMemoria:
             raise ConflitoDeConcorrenciaException()
         self.sagas[saga.ordem_id] = saga
         self.salvas.append(saga)
+
+
+class ConsultaDaOrdemEmMemoria:
+    """``ConsultaDaOrdem`` sobre os repositorios em memoria."""
+
+    def __init__(self, ordens: RepoEmMemoria, sagas: SagasEmMemoria) -> None:
+        self._ordens = ordens
+        self._sagas = sagas
+
+    def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
+        ordem = self._ordens.obter_por_id(ordem_id)
+        return None if ordem is None else (ordem, self._sagas.obter(ordem_id))

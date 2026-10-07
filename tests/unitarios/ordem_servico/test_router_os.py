@@ -41,6 +41,7 @@ from tests.fabricas import ATOR_ATENDENTE, ordem_em
 from tests.unitarios.fakes import (
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
+    ConsultaDaOrdemEmMemoria,
     FakeUnitOfWork,
     RepoEmMemoria,
     SagasEmMemoria,
@@ -75,7 +76,7 @@ def client_como(
             repo, FakeUnitOfWork(), ClientePortFake(), sagas
         ),
         "obter_listar_ordens": ListarOrdens(repo),
-        "obter_obter_ordem": ObterOrdem(repo, sagas),
+        "obter_obter_ordem": ObterOrdem(ConsultaDaOrdemEmMemoria(repo, sagas)),
         "obter_obter_saga": ObterSaga(sagas),
         "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork(), sagas),
         "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork(), sagas),

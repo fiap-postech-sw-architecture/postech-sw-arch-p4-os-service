@@ -2,9 +2,9 @@
 
 Definidas no contexto consumidor e implementadas na infraestrutura:
 ``ClientePort`` em ``adapters.py`` (Anti-Corruption Layer: consulta o contexto
-Cliente+Veiculo sem importar o agregado vizinho) e ``ConsultaAcompanhamento``
-em ``consultas.py`` (query service de leitura, fora do repositorio do
-agregado).
+Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento`` e
+``ConsultaDaOrdem`` em ``consultas.py`` (query services de leitura, fora do
+repositorio do agregado) e ``SagaRepository`` em ``repository.py``.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from src.compartilhado.dominio.placa import Placa
     from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
     from src.ordem_servico.aplicacao.saga.saga import Saga
+    from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 
 class ClientePort(Protocol):
@@ -50,6 +51,18 @@ class ConsultaAcompanhamento(Protocol):
         Recebe os VOs ja validados: quem chama garante que documento e placa
         invalidos nunca chegam ao banco.
         """
+        pass
+
+
+class ConsultaDaOrdem(Protocol):
+    """Leitura da OS com a saga dela numa consulta so (RFC-004 secao 4).
+
+    O status e a etapa saem do mesmo instante: um commit do consumidor entre
+    duas leituras mostraria o status velho com a etapa nova.
+    """
+
+    def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
+        """A OS e a saga (``None`` sem saga), ou ``None`` sem a OS."""
         pass
 
 

@@ -51,6 +51,7 @@ from tests.unitarios.fakes import (
     RETRATO,
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
+    ConsultaDaOrdemEmMemoria,
     FakeUnitOfWork,
     RepoEmMemoria,
     SagasEmMemoria,
@@ -173,7 +174,9 @@ class TestObterOrdem:
     def test_projeta_resumos_e_historico(self) -> None:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_PAGAMENTO)
 
-        dto = ObterOrdem(RepoEmMemoria(ordem), SagasEmMemoria()).executar(ordem.id)
+        dto = ObterOrdem(
+            ConsultaDaOrdemEmMemoria(RepoEmMemoria(ordem), SagasEmMemoria())
+        ).executar(ordem.id)
 
         assert dto.status == "aguardando_pagamento"
         assert dto.orcamento is not None
@@ -201,13 +204,17 @@ class TestObterOrdem:
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            ObterOrdem(RepoEmMemoria(), SagasEmMemoria()).executar(uuid4())
+            ObterOrdem(
+                ConsultaDaOrdemEmMemoria(RepoEmMemoria(), SagasEmMemoria())
+            ).executar(uuid4())
 
     def test_projeta_a_etapa_e_os_passos_da_saga(self) -> None:
         cenario = CenarioDaSaga()
         cenario.receber("DiagnosticoIniciado")
 
-        dto = ObterOrdem(cenario.ordens, cenario.sagas).executar(cenario.ordem_id)
+        dto = ObterOrdem(
+            ConsultaDaOrdemEmMemoria(cenario.ordens, cenario.sagas)
+        ).executar(cenario.ordem_id)
 
         assert dto.etapa == "aguardando_diagnostico"
         assert dto.passos == cenario.saga.passos
@@ -219,7 +226,9 @@ class TestObterOrdem:
     def test_ordem_sem_saga_sai_sem_etapa(self) -> None:
         ordem = ordem_em(StatusOrdem.RECEBIDA)
 
-        dto = ObterOrdem(RepoEmMemoria(ordem), SagasEmMemoria()).executar(ordem.id)
+        dto = ObterOrdem(
+            ConsultaDaOrdemEmMemoria(RepoEmMemoria(ordem), SagasEmMemoria())
+        ).executar(ordem.id)
 
         assert (dto.etapa, dto.passos) == (None, ())
 

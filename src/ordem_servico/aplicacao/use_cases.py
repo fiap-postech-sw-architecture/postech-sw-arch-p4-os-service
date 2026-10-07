@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.ports import (
         ClientePort,
         ConsultaAcompanhamento,
+        ConsultaDaOrdem,
         SagaRepository,
     )
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
@@ -216,16 +217,20 @@ class ListarOrdens:
 
 
 class ObterOrdem:
-    """Projecao completa de uma ordem: historico, etapa e passos da saga."""
+    """Projecao completa de uma ordem: historico, etapa e passos da saga.
 
-    def __init__(self, repo: OrdemDeServicoRepository, sagas: SagaRepository) -> None:
-        self._repo = repo
-        self._sagas = sagas
+    A OS e a saga vem de uma consulta so: o status e a etapa do mesmo instante.
+    """
+
+    def __init__(self, consulta: ConsultaDaOrdem) -> None:
+        self._consulta = consulta
 
     def executar(self, ordem_id: UUID) -> OrdemDeServicoDTO:
         """Projeta a ordem; ``OrdemNaoEncontradaException`` (404) se nao existe."""
-        ordem = _obter_ordem(self._repo, ordem_id)
-        return _ordem_dto(ordem, self._sagas.obter(ordem_id))
+        lida = self._consulta.com_saga(ordem_id)
+        if lida is None:
+            raise OrdemNaoEncontradaException(ordem_id)
+        return _ordem_dto(*lida)
 
 
 class ObterSaga:
