@@ -257,6 +257,42 @@ class TestScrubTelefone:
 _UUID_COM_SPLIT_DE_TELEFONE = "732ffc02-3465-4237-a5f6-12fd4a2b3be0"
 
 
+class TestScrubEmailHostil:
+    """O scrub de e-mail e linear: entrada hostil de 80 KB sai em menos de 100 ms.
+
+    Com o local-part sem teto, ``a.a.a.`` de 80 KB levava segundos (e 900 KB
+    prenderiam o processo por minutos a 100% de CPU).
+    """
+
+    @pytest.mark.parametrize(
+        "hostil",
+        [
+            pytest.param("a." * 40_000, id="pontos-sem-arroba"),
+            pytest.param("a" * 80_000, id="local-part-sem-fim"),
+            pytest.param("a@" + "a." * 40_000, id="dominio-sem-fim"),
+            pytest.param("a@a" + ".a" * 40_000, id="labels-sem-fim"),
+            pytest.param("x@" * 40_000, id="arrobas"),
+        ],
+    )
+    def test_entrada_hostil_de_80_kb_em_menos_de_100_ms(self, hostil: str) -> None:
+        inicio = time.perf_counter()
+        scrub_pii(None, "info", {"event": "x", "id": hostil})
+        assert time.perf_counter() - inicio < 0.1
+
+    @pytest.mark.parametrize(
+        "email",
+        [
+            pytest.param("joao.silva+tag@sub.exemplo.com.br", id="comum"),
+            pytest.param("a_b@x.io", id="sublinhado"),
+            pytest.param("x" * 64 + "@exemplo.com", id="local-part-de-64"),
+        ],
+    )
+    def test_email_continua_mascarado(self, email: str) -> None:
+        resultado = scrub_pii(None, "info", {"event": f"contato {email} fim"})
+        assert email not in str(resultado["event"])
+        assert "***@" in str(resultado["event"])
+
+
 class TestScrubUuid:
     """Os ids do servico (``ordem_id``, ``request_id``, ator e ``jti``) sao UUID."""
 

@@ -58,12 +58,14 @@ _CPF_PATTERN = re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b")
 _CNPJ_PATTERN = re.compile(
     r"\b[0-9A-Z]{2}\.?[0-9A-Z]{3}\.?[0-9A-Z]{3}/?[0-9A-Z]{4}-?\d{2}\b"
 )
-# Dominio casado label a label (`.` fora da classe) -- correcao do hotspot S5852
-# (backtracking polinomial): o scrubber roda sobre o event_dict inteiro,
-# tracebacks inclusos, sem cap de tamanho.
-# O `[A-Z|a-z]` antigo ainda embutia um `|` literal na classe do TLD.
+# Local-part de ate 64 caracteres e dominio de ate 10 labels de ate 63 (os
+# tetos da RFC 5321): sem teto, cada inicio possivel relia o resto da linha e o
+# tempo era quadratico (um `id` de 80 KB com `a.a.a.` levava segundos, e o
+# scrubber roda sobre o event_dict inteiro, tracebacks inclusos). Sem `\b` no
+# inicio: o e-mail colado a `_` ou a um local-part longo tambem e mascarado.
 _EMAIL_PATTERN = re.compile(
-    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
+    r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63}){0,8}"
+    r"\.[A-Za-z]{2,63}\b"
 )
 
 # Chave privada em PEM solta no texto (mensagem de erro, traceback, repr, JSON):
