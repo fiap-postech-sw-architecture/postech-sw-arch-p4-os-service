@@ -127,6 +127,7 @@ linhas de la que apontam para essas fontes. O texto exato das 119 esta no histor
 do git (`git show 0ccdca8:MEMORY.md`); aqui ele so mudou onde citava um documento ou um
 modelo que nao e publico (a "especificacao comum" da entrada de `RABBITMQ_URL` e o
 "modelo comum" de CI).
+
 As linhas `RESOLVIDO (conferencia ...)` registram duas dividas que a conferencia achou
 fechadas e a linha `CORRIGIDO (conferencia ...)`, uma entrada que a conferencia achou errada.
 
@@ -213,7 +214,7 @@ fechadas e a linha `CORRIGIDO (conferencia ...)`, uma entrada que a conferencia 
 - 2026-10-06 - MEDIUM - O envelope do `SolicitarDiagnostico` leva placa e `descricao_problema` e fica na outbox (entregue por 7 dias; `dead` sem prazo), e o erasure LGPD do cliente nao toca a outbox. Quando a saga passar a gravar o comando, o erasure limpa os envelopes das OS do cliente e as linhas `dead` ganham retencao - PR #4
 - 2026-10-06 - RESOLVIDO - `mensagens_processadas` com consumidor e com as colunas do ER (`mensagem_id`, `processada_em`), pela migracao 002 - PR #4
 - 2026-10-06 - LOW - `contratos/ORIGEM` aponta para o commit da branch do platform com a fila de retry por atraso; depois do merge la, trocar pelo SHA da `main` (conteudo igual) - PR #4
-- 2026-10-07 - RESOLVIDO (conferencia da consolidacao) - O README e o compose do platform (`f1f0f0a`, na `main` de la) chamam a URL do broker de `RABBITMQ_URL`, o nome que os servicos leem; resolve a divida LOW sobre `AMQP_URL` abaixo
+- 2026-10-07 - RESOLVIDO (conferencia da consolidacao) - O README e o compose do platform (na `main` de la, conferida em `5b8b7f1`) chamam a URL do broker de `RABBITMQ_URL`, o nome que os servicos leem; resolve a divida LOW sobre `AMQP_URL` abaixo
 - 2026-10-06 - LOW - O README e o compose do platform chamam a URL do broker de `AMQP_URL`; os servicos leem `RABBITMQ_URL`. Alinhar no platform - PR #4
 - 2026-10-06 - LOW - `service.name` dos spans e fixo em `pytstop-os-service` (API, relay e consumidor); o README do platform lista `OTEL_SERVICE_NAME=os-service`, que nenhum processo do OS le - PR #4
 - 2026-10-06 - LOW - `mensagens_processadas` ainda sem consumidor e com `id`/`tipo` no lugar de `mensagem_id`/`processada_em` do ER da RFC-004 secao 7.2; a migracao 002, da mensageria, alinha, como o ER da outbox - PR #2
