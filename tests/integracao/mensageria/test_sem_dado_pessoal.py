@@ -12,16 +12,12 @@ logs e spans capturados.
 from __future__ import annotations
 
 import json
-import logging
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import pytest
-import structlog
 from prometheus_client import REGISTRY
 from sqlalchemy import text
-from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import (
     Comando,
@@ -29,10 +25,8 @@ from src.compartilhado.aplicacao.mensageria import (
     FalhaTransitoriaError,
     MensagemRecebida,
 )
-from src.compartilhado.infraestrutura.logging import configurar_logging
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
-from src.compartilhado.infraestrutura.mensageria import relay as modulo_relay
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
     Consumidor,
@@ -52,56 +46,12 @@ if TYPE_CHECKING:
 
     from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
     from tests.integracao.broker import Broker
-    from tests.rastreamento import Rastreador
+    from tests.rastreamento import Rastreador, Saidas
 
 _PLACA = "QZX7W42"
 _TEXTO_LIVRE = f"texto livre com a placa {_PLACA}"
 _DLQ = "os.eventos.dlq"
 _QUEDA = "broker connection lost; reconnecting"
-
-
-class _Registros(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__()
-        self.registros: list[logging.LogRecord] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.registros.append(record)
-
-
-@dataclass
-class _Saidas:
-    stdlib: _Registros
-    eventos: list[dict[str, Any]] = field(default_factory=list)
-
-    def texto(self, rastreador: Rastreador) -> str:
-        """Tudo o que saiu: linhas de log (as duas pilhas) e spans."""
-        partes = [repr(evento) for evento in self.eventos]
-        partes += [
-            f"{registro.getMessage()} {registro.exc_text or ''}"
-            for registro in self.stdlib.registros
-        ]
-        for span in rastreador.spans():
-            partes += [span.name, repr(dict(span.attributes or {}))]
-            partes += [span.status.description or "", repr(span.events)]
-        return "\n".join(partes)
-
-
-@pytest.fixture
-def saidas(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Saidas]:
-    # O logging dos processos (o pika so em ERROR), com um registrador a mais
-    # no root e os eventos do structlog capturados antes de renderizar (sem o
-    # scrubber, que mascararia o que o codigo nao deveria ter posto no log).
-    configurar_logging()
-    registros = _Registros()
-    logging.getLogger().addHandler(registros)
-    for modulo in (amqp, modulo_consumidor, modulo_relay):
-        monkeypatch.setattr(modulo, "_log", structlog.get_logger())
-    try:
-        with capture_logs() as eventos:
-            yield _Saidas(registros, eventos)
-    finally:
-        logging.getLogger().removeHandler(registros)
 
 
 def _gravar_com_placa(session_factory: sessionmaker[Session]) -> UUID:
@@ -141,7 +91,7 @@ def test_relay_com_mensagem_devolvida_nao_poe_placa_nem_texto_livre_em_lugar_nen
     broker: Broker,
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
 ) -> None:
     mensagem_id = _gravar_com_placa(session_factory)
     relay = Relay(
@@ -208,7 +158,7 @@ def test_consumidor_com_falhas_do_handler_e_mensagens_recusadas_nao_vaza_o_texto
     broker: Broker,
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
 ) -> None:
     transitoria = _diagnostico_com_texto_livre()
     com_bug = _diagnostico_com_texto_livre()
@@ -275,7 +225,7 @@ def test_copia_de_retry_devolvida_nao_poe_o_corpo_no_log_do_pika(
     broker: Broker,
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
 ) -> None:
     def falhar(_m: MensagemRecebida, _t: TransacaoDaMensagem) -> Desfecho:
         raise FalhaTransitoriaError(_TEXTO_LIVRE)
@@ -296,7 +246,7 @@ def test_conexao_derrubada_pelo_broker_loga_so_o_tipo_do_erro(
     broker: Broker,
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
 ) -> None:
     # O texto da excecao de queda vem de fora do servico: o motivo que o broker
     # manda ao fechar a conexao (que o pika loga em ERROR) ou o erro do decoder
@@ -322,7 +272,7 @@ def test_sexta_falha_transitoria_com_texto_livre_loga_so_o_tipo_do_erro(
     broker: Broker,
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
 ) -> None:
     def falhar(_m: MensagemRecebida, _t: TransacaoDaMensagem) -> Desfecho:
         raise FalhaTransitoriaError(_TEXTO_LIVRE)
@@ -347,7 +297,7 @@ def test_falha_inesperada_fora_do_handler_nao_poe_o_texto_no_log_nem_no_span(
     broker: Broker,
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Fora do handler a excecao nao e embrulhada em `erro_no_handler`: e o
@@ -385,7 +335,7 @@ def test_broker_inalcancavel_loga_so_o_tipo_do_erro_sem_a_senha(
     session_factory: sessionmaker[Session],
     rastreador: Rastreador,
     tmp_path: Path,
-    saidas: _Saidas,
+    saidas: Saidas,
 ) -> None:
     senha = f"senha-{_PLACA}"
     consumidor = Consumidor(

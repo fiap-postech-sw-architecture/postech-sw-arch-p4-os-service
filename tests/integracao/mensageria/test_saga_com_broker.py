@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from tests.integracao.broker import Broker
-    from tests.rastreamento import Rastreador
+    from tests.rastreamento import Rastreador, Saidas
 
 _ATENDENTE = "4c2f8f8e-1b8e-4d5a-9a9e-3f1d2c7b6a55"
 _DLQ = "os.eventos.dlq"
@@ -377,15 +377,17 @@ def test_mesmo_evento_entregue_duas_vezes_gera_um_comando_so(
 
 
 def test_placa_e_descricao_so_no_comando_da_execucao(
+    saidas: Saidas,
     atendimento: Atendimento,
     engine: Engine,
     session_factory: sessionmaker[Session],
     rastreador: Rastreador,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
     # Valores sentinela no caminho real (abertura, relay, consumidor,
     # orquestrador, entrega): a placa e o texto livre so podem aparecer no
-    # envelope do SolicitarDiagnostico, por contrato (RFC-004 secao 5.3).
+    # envelope do SolicitarDiagnostico, por contrato (RFC-004 secao 5.3). Os
+    # logs vem da fixture `saidas`, que nao depende do stream em que o logging
+    # foi configurado por outro teste.
     placa, descricao = "QZX7W42", "Sentinela 7f3a do problema relatado"
     ordem_id = atendimento.abrir(placa=placa, descricao=descricao)
     atendimento.ate_aguardando_agendamento()
@@ -399,13 +401,10 @@ def test_placa_e_descricao_so_no_comando_da_execucao(
         saga = obter_obter_saga(sess).executar(ordem_id)
     esperar_ate(lambda: rastreador.spans("process ExecucaoFinalizada"))
 
-    saidas = capfd.readouterr()
-    # Os logs do servico sairam (e foram lidos) nesta captura.
-    assert "saga transition" in saidas.out + saidas.err
-    textos = [saidas.out, saidas.err, generate_latest(REGISTRY).decode(), repr(saga)]
-    for span in rastreador.spans():
-        textos += [span.name, str(span.attributes), str(span.status.description)]
-        textos += [str(evento.attributes) for evento in span.events]
+    # Os logs do caminho sairam (e foram capturados) neste teste.
+    eventos = {evento["event"] for evento in saidas.eventos}
+    assert {"saga started", "saga transition"} <= eventos
+    textos = [saidas.texto(rastreador), generate_latest(REGISTRY).decode(), repr(saga)]
     with engine.connect() as conexao:
         for consulta in (
             "SELECT passos::text, comando_em_voo::text, itens::text FROM sagas",
