@@ -318,7 +318,10 @@ def test_orcamento_so_de_servicos_reserva_lista_vazia() -> None:
     assert (tipo, dados["pecas"]) == ("ReservarPecas", [])
 
 
-def test_falha_de_negocio_na_etapa_e_ignorada_com_log() -> None:
+def test_falha_de_negocio_na_etapa_e_ignorada_com_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
     cenario = CenarioDaSaga.em("aguardando_decisao")
     passos = cenario.saga.passos
 
