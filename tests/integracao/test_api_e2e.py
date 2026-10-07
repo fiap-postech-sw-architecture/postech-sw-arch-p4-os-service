@@ -309,6 +309,11 @@ class TestCicloDaOrdem:
             f"{_OS}/{ordem_id}/historico", headers=headers
         ).json()["mudancas"]
         assert [m["para"] for m in mudancas] == [s.value for s in FLUXO]
+        # A entrega leva o sub de quem a registrou (RFC-004 secao 7.2).
+        assert (mudancas[-1]["origem"], mudancas[-1]["ator"]) == (
+            "atendimento",
+            str(admin_user.id),
+        )
 
     def test_abrir_rejeita_veiculo_de_outro_cliente(
         self, api_client: TestClient, admin_user: Usuario
@@ -646,7 +651,10 @@ class TestCadastroComDocumentoInvalido:
         assert resp.status_code == 422
         assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
         assert resp.json()["erro"]["mensagem"] == "CPF invalido"
-        assert "247" not in resp.text
+        # O numero inteiro, com e sem mascara: um pedaco dele aparece por acaso
+        # no id_requisicao (uuid4) de algumas respostas.
+        assert "52998224726" not in resp.text
+        assert "529.982.247-26" not in resp.text
 
 
 class TestRegrasEntreContextos:

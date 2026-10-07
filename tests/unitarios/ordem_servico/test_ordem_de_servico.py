@@ -132,6 +132,28 @@ CANCELAVEIS = [
 NAO_CANCELAVEIS = [S.EM_EXECUCAO, S.FINALIZADA, S.ENTREGUE, S.CANCELADA]
 
 
+@pytest.fixture
+def relogio_que_avanca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Relogio da OS que anda 1 minuto por leitura.
+
+    A ordem dos instantes e provada sem depender da resolucao do relogio de
+    parede: dois fatos no mesmo tique passariam num ">=" com a ordem trocada.
+    """
+
+    class _RelogioQueAvanca(datetime):
+        _proximo = datetime(2026, 10, 6, 12, tzinfo=UTC)
+
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> _RelogioQueAvanca:
+            atual = cls._proximo
+            cls._proximo = atual + timedelta(minutes=1)
+            return cls.fromtimestamp(atual.timestamp(), tz)
+
+    monkeypatch.setattr(
+        "src.ordem_servico.dominio.ordem_de_servico.datetime", _RelogioQueAvanca
+    )
+
+
 def _fotografia(ordem: OrdemDeServico) -> tuple[object, ...]:
     """Estado observavel completo, para provar que nada mudou."""
     return (
@@ -311,6 +333,7 @@ class TestFatosDaSaga:
 
         assert _fotografia(sem_orcamento) == antes
 
+    @pytest.mark.usefixtures("relogio_que_avanca")
     def test_pagamento_solicitado_so_grava_o_resumo(self) -> None:
         ordem = _aguardando_pagamento_sem_resumo()
         historico = ordem.historico
@@ -385,24 +408,8 @@ class TestFatosDaSaga:
 
         assert _fotografia(ordem) == antes
 
-    def test_fluxo_completo_produz_linha_do_tempo_encadeada(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Relogio que anda 1 minuto por leitura: a ordem dos instantes e
-        # provada sem depender da resolucao do relogio de parede (dois fatos
-        # no mesmo tique passariam num ">=" mesmo com a ordem trocada).
-        class _RelogioQueAvanca(datetime):
-            _proximo = datetime(2026, 10, 6, 12, tzinfo=UTC)
-
-            @classmethod
-            def now(cls, tz: tzinfo | None = None) -> _RelogioQueAvanca:
-                atual = cls._proximo
-                cls._proximo = atual + timedelta(minutes=1)
-                return cls.fromtimestamp(atual.timestamp(), tz)
-
-        monkeypatch.setattr(
-            "src.ordem_servico.dominio.ordem_de_servico.datetime", _RelogioQueAvanca
-        )
+    @pytest.mark.usefixtures("relogio_que_avanca")
+    def test_fluxo_completo_produz_linha_do_tempo_encadeada(self) -> None:
         ordem = ordem_em(S.ENTREGUE)
 
         historico = ordem.historico

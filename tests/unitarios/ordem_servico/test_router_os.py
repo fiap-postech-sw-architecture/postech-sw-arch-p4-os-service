@@ -578,6 +578,7 @@ def test_openapi_documenta_401_403_e_404_das_rotas_de_os() -> None:
         ("/api/v1/ordens-de-servico/{ordem_id}/historico", "get"),
         ("/api/v1/ordens-de-servico/{ordem_id}/cancelamento", "post"),
         ("/api/v1/ordens-de-servico/{ordem_id}/entrega", "post"),
+        ("/api/v1/sagas/{ordem_id}", "get"),
     ]:
         assert {"401", "403", "404"} <= set(caminhos[rota][metodo]["responses"])
     assert {"401", "403"} <= set(
@@ -626,6 +627,15 @@ class TestSaga:
 
         assert resp.status_code == 403
         assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
+
+    def test_sem_token_401_no_envelope(self) -> None:
+        app = criar_app()
+        app.dependency_overrides[obter_session] = lambda: MagicMock()
+
+        resp = TestClient(app).get(f"/api/v1/sagas/{uuid4()}")
+
+        assert resp.status_code == 401
+        assert resp.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
 
     def test_ordem_sem_saga_404_no_envelope(
         self, client_como: Callable[[str], TestClient]
