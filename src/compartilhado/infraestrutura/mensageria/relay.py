@@ -226,6 +226,10 @@ class Relay:
             if not linhas:
                 return
             for indice, linha in enumerate(linhas):
+                # Cada linha pode levar ate um lease (renovar, publish bloqueado
+                # e marcar): o heartbeat por linha, e nao por lote, mantem a
+                # sonda de liveness longe dos 90 s com lote grande ou banco lento.
+                self._sinal.bater()
                 if self._broker.bloqueada:
                     self._liberar(linhas[indice:])
                     return

@@ -61,8 +61,14 @@ def _conexao(
 class _Aberta:
     is_open = True
 
+    def __init__(self) -> None:
+        self.atendida: list[float] = []
+
     def close(self) -> None:
         self.is_open = False
+
+    def process_data_events(self, time_limit: float) -> None:
+        self.atendida.append(time_limit)
 
     def add_on_connection_blocked_callback(self, callback: Any) -> None:
         self.ao_bloquear = callback
@@ -190,6 +196,21 @@ def test_connection_blocked_e_unblocked_do_broker_viram_o_estado_bloqueada(
     conexao.desconectar()
     assert conexao.conectar()
     assert not conexao.bloqueada
+
+
+def test_atender_o_broker_toca_o_heartbeat_do_processo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Entre os lotes da limpeza o processo so atende o broker.
+    aberta = _Aberta()
+    conexao = _conexao(tmp_path, monkeypatch, (aberta, object()))
+    assert conexao.conectar()
+    assert not (tmp_path / "teste-heartbeat").exists()
+
+    conexao.atender()
+
+    assert aberta.atendida == [0]
+    assert (tmp_path / "teste-heartbeat").exists()
 
 
 @pytest.mark.usefixtures("relogio")

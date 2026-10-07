@@ -201,7 +201,12 @@ class ConexaoDoProcesso:
         self._atraso = min(self._atraso * 2, RECONEXAO_TETO_S)
 
     def atender(self) -> None:
-        """Atende o broker (heartbeat, Connection.Blocked) sem esperar."""
+        """Atende o broker (heartbeat, Connection.Blocked) sem esperar.
+
+        Toca tambem o heartbeat do processo: entre os lotes da limpeza, o
+        processo so atende o broker, e a sonda de liveness nao pode ve-lo parado.
+        """
+        self._sinal.bater()
         self.conexao.process_data_events(time_limit=0)
 
     def sucesso(self) -> None:

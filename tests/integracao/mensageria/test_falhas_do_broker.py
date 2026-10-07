@@ -43,6 +43,7 @@ from src.compartilhado.infraestrutura.mensageria.contratos import (
     catalogo,
 )
 from src.compartilhado.infraestrutura.mensageria.outbox import Outbox
+from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from tests.integracao.broker import (
@@ -505,6 +506,48 @@ def test_renovacao_gravada_e_perdida_na_volta_nao_conta_tentativa_e_fica_no_log(
     assert _linha(engine, mensagem_id).tentativas == 0
     eventos = [evento for evento, _ in log.linhas]
     assert "outbox row failure not recorded; the lease was lost" in eventos
+
+
+class _CanalQueVeOHeartbeat(CanalFalso):
+    """Anota, a cada publicacao, quantas vezes o processo ja tocou o heartbeat."""
+
+    def __init__(self, batidas: list[None]) -> None:
+        super().__init__()
+        self._batidas = batidas
+        self.batidas_ao_publicar: list[int] = []
+
+    def basic_publish(self, *args: Any, **kwargs: Any) -> None:
+        self.batidas_ao_publicar.append(len(self._batidas))
+        super().basic_publish(*args, **kwargs)
+
+
+def test_relay_toca_o_heartbeat_a_cada_linha_do_lote(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batidas: list[None] = []
+    bater = Sinalizador.bater
+
+    def contar(sinal: Sinalizador) -> None:
+        batidas.append(None)
+        bater(sinal)
+
+    monkeypatch.setattr(Sinalizador, "bater", contar)
+    canal = _CanalQueVeOHeartbeat(batidas)
+    conexoes.append((ConexaoFalsa(), canal))
+    for _ in range(3):
+        _gravar(session_factory)
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
+        esperar_ate(lambda: len(canal.publicadas) == 3)
+
+    # As tres linhas sao do mesmo lote: cada uma tocou o heartbeat antes de sair.
+    primeira, segunda, terceira = canal.batidas_ao_publicar
+    assert primeira < segunda < terceira
 
 
 def test_falha_ao_liberar_o_lote_interrompido_deixa_as_linhas_para_depois_do_lease(
