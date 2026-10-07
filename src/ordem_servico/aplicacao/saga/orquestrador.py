@@ -116,7 +116,7 @@ class OrquestradorDaSaga:
                 ``correlation_id`` (permanente, DLQ).
         """
         ordem_id = evento.correlation_id
-        if evento.dados.get("ordem_id") != str(ordem_id):
+        if UUID(evento.dados["ordem_id"]) != ordem_id:
             msg = "ordem_id dos dados diverge do correlation_id"
             raise ContratoInvalidoError(msg, caminho="$.dados.ordem_id")
         saga = self._sagas.obter(ordem_id)

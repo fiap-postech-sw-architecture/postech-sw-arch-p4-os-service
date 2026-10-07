@@ -388,6 +388,16 @@ def test_ordem_id_dos_dados_diferente_do_correlation_id_e_recusado() -> None:
     assert cenario.ordem.status is StatusOrdem.RECEBIDA
 
 
+def test_ordem_id_em_maiusculas_nos_dados_e_o_mesmo_uuid() -> None:
+    cenario = CenarioDaSaga()
+
+    tratamento = cenario.receber(
+        "DiagnosticoIniciado", ordem_id=str(cenario.ordem_id).upper()
+    )
+
+    assert tratamento.desfecho is Desfecho.PROCESSADA
+
+
 def test_conflito_de_versao_ao_gravar_propaga_como_transitorio() -> None:
     cenario = CenarioDaSaga()
     cenario.sagas.provocar_conflito()

@@ -12,6 +12,7 @@ pessoal ficam na OS (RFC-004 secao 7.2).
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
@@ -342,7 +343,8 @@ class Saga(AggregateRoot):
 
     @property
     def passos(self) -> tuple[Passo, ...]:
-        return tuple(self._passos)
+        """Copia: mudar um passo devolvido nao toca o estado da saga."""
+        return tuple(deepcopy(self._passos))
 
     @property
     def passos_concluidos(self) -> tuple[str, ...]:
@@ -350,7 +352,7 @@ class Saga(AggregateRoot):
 
     @property
     def comando_em_voo(self) -> ComandoEmVoo | None:
-        return self._comando_em_voo
+        return deepcopy(self._comando_em_voo)
 
     @property
     def plano_compensacao(self) -> tuple[str, ...]:
@@ -359,7 +361,7 @@ class Saga(AggregateRoot):
 
     @property
     def itens(self) -> tuple[ItemDoDiagnostico, ...]:
-        return tuple(self._itens)
+        return tuple(deepcopy(self._itens))
 
     @property
     def reenvios(self) -> int:

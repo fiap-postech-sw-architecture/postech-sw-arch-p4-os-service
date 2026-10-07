@@ -100,6 +100,26 @@ class TestIniciar:
             SagaIniciadaEvent(agregado_id=ordem_id, ocorrido_em=AGORA)
         ]
 
+    def test_colecoes_devolvidas_sao_copias(self) -> None:
+        saga = saga_em("aguardando_diagnostico")
+        saga.avancar(
+            evento("DiagnosticoConcluido", saga.ordem_id),
+            agora=AGORA,
+            ator=None,
+            envio=_envio(),
+        )
+
+        saga.passos[0]["ator"] = "outro"
+        saga.itens[0]["quantidade"] = 999
+        em_voo = saga.comando_em_voo
+        assert em_voo is not None
+        em_voo["mensagem_ids"].append("outro")
+
+        assert saga.passos[0]["ator"] is None
+        assert saga.itens[0]["quantidade"] == 1
+        assert saga.comando_em_voo is not None
+        assert len(saga.comando_em_voo["mensagem_ids"]) == 1
+
     def test_repr_nao_expoe_passos_nem_comando(self) -> None:
         saga = saga_em(
             "aguardando_orcamento",
