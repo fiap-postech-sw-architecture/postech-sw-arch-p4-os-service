@@ -32,6 +32,7 @@ from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaErr
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
 from src.compartilhado.infraestrutura import outbox_mapping
 from src.compartilhado.infraestrutura.mensageria import amqp
+from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
 from src.compartilhado.infraestrutura.mensageria import relay as modulo_relay
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
@@ -372,6 +373,49 @@ def test_conexao_bloqueada_pelo_broker_para_os_claims_ate_o_desbloqueio(
     assert _linha(engine, mensagem_id).tentativas == 0
 
 
+class _CanalQueEntraEmAlarme(CanalFalso):
+    """O broker entra em alarme logo depois da primeira publicacao."""
+
+    def __init__(self, conexao: ConexaoFalsa) -> None:
+        super().__init__()
+        self._conexao = conexao
+
+    def basic_publish(self, *args: Any, **kwargs: Any) -> None:
+        super().basic_publish(*args, **kwargs)
+        if len(self.publicadas) == 1:
+            self._conexao.ao_bloquear(self._conexao, object())
+
+
+def test_alarme_no_meio_do_lote_devolve_as_demais_linhas_sem_gastar_tentativa(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    conexao = ConexaoFalsa()
+    canal = _CanalQueEntraEmAlarme(conexao)
+    conexoes.append((conexao, canal))
+    mensagens = [_gravar(session_factory) for _ in range(3)]
+    batidas = tmp_path / "relay-heartbeat"
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
+        esperar_ate(lambda: _linha(engine, mensagens[0]).status == "entregue")
+        for _ in range(3):
+            batida = batidas.stat().st_mtime_ns
+            esperar_ate(lambda batida=batida: batidas.stat().st_mtime_ns > batida)
+        assert len(canal.publicadas) == 1
+        conexao.ao_desbloquear(conexao, object())
+        # Devolvidas na hora: com o lease de 60 s ainda valendo, o prazo de
+        # espera daqui venceria antes de elas voltarem.
+        esperar_ate(
+            lambda: all(_linha(engine, m).status == "entregue" for m in mensagens)
+        )
+
+    assert [_linha(engine, m).tentativas for m in mensagens] == [0, 0, 0]
+    assert len(canal.publicadas) == 3
+
+
 def test_erro_de_banco_numa_linha_do_lote_conta_tentativa_e_as_demais_saem(
     engine: Engine,
     session_factory: sessionmaker[Session],
@@ -474,6 +518,39 @@ def test_falha_depois_de_renovar_o_lease_conta_tentativa_na_linha_renovada(
     assert primeira.ultimo_erro == "falha ao publicar (KeyError)"
     assert _linha(engine, mensagem_id).tentativas == 1
     assert len(canal.publicadas) == 1
+
+
+def test_recusa_do_broker_com_o_banco_fora_deixa_a_linha_para_depois_do_lease(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = _LogEspiao()
+    monkeypatch.setattr(modulo_relay, "_log", log)
+    canal = CanalFalso(NackError([]))
+    conexoes.append((ConexaoFalsa(), canal))
+    mensagem_id = _gravar(session_factory)
+    # O desfecho da recusa e a contagem da falha nao gravam (banco fora).
+    falhas = [OperationalError("UPDATE", {}, Exception("banco fora")) for _ in range(2)]
+    registrar_falha = Outbox.registrar_falha
+
+    def registrar_com_falha(self: Outbox, *args: Any) -> Any:
+        if falhas:
+            raise falhas.pop()
+        return registrar_falha(self, *args)
+
+    monkeypatch.setattr(Outbox, "registrar_falha", registrar_com_falha)
+    relay = _relay(engine, rastreador, tmp_path, lease=timedelta(seconds=0.3))
+
+    with EmSegundoPlano(relay):
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+
+    assert _linha(engine, mensagem_id).tentativas == 0
+    eventos = [evento for evento, _ in log.linhas]
+    assert "outbox row failure not recorded; it returns after the lease" in eventos
 
 
 def test_renovacao_gravada_e_perdida_na_volta_nao_conta_tentativa_e_fica_no_log(
@@ -718,17 +795,20 @@ def test_linha_que_outra_replica_ja_finalizou_e_pulada(
 
 
 class _CanalQueTrava(CanalFalso):
-    """O publish espera o teste liberar e entao e recusado (nack)."""
+    """O publish espera o teste liberar e entao e recusado (nack) ou confirmado."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, recusar: bool = True) -> None:
         super().__init__()
         self.publicando = threading.Event()
         self.liberar = threading.Event()
+        self._recusar = recusar
 
     def basic_publish(self, *args: Any, **kwargs: Any) -> None:
         self.publicando.set()
         self.liberar.wait(20)
-        raise NackError([])
+        if self._recusar:
+            raise NackError([])
+        super().basic_publish(*args, **kwargs)
 
 
 def test_replica_que_perdeu_o_lease_nao_grava_o_desfecho_por_cima_da_outra(
@@ -761,6 +841,41 @@ def test_replica_que_perdeu_o_lease_nao_grava_o_desfecho_por_cima_da_outra(
     linha = _linha(engine, mensagem_id)
     assert (linha.status, linha.tentativas) == ("entregue", 4)
     assert len(livre.publicadas) == 1
+
+
+def test_replica_que_publica_depois_de_perder_o_lease_nao_marca_a_linha_de_novo(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A publica e fica presa alem do lease; B reivindica a linha e a entrega.
+    # O broker confirma a copia de A (o consumidor a descarta pelo id), e A nao
+    # grava nada por cima: so avisa no log.
+    log = _LogEspiao()
+    monkeypatch.setattr(modulo_relay, "_log", log)
+    mensagem_id = _gravar(session_factory)
+    presa, livre = _CanalQueTrava(recusar=False), CanalFalso()
+    conexoes.extend([(ConexaoFalsa(), presa), (ConexaoFalsa(), livre)])
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    curto = timedelta(seconds=0.3)
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path / "a", lease=curto)):
+        esperar_ate(presa.publicando.is_set)
+        with EmSegundoPlano(_relay(engine, rastreador, tmp_path / "b", lease=curto)):
+            esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+        presa.liberar.set()
+        esperar_ate(lambda: presa.publicadas)
+
+    assert (_linha(engine, mensagem_id).status, len(livre.publicadas)) == (
+        "entregue",
+        1,
+    )
+    eventos = [evento for evento, _ in log.linhas]
+    assert "message published after losing the lease" in eventos
 
 
 def test_sem_listen_nem_select_o_relay_segue_pelo_poll(
@@ -901,6 +1016,35 @@ def test_evento_sem_handler_vai_para_a_dlq(
         esperar_ate(lambda: canal.rejeitadas)
 
     assert canal.rejeitadas == [3]
+
+
+def test_falha_inesperada_fora_do_handler_vai_para_a_dlq_e_o_consumo_segue(
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    falhas = [AttributeError("bug no registro da mensagem")]
+    registrar = modulo_consumidor.registrar_processada
+
+    def registrar_com_falha(sessao: Any, mensagem_id: UUID) -> bool:
+        if falhas:
+            raise falhas.pop()
+        return registrar(sessao, mensagem_id)
+
+    monkeypatch.setattr(modulo_consumidor, "registrar_processada", registrar_com_falha)
+    entregas = [_entrega(envelope_de_evento("ReservaLiberada"), tag) for tag in (1, 2)]
+    canal = CanalFalso(entregas=entregas)
+    conexoes.append((ConexaoFalsa(), canal))
+    despachante = dict.fromkeys(catalogo().consumidos, lambda *_: Desfecho.PROCESSADA)
+
+    with EmSegundoPlano(
+        _consumidor(session_factory, rastreador, tmp_path, despachante)
+    ):
+        esperar_ate(lambda: canal.confirmadas)
+
+    assert (canal.rejeitadas, canal.confirmadas) == ([1], [2])
 
 
 def test_banco_fora_na_limpeza_nao_derruba_o_consumidor(

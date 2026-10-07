@@ -8,6 +8,7 @@ import pytest
 
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     _MensagemRejeitadaError,
+    _uuid_ou_nada,
     conferir_origem,
     fila_de_retry_da_copia,
     ler_tentativa,
@@ -88,3 +89,22 @@ def test_origem_recusada(usuario: str | None, tentativa: int) -> None:
         conferir_origem(
             usuario=usuario, produtor="billing", consumidor="os", tentativa=tentativa
         )
+
+
+@pytest.mark.parametrize(
+    ("valor", "no_log"),
+    [
+        pytest.param(
+            "6F9619FF-8B86-D011-B42D-00C04FC964FF",
+            "6f9619ff-8b86-d011-b42d-00c04fc964ff",
+            id="uuid-canonico",
+        ),
+        pytest.param("placa QZX7W42", None, id="texto-livre"),
+        pytest.param(None, None, id="ausente"),
+        pytest.param(b"6f9619ff-8b86-d011-b42d-00c04fc964ff", None, id="bytes"),
+    ],
+)
+def test_so_o_id_convertido_em_uuid_vai_para_o_log(
+    valor: object, no_log: str | None
+) -> None:
+    assert _uuid_ou_nada(valor) == no_log
