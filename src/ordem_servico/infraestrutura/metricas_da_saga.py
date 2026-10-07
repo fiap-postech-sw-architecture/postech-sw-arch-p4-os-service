@@ -2,10 +2,11 @@
 
 Contadores e histograma: a ``Saga`` registra os fatos (``SagaIniciadaEvent``,
 ``EtapaDaSagaAlteradaEvent``), o repositorio os entrega a sessao no ``salvar``
-e eles so viram metrica no ``after_commit`` da transacao raiz. Rollback,
-conflito de versao ou commit que falha os descartam: a mensagem que volta pela
-retry nao conta duas vezes. Quem emite e
-o processo que tira a saga da etapa (API na abertura, consumidor nos eventos).
+e eles so viram metrica no ``after_commit`` da transacao raiz. Rollback (o da
+raiz e o de um SAVEPOINT, que descarta os fatos anotados dentro dele), conflito
+de versao ou commit que falha os descartam: a mensagem que volta pela retry nao
+conta duas vezes. Quem emite e o processo que tira a saga da etapa (API na
+abertura, consumidor nos eventos).
 
 Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` na hora
 da raspagem, numa conexao propria e com prazo curto, e continua certo com os
@@ -74,7 +75,9 @@ for _etapa in ETAPAS_FINAIS:
 for _etapa in ETAPAS_NAO_FINAIS:
     DURACAO_DA_ETAPA.labels(etapa=_etapa.value)
 
-# Fatos da transacao em curso, na sessao: so valem depois do commit.
+# Fatos da transacao em curso, na sessao: so valem depois do commit. Cada um
+# leva o SAVEPOINT em que foi anotado (``None`` fora de qualquer um), para o
+# rollback do SAVEPOINT o descartar.
 _FATOS: Final = "pytstop_fatos_da_saga"
 _sessoes_instrumentadas = False
 
@@ -88,7 +91,8 @@ def anotar(sessao: Session, fatos: Iterable[DomainEvent]) -> None:
     """
     observacoes = [_observacao(fato) for fato in fatos]
     _instrumentar_sessoes()
-    sessao.info.setdefault(_FATOS, []).extend(observacoes)
+    savepoint = sessao.get_nested_transaction()
+    sessao.info.setdefault(_FATOS, []).extend((savepoint, o) for o in observacoes)
 
 
 def _observacao(fato: DomainEvent) -> Callable[[], None]:
@@ -116,6 +120,7 @@ def _instrumentar_sessoes() -> None:
         return
     _sessoes_instrumentadas = True
     event.listen(Session, "after_commit", _ao_comitar)
+    event.listen(Session, "after_soft_rollback", _ao_desfazer)
     event.listen(Session, "after_transaction_end", _ao_encerrar)
 
 
@@ -127,8 +132,33 @@ def _ao_comitar(sessao: Session) -> None:
     """
     if sessao.in_nested_transaction():
         return
-    for observar in sessao.info.pop(_FATOS, ()):
+    for _, observar in sessao.info.pop(_FATOS, ()):
         observar()
+
+
+def _ao_desfazer(sessao: Session, desfeita: SessionTransaction) -> None:
+    """Rollback de um SAVEPOINT: descarta os fatos anotados dentro dele.
+
+    Vale tambem para o SAVEPOINT interno que um SAVEPOINT desfeito ja tinha
+    liberado. Os fatos anotados fora dele seguem para o commit da raiz.
+    """
+    fatos = sessao.info.get(_FATOS)
+    if fatos:
+        sessao.info[_FATOS] = [
+            (savepoint, observar)
+            for savepoint, observar in fatos
+            if not _dentro_de(savepoint, desfeita)
+        ]
+
+
+def _dentro_de(
+    savepoint: SessionTransaction | None, desfeita: SessionTransaction
+) -> bool:
+    while savepoint is not None:
+        if savepoint is desfeita:
+            return True
+        savepoint = savepoint.parent
+    return False
 
 
 def _ao_encerrar(sessao: Session, transacao: SessionTransaction) -> None:

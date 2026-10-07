@@ -287,6 +287,53 @@ def test_savepoint_liberado_nao_conta_antes_do_commit_da_raiz(
     assert _iniciadas() == iniciadas + 1
 
 
+def test_savepoint_desfeito_nao_conta_no_commit_da_raiz(
+    session_factory: sessionmaker[Session],
+) -> None:
+    iniciadas = _iniciadas()
+
+    with session_factory() as sess:
+        gravada = _nova_saga(sess)
+        SagaSQLAlchemyRepository(sess).salvar(gravada)
+        with sess.begin_nested() as savepoint:
+            desfeita = _nova_saga(sess)
+            SagaSQLAlchemyRepository(sess).salvar(desfeita)
+            savepoint.rollback()
+        sess.commit()
+
+    # So a saga de fora do SAVEPOINT foi gravada, e so o fato dela conta.
+    assert _iniciadas() == iniciadas + 1
+    with session_factory() as sess:
+        repo = SagaSQLAlchemyRepository(sess)
+        assert repo.obter(gravada.ordem_id) is not None
+        assert repo.obter(desfeita.ordem_id) is None
+
+
+def test_savepoints_aninhados_seguem_o_destino_do_externo(
+    session_factory: sessionmaker[Session],
+) -> None:
+    iniciadas = _iniciadas()
+
+    with session_factory() as sess:
+        with sess.begin_nested() as externo:
+            with sess.begin_nested():
+                SagaSQLAlchemyRepository(sess).salvar(_nova_saga(sess))
+            # O interno foi liberado, mas o externo cai e leva o fato junto.
+            externo.rollback()
+        sess.commit()
+    assert _iniciadas() == iniciadas
+
+    with session_factory() as sess:
+        with sess.begin_nested():
+            SagaSQLAlchemyRepository(sess).salvar(_nova_saga(sess))
+            with sess.begin_nested() as interno:
+                SagaSQLAlchemyRepository(sess).salvar(_nova_saga(sess))
+                interno.rollback()
+        sess.commit()
+    # Do externo, liberado, so o fato dele: o do interno desfeito saiu.
+    assert _iniciadas() == iniciadas + 1
+
+
 def test_series_de_rotulo_fechado_existem_desde_o_boot() -> None:
     for resultado in ("concluida", "compensada"):
         assert (
