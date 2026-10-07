@@ -55,6 +55,8 @@ _PECAS = [
     for i in _ITENS
     if i["tipo"] == "peca"
 ]
+# Orcamento que a OS guarda nos testes do agregado (o do OrcamentoGerado).
+_ORCAMENTO_ID = uuid4()
 
 
 def saga_em(etapa: EtapaSaga | str, **campos: Any) -> Saga:
@@ -80,9 +82,17 @@ def saga_em(etapa: EtapaSaga | str, **campos: Any) -> Saga:
     )
 
 
-def _marcos(*, diagnostico: bool = True, checkout: bool = False) -> MarcosDaOrdem:
+def _marcos(
+    *,
+    diagnostico: bool = True,
+    checkout: bool = False,
+    orcamento_id: UUID | None = _ORCAMENTO_ID,
+) -> MarcosDaOrdem:
     return MarcosDaOrdem(
-        diagnostico_iniciado=diagnostico, checkout_aberto=checkout, encerrada=False
+        diagnostico_iniciado=diagnostico,
+        checkout_aberto=checkout,
+        encerrada=False,
+        orcamento_id=orcamento_id,
     )
 
 
@@ -94,7 +104,7 @@ def _dados(comando: Comando, saga: Saga) -> dict[str, Any]:
         Comando.RESERVAR_PECAS: {"ordem_id": ordem_id, "pecas": _PECAS},
         Comando.SOLICITAR_PAGAMENTO: {
             "ordem_id": ordem_id,
-            "orcamento_id": str(uuid4()),
+            "orcamento_id": str(_ORCAMENTO_ID),
         },
         Comando.AGENDAR_EXECUCAO: {"ordem_id": ordem_id, "prioridade": "normal"},
     }[comando]
@@ -677,6 +687,78 @@ class TestRecusasDoAvancar:
                     dados={"ordem_id": str(saga.ordem_id), "pecas": servicos},
                 ),
             )
+
+    @pytest.mark.parametrize(
+        ("etapa", "tipo", "comando", "dados", "marcos"),
+        [
+            pytest.param(
+                "aguardando_reserva",
+                "PecasReservadas",
+                Comando.SOLICITAR_PAGAMENTO,
+                {"orcamento_id": str(uuid4())},
+                _marcos(),
+                id="orcamento-que-nao-e-o-da-os",
+            ),
+            pytest.param(
+                "aguardando_reserva",
+                "PecasReservadas",
+                Comando.SOLICITAR_PAGAMENTO,
+                {"orcamento_id": str(_ORCAMENTO_ID)},
+                _marcos(orcamento_id=None),
+                id="os-sem-orcamento",
+            ),
+            pytest.param(
+                "aguardando_reserva",
+                "PecasReservadas",
+                Comando.SOLICITAR_PAGAMENTO,
+                {"orcamento_id": None},
+                _marcos(orcamento_id=None),
+                id="pagamento-sem-orcamento-e-os-sem-orcamento",
+            ),
+            pytest.param(
+                "aguardando_pagamento",
+                "PagamentoConfirmado",
+                Comando.AGENDAR_EXECUCAO,
+                {"prioridade": "alta"},
+                _marcos(checkout=True),
+                id="prioridade-que-nao-e-normal",
+            ),
+            pytest.param(
+                "aguardando_pagamento",
+                "PagamentoConfirmado",
+                Comando.AGENDAR_EXECUCAO,
+                {"prioridade": None},
+                _marcos(checkout=True),
+                id="agendamento-sem-prioridade",
+            ),
+        ],
+    )
+    def test_dados_que_a_os_ou_a_tabela_nao_confirmam_sao_recusados(
+        self,
+        etapa: str,
+        tipo: str,
+        comando: Comando,
+        dados: dict[str, Any],
+        marcos: MarcosDaOrdem,
+    ) -> None:
+        saga = saga_em(etapa)
+        antes = _foto(saga)
+        # ``None`` tira a chave dos dados do comando.
+        trocados = {**_dados(comando, saga), **dados}
+        envio = _envio(
+            comando, saga, dados={k: v for k, v in trocados.items() if v is not None}
+        )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="dados"):
+            saga.avancar(
+                evento(tipo, saga.ordem_id),
+                marcos,
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
+                envio=envio,
+            )
+
+        assert _foto(saga) == antes
 
 
 class TestContextoDeTrace:

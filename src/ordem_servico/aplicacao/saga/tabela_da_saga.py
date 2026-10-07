@@ -3,8 +3,9 @@
 A ordem das etapas, a etapa em que cada evento e esperado, a linha de cada
 evento do fluxo normal (etapa seguinte, comando enviado e passo concluido) e os
 comandos com prazo; ``classificar`` decide se o evento recebido e processado,
-ignorado, adiantado ou recusado. ``linha_do_evento`` e ``conferir_envio`` sao
-as conferencias que a ``Saga`` faz antes de aplicar uma linha.
+ignorado, adiantado ou recusado. ``linha_do_evento``, ``conferir_envio`` e
+``conferir_prazo`` sao as conferencias que a ``Saga`` faz antes de aplicar uma
+linha.
 """
 
 from __future__ import annotations
@@ -134,6 +135,9 @@ COMANDOS_COM_PRAZO: Final = frozenset(
         Comando.DESCARTAR_DIAGNOSTICO,
     }
 )
+# O AgendarExecucao sai sempre com esta prioridade nesta fase: nenhuma regra
+# escolhe `alta` (RFC-004 secao 5.3).
+PRIORIDADE_DO_AGENDAMENTO: Final = "normal"
 GATILHO_ABERTURA: Final = "abertura"
 
 
@@ -240,17 +244,18 @@ def conferir_envio(
     *,
     ordem_id: UUID,
     itens: Sequence[ItemDoDiagnostico],
-    agora: datetime,
+    marcos: MarcosDaOrdem,
 ) -> None:
-    """O ``envio`` e o comando da ``linha``, com os dados e o prazo dela.
+    """O ``envio`` e o comando da ``linha``, com os dados que a saga e a OS fixam.
 
     Nenhum envio onde a linha nao envia; nos dados, o ``ordem_id`` da OS e o que
-    a saga guarda (os ``itens`` do diagnostico no ``GerarOrcamento``, as pecas
-    deles no ``ReservarPecas``); prazo depois de ``agora`` so nos
-    ``COMANDOS_COM_PRAZO``.
+    a saga e a OS guardam: os ``itens`` do diagnostico no ``GerarOrcamento``, as
+    pecas deles no ``ReservarPecas``, o orcamento dos ``marcos`` da OS no
+    ``SolicitarPagamento`` e a prioridade ``normal`` no ``AgendarExecucao``.
 
     Raises:
-        TransicaoDaSagaInvalidaError: o envio nao e o da linha.
+        TransicaoDaSagaInvalidaError: o envio nao e o da linha, ou seus dados
+            nao sao os desta saga.
     """
     if envio is None and linha.comando is None:
         return
@@ -258,14 +263,30 @@ def conferir_envio(
         enviado = envio.tipo if envio is not None else "nenhum comando"
         msg = f"a linha envia {linha.comando or 'nenhum comando'}, nao {enviado}"
         raise TransicaoDaSagaInvalidaError(msg)
+    # Sem orcamento na OS, str(None), que e "None", nao casa com id nenhum.
     da_saga: dict[Comando, dict[str, object]] = {
         Comando.GERAR_ORCAMENTO: {"itens": list(itens)},
         Comando.RESERVAR_PECAS: {"pecas": pecas_dos_itens(itens)},
+        Comando.SOLICITAR_PAGAMENTO: {"orcamento_id": str(marcos.orcamento_id)},
+        Comando.AGENDAR_EXECUCAO: {"prioridade": PRIORIDADE_DO_AGENDAMENTO},
     }
     esperados = {"ordem_id": str(ordem_id), **da_saga.get(envio.tipo, {})}
     if any(envio.dados.get(chave) != valor for chave, valor in esperados.items()):
         msg = f"{envio.tipo} com dados que nao sao os desta saga"
         raise TransicaoDaSagaInvalidaError(msg)
+
+
+def conferir_prazo(envio: Envio | None, agora: datetime) -> None:
+    """O prazo de resposta do ``envio``, que so os ``COMANDOS_COM_PRAZO`` levam.
+
+    O prazo e depois de ``agora`` e tem fuso horario.
+
+    Raises:
+        TransicaoDaSagaInvalidaError: prazo faltando, sobrando, sem fuso horario
+            ou que nao e depois do envio.
+    """
+    if envio is None:
+        return
     prazo = envio.prazo_resposta_em
     com_prazo = envio.tipo in COMANDOS_COM_PRAZO
     if (prazo is not None) is not com_prazo or (

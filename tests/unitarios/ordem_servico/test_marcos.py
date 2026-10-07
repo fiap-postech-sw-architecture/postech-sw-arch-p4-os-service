@@ -36,6 +36,31 @@ def test_marcos_pelo_historico_pelo_resumo_e_pelo_status(
     )
 
 
+@pytest.mark.parametrize(
+    ("perfil", "tem_orcamento"),
+    [
+        pytest.param("recebida", False, id="recebida"),
+        pytest.param("em_diagnostico", False, id="em_diagnostico"),
+        pytest.param("aguardando_aprovacao", True, id="aprovacao"),
+        pytest.param(SEM_CHECKOUT, True, id="sem-checkout"),
+        pytest.param("aguardando_pagamento", True, id="checkout"),
+        pytest.param("entregue", True, id="entregue"),
+        pytest.param("cancelada", False, id="cancelada"),
+    ],
+)
+def test_marcos_levam_o_orcamento_que_a_os_guarda(
+    perfil: str, tem_orcamento: bool
+) -> None:
+    ordem = ordem_no_perfil(perfil)
+
+    orcamento_id = MarcosDaOrdem.da_ordem(ordem).orcamento_id
+
+    assert (ordem.resumo_orcamento is not None) is tem_orcamento
+    assert orcamento_id == (
+        ordem.resumo_orcamento.orcamento_id if ordem.resumo_orcamento else None
+    )
+
+
 def test_marcos_sao_um_retrato_que_nao_acompanha_a_os() -> None:
     ordem = ordem_no_perfil("recebida")
     marcos = MarcosDaOrdem.da_ordem(ordem)

@@ -47,6 +47,7 @@ from src.ordem_servico.aplicacao.saga.resumos_do_billing import (
     resumo_do_pagamento,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    PRIORIDADE_DO_AGENDAMENTO,
     Classificacao,
 )
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
@@ -67,8 +68,6 @@ _log = structlog.get_logger(__name__)
 
 # Ator dos fatos que o consumidor aplica (historico da OS e passos da saga).
 ATOR_CONSUMIDOR: Final = "consumidor"
-# Unica prioridade nesta fase: nenhuma regra escolhe `alta` (RFC-004 secao 5.3).
-_PRIORIDADE: Final = "normal"
 # O que a OS ou a saga recusam ao aplicar o fato: estado incompativel com o
 # evento, que nenhuma nova tentativa muda.
 _RECUSAS_DO_DOMINIO: Final = (
@@ -319,7 +318,7 @@ def _pagamento_confirmado(
     ordem.registrar_pagamento_confirmado(ator=ATOR_CONSUMIDOR)
     return Comando.AGENDAR_EXECUCAO, {
         "ordem_id": str(saga.ordem_id),
-        "prioridade": _PRIORIDADE,
+        "prioridade": PRIORIDADE_DO_AGENDAMENTO,
     }
 
 

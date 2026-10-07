@@ -35,6 +35,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     Classificacao,
     classificar,
     conferir_envio,
+    conferir_prazo,
     linha_do_evento,
 )
 
@@ -260,11 +261,12 @@ class Saga(AggregateRoot):
     ) -> None:
         """Aplica um evento do fluxo normal pela linha dele na tabela 4.1.
 
-        Confere tudo antes de mudar, pelas regras da tabela (``linha_do_evento``
-        e ``conferir_envio``, com os ``marcos`` da OS de antes do fato). Depois
-        anota o registro, vai para a etapa seguinte, marca o passo concluido
-        (T3, T5, T6, T7), guarda os itens do diagnostico e troca o comando em voo
-        (o ``envio`` passa a esperar resposta, com ``reenvios`` zerado).
+        Confere tudo antes de mudar, pelas regras da tabela (``linha_do_evento``,
+        ``conferir_envio`` e ``conferir_prazo``, com os ``marcos`` da OS de antes
+        do fato). Depois anota o registro, vai para a etapa seguinte, marca o
+        passo concluido (T3, T5, T6, T7), guarda os itens do diagnostico e troca
+        o comando em voo (o ``envio`` passa a esperar resposta, com ``reenvios``
+        zerado).
 
         Raises:
             TransicaoDaSagaInvalidaError: alguma conferencia falhou; nada muda.
@@ -278,7 +280,8 @@ class Saga(AggregateRoot):
             if evento.tipo == "ExecucaoAgendada"
             else None
         )
-        conferir_envio(linha, envio, ordem_id=self.id, itens=itens, agora=agora)
+        conferir_envio(linha, envio, ordem_id=self.id, itens=itens, marcos=marcos)
+        conferir_prazo(envio, agora)
         de = self._etapa
         if linha.seguinte is not de:
             self._registrar_evento(
