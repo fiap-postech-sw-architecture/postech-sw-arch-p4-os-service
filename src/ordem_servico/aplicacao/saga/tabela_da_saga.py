@@ -3,7 +3,8 @@
 A ordem das etapas, a etapa em que cada evento e esperado, a linha de cada
 evento do fluxo normal (etapa seguinte, comando enviado e passo concluido) e os
 comandos com prazo; ``classificar`` decide se o evento recebido e processado,
-ignorado, adiantado ou recusado.
+ignorado, adiantado ou recusado. ``linha_do_evento`` e ``conferir_envio`` sao
+as conferencias que a ``Saga`` faz antes de aplicar uma linha.
 """
 
 from __future__ import annotations
@@ -14,11 +15,20 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
-from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
+from src.ordem_servico.aplicacao.saga.modelo import (
+    EtapaSaga,
+    TransicaoDaSagaInvalidaError,
+    pecas_dos_itens,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
+    from datetime import datetime
+    from uuid import UUID
 
+    from src.compartilhado.aplicacao.mensageria import MensagemRecebida
+    from src.ordem_servico.aplicacao.saga.modelo import Envio, ItemDoDiagnostico
+    from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 _E = EtapaSaga
@@ -194,3 +204,71 @@ def _na_mesma_etapa(tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
         ):
             return Classificacao.ADIANTADO
     return Classificacao.PROCESSAR
+
+
+def linha_do_evento(
+    saga: Saga, evento: MensagemRecebida, marcos: MarcosDaOrdem, agora: datetime
+) -> LinhaDoFluxo:
+    """A linha do ``evento`` no fluxo normal, se ele pode avancar a ``saga`` agora.
+
+    O evento e da OS da saga e se classifica para processar na etapa dela (com
+    os ``marcos`` da OS de antes do fato), e o instante tem fuso e nao volta
+    antes do ultimo registro.
+
+    Raises:
+        TransicaoDaSagaInvalidaError: alguma das tres conferencias falhou.
+    """
+    tipo = evento.tipo
+    linha = FLUXO_NORMAL.get(tipo)
+    if evento.correlation_id != saga.id:
+        msg = f"{tipo} de outra ordem"
+    elif linha is None or classificar(saga.etapa, tipo, marcos) is not (
+        Classificacao.PROCESSAR
+    ):
+        msg = f"{tipo} nao avanca a saga na etapa {saga.etapa.value}"
+    elif agora.tzinfo is None or agora < saga.atualizada_em:
+        msg = f"{tipo} num instante sem fuso ou anterior ao ultimo registro"
+    else:
+        return linha
+    raise TransicaoDaSagaInvalidaError(msg)
+
+
+def conferir_envio(
+    linha: LinhaDoFluxo,
+    envio: Envio | None,
+    *,
+    ordem_id: UUID,
+    itens: Sequence[ItemDoDiagnostico],
+    agora: datetime,
+) -> None:
+    """O ``envio`` e o comando da ``linha``, com os dados e o prazo dela.
+
+    Nenhum envio onde a linha nao envia; nos dados, o ``ordem_id`` da OS e o que
+    a saga guarda (os ``itens`` do diagnostico no ``GerarOrcamento``, as pecas
+    deles no ``ReservarPecas``); prazo depois de ``agora`` so nos
+    ``COMANDOS_COM_PRAZO``.
+
+    Raises:
+        TransicaoDaSagaInvalidaError: o envio nao e o da linha.
+    """
+    if envio is None and linha.comando is None:
+        return
+    if envio is None or envio.tipo is not linha.comando:
+        enviado = envio.tipo if envio is not None else "nenhum comando"
+        msg = f"a linha envia {linha.comando or 'nenhum comando'}, nao {enviado}"
+        raise TransicaoDaSagaInvalidaError(msg)
+    da_saga: dict[Comando, dict[str, object]] = {
+        Comando.GERAR_ORCAMENTO: {"itens": list(itens)},
+        Comando.RESERVAR_PECAS: {"pecas": pecas_dos_itens(itens)},
+    }
+    esperados = {"ordem_id": str(ordem_id), **da_saga.get(envio.tipo, {})}
+    if any(envio.dados.get(chave) != valor for chave, valor in esperados.items()):
+        msg = f"{envio.tipo} com dados que nao sao os desta saga"
+        raise TransicaoDaSagaInvalidaError(msg)
+    prazo = envio.prazo_resposta_em
+    com_prazo = envio.tipo in COMANDOS_COM_PRAZO
+    if (prazo is not None) is not com_prazo or (
+        prazo is not None and (prazo.tzinfo is None or prazo <= agora)
+    ):
+        msg = f"{envio.tipo} sem o prazo de resposta depois do envio"
+        raise TransicaoDaSagaInvalidaError(msg)

@@ -6,7 +6,7 @@ pessoal ficam na OS (RFC-004 secao 7.2).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -152,4 +152,16 @@ def itens_do_diagnostico(dados: DadosDoContrato) -> list[ItemDoDiagnostico]:
             "quantidade": item["quantidade"],
         }
         for item in dados["itens"]
+    ]
+
+
+def pecas_dos_itens(itens: Sequence[ItemDoDiagnostico]) -> list[dict[str, Any]]:
+    """Os itens ``peca`` como o ``ReservarPecas`` os pede: ``{sku, quantidade}``.
+
+    Lista vazia vale (diagnostico so com servicos).
+    """
+    return [
+        {"sku": item["codigo"], "quantidade": item["quantidade"]}
+        for item in itens
+        if item["tipo"] == "peca"
     ]

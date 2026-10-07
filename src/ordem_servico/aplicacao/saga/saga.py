@@ -4,8 +4,9 @@ Uma por OS (``id`` = ``ordem_id`` = ``correlation_id`` das mensagens),
 persistida na tabela ``sagas`` como agregado proprio (RFC-004 secao 4; ADR-035
 "Estado persistido e eventos fora de ordem"). Aqui ficam so o estado e as
 regras, sem I/O: quem le e grava saga e OS e publica os comandos e o
-``OrquestradorDaSaga``, pelas portas, numa transacao so. A tabela da RFC e a
-classificacao dos eventos ficam em ``tabela_da_saga``; os tipos, em ``modelo``.
+``OrquestradorDaSaga``, pelas portas, numa transacao so. A tabela da RFC, a
+classificacao dos eventos e as conferencias de cada linha ficam em
+``tabela_da_saga``; os tipos, em ``modelo``.
 """
 
 from __future__ import annotations
@@ -26,15 +27,15 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
+    pecas_dos_itens,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
-    COMANDOS_COM_PRAZO,
     ETAPAS_FINAIS,
-    FLUXO_NORMAL,
     GATILHO_ABERTURA,
     Classificacao,
-    LinhaDoFluxo,
     classificar,
+    conferir_envio,
+    linha_do_evento,
 )
 
 if TYPE_CHECKING:
@@ -196,7 +197,7 @@ class Saga(AggregateRoot):
     @property
     def pecas(self) -> list[dict[str, Any]]:
         """As pecas dos itens como o ``ReservarPecas`` as pede (RFC-004 secao 4.1)."""
-        return _pecas(self._itens)
+        return pecas_dos_itens(self._itens)
 
     @property
     def reenvios(self) -> int:
@@ -259,19 +260,16 @@ class Saga(AggregateRoot):
     ) -> None:
         """Aplica um evento do fluxo normal pela linha dele na tabela 4.1.
 
-        Confere tudo antes de mudar: o evento e desta OS e se classifica para
-        processar (a regra de ``classificar``, com os ``marcos`` da OS de antes
-        do fato), o instante tem fuso e nao volta, e o ``envio`` e o comando da
-        linha (nenhum onde ela nao envia), com o ``ordem_id`` desta OS, os itens
-        ou as pecas que a saga guarda e o prazo de quem tem resposta automatica.
-        Depois anota o passo, vai para a etapa seguinte, marca o passo concluido
+        Confere tudo antes de mudar, pelas regras da tabela (``linha_do_evento``
+        e ``conferir_envio``, com os ``marcos`` da OS de antes do fato). Depois
+        anota o registro, vai para a etapa seguinte, marca o passo concluido
         (T3, T5, T6, T7), guarda os itens do diagnostico e troca o comando em voo
-        (o ``envio`` com prazo passa a esperar resposta, com ``reenvios`` zerado).
+        (o ``envio`` passa a esperar resposta, com ``reenvios`` zerado).
 
         Raises:
             TransicaoDaSagaInvalidaError: alguma conferencia falhou; nada muda.
         """
-        linha = self._conferir_evento(evento, marcos, agora)
+        linha = linha_do_evento(self, evento, marcos, agora)
         # Calculados antes de mudar: dado malformado levanta com a saga intacta.
         diagnostico = evento.tipo == "DiagnosticoConcluido"
         itens = itens_do_diagnostico(evento.dados) if diagnostico else self._itens
@@ -280,7 +278,7 @@ class Saga(AggregateRoot):
             if evento.tipo == "ExecucaoAgendada"
             else None
         )
-        self._conferir_envio(linha, envio, agora, itens)
+        conferir_envio(linha, envio, ordem_id=self.id, itens=itens, agora=agora)
         de = self._etapa
         if linha.seguinte is not de:
             self._registrar_evento(
@@ -307,55 +305,6 @@ class Saga(AggregateRoot):
         self._esperar_resposta(envio)
 
     # ----- mecanica interna
-
-    def _conferir_evento(
-        self, evento: MensagemRecebida, marcos: MarcosDaOrdem, agora: datetime
-    ) -> LinhaDoFluxo:
-        """A linha do evento, se ele e desta OS, do fluxo e do instante certo."""
-        tipo = evento.tipo
-        linha = FLUXO_NORMAL.get(tipo)
-        if evento.correlation_id != self.id:
-            msg = f"{tipo} de outra ordem"
-        elif linha is None or self.classificar(tipo, marcos) is not (
-            Classificacao.PROCESSAR
-        ):
-            msg = f"{tipo} nao avanca a saga na etapa {self._etapa.value}"
-        elif agora.tzinfo is None or agora < self._atualizada_em:
-            msg = f"{tipo} num instante sem fuso ou anterior ao ultimo passo"
-        else:
-            return linha
-        raise TransicaoDaSagaInvalidaError(msg)
-
-    def _conferir_envio(
-        self,
-        linha: LinhaDoFluxo,
-        envio: Envio | None,
-        agora: datetime,
-        itens: list[ItemDoDiagnostico],
-    ) -> None:
-        """O ``envio`` e o comando da ``linha``, com os dados e o prazo certos."""
-        if envio is None and linha.comando is None:
-            return
-        if envio is None or envio.tipo is not linha.comando:
-            enviado = envio.tipo if envio is not None else "nenhum comando"
-            msg = f"a linha envia {linha.comando or 'nenhum comando'}, nao {enviado}"
-            raise TransicaoDaSagaInvalidaError(msg)
-        # Os dados que a saga guarda: os itens do diagnostico e as pecas deles.
-        da_saga: dict[Comando, dict[str, Any]] = {
-            Comando.GERAR_ORCAMENTO: {"itens": itens},
-            Comando.RESERVAR_PECAS: {"pecas": _pecas(itens)},
-        }
-        esperados = {"ordem_id": str(self.id), **da_saga.get(envio.tipo, {})}
-        if any(envio.dados.get(chave) != valor for chave, valor in esperados.items()):
-            msg = f"{envio.tipo} com dados que nao sao os desta saga"
-            raise TransicaoDaSagaInvalidaError(msg)
-        prazo = envio.prazo_resposta_em
-        com_prazo = envio.tipo in COMANDOS_COM_PRAZO
-        if (prazo is not None) is not com_prazo or (
-            prazo is not None and (prazo.tzinfo is None or prazo <= agora)
-        ):
-            msg = f"{envio.tipo} sem o prazo de resposta depois do envio"
-            raise TransicaoDaSagaInvalidaError(msg)
 
     def _passo(
         self,
@@ -399,12 +348,3 @@ class Saga(AggregateRoot):
         }
         self._prazo_resposta_em = envio.prazo_resposta_em
         self._reenvios = 0
-
-
-def _pecas(itens: list[ItemDoDiagnostico]) -> list[dict[str, Any]]:
-    """Os itens ``peca`` como ``{sku, quantidade}`` (lista vazia vale)."""
-    return [
-        {"sku": item["codigo"], "quantidade": item["quantidade"]}
-        for item in itens
-        if item["tipo"] == "peca"
-    ]
