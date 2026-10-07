@@ -72,8 +72,9 @@ dev = [
     "import-linter>=2.13",
     "types-jsonschema>=4.26.0",
     "types-pyyaml>=6.0.12",
-    # BDD de componente da saga (ADR-041): Gherkin em portugues exige o 8+.
-    "pytest-bdd>=8.1",
+    # BDD de componente da saga (ADR-041, que fixa o piso 8.0): o parser
+    # oficial do Gherkin, com `# language: pt`, chegou no 8.0.
+    "pytest-bdd>=8.0",
 ]
 
 [build-system]
@@ -215,6 +216,20 @@ forbidden_modules = [
     "yaml",
     "opentelemetry",
     "prometheus_client",
+]
+
+# A saga e process manager da aplicacao (ADR-035, RFC-004 secao 4): estado e
+# regras sem I/O. Ela nao enxerga o ORM, o driver do banco nem a infraestrutura
+# do proprio contexto (a aplicacao de outros contextos ainda importa
+# `sqlalchemy.exc`, entao o contrato geral acima nao cobre o banco).
+[[tool.importlinter.contracts]]
+name = "Saga sem banco nem infraestrutura"
+type = "forbidden"
+source_modules = ["src.ordem_servico.aplicacao.saga"]
+forbidden_modules = [
+    "sqlalchemy",
+    "psycopg2",
+    "src.ordem_servico.infraestrutura",
 ]
 
 # A camada HTTP so e importada pelos composition roots (as proprias

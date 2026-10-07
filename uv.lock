@@ -1686,7 +1686,7 @@ dev = [
     { name = "import-linter", specifier = ">=2.13" },
     { name = "mypy", specifier = ">=2.3.0" },
     { name = "pytest", specifier = ">=8.0" },
-    { name = "pytest-bdd", specifier = ">=8.1" },
+    { name = "pytest-bdd", specifier = ">=8.0" },
     { name = "pytest-cov", specifier = ">=6.0" },
     { name = "pytest-timeout", specifier = ">=2.3" },
     { name = "ruff", specifier = ">=0.16.0" },
