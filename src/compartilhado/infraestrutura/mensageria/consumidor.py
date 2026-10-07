@@ -522,7 +522,12 @@ def _recusar_commit(sessao: Session) -> None:
 
     O SQLAlchemy dispara o ``before_commit`` tambem ao liberar um savepoint
     (``begin_nested``), que continua dentro da transacao da mensagem e segue
-    permitido; so o commit dela e recusado.
+    permitido; so o commit dela e recusado, inclusive o ``session.commit()``
+    chamado dentro de um savepoint. O evento nao diz qual transacao comita: o
+    ``commit()`` direto na transacao raiz com um savepoint aberto escapa desta
+    guarda (a conferencia da transacao depois do handler manda a mensagem para
+    a DLQ, com o efeito ja gravado), e o commit da conexao
+    (``session.connection().commit()``) nao passa por nenhuma das duas.
     """
     if sessao.in_nested_transaction():
         return

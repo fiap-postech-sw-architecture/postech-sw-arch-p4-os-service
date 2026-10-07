@@ -536,10 +536,21 @@ def test_falha_no_commit_depois_do_handler_desfaz_tudo_e_a_mensagem_volta_pela_r
     assert transicoes == 2  # abertura (RECEBIDA) e EM_DIAGNOSTICO
 
 
+def _comitar_no_savepoint(transacao: TransacaoDaMensagem) -> Desfecho:
+    with transacao.session.begin_nested():
+        transacao.session.commit()
+    return Desfecho.PROCESSADA
+
+
 @pytest.mark.parametrize(
     ("depois", "motivo"),
     [
         pytest.param(lambda t: t.session.commit(), "commit", id="handler-comita"),
+        pytest.param(
+            _comitar_no_savepoint,
+            "commit no savepoint",
+            id="handler-comita-dentro-do-savepoint",
+        ),
         pytest.param(
             lambda t: (t.session.rollback(), Desfecho.PROCESSADA)[1],
             "rollback",
