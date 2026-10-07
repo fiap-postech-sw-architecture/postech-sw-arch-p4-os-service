@@ -555,6 +555,36 @@ def test_recusa_do_broker_com_o_banco_fora_deixa_a_linha_para_depois_do_lease(
     assert "outbox row failure not recorded; it returns after the lease" in eventos
 
 
+def test_linha_que_vira_dead_por_falhas_inesperadas_sai_no_log(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = _LogEspiao()
+    monkeypatch.setattr(modulo_relay, "_log", log)
+    canal = CanalFalso()
+    conexoes.append((ConexaoFalsa(), canal))
+    mensagem_id = _gravar(session_factory)
+
+    def validar_com_falha(self: Catalogo, envelope: object) -> None:
+        raise KeyError("tipo")
+
+    monkeypatch.setattr(Catalogo, "validar", validar_com_falha)
+    relay = _relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+
+    with EmSegundoPlano(relay):
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "dead")
+
+    linha = _linha(engine, mensagem_id)
+    assert (linha.tentativas, linha.ultimo_erro) == (5, "falha ao publicar (KeyError)")
+    eventos = [evento for evento, _ in log.linhas]
+    assert eventos.count("outbox row dead after unexpected failures") == 1
+    assert canal.publicadas == []
+
+
 def test_renovacao_gravada_e_perdida_na_volta_nao_conta_tentativa_e_fica_no_log(
     engine: Engine,
     session_factory: sessionmaker[Session],

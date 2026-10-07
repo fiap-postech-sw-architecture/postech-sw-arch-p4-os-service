@@ -303,6 +303,12 @@ class Relay:
                 "outbox row failure not recorded; the lease was lost",
                 outbox_id=linha.id,
             )
+        elif desfecho == "dead":
+            _log.error(
+                "outbox row dead after unexpected failures",
+                outbox_id=linha.id,
+                tentativas=linha.tentativas + 1,
+            )
 
     def _publicar_no_span(self, linha: LinhaDaOutbox) -> None:
         tipo = linha.envelope["tipo"]
