@@ -17,7 +17,6 @@ import math
 import threading
 import time
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -642,9 +641,7 @@ def test_sem_listen_nem_select_o_relay_segue_pelo_poll(
         return select_original(*args)
 
     monkeypatch.setattr(engine.dialect, "create_connect_args", connect_args)
-    monkeypatch.setattr(
-        modulo_relay, "select", SimpleNamespace(select=select_com_falha)
-    )
+    monkeypatch.setattr(modulo_relay.select, "select", select_com_falha)
 
     with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
         esperar_ate(lambda: not falhas_de_listen and not falhas_de_select)
