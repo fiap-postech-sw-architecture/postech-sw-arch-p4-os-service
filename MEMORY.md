@@ -59,6 +59,7 @@ Consolidado em 2026-10-06: as 92 entradas anteriores estao em `MEMORY.archive.md
 
 ## Gotchas
 
+- 2026-10-07 - Substitui a entrada de 2026-10-06 sobre o pika em WARNING no boot do relay e do consumidor: o logger `pika` fica em ERROR no `configurar_logging`, em todos os processos (em WARNING ele imprime parte do corpo da mensagem devolvida) - PR #4
 - 2026-10-07 - RabbitMQ 4: `queue.declare` passivo exige permissao de configuracao ou de leitura na fila (sem as duas, 403 `ACCESS_REFUSED`), e `exchange.declare` passivo nao exige nenhuma - PR #4
 - 2026-10-07 - RabbitMQ em alarme de memoria nao le o fechamento de uma conexao bloqueada: a mensagem sem ack fica presa na conexao antiga ate o alarme passar, e so entao volta a fila (nada se perde, mas atrasa) - PR #4
 - 2026-10-07 - O pika loga em WARNING a mensagem devolvida com os 255 primeiros bytes do corpo (o `configurar_logging` deixa o logger `pika` em ERROR); nao codifica `float` em header (`Decimal` sim); e um header de timestamp fora do intervalo (epoch em ms) derruba a conexao no decoder, antes do codigo do servico - PR #4

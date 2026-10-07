@@ -24,7 +24,8 @@ x-mensageria: &mensageria
 
 # Relay e consumidor: sistema de arquivos so leitura (o /tmp dos arquivos de
 # saude e um tmpfs), sem capabilities nem escalada de privilegio e com teto de
-# memoria, CPU e processos. Cada um usa ate 4 conexoes com o banco.
+# memoria, CPU e processos. Cada um usa ate 4 conexoes com o banco (pool de
+# 2 + 2), e o relay mais 1, a do LISTEN.
 x-processo-endurecido: &processo-endurecido
   read_only: true
   tmpfs:
