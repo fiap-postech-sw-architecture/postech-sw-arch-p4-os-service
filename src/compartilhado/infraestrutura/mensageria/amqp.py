@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 # Queda do broker (e nao falha de uma mensagem): conexao recusada ou perdida,
-# heartbeat vencido, canal usado depois que a conexao caiu.
+# heartbeat vencido, canal usado depois que a conexao caiu e o nome do broker
+# sem resolucao no DNS, que o pika levanta como ``socket.gaierror`` (OSError),
+# sem embrulhar (o Service headless do broker some do DNS sem pod pronto).
 ERROS_DE_CONEXAO: Final[tuple[type[Exception], ...]] = (
     AMQPConnectionError,
     ChannelWrongStateError,
