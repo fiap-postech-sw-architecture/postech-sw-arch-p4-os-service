@@ -16,7 +16,7 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 - Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, e o consumidor conduz o caminho feliz até `FINALIZADA`, com a etapa visível na OS e na rota de operação ([seção abaixo](#saga)).
 - API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento`, `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
 - Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
-- Ainda não: as compensações (falhas de negócio e respostas de compensação são classificadas e ignoradas com log, e o cancelamento ainda leva a OS direto a `CANCELADA`, sem passar pela saga), o processo `prazos`, o e-mail ao cliente e os manifestos Kubernetes, desenhados na RFC-004.
+- Ainda não: as compensações (falhas de negócio e respostas de compensação vão para a DLQ com o motivo `sem_tratador_nesta_versao`, para o redrive na versão que as trata, e o cancelamento ainda leva a OS direto a `CANCELADA`, sem passar pela saga), o processo `prazos`, o e-mail ao cliente e os manifestos Kubernetes, desenhados na RFC-004.
 
 ## Autenticação
 
@@ -161,7 +161,7 @@ Para cada mensagem da fila `os.eventos`, uma por vez (prefetch 1) e com ack manu
 | Handler concluiu | ack (`processada`, ou `ignorada` quando a mensagem não corresponde ao estado atual) |
 | Mesmo `id` de novo | ack sem efeito (`duplicada`) |
 | Erro transitório (banco fora, `FalhaTransitoriaError`, conflito de versão) | cópia em `pytstop.retry` com `x-tentativa` + 1 e a routing key da fila do nível (`os.eventos.retry.1s`, `.5s`, `.15s`, `.60s` e `.300s`), com confirmação e `mandatory`, e só então o ack (`retry`); a cópia leva as propriedades da original e o contexto de trace do consumo |
-| Sexta falha transitória, tipo, versão, contrato ou origem inválidos, cópia de retry devolvida ou recusada, ou outra exceção do handler | `reject` sem requeue, e a fila manda para `os.eventos.dlq` (`dlq`) |
+| Sexta falha transitória, tipo, versão, contrato ou origem inválidos, cópia de retry devolvida ou recusada, `FalhaPermanenteError` do handler (com o motivo dela em código no log) ou outra exceção do handler | `reject` sem requeue, e a fila manda para `os.eventos.dlq` (`dlq`); o `id` não entra em `mensagens_processadas`, e o redrive trata a mensagem de novo |
 
 Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como argumento dela: uma fila só, com `expiration` por mensagem, seguraria a cópia de 1 s atrás da de 300 s, porque a mensagem só expira na cabeça da fila. Uma mensagem que o cliente AMQP não consegue nem decodificar (um header de timestamp fora do intervalo, por exemplo) derruba a conexão a cada entrega: com prefetch 1 só ela cai, e o `delivery-limit` de 5 da fila (policy do platform) a manda para a DLQ sem levar as seguintes. Uma vez por hora o consumidor apaga, em lotes, as linhas de `mensagens_processadas` com mais de 30 dias.
 
@@ -304,9 +304,11 @@ O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa an
 | Etapa à frente da atual | `ExecucaoIniciada` antes da `ExecucaoAgendada` | adiantado (`FalhaTransitoriaError`): volta pela fila de retry até a saga alcançá-lo |
 | Mesma etapa, antes do fato que o habilita | `DiagnosticoConcluido` com a OS ainda `recebida`; `PagamentoConfirmado` antes do `PagamentoSolicitado` | adiantado |
 | Saga concluída ou fora do fluxo normal | `ExecucaoFinalizada` repetida em `concluida` | ignorado com log |
-| OS sem saga, ou `ordem_id` dos dados diferente do `correlation_id` | | erro permanente: DLQ |
+| OS sem saga, ou `ordem_id` dos dados diferente do `correlation_id` | | erro permanente: DLQ com o motivo `saga_inexistente` ou `ordem_id_divergente` |
+| Falha de negócio ou resposta de compensação na etapa em que caberia tratá-la | `OrcamentoRecusado` em `aguardando_decisao` | DLQ com o motivo `sem_tratador_nesta_versao` (nesta versão, sem compensações) |
+| Fato que a OS ou a saga recusam | | DLQ com o motivo `transicao_invalida` |
 
-Nenhum evento fora de ordem vai para a DLQ: o adiantado espera a saga nas cinco cópias de retry (1 a 300 s), bem mais que o atraso entre eventos do mesmo passo. Falhas de negócio (`GeracaoDeOrcamentoFalhou`, `OrcamentoRecusado`, `OrcamentoExpirado`, `ReservaDePecasFalhou`, `PagamentoRecusado`, `PagamentoExpirado`) e respostas de compensação passam pela mesma classificação e, nesta versão, são ignoradas com log, sem compensar.
+Nenhum evento fora de ordem vai para a DLQ: o adiantado espera a saga nas cinco cópias de retry (1 a 300 s), bem mais que o atraso entre eventos do mesmo passo. Falhas de negócio (`GeracaoDeOrcamentoFalhou`, `OrcamentoRecusado`, `OrcamentoExpirado`, `ReservaDePecasFalhou`, `PagamentoRecusado`, `PagamentoExpirado`) e respostas de compensação passam pela mesma classificação; nesta versão, a que chega na etapa em que caberia tratá-la vai para a DLQ, onde o alerta a mostra, em vez de ser consumida sem efeito: o `id` dela não entra em `mensagens_processadas`, e o redrive na versão com as compensações a processa. O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
 
 ### Consulta e operação
 
@@ -320,7 +322,7 @@ curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" 
 
 ### Observabilidade da saga
 
-- Trace: o span da requisição de abertura é a raiz do trace da saga; a outbox guarda o contexto, o relay publica como filho, e o `process <tipo>` do consumidor ganha `pytstop.saga.etapa`, `pytstop.saga.etapa_nova` e `pytstop.saga.desfecho` (`processada`, `ignorada` ou `adiantada`). A saga guarda o `traceparent` da última transição.
+- Trace: o span da requisição de abertura é a raiz do trace da saga; a outbox guarda o contexto, o relay publica como filho, e o `process <tipo>` do consumidor ganha `pytstop.saga.etapa`, `pytstop.saga.etapa_nova` e `pytstop.saga.desfecho` (`processada`, `ignorada`, `adiantada` ou `recusada`, com o motivo no status de erro). A saga guarda o `traceparent` da última transição.
 - Métricas ([ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md)): `pytstop_saga_iniciadas_total` (API), `pytstop_saga_finalizadas_total{resultado}` e `pytstop_saga_etapa_duracao_segundos{etapa}` (quem tira a saga da etapa), contadas só depois do commit (rollback e conflito de versão não contam, e a retry não conta duas vezes); `pytstop_saga_ativas{etapa}` e `pytstop_saga_etapa_mais_antiga_segundos{etapa}`, gauges que o coletor da API calcula numa consulta por raspagem. As séries de rótulo fechado nascem em zero em cada processo.
 - Logs JSON em inglês com `correlation_id`, `etapa` e `tipo`: `saga started`, `saga transition`, `saga event ignored` (com a classificação) e `saga event ahead`, sem texto livre, placa nem links.
 

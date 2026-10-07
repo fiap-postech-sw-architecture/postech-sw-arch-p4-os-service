@@ -18,6 +18,7 @@ from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
+    EventoRecusadoError,
     Tratamento,
 )
 
@@ -66,16 +67,31 @@ class _OrquestradorFalso:
         return self._resultado
 
 
+@pytest.mark.parametrize(
+    "tratamento",
+    [
+        pytest.param(
+            Tratamento(
+                Desfecho.PROCESSADA,
+                EtapaSaga.AGUARDANDO_DIAGNOSTICO,
+                EtapaSaga.AGUARDANDO_ORCAMENTO,
+            ),
+            id="processada",
+        ),
+        pytest.param(
+            Tratamento(
+                Desfecho.IGNORADA,
+                EtapaSaga.AGUARDANDO_DECISAO,
+                EtapaSaga.AGUARDANDO_DECISAO,
+            ),
+            id="ignorada",
+        ),
+    ],
+)
 def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
-    monkeypatch: pytest.MonkeyPatch, rastreador: Rastreador
+    monkeypatch: pytest.MonkeyPatch, rastreador: Rastreador, tratamento: Tratamento
 ) -> None:
-    falso = _OrquestradorFalso(
-        Tratamento(
-            Desfecho.PROCESSADA,
-            EtapaSaga.AGUARDANDO_DIAGNOSTICO,
-            EtapaSaga.AGUARDANDO_ORCAMENTO,
-        )
-    )
+    falso = _OrquestradorFalso(tratamento)
     monkeypatch.setattr(processo_consumidor, "OrquestradorDaSaga", falso)
     transacao = TransacaoDaMensagem(MagicMock())
 
@@ -84,14 +100,14 @@ def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
             _mensagem(), transacao, prazo_resposta=timedelta(seconds=9)
         )
 
-    assert desfecho is Desfecho.PROCESSADA
+    assert desfecho is tratamento.desfecho
     assert falso.montado_com["publicador"] is transacao
     assert falso.montado_com["prazo_resposta"] == timedelta(seconds=9)
     (span,) = rastreador.spans()
     assert span.attributes == {
-        "pytstop.saga.etapa": "aguardando_diagnostico",
-        "pytstop.saga.etapa_nova": "aguardando_orcamento",
-        "pytstop.saga.desfecho": "processada",
+        "pytstop.saga.etapa": tratamento.etapa.value,
+        "pytstop.saga.etapa_nova": tratamento.etapa_nova.value,
+        "pytstop.saga.desfecho": tratamento.desfecho.value,
     }
 
 
@@ -116,6 +132,51 @@ def test_handler_marca_o_adiantado_no_span_e_relanca(
         "pytstop.saga.etapa": "aguardando_agendamento",
         "pytstop.saga.desfecho": "adiantada",
     }
+
+
+@pytest.mark.parametrize(
+    ("recusa", "atributos"),
+    [
+        pytest.param(
+            EventoRecusadoError(
+                "sem_tratador_nesta_versao", EtapaSaga.AGUARDANDO_DECISAO
+            ),
+            {
+                "pytstop.saga.desfecho": "recusada",
+                "pytstop.saga.etapa": "aguardando_decisao",
+            },
+            id="com-saga",
+        ),
+        pytest.param(
+            EventoRecusadoError("saga_inexistente"),
+            {"pytstop.saga.desfecho": "recusada"},
+            id="sem-saga",
+        ),
+    ],
+)
+def test_handler_marca_a_recusa_no_span_e_relanca(
+    monkeypatch: pytest.MonkeyPatch,
+    rastreador: Rastreador,
+    recusa: EventoRecusadoError,
+    atributos: dict[str, str],
+) -> None:
+    monkeypatch.setattr(
+        processo_consumidor, "OrquestradorDaSaga", _OrquestradorFalso(recusa)
+    )
+
+    with (
+        rastreador.tracer.start_as_current_span("process OrcamentoRecusado"),
+        pytest.raises(EventoRecusadoError) as exc,
+    ):
+        processo_consumidor.tratar_evento_da_saga(
+            _mensagem(),
+            TransacaoDaMensagem(MagicMock()),
+            prazo_resposta=timedelta(seconds=9),
+        )
+
+    assert exc.value is recusa
+    (span,) = rastreador.spans()
+    assert span.attributes == atributos
 
 
 class _Processo:

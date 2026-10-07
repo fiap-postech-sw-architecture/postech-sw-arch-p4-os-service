@@ -30,6 +30,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
 from src.compartilhado.infraestrutura.observability import criar_tracer
 from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
+    EventoRecusadoError,
     OrquestradorDaSaga,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
@@ -57,7 +58,8 @@ def tratar_evento_da_saga(
     """Orquestrador da saga sobre a transacao da mensagem (sem commit aqui).
 
     O span ``process <tipo>`` do consumo ganha a etapa antes e depois do evento
-    e o desfecho (processada, ignorada ou adiantada), ADR-043.
+    e o desfecho (processada, ignorada, adiantada ou recusada), ADR-043; o
+    motivo da recusa vai no status de erro do span, pelo consumidor.
     """
     span = trace.get_current_span()
     orquestrador = OrquestradorDaSaga(
@@ -75,6 +77,11 @@ def tratar_evento_da_saga(
                 "pytstop.saga.desfecho": "adiantada",
             }
         )
+        raise
+    except EventoRecusadoError as exc:
+        span.set_attribute("pytstop.saga.desfecho", "recusada")
+        if exc.etapa is not None:
+            span.set_attribute("pytstop.saga.etapa", exc.etapa.value)
         raise
     span.set_attributes(
         {

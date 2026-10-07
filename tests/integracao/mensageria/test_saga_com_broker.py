@@ -12,12 +12,15 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
+import structlog
 from prometheus_client import REGISTRY
 from sqlalchemy import text
+from structlog.testing import capture_logs
 
+from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
     Consumidor,
@@ -353,3 +356,69 @@ def test_falha_no_insert_da_outbox_nao_grava_nada_do_evento(
     assert (processada, status, itens) == (0, "em_diagnostico", [])
     assert atendimento.etapa() == "aguardando_diagnostico"
     assert atendimento.gatilhos() == ["abertura", "DiagnosticoIniciado"]
+
+
+@pytest.mark.parametrize(
+    ("caso", "motivo", "etapa"),
+    [
+        pytest.param("divergente", "ordem_id_divergente", None, id="divergente"),
+        pytest.param("sem_saga", "saga_inexistente", None, id="sem-saga"),
+        pytest.param(
+            "recusa", "sem_tratador_nesta_versao", "aguardando_decisao", id="recusa"
+        ),
+    ],
+)
+def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
+    atendimento: Atendimento,
+    engine: Engine,
+    broker: Broker,
+    rastreador: Rastreador,
+    monkeypatch: pytest.MonkeyPatch,
+    caso: str,
+    motivo: str,
+    etapa: str | None,
+) -> None:
+    atendimento.abrir()
+    atendimento.receber("SolicitarDiagnostico")
+    if caso == "recusa":
+        atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
+        atendimento.esperar_passo("DiagnosticoIniciado")
+        atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
+        atendimento.receber("GerarOrcamento")
+        atendimento.responder("GerarOrcamento", "OrcamentoGerado")
+        atendimento.esperar_passo("OrcamentoGerado")
+    gatilhos = atendimento.gatilhos()
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+
+    with capture_logs() as logs:
+        match caso:
+            case "divergente":
+                recusado = atendimento.responder(
+                    "SolicitarDiagnostico", "DiagnosticoIniciado", ordem_id=str(uuid4())
+                )
+            case "sem_saga":
+                recusado = envelope_de_evento("DiagnosticoIniciado")
+                broker.publicar_evento(recusado)
+            case _:
+                recusado = atendimento.responder("GerarOrcamento", "OrcamentoRecusado")
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+
+    # O operador le o motivo no log e no span; o id fica livre para o redrive.
+    assert [
+        (log["event"], log.get("motivo")) for log in logs if "dlq" in log["event"]
+    ] == [("message rejected to dlq", motivo)]
+    with engine.connect() as conexao:
+        registrada = conexao.execute(
+            text("SELECT count(*) FROM mensagens_processadas WHERE mensagem_id = :id"),
+            {"id": recusado["id"]},
+        ).scalar_one()
+    assert registrada == 0
+    assert atendimento.gatilhos() == gatilhos
+    (consumo,) = rastreador.spans(f"process {recusado['tipo']}")
+    assert consumo.status.description == motivo
+    assert consumo.attributes is not None
+    saga = {k: v for k, v in consumo.attributes.items() if k.startswith("pytstop.saga")}
+    esperado = {"pytstop.saga.desfecho": "recusada"}
+    if etapa is not None:
+        esperado["pytstop.saga.etapa"] = etapa
+    assert saga == esperado

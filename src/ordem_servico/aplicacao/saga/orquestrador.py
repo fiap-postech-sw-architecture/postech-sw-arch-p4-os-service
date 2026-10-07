@@ -7,10 +7,12 @@ junto com ``mensagens_processadas`` (ADR-036): etapa, status, passo e comando
 entram no mesmo commit ou nao entram.
 
 Evento de etapa ja passada, repetido ou com a saga fora do fluxo e ignorado com
-log; o adiantado volta pela fila de retry (``EventoAdiantadoError``). As falhas
-de negocio e as respostas de compensacao sao classificadas da mesma forma, mas,
-enquanto as compensacoes nao chegam ao orquestrador, a que caberia tratar
-tambem e ignorada com log.
+log; o adiantado volta pela fila de retry (``EventoAdiantadoError``). O que
+nenhuma tentativa resolve vai para a DLQ com o motivo em codigo
+(``EventoRecusadoError``): OS sem saga, ``ordem_id`` divergente, fato que a OS
+ou a saga recusam e, enquanto as compensacoes nao chegam ao orquestrador, a
+falha de negocio e a resposta de compensacao na etapa em que caberia trata-las
+(``sem_tratador_nesta_versao``, para o redrive na versao que as trata).
 """
 
 from __future__ import annotations
@@ -25,16 +27,19 @@ import structlog
 
 from src.compartilhado.aplicacao.mensageria import (
     Comando,
-    ContratoInvalidoError,
     Desfecho,
+    FalhaPermanenteError,
     FalhaTransitoriaError,
 )
 from src.compartilhado.dominio.dinheiro import Dinheiro
-from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
+from src.compartilhado.dominio.exceptions import (
+    TransicaoStatusInvalidaException,
+    ViolacaoRegraDeNegocioException,
+)
 from src.ordem_servico.aplicacao.saga.modelo import (
     Envio,
     EtapaSaga,
-    SagaNaoEncontradaException,
+    TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
@@ -59,6 +64,13 @@ _log = structlog.get_logger(__name__)
 ATOR_CONSUMIDOR: Final = "consumidor"
 # Unica prioridade nesta fase: nenhuma regra escolhe `alta` (RFC-004 secao 5.3).
 _PRIORIDADE: Final = "normal"
+# O que a OS ou a saga recusam ao aplicar o fato: estado incompativel com o
+# evento, que nenhuma nova tentativa muda.
+_RECUSAS_DO_DOMINIO: Final = (
+    TransicaoStatusInvalidaException,
+    ViolacaoRegraDeNegocioException,
+    TransicaoDaSagaInvalidaError,
+)
 
 
 def _agora() -> datetime:
@@ -82,6 +94,17 @@ class EventoAdiantadoError(FalhaTransitoriaError):
 
     def __init__(self, etapa: EtapaSaga) -> None:
         super().__init__(f"evento adiantado na etapa {etapa.value}")
+        self.etapa = etapa
+
+
+class EventoRecusadoError(FalhaPermanenteError):
+    """Evento que nenhuma tentativa resolve: DLQ com o ``motivo`` em codigo.
+
+    ``etapa`` e a da saga quando ela existe (vai para o span do consumo).
+    """
+
+    def __init__(self, motivo: str, etapa: EtapaSaga | None = None) -> None:
+        super().__init__(motivo)
         self.etapa = etapa
 
 
@@ -113,41 +136,44 @@ class OrquestradorDaSaga:
 
         Raises:
             EventoAdiantadoError: evento de etapa a frente (transitorio).
-            SagaNaoEncontradaException: ``ordem_id`` sem saga (permanente, DLQ).
-            ContratoInvalidoError: ``ordem_id`` dos dados diferente do
-                ``correlation_id`` (permanente, DLQ).
+            EventoRecusadoError: permanente, DLQ com o motivo:
+                ``ordem_id_divergente`` (``ordem_id`` dos dados diferente do
+                ``correlation_id``), ``saga_inexistente`` (OS sem saga, ou saga
+                sem OS), ``sem_tratador_nesta_versao`` (falha de negocio ou
+                resposta de compensacao na etapa em que caberia trata-la) e
+                ``transicao_invalida`` (a OS ou a saga recusam o fato).
         """
         ordem_id = evento.correlation_id
         if UUID(evento.dados["ordem_id"]) != ordem_id:
-            msg = "ordem_id dos dados diverge do correlation_id"
-            raise ContratoInvalidoError(msg, caminho="$.dados.ordem_id")
+            raise EventoRecusadoError("ordem_id_divergente")
         saga = self._sagas.obter(ordem_id)
         ordem = self._ordens.obter_por_id(ordem_id)
         if saga is None or ordem is None:
-            raise SagaNaoEncontradaException(ordem_id)
+            raise EventoRecusadoError("saga_inexistente")
         etapa = saga.etapa
         contexto = {"correlation_id": str(ordem_id), "tipo": evento.tipo}
         classificacao = saga.classificar(evento.tipo, ordem)
         if classificacao is Classificacao.ADIANTADO:
             _log.warning("saga event ahead", etapa=etapa.value, **contexto)
             raise EventoAdiantadoError(etapa)
-        aplicar = _FLUXO_NORMAL.get(evento.tipo)
-        if classificacao is not Classificacao.PROCESSAR or aplicar is None:
-            # Falha de negocio ou resposta de compensacao na etapa em que caberia
-            # tratar: a compensacao ainda nao esta no orquestrador.
-            motivo = (
-                "sem_compensacao"
-                if classificacao is Classificacao.PROCESSAR
-                else classificacao.value
-            )
+        if classificacao is not Classificacao.PROCESSAR:
             _log.info(
                 "saga event ignored",
                 etapa=etapa.value,
-                classificacao=motivo,
+                classificacao=classificacao.value,
                 **contexto,
             )
             return Tratamento(Desfecho.IGNORADA, etapa, etapa)
-        aplicar(self, evento, saga, ordem, self._relogio())
+        aplicar = _FLUXO_NORMAL.get(evento.tipo)
+        if aplicar is None:
+            # Falha de negocio ou resposta de compensacao na etapa em que caberia
+            # trata-la: consumida agora, ela se perderia; na DLQ, espera o redrive
+            # da versao com as compensacoes.
+            raise EventoRecusadoError("sem_tratador_nesta_versao", etapa)
+        try:
+            aplicar(self, evento, saga, ordem, self._relogio())
+        except _RECUSAS_DO_DOMINIO as exc:
+            raise EventoRecusadoError("transicao_invalida", etapa) from exc
         self._ordens.salvar(ordem)
         self._sagas.salvar(saga)
         _log.info(

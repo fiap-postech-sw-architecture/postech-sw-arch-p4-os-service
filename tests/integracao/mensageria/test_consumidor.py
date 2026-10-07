@@ -27,6 +27,7 @@ from structlog.testing import capture_logs
 from src.compartilhado.aplicacao.mensageria import (
     Comando,
     Desfecho,
+    FalhaPermanenteError,
     FalhaTransitoriaError,
     MensagemRecebida,
 )
@@ -429,6 +430,36 @@ def test_erro_permanente_do_handler_vai_direto_para_a_dlq(
 
     assert len(espiao.recebidas) == 1
     assert _processadas(engine) == []
+
+
+def test_falha_permanente_do_handler_vai_para_a_dlq_com_o_motivo_e_volta_no_redrive(
+    engine: Engine,
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    rastreador: Rastreador,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    espiao = Espiao(FalhaPermanenteError("sem_tratador_nesta_versao"))
+    envelope = envelope_de_evento("OrcamentoRecusado")
+    retries = _retries()
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+
+    with capture_logs() as logs, EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+        # O redrive (a mesma mensagem de novo, na versao que a trata) e
+        # processado: o id nao ficou em mensagens_processadas.
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _processadas(engine) == [UUID(envelope["id"])])
+
+    assert len(espiao.recebidas) == 2
+    assert _retries() == retries
+    assert [
+        (log["event"], log.get("motivo")) for log in logs if "dlq" in log["event"]
+    ] == [("message rejected to dlq", "sem_tratador_nesta_versao")]
+    recusa, redrive = rastreador.spans("process OrcamentoRecusado")
+    assert recusa.status.description == "sem_tratador_nesta_versao"
+    assert redrive.status.is_ok
 
 
 class _Saga:

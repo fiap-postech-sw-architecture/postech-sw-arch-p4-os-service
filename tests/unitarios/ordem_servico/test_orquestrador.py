@@ -11,8 +11,8 @@ import structlog
 from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import (
-    ContratoInvalidoError,
     Desfecho,
+    FalhaPermanenteError,
     FalhaTransitoriaError,
 )
 from src.compartilhado.dominio.exceptions import (
@@ -20,17 +20,14 @@ from src.compartilhado.dominio.exceptions import (
     ViolacaoRegraDeNegocioException,
 )
 from src.ordem_servico.aplicacao.saga import orquestrador as modulo
-from src.ordem_servico.aplicacao.saga.modelo import (
-    EtapaSaga,
-    SagaNaoEncontradaException,
-)
+from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
+    EventoRecusadoError,
     Tratamento,
 )
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
-from tests.eventos import evento
 from tests.unitarios.ordem_servico.cenario_da_saga import (
     ESPERADA,
     FLUXO_FELIZ,
@@ -227,17 +224,19 @@ def _desfecho(cenario: CenarioDaSaga, tipo: str) -> str:
         return cenario.receber(tipo).desfecho.value
     except EventoAdiantadoError:
         return "adiantada"
+    except EventoRecusadoError as exc:
+        return f"recusada:{exc.motivo}"
 
 
 def _desfecho_esperado(etapa: str, tipo: str) -> str:
     classificacao = esperado(etapa, tipo).value
     if classificacao == "adiantado":
         return "adiantada"
-    # So o fluxo normal e processado; falhas de negocio e respostas de
-    # compensacao ficam para as compensacoes.
-    if classificacao == "processar" and tipo in FLUXO_FELIZ:
-        return "processada"
-    return "ignorada"
+    if classificacao != "processar":
+        return "ignorada"
+    # So o fluxo normal tem tratador; falhas de negocio e respostas de
+    # compensacao esperam na DLQ a versao com as compensacoes.
+    return "processada" if tipo in FLUXO_FELIZ else "recusada:sem_tratador_nesta_versao"
 
 
 @pytest.mark.parametrize(
@@ -248,7 +247,7 @@ def _desfecho_esperado(etapa: str, tipo: str) -> str:
         for tipo in ESPERADA
     ],
 )
-def test_matriz_pelo_handler_so_levanta_a_falha_transitoria(
+def test_matriz_pelo_handler_processa_ignora_adianta_ou_recusa(
     etapa: str, tipo: str
 ) -> None:
     cenario = CenarioDaSaga.em(etapa)
@@ -259,7 +258,7 @@ def test_matriz_pelo_handler_so_levanta_a_falha_transitoria(
 
     assert desfecho == _desfecho_esperado(etapa, tipo)
     if desfecho != "processada":
-        # Ignorado ou adiantado nao toca saga nem OS.
+        # Ignorado, adiantado ou recusado nao toca saga nem OS.
         assert (len(cenario.saga.passos), cenario.ordem.versao) == (
             passos,
             versao_da_os,
@@ -318,26 +317,104 @@ def test_orcamento_so_de_servicos_reserva_lista_vazia() -> None:
     assert (tipo, dados["pecas"]) == ("ReservarPecas", [])
 
 
-def test_falha_de_negocio_na_etapa_e_ignorada_com_log(
+@pytest.mark.parametrize(
+    ("etapa", "tipo"),
+    [
+        pytest.param("aguardando_orcamento", "GeracaoDeOrcamentoFalhou", id="geracao"),
+        pytest.param("aguardando_decisao", "OrcamentoRecusado", id="recusa"),
+        pytest.param("aguardando_decisao", "OrcamentoExpirado", id="expiracao"),
+        pytest.param("aguardando_reserva", "ReservaDePecasFalhou", id="reserva"),
+        *(
+            pytest.param("compensando", tipo, id=tipo)
+            for tipo, alvo in ESPERADA.items()
+            if alvo == "compensando"
+        ),
+    ],
+)
+def test_falha_de_negocio_e_resposta_de_compensacao_sem_tratador_vao_para_a_dlq(
+    etapa: str, tipo: str
+) -> None:
+    cenario = CenarioDaSaga.em(etapa)
+    antes = (cenario.saga.passos, cenario.ordem.status, len(cenario.ordem.historico))
+    comandos = list(cenario.publicador.comandos)
+
+    with pytest.raises(FalhaPermanenteError) as exc:
+        cenario.receber(tipo)
+
+    # Consumida agora, a falha se perderia: na DLQ, espera o redrive da versao
+    # com as compensacoes.
+    assert isinstance(exc.value, EventoRecusadoError)
+    assert (exc.value.motivo, exc.value.etapa) == (
+        "sem_tratador_nesta_versao",
+        EtapaSaga(etapa),
+    )
+    depois = (cenario.saga.passos, cenario.ordem.status, len(cenario.ordem.historico))
+    assert depois == antes
+    assert cenario.publicador.comandos == comandos
+
+
+def test_pagamento_recusado_ou_expirado_com_checkout_vao_para_a_dlq() -> None:
+    for tipo in ("PagamentoRecusado", "PagamentoExpirado"):
+        cenario = CenarioDaSaga.em("aguardando_pagamento")
+        cenario.receber("PagamentoSolicitado")
+
+        with pytest.raises(EventoRecusadoError, match="sem_tratador_nesta_versao"):
+            cenario.receber(tipo)
+
+        assert cenario.ordem.resumo_pagamento is not None
+        assert cenario.ordem.resumo_pagamento.status.value == "solicitado"
+
+
+@pytest.mark.parametrize(
+    ("etapa", "tipo", "classificacao"),
+    [
+        pytest.param(
+            "aguardando_decisao", "OrcamentoGerado", "obsoleto", id="obsoleto"
+        ),
+        pytest.param(
+            "aguardando_orcamento", "DiagnosticoIniciado", "obsoleto", id="anterior"
+        ),
+        pytest.param("concluida", "ExecucaoFinalizada", "fora_do_fluxo", id="fluxo"),
+        pytest.param(
+            "aguardando_decisao", "ReservaLiberada", "fora_da_compensacao", id="comp"
+        ),
+    ],
+)
+def test_ignorado_sai_no_log_com_a_classificacao(
+    monkeypatch: pytest.MonkeyPatch, etapa: str, tipo: str, classificacao: str
+) -> None:
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    cenario = CenarioDaSaga.em(etapa)
+
+    with capture_logs() as logs:
+        tratamento = cenario.receber(tipo)
+
+    assert tratamento.desfecho is Desfecho.IGNORADA
+    assert logs == [
+        {
+            "event": "saga event ignored",
+            "log_level": "info",
+            "etapa": etapa,
+            "classificacao": classificacao,
+            "correlation_id": str(cenario.ordem_id),
+            "tipo": tipo,
+        }
+    ]
+
+
+def test_repetido_na_mesma_etapa_sai_no_log_como_repetido(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(modulo, "_log", structlog.get_logger())
-    cenario = CenarioDaSaga.em("aguardando_decisao")
-    passos = cenario.saga.passos
+    cenario = CenarioDaSaga()
+    cenario.receber("DiagnosticoIniciado")
 
     with capture_logs() as logs:
-        tratamento = cenario.receber("OrcamentoRecusado")
+        cenario.receber("DiagnosticoIniciado")
 
-    assert tratamento.desfecho is Desfecho.IGNORADA
-    assert cenario.saga.passos == passos
-    assert {
-        "event": "saga event ignored",
-        "log_level": "info",
-        "etapa": "aguardando_decisao",
-        "classificacao": "sem_compensacao",
-        "correlation_id": str(cenario.ordem_id),
-        "tipo": "OrcamentoRecusado",
-    } in logs
+    assert [(log["event"], log["classificacao"]) for log in logs] == [
+        ("saga event ignored", "repetido")
+    ]
 
 
 def test_logs_da_transicao_e_do_adiantado_sem_texto_livre(
@@ -372,19 +449,31 @@ def test_logs_da_transicao_e_do_adiantado_sem_texto_livre(
     ]
 
 
-def test_ordem_sem_saga_e_erro_permanente() -> None:
+@pytest.mark.parametrize(
+    "falta",
+    [pytest.param("saga", id="os-sem-saga"), pytest.param("os", id="saga-sem-os")],
+)
+def test_os_sem_saga_ou_saga_sem_os_vai_para_a_dlq(falta: str) -> None:
     cenario = CenarioDaSaga()
+    if falta == "saga":
+        # OS anterior a saga: nenhum ambiente persistente a tem (sem backfill).
+        del cenario.sagas.sagas[cenario.ordem_id]
+    else:
+        del cenario.ordens.ordens[cenario.ordem_id]
 
-    with pytest.raises(SagaNaoEncontradaException):
-        cenario.orquestrador.tratar(evento("DiagnosticoIniciado", uuid4()))
+    with pytest.raises(EventoRecusadoError) as exc:
+        cenario.receber("DiagnosticoIniciado")
+
+    assert (exc.value.motivo, exc.value.etapa) == ("saga_inexistente", None)
 
 
 def test_ordem_id_dos_dados_diferente_do_correlation_id_e_recusado() -> None:
     cenario = CenarioDaSaga()
 
-    with pytest.raises(ContratoInvalidoError, match="diverge"):
+    with pytest.raises(EventoRecusadoError) as exc:
         cenario.receber("DiagnosticoIniciado", ordem_id=str(uuid4()))
 
+    assert (exc.value.motivo, exc.value.etapa) == ("ordem_id_divergente", None)
     assert cenario.ordem.status is StatusOrdem.RECEBIDA
 
 
@@ -420,5 +509,11 @@ def test_pecas_reservadas_sem_orcamento_na_os_e_erro_permanente() -> None:
     )
     cenario.ordens.ordens = {ordem.id: sem_orcamento}
 
-    with pytest.raises(ViolacaoRegraDeNegocioException, match="orcamento"):
+    with pytest.raises(EventoRecusadoError) as exc:
         cenario.receber("PecasReservadas")
+
+    assert (exc.value.motivo, exc.value.etapa) == (
+        "transicao_invalida",
+        E.AGUARDANDO_RESERVA,
+    )
+    assert isinstance(exc.value.__cause__, ViolacaoRegraDeNegocioException)
