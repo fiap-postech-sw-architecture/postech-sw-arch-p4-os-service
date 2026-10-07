@@ -1,5 +1,7 @@
-"""Orquestrador da saga com fakes: cada linha da tabela da RFC-004 secao 4.1 e a
-matriz etapa x tipo pelo handler (processada, ignorada ou adiantada)."""
+"""Orquestrador da saga com fakes: cada linha da tabela da RFC-004 secao 4.1, a
+matriz etapa x tipo pelo handler (processada, ignorada, adiantada ou recusada)
+e as compensacoes da secao 4.4 (falhas de negocio, cada compensacao pendente x
+cada resposta, estorno automatico e corrida do pivot)."""
 
 from __future__ import annotations
 
@@ -14,7 +16,6 @@ from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import (
     Desfecho,
-    FalhaPermanenteError,
     FalhaTransitoriaError,
     MensagemRecebida,
 )
@@ -38,6 +39,7 @@ from tests.unitarios.ordem_servico.cenario_da_saga import (
     STATUS_DE_ENTRADA,
     CenarioDaSaga,
     esperado,
+    perfil_de_entrada,
 )
 
 E = EtapaSaga
@@ -285,17 +287,27 @@ def _desfecho(cenario: CenarioDaSaga, tipo: str) -> str:
         return f"recusada:{exc.motivo}"
 
 
+# Perfis da OS com o resumo do pagamento: o estorno automatico o atualiza.
+_COM_PAGAMENTO = {
+    "aguardando_pagamento",
+    "aguardando_execucao",
+    "em_execucao",
+    "finalizada",
+    "entregue",
+}
+
+
 def _desfecho_esperado(etapa: str, tipo: str, perfil: str | None = None) -> str:
+    perfil = perfil or perfil_de_entrada(etapa)
     classificacao = esperado(etapa, tipo, perfil).value
     if classificacao == "adiantado":
         return "adiantada"
     if classificacao == "ordem_encerrada":
         return "recusada:ordem_encerrada"
-    if classificacao != "processar":
-        return "ignorada"
-    # So o fluxo normal tem tratador; falhas de negocio e respostas de
-    # compensacao esperam na DLQ a versao com as compensacoes.
-    return "processada" if tipo in FLUXO_FELIZ else "recusada:sem_tratador_nesta_versao"
+    if classificacao == "estorno_automatico":
+        # So o resumo do pagamento muda, quando a OS o tem.
+        return "processada" if perfil in _COM_PAGAMENTO else "ignorada"
+    return "processada" if classificacao == "processar" else "ignorada"
 
 
 @pytest.mark.parametrize(
@@ -342,7 +354,16 @@ def test_os_encerrada_com_a_saga_viva_recusa_o_evento_sem_tocar_em_nada(
     desfecho = _desfecho(cenario, tipo)
 
     assert desfecho == _desfecho_esperado(etapa, tipo, perfil)
-    assert _foto(cenario) == antes
+    if desfecho != "processada":
+        assert _foto(cenario) == antes
+    else:
+        # So o estorno automatico passa: o resumo do pagamento muda, e a saga
+        # e a outbox ficam como estavam.
+        assert tipo == "PagamentoEstornado"
+        depois = _foto(cenario)
+        assert depois[:3] + depois[-1:] == antes[:3] + antes[-1:]
+        assert cenario.ordem.resumo_pagamento is not None
+        assert cenario.ordem.resumo_pagamento.status.value == "estornado"
 
 
 def _foto(cenario: CenarioDaSaga) -> tuple[object, ...]:
@@ -486,54 +507,6 @@ def test_orcamento_so_de_servicos_reserva_lista_vazia() -> None:
 
 
 @pytest.mark.parametrize(
-    ("etapa", "tipo"),
-    [
-        pytest.param("aguardando_orcamento", "GeracaoDeOrcamentoFalhou", id="geracao"),
-        pytest.param("aguardando_decisao", "OrcamentoRecusado", id="recusa"),
-        pytest.param("aguardando_decisao", "OrcamentoExpirado", id="expiracao"),
-        pytest.param("aguardando_reserva", "ReservaDePecasFalhou", id="reserva"),
-        *(
-            pytest.param("compensando", tipo, id=tipo)
-            for tipo, alvo in ESPERADA.items()
-            if alvo == "compensando"
-        ),
-    ],
-)
-def test_falha_de_negocio_e_resposta_de_compensacao_sem_tratador_vao_para_a_dlq(
-    etapa: str, tipo: str
-) -> None:
-    cenario = CenarioDaSaga.em(etapa)
-    antes = (cenario.saga.passos, cenario.ordem.status, len(cenario.ordem.historico))
-    comandos = list(cenario.publicador.comandos)
-
-    with pytest.raises(FalhaPermanenteError) as exc:
-        cenario.receber(tipo)
-
-    # Consumida agora, a falha se perderia: na DLQ, espera o redrive da versao
-    # com as compensacoes.
-    assert isinstance(exc.value, EventoRecusadoError)
-    assert (exc.value.motivo, exc.value.etapa) == (
-        "sem_tratador_nesta_versao",
-        EtapaSaga(etapa),
-    )
-    depois = (cenario.saga.passos, cenario.ordem.status, len(cenario.ordem.historico))
-    assert depois == antes
-    assert cenario.publicador.comandos == comandos
-
-
-def test_pagamento_recusado_ou_expirado_com_checkout_vao_para_a_dlq() -> None:
-    for tipo in ("PagamentoRecusado", "PagamentoExpirado"):
-        cenario = CenarioDaSaga.em("aguardando_pagamento")
-        cenario.receber("PagamentoSolicitado")
-
-        with pytest.raises(EventoRecusadoError, match="sem_tratador_nesta_versao"):
-            cenario.receber(tipo)
-
-        assert cenario.ordem.resumo_pagamento is not None
-        assert cenario.ordem.resumo_pagamento.status.value == "solicitado"
-
-
-@pytest.mark.parametrize(
     ("etapa", "tipo", "classificacao"),
     [
         pytest.param(
@@ -604,6 +577,7 @@ def test_logs_da_transicao_e_do_adiantado_sem_texto_livre(
             "etapa": "aguardando_diagnostico",
             "etapa_nova": "aguardando_orcamento",
             "status": "em_diagnostico",
+            "motivo": None,
             "correlation_id": str(cenario.ordem_id),
             "tipo": "DiagnosticoConcluido",
         },

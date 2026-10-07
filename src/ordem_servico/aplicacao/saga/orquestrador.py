@@ -3,24 +3,27 @@
 Cada evento roda na transacao da mensagem: le saga e OS, classifica o evento
 pela etapa ANTES de tocar no dominio (RFC-004 secao 4.5), aplica o fato na OS,
 avanca a saga e grava o comando seguinte na outbox. Quem comita e o consumidor,
-junto com ``mensagens_processadas`` (ADR-036): etapa, status, passo e comando
-entram no mesmo commit ou nao entram.
+junto com ``mensagens_processadas`` (ADR-036): etapa, status, registro e
+comando entram no mesmo commit ou nao entram.
 
-Evento de etapa ja passada, repetido ou com a saga fora do fluxo e ignorado com
-log; o adiantado volta pela fila de retry (``EventoAdiantadoError``). O que
-nenhuma tentativa resolve vai para a DLQ com o motivo em codigo
+Cada tipo de evento tem a sua linha: o fluxo normal (tabela da RFC-004 secao
+4.1); a falha de negocio, que inicia a compensacao com a primeira do plano; a
+resposta da compensacao pendente, que envia a seguinte ou, na ultima, cancela
+a OS (secao 4.4); e o ``ExecucaoIniciada`` que vence o cancelamento (corrida
+do pivot, secao 4.5). Evento de etapa ja passada, repetido ou com a saga fora
+do fluxo e ignorado com log; o ``PagamentoEstornado`` que nao responde a
+compensacao (estorno automatico) so atualiza o resumo do pagamento; o
+adiantado volta pela fila de retry (``EventoAdiantadoError``). O que nenhuma
+tentativa resolve vai para a DLQ com o motivo em codigo
 (``EventoRecusadoError``): OS sem saga, ``ordem_id`` divergente, OS encerrada
-com a saga viva, fato que a OS ou a saga recusam, relogio desta replica muito
-atras do ultimo registro da saga e, enquanto as compensacoes nao chegam ao
-orquestrador, a falha de negocio e a resposta de compensacao na etapa em que
-caberia trata-las (``sem_tratador_nesta_versao``, para o redrive na versao que
-as trata).
+com a saga viva e fato que a OS ou a saga recusam.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
@@ -36,12 +39,21 @@ from src.compartilhado.dominio.exceptions import (
     TransicaoStatusInvalidaException,
     ViolacaoRegraDeNegocioException,
 )
+from src.ordem_servico.aplicacao.saga.compensacao import (
+    MOTIVO_DA_FALHA,
+    RESPOSTA_DA_COMPENSACAO,
+    ROTULO_DO_MOTIVO,
+    inicio,
+    resposta,
+)
 from src.ordem_servico.aplicacao.saga.modelo import (
     DadosDoContrato,
     Envio,
     EtapaSaga,
+    MotivoCompensacao,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
+    pecas_dos_itens,
 )
 from src.ordem_servico.aplicacao.saga.resumos_do_billing import (
     resumo_do_orcamento,
@@ -51,6 +63,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     PRIORIDADE_DO_AGENDAMENTO,
     Classificacao,
 )
+from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.resumos import StatusPagamento
 
@@ -60,6 +73,7 @@ if TYPE_CHECKING:
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
     from src.ordem_servico.aplicacao.ports import SagaRepository
+    from src.ordem_servico.aplicacao.saga.modelo import Transicao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
@@ -80,6 +94,16 @@ _RECUSAS_DO_DOMINIO: Final = (
     TransicaoStatusInvalidaException,
     ViolacaoRegraDeNegocioException,
     TransicaoDaSagaInvalidaError,
+)
+# Eventos do Billing que mudam o estado do pagamento depois do checkout: as
+# falhas de negocio dele e as respostas ao EstornarPagamento.
+_STATUS_DO_PAGAMENTO: Final[Mapping[str, StatusPagamento]] = MappingProxyType(
+    {
+        "PagamentoRecusado": StatusPagamento.RECUSADO,
+        "PagamentoExpirado": StatusPagamento.EXPIRADO,
+        "PagamentoCancelado": StatusPagamento.CANCELADO,
+        "PagamentoEstornado": StatusPagamento.ESTORNADO,
+    }
 )
 
 
@@ -118,17 +142,17 @@ class EventoRecusadoError(FalhaPermanenteError):
         self.etapa = etapa
 
 
-# O comando que a linha da tabela envia: tipo e ``dados`` (sem ele, ``None``).
+# O comando que a linha envia: tipo e ``dados`` (sem ele, ``None``).
 type _Pedido = tuple[Comando, DadosDoContrato] | None
 type _Aplicacao = Callable[[MensagemRecebida, Saga, OrdemDeServico], _Pedido]
 
 
 class OrquestradorDaSaga:
-    """Aplica o fluxo normal na OS e na saga (tabela da RFC-004 secao 4.1).
+    """Aplica cada evento na OS e na saga (RFC-004 secoes 4.1, 4.4 e 4.5).
 
-    Le saga e OS, classifica o evento e traduz cada linha da tabela em
-    chamadas: o fato na OS, o comando na outbox e o passo na saga, que confere
-    etapa, comando, dados e prazo antes de mudar.
+    Le saga e OS, classifica o evento e traduz a linha dele em chamadas: o
+    fato na OS, o comando na outbox e o registro na saga, que confere etapa,
+    comando, dados e prazo antes de mudar.
     """
 
     def __init__(
@@ -155,18 +179,17 @@ class OrquestradorDaSaga:
                 ``ordem_id_divergente`` (``ordem_id`` dos dados diferente do
                 ``correlation_id``), ``saga_inexistente`` (OS sem saga, ou saga
                 sem OS), ``ordem_encerrada`` (OS cancelada ou entregue com a
-                saga viva), ``sem_tratador_nesta_versao`` (falha de negocio ou
-                resposta de compensacao na etapa em que caberia trata-la),
-                ``relogio_defasado`` (o relogio desta replica esta mais de 60 s
-                atras do ultimo registro da saga) e ``transicao_invalida`` (a OS
-                ou a saga recusam o fato).
+                saga viva) e ``transicao_invalida`` (a OS ou a saga recusam o
+                fato).
         """
         saga, ordem = self._ler(evento)
         etapa = saga.etapa
         contexto = {"correlation_id": str(saga.ordem_id), "tipo": evento.tipo}
         # Os marcos de antes do fato: a saga confere a mesma classificacao.
         marcos = MarcosDaOrdem.da_ordem(ordem)
-        classificacao = saga.classificar(evento.tipo, marcos)
+        classificacao = saga.classificar(
+            evento.tipo, marcos, causation_id=evento.causation_id
+        )
         if classificacao is Classificacao.ADIANTADO:
             _log.warning("saga event ahead", etapa=etapa.value, **contexto)
             raise EventoAdiantadoError(etapa)
@@ -174,14 +197,10 @@ class OrquestradorDaSaga:
             # Estado que o cancelamento recusa: nunca comando para OS encerrada,
             # e o alerta da DLQ o mostra (o pagamento confirmado inclusive).
             raise EventoRecusadoError("ordem_encerrada", etapa)
+        if classificacao is Classificacao.ESTORNO_AUTOMATICO:
+            return self._estorno_automatico(ordem, etapa, contexto)
         if classificacao is not Classificacao.PROCESSAR:
-            _log.info(
-                "saga event ignored",
-                etapa=etapa.value,
-                classificacao=classificacao.value,
-                **contexto,
-            )
-            return Tratamento(Desfecho.IGNORADA, etapa, etapa)
+            return _ignorado(classificacao, etapa, contexto)
         self._aplicar(evento, saga, ordem, marcos)
         self._ordens.salvar(ordem)
         self._sagas.salvar(saga)
@@ -190,6 +209,7 @@ class OrquestradorDaSaga:
             etapa=etapa.value,
             etapa_nova=saga.etapa.value,
             status=ordem.status.value,
+            motivo=saga.motivo,
             **contexto,
         )
         return Tratamento(Desfecho.PROCESSADA, etapa, saga.etapa)
@@ -205,6 +225,26 @@ class OrquestradorDaSaga:
             raise EventoRecusadoError("saga_inexistente")
         return saga, ordem
 
+    def _estorno_automatico(
+        self, ordem: OrdemDeServico, etapa: EtapaSaga, contexto: dict[str, str]
+    ) -> Tratamento:
+        """``PagamentoEstornado`` que nao responde a compensacao (RFC-004 4.4).
+
+        O Billing estornou sozinho a aprovacao que chegou depois do
+        cancelamento, da expiracao ou da recusa (ADR-040): a etapa nao muda e
+        nenhum comando sai; so o resumo do pagamento passa a estornado, se a OS
+        o tiver (a metrica e a do Billing).
+        """
+        resumo = ordem.resumo_pagamento
+        if resumo is None or resumo.status is StatusPagamento.ESTORNADO:
+            return _ignorado(Classificacao.ESTORNO_AUTOMATICO, etapa, contexto)
+        ordem.registrar_status_do_pagamento(
+            StatusPagamento.ESTORNADO, ator=ATOR_CONSUMIDOR
+        )
+        self._ordens.salvar(ordem)
+        _log.info("late payment refunded", etapa=etapa.value, **contexto)
+        return Tratamento(Desfecho.PROCESSADA, etapa, etapa)
+
     def _aplicar(
         self,
         evento: MensagemRecebida,
@@ -212,13 +252,8 @@ class OrquestradorDaSaga:
         ordem: OrdemDeServico,
         marcos: MarcosDaOrdem,
     ) -> None:
-        """A linha do evento: fato na OS, comando na outbox e passo na saga."""
-        aplicar = _FLUXO_NORMAL.get(evento.tipo)
-        if aplicar is None:
-            # Falha de negocio ou resposta de compensacao na etapa em que caberia
-            # trata-la: consumida agora, ela se perderia; na DLQ, espera o redrive
-            # da versao com as compensacoes.
-            raise EventoRecusadoError("sem_tratador_nesta_versao", saga.etapa)
+        """A linha do evento: fato na OS, comando na outbox e registro na saga."""
+        aplicar = _LINHAS[evento.tipo]
         agora = self._instante_do_passo(evento, saga)
         try:
             pedido = aplicar(evento, saga, ordem)
@@ -261,8 +296,8 @@ class OrquestradorDaSaga:
     ) -> Envio:
         """Grava o comando na outbox, causado pelo ``evento`` (RFC-004 secao 5.2).
 
-        Todo comando do fluxo normal tem resposta automatica: sai com o prazo
-        tecnico (RFC-004 secao 4.6), que a saga confere contra a tabela.
+        Todo comando que um evento envia tem resposta automatica: sai com o
+        prazo tecnico (RFC-004 secao 4.6), que a saga confere contra a linha.
         """
         tipo, dados = pedido
         comando_id = self._publicador.publicar_comando(
@@ -279,19 +314,65 @@ class OrquestradorDaSaga:
         )
 
 
+def dados_da_compensacao(
+    comando: Comando, ordem: OrdemDeServico, motivo: str | None
+) -> DadosDoContrato:
+    """``{ordem_id, motivo}`` e o id do recurso quando a OS ja o conhece.
+
+    O ``CancelarOrcamento`` leva o ``orcamento_id`` e o ``EstornarPagamento``, o
+    ``pagamento_id``, dos resumos da OS; sem eles (o passo estava em voo), o
+    participante acha o recurso pelo ``ordem_id`` (RFC-004 secao 5.3).
+    """
+    dados = {"ordem_id": str(ordem.id), "motivo": motivo}
+    orcamento, pagamento = ordem.resumo_orcamento, ordem.resumo_pagamento
+    if comando is Comando.CANCELAR_ORCAMENTO and orcamento is not None:
+        dados["orcamento_id"] = str(orcamento.orcamento_id)
+    if comando is Comando.ESTORNAR_PAGAMENTO and pagamento is not None:
+        dados["pagamento_id"] = str(pagamento.pagamento_id)
+    return dados
+
+
+def _ignorado(
+    classificacao: Classificacao, etapa: EtapaSaga, contexto: dict[str, str]
+) -> Tratamento:
+    """Evento sem efeito, com log da classificacao.
+
+    O incoerente sai em erro: o inicio da execucao com outra compensacao
+    pendente contradiz o que a saga sabe (RFC-004 secao 4.5).
+    """
+    registrar = _log.error if classificacao is Classificacao.INCOERENTE else _log.info
+    registrar(
+        "saga event ignored",
+        etapa=etapa.value,
+        classificacao=classificacao.value,
+        **contexto,
+    )
+    return Tratamento(Desfecho.IGNORADA, etapa, etapa)
+
+
 def _ator(evento: MensagemRecebida) -> str:
     """Quem provoca o passo: o consumidor, ou o atendente que registrou a decisao.
 
     A decisao do orcamento registrada pelo atendente em nome do cliente leva o
     sub dele (RFC-004 secao 8).
     """
-    if evento.tipo == "OrcamentoAprovado" and evento.dados["canal"] == "atendente":
+    decisao = evento.tipo in {"OrcamentoAprovado", "OrcamentoRecusado"}
+    if decisao and evento.dados["canal"] == "atendente":
         return str(evento.dados["decidido_por"])
     return ATOR_CONSUMIDOR
 
 
-# ----- uma linha da tabela da RFC-004 secao 4.1 por evento: o fato na OS e o
-# comando que a linha envia (a saga confere tipo, dados e prazo)
+def _compensacao(transicao: Transicao, ordem: OrdemDeServico) -> _Pedido:
+    """A compensacao que a ``transicao`` envia, com os ``dados`` dela."""
+    if transicao.comando is None:
+        return None
+    dados = dados_da_compensacao(transicao.comando, ordem, transicao.motivo)
+    return transicao.comando, dados
+
+
+# ----- uma linha por evento: o fato na OS e o comando que ela envia (a saga
+# confere tipo, dados e prazo). O fluxo normal segue a tabela da RFC-004
+# secao 4.1; a compensacao, a secao 4.4.
 
 
 def _diagnostico_iniciado(
@@ -320,7 +401,8 @@ def _orcamento_gerado(
 def _orcamento_aprovado(
     evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
 ) -> _Pedido:
-    return Comando.RESERVAR_PECAS, {"ordem_id": str(saga.ordem_id), "pecas": saga.pecas}
+    pecas = pecas_dos_itens(saga.itens)
+    return Comando.RESERVAR_PECAS, {"ordem_id": str(saga.ordem_id), "pecas": pecas}
 
 
 def _pecas_reservadas(
@@ -364,6 +446,7 @@ def _execucao_agendada(
 def _execucao_iniciada(
     evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
 ) -> _Pedido:
+    # No fluxo e na corrida do pivot: a OS descarta o pedido de cancelamento.
     ordem.registrar_execucao_iniciada(ator=ATOR_CONSUMIDOR)
     return None
 
@@ -375,15 +458,53 @@ def _execucao_finalizada(
     return None
 
 
-_FLUXO_NORMAL: Final[Mapping[str, _Aplicacao]] = {
-    "DiagnosticoIniciado": _diagnostico_iniciado,
-    "DiagnosticoConcluido": _diagnostico_concluido,
-    "OrcamentoGerado": _orcamento_gerado,
-    "OrcamentoAprovado": _orcamento_aprovado,
-    "PecasReservadas": _pecas_reservadas,
-    "PagamentoSolicitado": _pagamento_solicitado,
-    "PagamentoConfirmado": _pagamento_confirmado,
-    "ExecucaoAgendada": _execucao_agendada,
-    "ExecucaoIniciada": _execucao_iniciada,
-    "ExecucaoFinalizada": _execucao_finalizada,
-}
+def _falha_de_negocio(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    """A compensacao comeca pela primeira do plano (RFC-004 secao 4.4).
+
+    O pagamento recusado ou expirado tambem passa ao resumo da OS.
+    """
+    status = _STATUS_DO_PAGAMENTO.get(evento.tipo)
+    if status is not None:
+        ordem.registrar_status_do_pagamento(status, ator=ATOR_CONSUMIDOR)
+    return _compensacao(inicio(saga, MOTIVO_DA_FALHA[evento.tipo]), ordem)
+
+
+def _resposta_da_compensacao(
+    evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
+) -> _Pedido:
+    """A seguinte do plano sai; depois da ultima, a OS e cancelada.
+
+    O cancelamento e o estorno do pagamento passam ao resumo da OS, quando ela
+    o tem. A OS cancelada leva o texto do pedido do atendente ou, na falha de
+    negocio, o rotulo do motivo (RFC-004 secao 4.4).
+    """
+    status = _STATUS_DO_PAGAMENTO.get(evento.tipo)
+    if status is not None and ordem.resumo_pagamento is not None:
+        ordem.registrar_status_do_pagamento(status, ator=ATOR_CONSUMIDOR)
+    transicao = resposta(saga, evento.tipo)
+    if transicao.seguinte is EtapaSaga.COMPENSADA:
+        # Em compensacao a saga sempre tem o motivo (``conferir_estado``).
+        rotulo = ROTULO_DO_MOTIVO[MotivoCompensacao(cast("str", saga.motivo))]
+        motivo = ordem.motivo_cancelamento or rotulo
+        ordem.cancelar(motivo, OrigemMudanca.SAGA, ator=ATOR_CONSUMIDOR)
+    return _compensacao(transicao, ordem)
+
+
+_LINHAS: Final[Mapping[str, _Aplicacao]] = MappingProxyType(
+    {
+        "DiagnosticoIniciado": _diagnostico_iniciado,
+        "DiagnosticoConcluido": _diagnostico_concluido,
+        "OrcamentoGerado": _orcamento_gerado,
+        "OrcamentoAprovado": _orcamento_aprovado,
+        "PecasReservadas": _pecas_reservadas,
+        "PagamentoSolicitado": _pagamento_solicitado,
+        "PagamentoConfirmado": _pagamento_confirmado,
+        "ExecucaoAgendada": _execucao_agendada,
+        "ExecucaoIniciada": _execucao_iniciada,
+        "ExecucaoFinalizada": _execucao_finalizada,
+        **dict.fromkeys(MOTIVO_DA_FALHA, _falha_de_negocio),
+        **dict.fromkeys(RESPOSTA_DA_COMPENSACAO, _resposta_da_compensacao),
+    }
+)

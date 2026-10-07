@@ -521,7 +521,7 @@ def _estado(engine: Engine, ordem_id: UUID) -> tuple[object, ...]:
         pytest.param("divergente", "ordem_id_divergente", None, id="divergente"),
         pytest.param("sem_saga", "saga_inexistente", None, id="sem-saga"),
         pytest.param(
-            "recusa", "sem_tratador_nesta_versao", "aguardando_decisao", id="recusa"
+            "encerrada", "ordem_encerrada", "aguardando_diagnostico", id="encerrada"
         ),
     ],
 )
@@ -535,15 +535,18 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
     motivo: str,
     etapa: str | None,
 ) -> None:
-    atendimento.abrir()
+    ordem_id = atendimento.abrir()
     atendimento.receber("SolicitarDiagnostico")
-    if caso == "recusa":
-        atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
-        atendimento.esperar_passo("DiagnosticoIniciado")
-        atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
-        atendimento.receber("GerarOrcamento")
-        atendimento.responder("GerarOrcamento", "OrcamentoGerado")
-        atendimento.esperar_passo("OrcamentoGerado")
+    if caso == "encerrada":
+        # OS encerrada com a saga viva, forcada por fora: o cancelamento passa
+        # pela saga e nunca produz esse estado, e nenhum evento o toca.
+        with engine.begin() as conexao:
+            conexao.execute(
+                text(
+                    "UPDATE ordens_de_servico SET status = 'cancelada' WHERE id = :id"
+                ),
+                {"id": ordem_id},
+            )
     gatilhos = atendimento.gatilhos()
     monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
 
@@ -557,7 +560,9 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
                 recusado = envelope_de_evento("DiagnosticoIniciado")
                 broker.publicar_evento(recusado)
             case _:
-                recusado = atendimento.responder("GerarOrcamento", "OrcamentoRecusado")
+                recusado = atendimento.responder(
+                    "SolicitarDiagnostico", "DiagnosticoIniciado"
+                )
         esperar_ate(lambda: broker.contar(_DLQ) == 1)
 
     # O operador le o motivo no log e no span; o id fica livre para o redrive.

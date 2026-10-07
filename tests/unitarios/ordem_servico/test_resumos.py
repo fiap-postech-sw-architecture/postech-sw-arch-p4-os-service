@@ -174,6 +174,39 @@ class TestCicloDoPagamento:
         )
         assert solicitado.status is StatusPagamento.SOLICITADO
 
+    @pytest.mark.parametrize(
+        ("atual", "informado", "fica"),
+        [
+            pytest.param("estornado", "recusado", "estornado", id="recusado-atrasado"),
+            pytest.param(
+                "estornado", "cancelado", "estornado", id="cancelado-atrasado"
+            ),
+            pytest.param("recusado", "cancelado", "recusado", id="encerrado-de-novo"),
+            pytest.param("cancelado", "estornado", "estornado", id="aprovacao-tardia"),
+            pytest.param("expirado", "estornado", "estornado", id="tardia-expirado"),
+            pytest.param("confirmado", "estornado", "estornado", id="compensacao"),
+        ],
+    )
+    def test_so_anda_para_a_frente_no_ciclo_do_billing(
+        self, atual: str, informado: str, fica: str
+    ) -> None:
+        # Os eventos chegam fora de ordem: o estado mais antigo que chega
+        # depois de um mais novo nao o desfaz (RFC-004 secao 7.1).
+        resumo = _pagamento(status=StatusPagamento(atual))
+
+        seguinte = pagamento_no_status(resumo, StatusPagamento(informado))
+
+        assert seguinte.status is StatusPagamento(fica)
+        assert (seguinte is resumo) is (fica == atual)
+
+    @pytest.mark.parametrize(
+        "status",
+        [s for s in StatusPagamento if s is not StatusPagamento.SOLICITADO],
+    )
+    def test_confirmado_so_parte_do_solicitado(self, status: StatusPagamento) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="nao passa"):
+            pagamento_no_status(_pagamento(status=status), StatusPagamento.CONFIRMADO)
+
     def test_estado_seguinte_sem_solicitado_levanta(self) -> None:
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
             pagamento_no_status(None, StatusPagamento.CONFIRMADO)

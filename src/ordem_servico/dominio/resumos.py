@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -94,6 +95,21 @@ class StatusPagamento(StrEnum):
     ESTORNADO = "estornado"
 
 
+# Ciclo do pagamento no Billing (RFC-004 secao 7.1): solicitado; depois
+# confirmado, recusado, expirado ou cancelado; por fim estornado (o confirmado
+# pela compensacao, e o encerrado quando a aprovacao chega depois).
+_FASE_DO_PAGAMENTO: Final = MappingProxyType(
+    {
+        StatusPagamento.SOLICITADO: 0,
+        StatusPagamento.CONFIRMADO: 1,
+        StatusPagamento.RECUSADO: 1,
+        StatusPagamento.EXPIRADO: 1,
+        StatusPagamento.CANCELADO: 1,
+        StatusPagamento.ESTORNADO: 2,
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ResumoPagamento(ValueObject):
     """Pagamento solicitado ao Billing: id, estado, valor, checkout e expiracao."""
@@ -136,12 +152,15 @@ def pagamento_no_status(
 ) -> ResumoPagamento:
     """O mesmo pagamento, no estado que o Billing informou (RFC-004 secao 7.1).
 
-    O Billing decide o ciclo: a OS so exige o pagamento ja solicitado, e o
-    ``SOLICITADO`` e o do primeiro resumo (``pagamento_solicitado``).
+    O resumo so anda para a frente no ciclo do Billing: os eventos chegam fora
+    de ordem, e o estado mais antigo que chega depois de um mais novo (o
+    recusado depois do estorno da aprovacao tardia) devolve o ``atual``. O
+    ``SOLICITADO`` e o do primeiro resumo (``pagamento_solicitado``), e o
+    ``CONFIRMADO`` so parte dele.
 
     Raises:
-        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, ou o
-            ``SOLICITADO`` outra vez.
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, o
+            ``SOLICITADO`` outra vez ou o confirmado de outro estado.
     """
     if atual is None:
         msg = "Ordem sem pagamento solicitado"
@@ -149,4 +168,11 @@ def pagamento_no_status(
     if status is StatusPagamento.SOLICITADO:
         msg = "Pagamento ja solicitado para esta ordem"
         raise ViolacaoRegraDeNegocioException(msg)
+    if status is StatusPagamento.CONFIRMADO and (
+        atual.status is not StatusPagamento.SOLICITADO
+    ):
+        msg = f"Pagamento {atual.status.value} nao passa a confirmado"
+        raise ViolacaoRegraDeNegocioException(msg)
+    if _FASE_DO_PAGAMENTO[status] <= _FASE_DO_PAGAMENTO[atual.status]:
+        return atual
     return replace(atual, status=status)

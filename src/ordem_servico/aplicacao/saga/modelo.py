@@ -1,4 +1,4 @@
-"""Tipos da saga de atendimento: etapas, passos, envio, fatos e erros.
+"""Tipos da saga de atendimento: etapas, registros, envio, transicao, fatos e erros.
 
 A saga guarda so codigos (etapa, gatilho, comando, motivo): texto livre e dado
 pessoal ficam na OS (RFC-004 secao 7.2).
@@ -130,6 +130,72 @@ class Envio:
     def __post_init__(self) -> None:
         congelados = MappingProxyType(deepcopy(dict(self.dados)))
         object.__setattr__(self, "dados", congelados)
+
+    def em_voo(self, enviado_em: datetime) -> ComandoEmVoo:
+        """O comando em voo que este envio abre: o id dele e o primeiro envio."""
+        return {
+            "tipo": self.tipo.value,
+            "dados": deepcopy(dict(self.dados)),
+            "mensagem_ids": [str(self.id)],
+            "enviado_em": enviado_em.isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Gatilho:
+    """O que mudou a saga, quando e por quem: o cabecalho de cada registro.
+
+    ``tipo`` e o tipo do evento, ou ``abertura`` e ``cancelamento`` nos pedidos
+    pela API; ``mensagem_id``, o id do evento (``None`` nos pedidos); ``ator``,
+    o processo ou o ``sub`` de quem pediu.
+    """
+
+    tipo: str
+    mensagem_id: UUID | None
+    em: datetime
+    ator: str
+
+    def registro(
+        self,
+        seq: int,
+        de: EtapaSaga | None,
+        para: EtapaSaga,
+        envio: Envio | None,
+        motivo: str | None,
+    ) -> RegistroDaSaga:
+        """O registro da saga deste gatilho: de que etapa para qual e o que enviou."""
+        return {
+            "seq": seq,
+            "em": self.em.isoformat(),
+            "de": de.value if de is not None else None,
+            "para": para.value,
+            "gatilho": self.tipo,
+            "mensagem_id": str(self.mensagem_id) if self.mensagem_id else None,
+            "comando": envio.tipo.value if envio is not None else None,
+            "comando_id": str(envio.id) if envio is not None else None,
+            "motivo": motivo,
+            "ator": self.ator,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Transicao:
+    """O que um gatilho faz com a saga (RFC-004 secoes 4.1 e 4.4).
+
+    ``seguinte`` e a etapa depois dele; ``comando``, o que o envio tem de ser
+    (nenhum envio com ``None``); ``concluido``, o passo T que ele conclui, que
+    a compensacao desfaz. ``motivo``, ``plano`` e ``falha`` sao os da
+    compensacao depois dele (vazios no fluxo normal), e ``registro``, o codigo
+    que o registro leva quando nao e o motivo (``cancelamento_recusado``).
+    """
+
+    seguinte: EtapaSaga
+    comando: Comando | None = None
+    concluido: str | None = None
+    motivo: str | None = None
+    plano: tuple[Comando, ...] = ()
+    falha: str | None = None
+    registro: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

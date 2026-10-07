@@ -1,7 +1,7 @@
 """Saga em memoria para os testes do orquestrador: abertura real e eventos do contrato.
 
-Tambem guarda o oraculo da classificacao (RFC-004 secoes 4.1 e 4.5), escrito
-aqui a partir da tabela da RFC e nao importado do modulo testado.
+Tambem guarda o oraculo da classificacao (RFC-004 secoes 4.1, 4.4 e 4.5),
+escrito aqui a partir das tabelas da RFC e nao importado do modulo testado.
 """
 
 from __future__ import annotations
@@ -27,6 +27,8 @@ from tests.unitarios.fakes import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.ordem_servico.aplicacao.saga.orquestrador import Tratamento
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
@@ -103,6 +105,43 @@ STATUS_DE_ENTRADA: Final = {
 }
 
 
+# A compensacao a que cada resposta responde (RFC-004 secao 4.3) e as cinco, na
+# ordem em que saem (secao 4.4).
+RESPONDE: Final = {
+    "ExecucaoCancelada": "CancelarExecucao",
+    "PagamentoCancelado": "EstornarPagamento",
+    "PagamentoEstornado": "EstornarPagamento",
+    "EstornoDePagamentoFalhou": "EstornarPagamento",
+    "ReservaLiberada": "LiberarReserva",
+    "OrcamentoCancelado": "CancelarOrcamento",
+    "DiagnosticoDescartado": "DescartarDiagnostico",
+}
+COMPENSACOES: Final = (
+    "CancelarExecucao",
+    "EstornarPagamento",
+    "LiberarReserva",
+    "CancelarOrcamento",
+    "DescartarDiagnostico",
+)
+# O que a saga ja fez em cada etapa antes do pivot: os passos T concluidos e o
+# comando com prazo que espera resposta (RFC-004 secoes 4.1 e 4.3). No
+# pagamento, antes e depois do PagamentoSolicitado (o checkout aberto conclui
+# o T6).
+FEITO: Final[dict[str, tuple[tuple[str, ...], str | None]]] = {
+    "aguardando_diagnostico": ((), None),
+    "aguardando_orcamento": ((), "GerarOrcamento"),
+    "aguardando_decisao": (("T3",), None),
+    "aguardando_reserva": (("T3",), "ReservarPecas"),
+    "aguardando_pagamento": (("T3", "T5"), "SolicitarPagamento"),
+    "aguardando_pagamento_com_checkout": (("T3", "T5", "T6"), None),
+    "aguardando_agendamento": (("T3", "T5", "T6"), "AgendarExecucao"),
+    "aguardando_inicio": (("T3", "T5", "T6", "T7"), None),
+}
+# A compensacao pendente das etapas da compensacao quando o teste nao diz
+# outra: a ultima do plano, que entra sempre.
+PENDENTE_PADRAO: Final = "DescartarDiagnostico"
+EM_COMPENSACAO: Final = {"compensando", "falha_na_compensacao"}
+
 # Perfis da OS na matriz: os 9 status (AGUARDANDO_PAGAMENTO com o checkout
 # aberto) e o AGUARDANDO_PAGAMENTO antes do PagamentoSolicitado.
 SEM_CHECKOUT: Final = "aguardando_pagamento_sem_checkout"
@@ -131,22 +170,50 @@ def ordem_no_perfil(perfil: str) -> OrdemDeServico:
     return ordem_em(S(perfil))
 
 
-def esperado(etapa: str, tipo: str, perfil: str | None = None) -> Classificacao:
-    """A regra da RFC-004 secao 4.5, com a OS no ``perfil`` (o de entrada, sem ele).
+def esperado(
+    etapa: str,
+    tipo: str,
+    perfil: str | None = None,
+    *,
+    pendente: str | None = None,
+    casada: bool = False,
+) -> Classificacao:
+    """A regra da RFC-004 secoes 4.4 e 4.5, com a OS no ``perfil`` (sem ele, o
+    de entrada da etapa).
 
-    OS encerrada (cancelada ou entregue) com a saga viva e o estado que o
-    cancelamento recusa: o evento e recusado, nunca aplicado.
+    ``pendente`` e a compensacao que espera resposta (nas etapas da
+    compensacao, ``PENDENTE_PADRAO`` sem ela) e ``casada``, se o
+    ``causation_id`` do evento e o de um envio dela. OS encerrada (cancelada ou
+    entregue) com a saga viva e o estado que o cancelamento recusa: o evento e
+    recusado, nunca aplicado. O ``PagamentoEstornado`` que nao responde ao
+    ``EstornarPagamento`` e o estorno automatico, em qualquer etapa.
     """
     perfil = perfil or perfil_de_entrada(etapa)
+    if etapa in EM_COMPENSACAO:
+        pendente = pendente or PENDENTE_PADRAO
     alvo = ESPERADA[tipo]
+    responde = (
+        etapa == "compensando"
+        and RESPONDE.get(tipo) == pendente
+        and (casada or pendente != "EstornarPagamento")
+    )
+    if tipo == "PagamentoEstornado" and not responde:
+        return C.ESTORNO_AUTOMATICO
     if etapa in {"concluida", "compensada"}:
         return C.FORA_DA_COMPENSACAO if alvo == "compensando" else C.FORA_DO_FLUXO
     if perfil in {"entregue", "cancelada"}:
         return C.ORDEM_ENCERRADA
     if alvo == "compensando":
-        return C.PROCESSAR if etapa == "compensando" else C.FORA_DA_COMPENSACAO
-    if etapa not in LINEAR:
-        return C.FORA_DO_FLUXO
+        return C.PROCESSAR if responde else C.FORA_DA_COMPENSACAO
+    if etapa in EM_COMPENSACAO:
+        # So o inicio e o fim da execucao contam. Com o CancelarExecucao
+        # pendente, o inicio decide a corrida do pivot e o fim que chegou antes
+        # dele espera (adiantado); com outra pendente, contradizem a saga.
+        if tipo not in {"ExecucaoIniciada", "ExecucaoFinalizada"}:
+            return C.FORA_DO_FLUXO
+        if pendente != "CancelarExecucao":
+            return C.INCOERENTE
+        return C.PROCESSAR if tipo == "ExecucaoIniciada" else C.ADIANTADO
     if LINEAR.index(alvo) < LINEAR.index(etapa):
         return C.OBSOLETO
     if LINEAR.index(alvo) > LINEAR.index(etapa):
@@ -236,26 +303,78 @@ class CenarioDaSaga:
         cenario._reidratar(etapa, ordem_no_perfil(perfil))
         return cenario
 
-    def _reidratar(self, etapa: str, ordem: OrdemDeServico) -> None:
+    @classmethod
+    def em_compensacao(
+        cls,
+        plano: Sequence[str],
+        *,
+        status: StatusOrdem = StatusOrdem.AGUARDANDO_EXECUCAO,
+        motivo: str = "cancelamento",
+        falha: str | None = None,
+    ) -> CenarioDaSaga:
+        """Saga reidratada compensando pelo ``plano``, ou parada nele (``falha``).
+
+        A OS chega ao ``status`` pelos fatos de dominio. A pendente (a primeira
+        do plano) sai pelo publicador, e o comando em voo guarda o id dela: o
+        evento do cenario a responde pelo ``causation_id``. Parada na falha,
+        nada fica em voo.
+        """
+        cenario = cls()
+        cenario._reidratar(
+            "falha_na_compensacao" if falha else "compensando",
+            ordem_em(status),
+            plano=plano,
+            motivo=motivo,
+            falha=falha,
+        )
+        return cenario
+
+    def _reidratar(
+        self,
+        etapa: str,
+        ordem: OrdemDeServico,
+        *,
+        plano: Sequence[str] = (PENDENTE_PADRAO,),
+        motivo: str = "cancelamento",
+        falha: str | None = None,
+    ) -> None:
         """Troca a OS e a saga pelas da ``ordem``, com a saga na ``etapa``.
 
-        Nas etapas da compensacao, a saga leva o motivo e o que resta do plano
-        (a ultima compensacao, que entra sempre).
+        Nas etapas da compensacao, a saga leva o motivo e o ``plano`` restante
+        (sem ele, a ultima compensacao, que entra sempre); em compensando, a
+        pendente sai pelo publicador e fica em voo, e na falha a saga guarda a
+        ``falha`` (estorno recusado, sem ela).
         """
-        compensacao = etapa in {"compensando", "falha_na_compensacao"}
         self.ordens.ordens = {ordem.id: ordem}
+        self.ordem_id = ordem.id
+        agora = self.relogio.agora
+        campos: dict[str, Any] = {}
+        if etapa in EM_COMPENSACAO:
+            campos = {"_motivo": motivo, "_plano_compensacao": list(plano)}
+        if etapa == "compensando":
+            dados = {"ordem_id": str(ordem.id), "motivo": motivo}
+            enviado = self.publicador.publicar_comando(
+                plano[0], dados, correlation_id=ordem.id
+            )
+            campos["_comando_em_voo"] = {
+                "tipo": plano[0],
+                "dados": dados,
+                "mensagem_ids": [str(enviado)],
+                "enviado_em": agora.isoformat(),
+            }
+            campos["_prazo_resposta_em"] = agora + PRAZO
+        if etapa == "falha_na_compensacao":
+            campos["_falha"] = falha or "estorno_recusado"
         self.sagas.sagas = {
             ordem.id: Saga(
                 id=ordem.id,
                 _etapa=EtapaSaga(etapa),
-                _iniciada_em=self.relogio.agora,
-                _etapa_desde=self.relogio.agora,
-                _atualizada_em=self.relogio.agora,
-                _motivo="cancelamento" if compensacao else None,
-                _plano_compensacao=["DescartarDiagnostico"] if compensacao else [],
+                _iniciada_em=agora,
+                _etapa_desde=agora,
+                _atualizada_em=agora,
+                **campos,
             )
         }
-        self.ordem_id = ordem.id
 
     @property
     def saga(self) -> Saga:

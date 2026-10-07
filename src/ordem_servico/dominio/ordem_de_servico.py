@@ -259,13 +259,15 @@ class OrdemDeServico(AggregateRoot):
         """Estado novo do pagamento ja solicitado, informado pelo Billing.
 
         ``CONFIRMADO`` leva a OS a AGUARDANDO_EXECUCAO: o agendamento seguinte e
-        tecnico (RFC-004 secao 4.1). Os outros estados so trocam o resumo, em
-        qualquer status: a OS espelha o Billing, que decide o ciclo.
+        tecnico (RFC-004 secao 4.1). Os outros so trocam o resumo, em qualquer
+        status e so para a frente no ciclo (``resumos.pagamento_no_status``).
         """
         confirmado = status is StatusPagamento.CONFIRMADO
         if confirmado:
             _maquina.validar_transicao(self._status, StatusOrdem.AGUARDANDO_EXECUCAO)
         novo = pagamento_no_status(self._resumo_pagamento, status)
+        if novo is self._resumo_pagamento:
+            return  # estado mais antigo, chegado fora de ordem: nada muda
         if confirmado:
             self._aplicar_transicao(
                 StatusOrdem.AGUARDANDO_EXECUCAO, origem=OrigemMudanca.BILLING, ator=ator
@@ -294,9 +296,8 @@ class OrdemDeServico(AggregateRoot):
     def registrar_pedido_de_cancelamento(self, motivo: str) -> None:
         """Guarda o texto do pedido de cancelamento, sem mudar o status.
 
-        A saga desfaz os passos e so entao cancela a OS com ele (RFC-004 secao
-        4.4); ate la o texto fica aqui, ao alcance da eliminacao de dados da
-        LGPD. O estado (409) e conferido antes do texto (422).
+        A saga desfaz os passos e so entao cancela a OS com ele (RFC-004 4.4);
+        ate la o texto fica aqui, ao alcance da eliminacao de dados da LGPD.
         """
         _maquina.validar_transicao(self._status, StatusOrdem.CANCELADA)
         self._motivo_cancelamento = _texto_obrigatorio(

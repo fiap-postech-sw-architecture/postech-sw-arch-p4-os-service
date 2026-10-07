@@ -4,9 +4,10 @@ Uma por OS (``id`` = ``ordem_id`` = ``correlation_id`` das mensagens),
 persistida na tabela ``sagas`` como agregado proprio (RFC-004 secao 4; ADR-035
 "Estado persistido e eventos fora de ordem"). Aqui ficam so o estado e as
 regras, sem I/O: quem le e grava saga e OS e publica os comandos e o
-``OrquestradorDaSaga``, pelas portas, numa transacao so. A tabela da RFC, a
-classificacao dos eventos e as conferencias de cada linha ficam em
-``tabela_da_saga``; os tipos, em ``modelo``.
+``OrquestradorDaSaga`` (ou o caso de uso do cancelamento), pelas portas, numa
+transacao so. A tabela da RFC, a classificacao dos eventos e as conferencias
+ficam em ``tabela_da_saga``; o plano e as transicoes da compensacao, em
+``compensacao``; os tipos, em ``modelo``.
 """
 
 from __future__ import annotations
@@ -14,37 +15,43 @@ from __future__ import annotations
 import re
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final, cast
+from uuid import UUID
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
 from src.ordem_servico.aplicacao.saga.modelo import (
     ComandoEmVoo,
+    CompensacaoIniciadaEvent,
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
+    Gatilho,
     ItemDoDiagnostico,
+    MotivoCompensacao,
     RegistroDaSaga,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
-    pecas_dos_itens,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    ANTES_DO_PIVOT,
     ETAPAS_FINAIS,
     GATILHO_ABERTURA,
+    GATILHO_CANCELAMENTO,
     Classificacao,
     classificar,
     conferir_envio,
+    conferir_estado,
     conferir_prazo,
-    linha_do_evento,
+    transicao_do_cancelamento,
+    transicao_do_evento,
 )
 
 if TYPE_CHECKING:
     from datetime import datetime
-    from uuid import UUID
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
-    from src.ordem_servico.aplicacao.saga.modelo import Envio
+    from src.ordem_servico.aplicacao.saga.modelo import Envio, Transicao
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 
@@ -56,11 +63,11 @@ _TRACEPARENT: Final = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
 class Saga(AggregateRoot):
     """Instancia da saga de uma OS; ``id`` e o ``ordem_id``.
 
-    Construir com ``Saga.iniciar``; o fluxo normal anda com ``avancar``, que
-    impoe a tabela da RFC-004 secao 4.1 (etapa seguinte, comando, dados e
-    prazo). A ``versao`` e o lock otimista da persistencia, como na OS. Listas
-    e dicts sao trocados por novos a cada mudanca (a coluna JSONB nao detecta
-    mutacao no lugar).
+    Construir com ``Saga.iniciar``; os eventos andam com ``avancar`` e o
+    pedido de cancelamento com ``cancelar``, que impoem as tabelas da RFC-004
+    (secoes 4.1 e 4.4) antes de mudar. A ``versao`` e o lock otimista da
+    persistencia, como na OS. Listas e dicts sao trocados por novos a cada
+    mudanca (a coluna JSONB nao detecta mutacao no lugar).
     """
 
     _etapa: EtapaSaga = field(kw_only=True)
@@ -86,23 +93,9 @@ class Saga(AggregateRoot):
     _versao: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
-        """Invariantes do estado, para quem monta a saga por fora do ``iniciar``.
-
-        Prazo se e so se ha comando em voo; ``reenvios`` nunca negativo e zero
-        sem comando em voo; em compensacao, motivo e plano.
-        """
+        """Recusa estado contraditorio (``tabela_da_saga.conferir_estado``)."""
         super().__post_init__()
-        if (self._prazo_resposta_em is None) is not (self._comando_em_voo is None):
-            msg = "prazo de resposta so com comando em voo, e todo comando em voo tem"
-            raise ValueError(msg)
-        if self._reenvios < 0 or (self._comando_em_voo is None and self._reenvios):
-            msg = f"reenvios {self._reenvios} sem comando em voo ou negativo"
-            raise ValueError(msg)
-        if self._etapa is EtapaSaga.COMPENSANDO and not (
-            self._motivo and self._plano_compensacao
-        ):
-            msg = "compensando exige o motivo e o plano de compensacao"
-            raise ValueError(msg)
+        conferir_estado(self)
 
     @classmethod
     def iniciar(
@@ -131,15 +124,8 @@ class Saga(AggregateRoot):
             _etapa_desde=agora,
             _atualizada_em=agora,
         )
-        saga._passos = [
-            saga._passo(
-                gatilho=GATILHO_ABERTURA,
-                de=None,
-                mensagem_id=None,
-                ator=ator,
-                envio=envio,
-            )
-        ]
+        abertura = Gatilho(GATILHO_ABERTURA, None, agora, ator)
+        saga._passos = [abertura.registro(1, None, saga._etapa, envio, None)]
         saga._registrar_evento(
             SagaIniciadaEvent(agregado_id=ordem_id, ocorrido_em=agora)
         )
@@ -196,11 +182,6 @@ class Saga(AggregateRoot):
         return tuple(deepcopy(self._itens))
 
     @property
-    def pecas(self) -> list[dict[str, Any]]:
-        """As pecas dos itens como o ``ReservarPecas`` as pede (RFC-004 secao 4.1)."""
-        return pecas_dos_itens(self._itens)
-
-    @property
     def reenvios(self) -> int:
         """Reenvios do comando em voo; zero no envio e sem comando em voo."""
         return self._reenvios
@@ -246,9 +227,24 @@ class Saga(AggregateRoot):
             raise ValueError(msg)
         self._traceparent = traceparent
 
-    def classificar(self, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
-        """Classifica o evento ``tipo`` na etapa atual (``tabela_da_saga``)."""
-        return classificar(self._etapa, tipo, marcos)
+    def classificar(
+        self, tipo: str, marcos: MarcosDaOrdem, *, causation_id: UUID | None = None
+    ) -> Classificacao:
+        """Classifica o evento ``tipo`` na etapa atual (``tabela_da_saga``).
+
+        A compensacao pendente e a primeira do plano; o ``causation_id`` casa a
+        resposta com um dos envios do comando em voo (RFC-004 secao 4.4).
+        """
+        em_voo = self._comando_em_voo
+        envios = {UUID(i) for i in em_voo["mensagem_ids"]} if em_voo else set()
+        plano = self._plano_compensacao
+        return classificar(
+            self._etapa,
+            tipo,
+            marcos,
+            pendente=plano[0] if plano else None,
+            casada=causation_id in envios,
+        )
 
     def avancar(
         self,
@@ -259,95 +255,111 @@ class Saga(AggregateRoot):
         ator: str,
         envio: Envio | None = None,
     ) -> None:
-        """Aplica um evento do fluxo normal pela linha dele na tabela 4.1.
+        """Aplica um evento pela transicao dele (RFC-004 secoes 4.1, 4.4 e 4.5).
 
-        Confere tudo antes de mudar, pelas regras da tabela (``linha_do_evento``,
-        ``conferir_envio`` e ``conferir_prazo``, com os ``marcos`` da OS de antes
-        do fato). Depois anota o registro, vai para a etapa seguinte, marca o
-        passo concluido (T3, T5, T6, T7), guarda os itens do diagnostico e troca
-        o comando em voo (o ``envio`` passa a esperar resposta, com ``reenvios``
-        zerado).
+        A linha do fluxo normal, o inicio da compensacao pela falha de negocio,
+        a resposta da compensacao pendente ou a corrida do pivot, conferida
+        antes de mudar (``transicao_do_evento`` e ``conferir_envio``, com os
+        ``marcos`` da OS de antes do fato). O ``envio`` passa a esperar resposta.
 
         Raises:
             TransicaoDaSagaInvalidaError: alguma conferencia falhou; nada muda.
         """
-        linha = linha_do_evento(self, evento, marcos, agora)
+        transicao = transicao_do_evento(self, evento, marcos, agora)
         # Calculados antes de mudar: dado malformado levanta com a saga intacta.
         diagnostico = evento.tipo == "DiagnosticoConcluido"
         itens = itens_do_diagnostico(evento.dados) if diagnostico else self._itens
-        posicao = (
-            evento.dados["posicao_na_fila"]
-            if evento.tipo == "ExecucaoAgendada"
-            else None
+        agendada = evento.tipo == "ExecucaoAgendada"
+        posicao = evento.dados["posicao_na_fila"] if agendada else None
+        conferir_envio(
+            transicao, envio, ordem_id=self.id, itens=itens, marcos=marcos
         )
-        conferir_envio(linha, envio, ordem_id=self.id, itens=itens, marcos=marcos)
         conferir_prazo(envio, agora)
-        de = self._etapa
-        if linha.seguinte is not de:
+        self._itens = itens
+        gatilho = Gatilho(evento.tipo, evento.id, agora, ator)
+        self._mudar(transicao, gatilho, envio, posicao)
+
+    def cancelar(
+        self, marcos: MarcosDaOrdem, *, agora: datetime, ator: str, envio: Envio
+    ) -> None:
+        """Pedido de cancelamento antes do pivot: a compensacao comeca.
+
+        O plano leva os passos concluidos e o em voo (RFC-004 secao 4.4), e o
+        ``envio`` e a primeira compensacao dele, com prazo. O registro leva o
+        gatilho ``cancelamento`` e o ``ator`` que pediu.
+
+        Raises:
+            TransicaoDaSagaInvalidaError: etapa que nao e de antes do pivot, ou
+                o envio nao e a primeira compensacao do plano; nada muda.
+        """
+        transicao = transicao_do_cancelamento(self, agora)
+        conferir_envio(
+            transicao, envio, ordem_id=self.id, itens=self._itens, marcos=marcos
+        )
+        conferir_prazo(envio, agora)
+        pedido = Gatilho(GATILHO_CANCELAMENTO, None, agora, ator)
+        self._mudar(transicao, pedido, envio)
+
+    # ----- mecanica interna
+
+    def _mudar(
+        self,
+        transicao: Transicao,
+        gatilho: Gatilho,
+        envio: Envio | None,
+        posicao: int | None = None,
+    ) -> None:
+        """Aplica a transicao ja conferida e anota o registro dela."""
+        de, agora = self._etapa, gatilho.em
+        if transicao.seguinte is not de:
             self._registrar_evento(
                 EtapaDaSagaAlteradaEvent(
                     agregado_id=self.id,
                     etapa_anterior=de,
-                    etapa_nova=linha.seguinte,
+                    etapa_nova=transicao.seguinte,
                     permanencia=agora - self._etapa_desde,
                     ocorrido_em=agora,
                 )
             )
-            self._etapa = linha.seguinte
+            self._etapa = transicao.seguinte
             self._etapa_desde = agora
+        if de in ANTES_DO_PIVOT and transicao.seguinte is EtapaSaga.COMPENSANDO:
+            # A transicao que inicia a compensacao sempre traz o motivo.
+            motivo = MotivoCompensacao(cast("str", transicao.motivo))
+            self._registrar_evento(
+                CompensacaoIniciadaEvent(
+                    agregado_id=self.id, motivo=motivo, ocorrido_em=agora
+                )
+            )
         self._atualizada_em = agora
-        passo = self._passo(
-            gatilho=evento.tipo, de=de, mensagem_id=evento.id, ator=ator, envio=envio
+        self._motivo = transicao.motivo
+        self._falha = transicao.falha
+        self._plano_compensacao = [c.value for c in transicao.plano]
+        passo = gatilho.registro(
+            len(self._passos) + 1,
+            de,
+            self._etapa,
+            envio,
+            transicao.registro or transicao.motivo,
         )
         if posicao is not None:
             passo["posicao_na_fila"] = posicao
         self._passos = [*self._passos, passo]
-        self._itens = itens
-        if linha.concluido is not None:
-            self._passos_concluidos = [*self._passos_concluidos, linha.concluido]
+        if transicao.concluido is not None:
+            self._passos_concluidos = [*self._passos_concluidos, transicao.concluido]
         self._esperar_resposta(envio)
-
-    # ----- mecanica interna
-
-    def _passo(
-        self,
-        *,
-        gatilho: str,
-        de: EtapaSaga | None,
-        mensagem_id: UUID | None,
-        ator: str,
-        envio: Envio | None,
-    ) -> RegistroDaSaga:
-        """RegistroDaSaga novo no instante da alteracao (``atualizada_em``)."""
-        return {
-            "seq": len(self._passos) + 1,
-            "em": self._atualizada_em.isoformat(),
-            "de": de.value if de is not None else None,
-            "para": self._etapa.value,
-            "gatilho": gatilho,
-            "mensagem_id": str(mensagem_id) if mensagem_id is not None else None,
-            "comando": envio.tipo.value if envio is not None else None,
-            "comando_id": str(envio.id) if envio is not None else None,
-            "motivo": self._motivo,
-            "ator": ator,
-        }
 
     def _esperar_resposta(self, envio: Envio | None) -> None:
         """O envio conferido vira o comando em voo; sem ele, nada fica em voo.
 
-        Todo comando do fluxo normal tem resposta automatica, entao o envio
-        conferido sempre traz o prazo.
+        Todo comando enviado depois da abertura tem resposta automatica, entao o
+        envio conferido sempre traz o prazo.
         """
         if envio is None:
             self._comando_em_voo = None
             self._prazo_resposta_em = None
             self._reenvios = 0
             return
-        self._comando_em_voo = {
-            "tipo": envio.tipo.value,
-            "dados": deepcopy(dict(envio.dados)),
-            "mensagem_ids": [str(envio.id)],
-            "enviado_em": self._atualizada_em.isoformat(),
-        }
+        self._comando_em_voo = envio.em_voo(self._atualizada_em)
         self._prazo_resposta_em = envio.prazo_resposta_em
         self._reenvios = 0

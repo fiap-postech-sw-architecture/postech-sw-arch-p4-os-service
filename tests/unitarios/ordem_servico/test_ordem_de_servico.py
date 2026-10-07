@@ -417,16 +417,22 @@ class TestFatosDaSaga:
 
     @pytest.mark.usefixtures("relogio_que_avanca")
     @pytest.mark.parametrize(
-        "status",
+        ("estado", "status"),
         [
-            StatusPagamento.RECUSADO,
-            StatusPagamento.EXPIRADO,
-            StatusPagamento.CANCELADO,
-            StatusPagamento.ESTORNADO,
+            *(
+                pytest.param(S.AGUARDANDO_PAGAMENTO, s, id=f"solicitado-{s.value}")
+                for s in (
+                    StatusPagamento.RECUSADO,
+                    StatusPagamento.EXPIRADO,
+                    StatusPagamento.CANCELADO,
+                    StatusPagamento.ESTORNADO,
+                )
+            ),
+            pytest.param(
+                S.AGUARDANDO_EXECUCAO, StatusPagamento.ESTORNADO, id="confirmado"
+            ),
+            pytest.param(S.ENTREGUE, StatusPagamento.ESTORNADO, id="entregue"),
         ],
-    )
-    @pytest.mark.parametrize(
-        "estado", [S.AGUARDANDO_PAGAMENTO, S.AGUARDANDO_EXECUCAO, S.ENTREGUE]
     )
     def test_outros_estados_do_pagamento_so_trocam_o_resumo(
         self, status: StatusPagamento, estado: StatusOrdem
@@ -446,6 +452,21 @@ class TestFatosDaSaga:
         assert (ordem.status, ordem.historico) == (estado, historico)
         assert ordem.coletar_eventos() == []
         assert ordem.atualizado_em > historico[-1].ocorrido_em
+
+    def test_estado_antigo_do_pagamento_fora_de_ordem_nao_muda_nada(self) -> None:
+        # O recusado que chega depois do estorno da aprovacao tardia nao desfaz
+        # o estorno, nem conta como alteracao da OS.
+        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
+        ordem.registrar_status_do_pagamento(
+            StatusPagamento.ESTORNADO, ator=ATOR_PROCESSO
+        )
+        antes = _fotografia(ordem)
+
+        ordem.registrar_status_do_pagamento(
+            StatusPagamento.RECUSADO, ator=ATOR_PROCESSO
+        )
+
+        assert _fotografia(ordem) == antes
 
     @pytest.mark.parametrize(
         "status", [s for s in StatusPagamento if s is not StatusPagamento.CONFIRMADO]

@@ -1,7 +1,7 @@
 """Plano de compensacao: as 11 linhas da tabela da RFC-004 secao 4.4.
 
-O que a saga ja fez em cada etapa (passos concluidos e comando em voo) e o
-plano esperado sao escritos aqui a partir da RFC, e nao lidos do codigo.
+O que a saga ja fez em cada etapa (``FEITO``, no cenario) e o plano esperado
+sao escritos a partir da RFC, e nao lidos do codigo.
 """
 
 from __future__ import annotations
@@ -15,21 +15,8 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
     plano_de_compensacao,
 )
 from src.ordem_servico.aplicacao.saga.modelo import MotivoCompensacao
-from tests.unitarios.ordem_servico.cenario_da_saga import ESPERADA
+from tests.unitarios.ordem_servico.cenario_da_saga import ESPERADA, FEITO
 
-# O que a saga ja fez em cada etapa: os passos T concluidos e o comando com
-# prazo que espera resposta (RFC-004 secoes 4.1 e 4.3). No pagamento, antes e
-# depois do PagamentoSolicitado (o checkout aberto conclui o T6).
-FEITO = {
-    "aguardando_diagnostico": ((), None),
-    "aguardando_orcamento": ((), "GerarOrcamento"),
-    "aguardando_decisao": (("T3",), None),
-    "aguardando_reserva": (("T3",), "ReservarPecas"),
-    "aguardando_pagamento": (("T3", "T5"), "SolicitarPagamento"),
-    "aguardando_pagamento_com_checkout": (("T3", "T5", "T6"), None),
-    "aguardando_agendamento": (("T3", "T5", "T6"), "AgendarExecucao"),
-    "aguardando_inicio": (("T3", "T5", "T6", "T7"), None),
-}
 TODAS = (
     "CancelarExecucao",
     "EstornarPagamento",

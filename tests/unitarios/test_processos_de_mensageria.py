@@ -138,9 +138,7 @@ def test_handler_marca_o_adiantado_no_span_e_relanca(
     ("recusa", "atributos"),
     [
         pytest.param(
-            EventoRecusadoError(
-                "sem_tratador_nesta_versao", EtapaSaga.AGUARDANDO_DECISAO
-            ),
+            EventoRecusadoError("transicao_invalida", EtapaSaga.AGUARDANDO_DECISAO),
             {
                 "pytstop.saga.desfecho": "recusada",
                 "pytstop.saga.etapa": "aguardando_decisao",

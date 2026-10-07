@@ -1,4 +1,4 @@
-"""Compensacoes da saga (RFC-004 secoes 4.4 e 4.7; ADR-035 "Compensacoes").
+"""Compensacoes da saga (RFC-004 secoes 4.4, 4.5 e 4.7; ADR-035 "Compensacoes").
 
 O plano e funcao pura do que a saga ja fez quando a compensacao comeca: desfaz
 cada passo concluido ou em voo (o comando saiu e a resposta ainda nao chegou,
@@ -6,7 +6,10 @@ entao o efeito dele tambem se desfaz), na ordem fixa ``ORDEM_DAS_COMPENSACOES``,
 menos o passo que a falha de negocio ja encerrou no participante. O
 ``DescartarDiagnostico`` entra sempre: o ``SolicitarDiagnostico`` nao tem
 resposta automatica (RFC-004 secao 4.3). As compensacoes saem uma por vez,
-cada uma esperando a resposta (``RESPOSTA_DA_COMPENSACAO``).
+cada uma esperando a resposta (``RESPOSTA_DA_COMPENSACAO``): a resposta da
+ultima termina a saga em ``compensada``, e o estorno recusado a para em
+``falha_na_compensacao``. As transicoes daqui sao conferidas pela ``Saga``
+antes de mudar (``tabela_da_saga``).
 """
 
 from __future__ import annotations
@@ -15,10 +18,16 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
-from src.ordem_servico.aplicacao.saga.modelo import MotivoCompensacao
+from src.ordem_servico.aplicacao.saga.modelo import (
+    EtapaSaga,
+    MotivoCompensacao,
+    Transicao,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+
+    from src.ordem_servico.aplicacao.saga.saga import Saga
 
 _M = MotivoCompensacao
 
@@ -119,4 +128,49 @@ def plano_de_compensacao(
         comando
         for comando in ORDEM_DAS_COMPENSACOES
         if _PASSO_DESFEITO[comando] in a_desfazer
+    )
+
+
+# Codigo do registro quando o inicio da execucao vence o cancelamento, e da
+# falha da compensacao pelo estorno que o provedor recusou (RFC-004 secoes 4.5
+# e 4.7).
+CANCELAMENTO_RECUSADO: Final = "cancelamento_recusado"
+ESTORNO_RECUSADO: Final = "estorno_recusado"
+# O inicio da execucao com so o CancelarExecucao pendente (ou parado): nada foi
+# desfeito, e a saga volta ao fluxo, sem motivo nem plano (RFC-004 secao 4.5).
+CORRIDA_DO_PIVOT: Final = Transicao(
+    EtapaSaga.EM_EXECUCAO, registro=CANCELAMENTO_RECUSADO
+)
+
+
+def inicio(saga: Saga, motivo: MotivoCompensacao) -> Transicao:
+    """A compensacao comeca: o plano de agora, com a primeira dele enviada."""
+    em_voo = saga.comando_em_voo
+    plano = plano_de_compensacao(
+        saga.passos_concluidos, em_voo["tipo"] if em_voo else None, motivo
+    )
+    return Transicao(
+        EtapaSaga.COMPENSANDO, comando=plano[0], motivo=motivo.value, plano=plano
+    )
+
+
+def resposta(saga: Saga, tipo: str) -> Transicao:
+    """A resposta da compensacao pendente: a seguinte sai, ou a saga termina.
+
+    O ``EstornoDePagamentoFalhou`` para a sequencia: o compensado fica
+    compensado, o resto como estava, e a pendente segue no plano para a
+    retomada (RFC-004 secao 4.7).
+    """
+    plano = tuple(Comando(c) for c in saga.plano_compensacao)
+    if tipo == "EstornoDePagamentoFalhou":
+        return Transicao(
+            EtapaSaga.FALHA_NA_COMPENSACAO,
+            motivo=saga.motivo,
+            plano=plano,
+            falha=ESTORNO_RECUSADO,
+        )
+    if len(plano) == 1:
+        return Transicao(EtapaSaga.COMPENSADA, motivo=saga.motivo)
+    return Transicao(
+        EtapaSaga.COMPENSANDO, comando=plano[1], motivo=saga.motivo, plano=plano[1:]
     )

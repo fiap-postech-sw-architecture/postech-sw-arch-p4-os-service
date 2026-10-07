@@ -35,6 +35,7 @@ from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import (
     obter_abrir_ordem,
     obter_obter_ordem,
+    obter_obter_saga,
     obter_registrar_entrega,
 )
 from tests.eventos import envelope_de_evento
@@ -52,22 +53,53 @@ _ATENDENTE: Final = "0f8e2d7c-6b5a-4c3d-9e1f-a2b3c4d5e6f7"
 _PARTICIPANTE: Final = {"o Billing": "billing", "a Execução": "execucao"}
 # A copia de retry volta cinco vezes; a falha seguinte iria para a DLQ.
 _ENTREGAS_ATE_A_DLQ: Final = 6
-# Os eventos do caminho feliz, em ordem, e o comando que abriu o fluxo de cada
-# um: o evento espontaneo leva o id dele no causation_id (RFC-004 secao 5.2).
+# O comando a que cada evento responde, ou o que abriu o fluxo dele: o evento
+# leva o id desse comando no causation_id (RFC-004 secao 5.2).
 _COMANDO_QUE_ABRIU: Final = {
     "DiagnosticoIniciado": "SolicitarDiagnostico",
     "DiagnosticoConcluido": "SolicitarDiagnostico",
     "OrcamentoGerado": "GerarOrcamento",
+    "GeracaoDeOrcamentoFalhou": "GerarOrcamento",
     "OrcamentoAprovado": "GerarOrcamento",
     "OrcamentoRecusado": "GerarOrcamento",
+    "OrcamentoExpirado": "GerarOrcamento",
     "PecasReservadas": "ReservarPecas",
+    "ReservaDePecasFalhou": "ReservarPecas",
     "PagamentoSolicitado": "SolicitarPagamento",
     "PagamentoConfirmado": "SolicitarPagamento",
+    "PagamentoRecusado": "SolicitarPagamento",
+    "PagamentoExpirado": "SolicitarPagamento",
     "ExecucaoAgendada": "AgendarExecucao",
     "ExecucaoIniciada": "AgendarExecucao",
     "ExecucaoFinalizada": "AgendarExecucao",
+    "ExecucaoCancelada": "CancelarExecucao",
+    "PagamentoCancelado": "EstornarPagamento",
+    "PagamentoEstornado": "EstornarPagamento",
+    "EstornoDePagamentoFalhou": "EstornarPagamento",
+    "ReservaLiberada": "LiberarReserva",
+    "OrcamentoCancelado": "CancelarOrcamento",
+    "DiagnosticoDescartado": "DescartarDiagnostico",
 }
-_CAMINHO_FELIZ: Final = tuple(t for t in _COMANDO_QUE_ABRIU if t != "OrcamentoRecusado")
+_CAMINHO_FELIZ: Final = (
+    "DiagnosticoIniciado",
+    "DiagnosticoConcluido",
+    "OrcamentoGerado",
+    "OrcamentoAprovado",
+    "PecasReservadas",
+    "PagamentoSolicitado",
+    "PagamentoConfirmado",
+    "ExecucaoAgendada",
+    "ExecucaoIniciada",
+    "ExecucaoFinalizada",
+)
+# Como o participante responde a cada compensacao.
+_RESPOSTA: Final = {
+    "CancelarExecucao": "ExecucaoCancelada",
+    "EstornarPagamento": "PagamentoEstornado",
+    "LiberarReserva": "ReservaLiberada",
+    "CancelarOrcamento": "OrcamentoCancelado",
+    "DescartarDiagnostico": "DiagnosticoDescartado",
+}
 
 
 class Barramento:
@@ -184,6 +216,14 @@ class Atendimento:
         with self.session_factory() as sessao:
             return obter_obter_ordem(sessao).executar(self.ordem_id)
 
+    def compensacao_pendente(self) -> str | None:
+        """A primeira do plano, como o ``GET /api/v1/sagas/{id}`` a mostra."""
+        with self.session_factory() as sessao:
+            saga = obter_obter_saga(sessao).executar(self.ordem_id)
+        if saga.etapa != "compensando":
+            return None
+        return saga.plano_compensacao[0]
+
 
 @given("um cliente com um veículo cadastrado", target_fixture="atendimento")
 def _cliente_com_veiculo(session_factory: sessionmaker[Session]) -> Atendimento:
@@ -222,9 +262,16 @@ def _caminho_feliz_ate(atendimento: Atendimento, evento: str) -> None:
         atendimento.publicar(tipo)
 
 
+@given(parsers.parse('{participante} publica "{tipo}"'))
 @when(parsers.parse('{participante} publica "{tipo}"'))
 def _publicar(atendimento: Atendimento, participante: str, tipo: str) -> None:
     atendimento.publicar(tipo, participante)
+
+
+@when("os participantes respondem a cada compensação")
+def _responder_compensacoes(atendimento: Atendimento) -> None:
+    while (pendente := atendimento.compensacao_pendente()) is not None:
+        atendimento.publicar(_RESPOSTA[pendente])
 
 
 @when("o atendente registra a entrega")
@@ -257,6 +304,24 @@ def _etapa_e_status(atendimento: Atendimento, etapa: str, status: str) -> None:
 def _final(atendimento: Atendimento, status: str, etapa: str) -> None:
     ordem = atendimento.ordem()
     assert (ordem.status, ordem.etapa) == (status, etapa)
+
+
+@then(parsers.parse('as compensações enviadas, em ordem, são "{compensacoes}"'))
+def _compensacoes(atendimento: Atendimento, compensacoes: str) -> None:
+    enviadas = [t for t in atendimento.barramento.entregues if t in _RESPOSTA]
+    assert enviadas == compensacoes.split(", ")
+
+
+@then(parsers.parse('a OS fica cancelada pela saga com o motivo "{motivo}"'))
+def _cancelada(atendimento: Atendimento, motivo: str) -> None:
+    ordem = atendimento.ordem()
+    assert (ordem.status, ordem.etapa, ordem.motivo_cancelamento) == (
+        "cancelada",
+        "compensada",
+        motivo,
+    )
+    ultima = ordem.historico[-1]
+    assert (ultima.para, ultima.origem, ultima.motivo) == ("cancelada", "saga", motivo)
 
 
 @then("os registros da saga são, em ordem:")
