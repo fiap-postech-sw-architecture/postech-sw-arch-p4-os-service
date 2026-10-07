@@ -120,8 +120,8 @@ seguinte; as secoes acima ficam como estavam.
 
 ## Consolidacao de 2026-10-07
 
-Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (78 das 119), na
-ordem e nas secoes originais. As outras 41 seguem inteiras no `MEMORY.md`, e o que o
+Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (81 das 119), na
+ordem e nas secoes originais. As outras 38 seguem inteiras no `MEMORY.md`, e o que o
 README, os ADR e a RFC-004 do platform ou os comentarios do codigo ja registram virou
 linhas de la que apontam para essas fontes. O texto exato das 119 esta no historico
 do git (`git show 0ccdca8:MEMORY.md`); aqui ele so mudou onde citava um documento ou um
@@ -222,3 +222,9 @@ fechadas e a linha `CORRIGIDO (conferencia ...)`, uma entrada que a conferencia 
 - 2026-10-06 - LOW - O padrao de e-mail do scrubber de log (`\b[A-Za-z0-9._%+-]+@...`, o mesmo em Billing e Execucao) tem tempo quadratico numa linha longa de `a-b-c-...` sem `@` (20 mil caracteres em cerca de 0,1 s, 80 mil em cerca de 1,8 s), e o scrubber roda no event loop: ancorar o inicio do trecho com um lookbehind no lugar do `\b`, nos tres servicos - PR #3
 - 2026-10-06 - LOW - BDD de componente (ADR-041: a saga com barramento falso) entra com a saga; o comentario do job `test` do `ci.yml` ja o anuncia - PR #2
 - 2026-10-06 - LOW - Sugestoes para o CI dos tres servicos, nao aplicadas aqui para o CI seguir copia literal: resultado do pip-audit e do trivy no `$GITHUB_STEP_SUMMARY` e pip-audit com export com hashes e `--disable-pip` (o total do gate no `cobertura_resumo.py` ja foi feito aqui) - PR #2
+
+### Review lessons
+
+- 2026-10-07 - `SKIP LOCKED` se prova com uma replica segurando a transacao do claim aberta (gancho no `before_cursor_execute`) e a outra publicando nesse meio tempo: sem a clausula o claim concorrente so espera o lock, com o mesmo resultado final - PR #4
+- 2026-10-07 - Teste de PII em log e span cobre cada caminho que leva texto de excecao para la, inclusive os de fora do handler (queda da conexao, retries esgotados, falha antes do handler), e justificativa de "nao se provoca no teste" se confere com experimento: o nack da fila de retry cheia se provocava redeclarando a fila - PR #4
+- 2026-10-07 - Teste de PII em log confere tambem o log do cliente AMQP, com o dado sensivel no comeco do corpo (o pika imprime so os 255 primeiros bytes); e teste de concorrencia prova a sobreposicao (uma sessao esperando lock no `pg_stat_activity`), nao so o resultado - PR #4
