@@ -90,7 +90,7 @@ class Atendimento:
         broker: Broker,
         rastreador: Rastreador,
     ) -> None:
-        self._engine = engine
+        self.engine = engine
         self._session_factory = session_factory
         self._broker = broker
         self._rastreador = rastreador
@@ -151,14 +151,14 @@ class Atendimento:
         return envelope
 
     def etapa(self) -> str | None:
-        with self._engine.connect() as conexao:
+        with self.engine.connect() as conexao:
             return conexao.execute(
                 text("SELECT etapa FROM sagas WHERE ordem_id = :id"),
                 {"id": self.ordem_id},
             ).scalar_one_or_none()
 
     def gatilhos(self) -> list[str]:
-        with self._engine.connect() as conexao:
+        with self.engine.connect() as conexao:
             passos = conexao.execute(
                 text("SELECT passos FROM sagas WHERE ordem_id = :id"),
                 {"id": self.ordem_id},
@@ -275,6 +275,13 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
     }
     assert broker.contar(_DLQ) == 0
     assert _retries() == retries
+    # Um UPDATE da saga por evento: a abertura grava a versao 1 e cada um dos
+    # dez eventos a sobe uma vez (o traceparent vai no mesmo UPDATE).
+    with atendimento.engine.connect() as conexao:
+        versao = conexao.execute(
+            text("SELECT versao FROM sagas WHERE ordem_id = :id"), {"id": ordem_id}
+        ).scalar_one()
+    assert versao == 11
     assert _amostra("pytstop_saga_iniciadas_total") == iniciadas + 1
     assert (
         _amostra("pytstop_saga_finalizadas_total", resultado="concluida")

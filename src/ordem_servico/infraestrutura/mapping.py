@@ -40,10 +40,13 @@ from sqlalchemy import (
     event,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import composite, registry, relationship
+from sqlalchemy.orm import Session, composite, registry, relationship
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.infraestrutura.database import metadata
+from src.compartilhado.infraestrutura.mensageria.telemetria import (
+    cabecalhos_do_contexto_atual,
+)
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.historico import MudancaDeStatus, OrigemMudanca
@@ -279,6 +282,23 @@ def _ao_recarregar(
     object.__setattr__(target, "_eventos_pendentes", [])
 
 
+def _gravar_contexto_de_trace(
+    sessao: Session, _contexto: object, _instancias: object
+) -> None:
+    """Antes do flush, a saga alterada leva o contexto do span corrente (ADR-043).
+
+    No mesmo UPDATE da transicao, mesmo quando o flush vem de outro
+    repositorio (o da OS grava antes da saga); fora de um span, fica o
+    anterior.
+    """
+    traceparent = cabecalhos_do_contexto_atual().get("traceparent")
+    if traceparent is None:
+        return
+    for instancia in (*sessao.new, *sessao.dirty):
+        if isinstance(instancia, Saga):
+            instancia.registrar_contexto_de_trace(traceparent)
+
+
 _mapeamento_iniciado = False
 
 
@@ -373,7 +393,7 @@ def iniciar_mapeamentos() -> None:
             "_itens": sg.c.itens,
             "_reenvios": sg.c.reenvios,
             "_prazo_resposta_em": sg.c.prazo_resposta_em,
-            "traceparent": sg.c.traceparent,
+            "_traceparent": sg.c.traceparent,
             "_iniciada_em": sg.c.iniciada_em,
             "_etapa_desde": sg.c.etapa_desde,
             "_atualizada_em": sg.c.atualizada_em,
@@ -384,3 +404,4 @@ def iniciar_mapeamentos() -> None:
     event.listen(OrdemDeServico, "load", _ao_carregar)
     event.listen(OrdemDeServico, "refresh", _ao_recarregar)
     event.listen(Saga, "load", _ao_carregar)
+    event.listen(Session, "before_flush", _gravar_contexto_de_trace)

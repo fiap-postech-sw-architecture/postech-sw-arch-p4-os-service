@@ -10,9 +10,10 @@ classificacao dos eventos ficam em ``tabela_da_saga``; os tipos, em ``modelo``.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
@@ -45,6 +46,10 @@ if TYPE_CHECKING:
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 
+# traceparent W3C da versao 00 (55 caracteres, o tamanho da coluna).
+_TRACEPARENT: Final = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
+
+
 @dataclass(eq=False)
 class Saga(AggregateRoot):
     """Instancia da saga de uma OS; ``id`` e o ``ordem_id``.
@@ -71,9 +76,9 @@ class Saga(AggregateRoot):
     )
     _reenvios: int = field(default=0, kw_only=True)
     _prazo_resposta_em: datetime | None = field(default=None, kw_only=True)
-    # Contexto W3C da ultima transicao (ADR-043): a persistencia grava o do
-    # span corrente ao salvar.
-    traceparent: str | None = field(default=None, kw_only=True, repr=False)
+    # Contexto W3C da ultima transicao (ADR-043): a persistencia registra o do
+    # span corrente antes de gravar.
+    _traceparent: str | None = field(default=None, kw_only=True, repr=False)
     _versao: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -220,6 +225,22 @@ class Saga(AggregateRoot):
     def versao(self) -> int:
         """Versao do lock otimista: comeca em 1 e sobe a cada gravacao."""
         return self._versao
+
+    @property
+    def traceparent(self) -> str | None:
+        """Contexto W3C da ultima transicao, pai dos spans que a retomam."""
+        return self._traceparent
+
+    def registrar_contexto_de_trace(self, traceparent: str) -> None:
+        """Guarda o ``traceparent`` W3C (versao 00) da transicao em curso.
+
+        Raises:
+            ValueError: texto fora do formato ``00-<32 hex>-<16 hex>-<2 hex>``.
+        """
+        if not _TRACEPARENT.fullmatch(traceparent):
+            msg = "traceparent fora do formato W3C da versao 00"
+            raise ValueError(msg)
+        self._traceparent = traceparent
 
     def classificar(self, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
         """Classifica o evento ``tipo`` na etapa atual (``tabela_da_saga``)."""

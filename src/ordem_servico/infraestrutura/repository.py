@@ -8,9 +8,6 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm.exc import StaleDataError
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.compartilhado.infraestrutura.mensageria.telemetria import (
-    cabecalhos_do_contexto_atual,
-)
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
@@ -103,17 +100,13 @@ class SagaSQLAlchemyRepository:
         return self._session.get(Saga, ordem_id)
 
     def salvar(self, saga: Saga) -> None:
-        """Grava o contexto de trace corrente e faz flush com lock otimista.
+        """Faz flush com lock otimista; os fatos viram metrica no commit.
 
-        O ``traceparent`` do span em curso (a requisicao da abertura, o
-        consumo do evento) vira o da saga (ADR-043); fora de um span, fica o
-        anterior. Versao divergente vira ``ConflitoDeConcorrenciaException``.
-        Os fatos da saga vao para a sessao e viram metrica no commit.
+        O flush leva o ``traceparent`` do span em curso (a requisicao da
+        abertura, o consumo do evento) para a saga (ADR-043, no ``before_flush``
+        do mapeamento). Versao divergente vira ``ConflitoDeConcorrenciaException``.
         """
         ordem_id = saga.ordem_id
-        saga.traceparent = cabecalhos_do_contexto_atual().get(
-            "traceparent", saga.traceparent
-        )
         self._session.add(saga)
         try:
             self._session.flush()

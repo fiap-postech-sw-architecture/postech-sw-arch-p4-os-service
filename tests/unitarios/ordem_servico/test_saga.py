@@ -675,6 +675,33 @@ class TestRecusasDoAvancar:
             )
 
 
+class TestContextoDeTrace:
+    def test_guarda_o_traceparent_w3c(self) -> None:
+        saga = saga_em("aguardando_diagnostico")
+        valido = f"00-{'a' * 32}-{'b' * 16}-01"
+
+        saga.registrar_contexto_de_trace(valido)
+
+        assert saga.traceparent == valido
+
+    @pytest.mark.parametrize(
+        "invalido",
+        [
+            pytest.param("x" * 500, id="longo"),
+            pytest.param(f"01-{'a' * 32}-{'b' * 16}-01", id="outra-versao"),
+            pytest.param(f"00-{'A' * 32}-{'b' * 16}-01", id="maiusculas"),
+            pytest.param(f"00-{'a' * 32}-{'b' * 16}-01\n", id="quebra-de-linha"),
+        ],
+    )
+    def test_recusa_o_que_nao_e_traceparent_sem_mudar(self, invalido: str) -> None:
+        saga = saga_em("aguardando_diagnostico")
+
+        with pytest.raises(ValueError, match="traceparent"):
+            saga.registrar_contexto_de_trace(invalido)
+
+        assert saga.traceparent is None
+
+
 class TestEnvio:
     def test_dados_sao_uma_copia_so_de_leitura(self) -> None:
         dados = {"ordem_id": "x", "itens": [{"codigo": "A"}]}
