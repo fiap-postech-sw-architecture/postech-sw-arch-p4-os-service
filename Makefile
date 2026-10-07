@@ -178,8 +178,10 @@ manifests:
 # Implantacao no kind do platform (README, "Implantacao"), com a plataforma
 # de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do
 # servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
-# carrega no kind e aplica o overlay kind na ordem (banco, Job de migracao,
-# Deployments). PLATFORM e o clone do platform, por padrao o vizinho deste.
+# carrega no kind, aplica o overlay kind de uma vez e espera o banco, o Job de
+# migracao e os Deployments, nessa ordem. PLATFORM e o clone do platform, por
+# padrao o vizinho deste; o script entra no platform com o contrato de
+# implantacao dos servicos (README do platform, "Contrato com os servicos").
 PLATFORM ?= ../postech-sw-arch-p4-platform
 
 kind-deploy:

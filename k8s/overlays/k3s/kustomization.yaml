@@ -1,5 +1,6 @@
-# k3s na VM da Azure: o deploy-k3s do platform gera o overlay final, com a
-# imagem por digest. Aqui, o CIDR de pods do k3s, ate 3 replicas da API e mais
+# k3s na VM da Azure (ADR-042). A imagem entra por digest, num overlay gerado
+# a partir deste na implantacao, como o do kind-ci; sozinho, ele fica com a
+# imagem sem tag. Aqui, o CIDR de pods do k3s, ate 3 replicas da API e mais
 # disco para o banco (a StorageClass padrao do k3s e a local-path).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization

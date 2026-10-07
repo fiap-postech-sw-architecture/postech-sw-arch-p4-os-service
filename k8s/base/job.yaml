@@ -1,9 +1,9 @@
-# Migracao, com o dono `os` (DDL), e semente do admin, antes do rollout dos
-# Deployments, que esperam por ela (aguarda-migracao). Job e imutavel: o
-# implantar-servicos.sh do platform apaga os Jobs com o rotulo de
-# inicializacao antes do apply e espera este completar. Idempotente: o alembic
-# em head nao faz nada, e a semente nao recria o admin (que e o unico usuario
-# semeado; atendente e mecanico se cadastram pela API).
+# Migracao, com o dono `os` (DDL), e semente do admin, que os pods dos
+# Deployments esperam (aguarda-migracao). Job e imutavel: o
+# implantar-servicos.sh do platform apaga os Jobs com o rotulo de inicializacao
+# antes do apply e espera este completar antes dos rollouts. Idempotente: o
+# alembic em head nao faz nada, e a semente nao recria o admin (que e o unico
+# usuario semeado; atendente e mecanico se cadastram pela API).
 apiVersion: batch/v1
 kind: Job
 metadata:

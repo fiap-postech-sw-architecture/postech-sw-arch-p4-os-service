@@ -1,15 +1,18 @@
 # OS Service no namespace pytstop-os (README, "Implantacao"). Nao aplique este
 # diretorio direto: os overlays (kind, kind-ci e k3s) trazem o que muda por
-# ambiente, e o implantar-servicos.sh do platform os aplica na ordem: banco,
-# Job de migracao, Deployments. Nenhum Secret aqui: os do servico nascem no
-# make deploy do platform e entram por secretKeyRef (ADR-042).
+# ambiente, e o implantar-servicos.sh do platform aplica um deles de uma vez e
+# espera o banco, o Job de migracao e os Deployments, nessa ordem (os pods dos
+# processos sobem junto e esperam a migracao no aguarda-migracao). Nenhum
+# Secret aqui: os do servico nascem no make deploy do platform e entram por
+# secretKeyRef (ADR-042).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: pytstop-os
 
 # Todo objeto, e os pods pelos templates, leva o part-of do servico; os
-# seletores ficam so com o app.
+# seletores ficam so com o app. O rotulo vai tambem ao volumeClaimTemplates do
+# StatefulSet do banco, que e imutavel: muda-lo exige recriar o StatefulSet.
 labels:
   - pairs:
       app.kubernetes.io/part-of: os-service
@@ -41,7 +44,7 @@ configMapGenerator:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger.pytstop-plataforma.svc.cluster.local:4317
       # /metrics do relay e do consumidor, a porta `metrics` dos Deployments.
       - METRICS_PORT=9100
-      # Migracao e semente sao do Job, antes do rollout.
+      # Migracao e semente sao do Job, que os pods esperam.
       - RUN_MIGRATIONS_ON_STARTUP=false
       - RUN_SEED_ON_STARTUP=false
       # /metrics da API, na porta http (ADR-043).

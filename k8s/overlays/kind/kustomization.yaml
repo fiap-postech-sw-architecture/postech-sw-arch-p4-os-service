@@ -12,8 +12,10 @@ images:
     newTag: dev
 
 configMapGenerator:
-  # CIDR de pods do kind: o X-Forwarded-For do Kong (o unico na frente da API,
-  # pela NetworkPolicy) vale como IP do cliente no limite de login e registro.
+  # CIDR de pods do kind: o X-Forwarded-For do Kong vale como IP do cliente no
+  # limite de login e registro. Vale tambem o de quem mais a NetworkPolicy deixa
+  # chegar a API (o Prometheus e as APIs de Billing e Execucao, que leem o
+  # JWKS): pods da plataforma e dos servicos, nao clientes.
   - name: os-service
     behavior: merge
     literals:
