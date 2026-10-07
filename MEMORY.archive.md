@@ -4,7 +4,9 @@ Entradas do `MEMORY.md` antes da consolidacao de 2026-10-06 (92 entradas), na
 ordem e nas secoes originais. O `MEMORY.md` traz a versao consolidada; aqui fica
 a trilha de auditoria. As referencias ao processo interno de revisao foram
 trocadas pela fonte publica (PR, ADR ou RFC); o texto exato esta no historico do
-git (`git show 250c756:MEMORY.md`).
+git (`git show 250c756:MEMORY.md`). A secao `Consolidacao de 2026-10-07`, ao fim
+deste arquivo, guarda as entradas que sairam do `MEMORY.md` na consolidacao
+seguinte; as secoes acima ficam como estavam.
 
 ## Recent decisions
 
