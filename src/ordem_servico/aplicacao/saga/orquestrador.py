@@ -19,8 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
 
 import structlog
@@ -31,7 +30,6 @@ from src.compartilhado.aplicacao.mensageria import (
     FalhaPermanenteError,
     FalhaTransitoriaError,
 )
-from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.dominio.exceptions import (
     TransicaoStatusInvalidaException,
     ViolacaoRegraDeNegocioException,
@@ -41,6 +39,10 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
+)
+from src.ordem_servico.aplicacao.saga.resumos_do_billing import (
+    resumo_do_orcamento,
+    resumo_do_pagamento,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     COMANDOS_COM_PRAZO,
@@ -57,6 +59,7 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
+    from src.ordem_servico.dominio.resumos import ResumoOrcamento
 
 _log = structlog.get_logger(__name__)
 
@@ -235,13 +238,8 @@ class OrquestradorDaSaga:
         ordem: OrdemDeServico,
         agora: datetime,
     ) -> None:
-        dados = evento.dados
         ordem.registrar_orcamento_gerado(
-            orcamento_id=UUID(dados["orcamento_id"]),
-            total=Dinheiro(valor=Decimal(dados["total"]), moeda=dados["moeda"]),
-            link_decisao=dados["link_decisao"],
-            valido_ate=datetime.fromisoformat(dados["valido_ate"]),
-            ator=ATOR_CONSUMIDOR,
+            resumo_do_orcamento(evento.dados), ator=ATOR_CONSUMIDOR
         )
         saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
 
@@ -275,15 +273,12 @@ class OrquestradorDaSaga:
         ordem: OrdemDeServico,
         agora: datetime,
     ) -> None:
-        ordem.registrar_pecas_reservadas(ator=ATOR_CONSUMIDOR)
         orcamento = ordem.resumo_orcamento
-        if orcamento is None:
-            # A OS so chega a aguardando_aprovacao com o resumo do orcamento.
-            msg = "Ordem sem orcamento gerado"
-            raise ViolacaoRegraDeNegocioException(msg)
+        # A OS recusa o fato sem o resumo do orcamento, antes de mudar.
+        ordem.registrar_pecas_reservadas(ator=ATOR_CONSUMIDOR)
         dados = {
             "ordem_id": str(saga.ordem_id),
-            "orcamento_id": str(orcamento.orcamento_id),
+            "orcamento_id": str(cast("ResumoOrcamento", orcamento).orcamento_id),
         }
         envio = self._enviar(Comando.SOLICITAR_PAGAMENTO, dados, evento, agora)
         saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR, envio=envio)
@@ -295,13 +290,7 @@ class OrquestradorDaSaga:
         ordem: OrdemDeServico,
         agora: datetime,
     ) -> None:
-        dados = evento.dados
-        ordem.registrar_pagamento_solicitado(
-            pagamento_id=UUID(dados["pagamento_id"]),
-            valor=Dinheiro(valor=Decimal(dados["valor"]), moeda=dados["moeda"]),
-            checkout_url=dados["checkout_url"],
-            expira_em=datetime.fromisoformat(dados["expira_em"]),
-        )
+        ordem.registrar_pagamento_solicitado(resumo_do_pagamento(evento.dados))
         saga.avancar(evento, agora=agora, ator=ATOR_CONSUMIDOR)
 
     def _pagamento_confirmado(

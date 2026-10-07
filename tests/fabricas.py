@@ -13,6 +13,11 @@ from uuid import UUID, uuid4
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+from src.ordem_servico.dominio.resumos import (
+    ResumoOrcamento,
+    ResumoPagamento,
+    StatusPagamento,
+)
 from src.ordem_servico.dominio.status import StatusOrdem
 
 # Quem provoca cada fato (``ator`` do historico): o processo que trata os
@@ -52,14 +57,32 @@ def abrir_ordem(
     )
 
 
-def solicitar_pagamento(ordem: OrdemDeServico) -> None:
-    """``PagamentoSolicitado``: grava o resumo do pagamento, sem mudar o status."""
-    ordem.registrar_pagamento_solicitado(
+def resumo_do_orcamento(link_decisao: str = LINK_DECISAO) -> ResumoOrcamento:
+    """Resumo de um ``OrcamentoGerado`` com id novo."""
+    return ResumoOrcamento(
+        orcamento_id=uuid4(),
+        total=TOTAL,
+        link_decisao=link_decisao,
+        valido_ate=VALIDO_ATE,
+    )
+
+
+def resumo_do_pagamento(
+    status: StatusPagamento = StatusPagamento.SOLICITADO,
+) -> ResumoPagamento:
+    """Resumo de um ``PagamentoSolicitado`` com id novo."""
+    return ResumoPagamento(
         pagamento_id=uuid4(),
+        status=status,
         valor=TOTAL,
         checkout_url=CHECKOUT_URL,
         expira_em=EXPIRA_EM,
     )
+
+
+def solicitar_pagamento(ordem: OrdemDeServico) -> None:
+    """``PagamentoSolicitado``: grava o resumo do pagamento, sem mudar o status."""
+    ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
 
 
 def aplicar_fato(ordem: OrdemDeServico, para: StatusOrdem) -> None:
@@ -72,13 +95,7 @@ def aplicar_fato(ordem: OrdemDeServico, para: StatusOrdem) -> None:
         case StatusOrdem.EM_DIAGNOSTICO:
             ordem.registrar_diagnostico_iniciado(ator=ATOR_PROCESSO)
         case StatusOrdem.AGUARDANDO_APROVACAO:
-            ordem.registrar_orcamento_gerado(
-                orcamento_id=uuid4(),
-                total=TOTAL,
-                link_decisao=LINK_DECISAO,
-                valido_ate=VALIDO_ATE,
-                ator=ATOR_PROCESSO,
-            )
+            ordem.registrar_orcamento_gerado(resumo_do_orcamento(), ator=ATOR_PROCESSO)
         case StatusOrdem.AGUARDANDO_PAGAMENTO:
             ordem.registrar_pecas_reservadas(ator=ATOR_PROCESSO)
             solicitar_pagamento(ordem)

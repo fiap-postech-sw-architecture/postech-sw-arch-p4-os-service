@@ -40,6 +40,7 @@ from tests.fabricas import (
     LINK_DECISAO,
     VALIDO_ATE,
     aplicar_fato,
+    resumo_do_pagamento,
 )
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
@@ -68,6 +69,15 @@ def _avancar(session: Session, ordem: OrdemDeServico, ate: StatusOrdem) -> None:
     for proximo in FLUXO[FLUXO.index(ordem.status) + 1 : FLUXO.index(ate) + 1]:
         aplicar_fato(ordem, proximo)
         repo.salvar(ordem)
+
+
+def _aguardando_pagamento_sem_resumo(session: Session) -> OrdemDeServico:
+    """``PecasReservadas`` gravado e ``PagamentoSolicitado`` ainda nao."""
+    ordem = _abrir(session)
+    _avancar(session, ordem, S.AGUARDANDO_APROVACAO)
+    ordem.registrar_pecas_reservadas(ator="consumidor")
+    OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
+    return ordem
 
 
 def _recarregar(session: Session, ordem: OrdemDeServico) -> OrdemDeServico:
@@ -201,21 +211,20 @@ class TestMapping:
     def test_trocar_so_o_resumo_suja_a_instancia_e_persiste(
         self, session: Session
     ) -> None:
-        ordem = _abrir(session)
-        _avancar(session, ordem, S.AGUARDANDO_PAGAMENTO)
+        ordem = _aguardando_pagamento_sem_resumo(session)
         lida = _recarregar(session, ordem)
         versao = lida.versao
 
-        lida.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
+        lida.registrar_pagamento_solicitado(resumo_do_pagamento())
 
         # O composite leva o VO novo para a coluna na hora (sem esperar um
         # flush disparado por outra mudanca da instancia).
         historia = inspect(lida).attrs["_pagamento_status"].history
-        assert historia.added == [StatusPagamento.CONFIRMADO]
+        assert historia.added == [StatusPagamento.SOLICITADO]
         OrdemDeServicoSQLAlchemyRepository(session).salvar(lida)
         relida = _recarregar(session, lida)
         assert relida.resumo_pagamento is not None
-        assert relida.resumo_pagamento.status is StatusPagamento.CONFIRMADO
+        assert relida.resumo_pagamento.status is StatusPagamento.SOLICITADO
         assert relida.status is S.AGUARDANDO_PAGAMENTO
         assert relida.versao == versao + 1
 
@@ -395,8 +404,7 @@ class TestMetricasDeNegocio:
     def test_escrita_sem_troca_de_status_nao_mede(
         self, session: Session, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ordem = _abrir(session)
-        _avancar(session, ordem, S.AGUARDANDO_PAGAMENTO)
+        ordem = _aguardando_pagamento_sem_resumo(session)
         duracoes: list[tuple[str, float]] = []
         monkeypatch.setattr(
             metricas_api,
@@ -406,7 +414,7 @@ class TestMetricasDeNegocio:
         instrumentar_metricas_de_ordens()
 
         # So o resumo do pagamento muda (escrita sem transicao de status).
-        ordem.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
+        ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         assert duracoes == []

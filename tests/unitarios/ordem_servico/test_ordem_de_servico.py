@@ -30,36 +30,22 @@ from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import (
     ATOR_ATENDENTE,
     ATOR_PROCESSO,
-    CHECKOUT_URL,
-    EXPIRA_EM,
-    LINK_DECISAO,
-    TOTAL,
-    VALIDO_ATE,
     abrir_ordem,
     ordem_em,
+    resumo_do_orcamento,
+    resumo_do_pagamento,
 )
 
 S = StatusOrdem
 OM = OrigemMudanca
 
 
-def _orcamento(ordem: OrdemDeServico, link_decisao: str = LINK_DECISAO) -> None:
-    ordem.registrar_orcamento_gerado(
-        orcamento_id=uuid4(),
-        total=TOTAL,
-        link_decisao=link_decisao,
-        valido_ate=VALIDO_ATE,
-        ator=ATOR_PROCESSO,
-    )
+def _orcamento(ordem: OrdemDeServico) -> None:
+    ordem.registrar_orcamento_gerado(resumo_do_orcamento(), ator=ATOR_PROCESSO)
 
 
-def _pagamento(ordem: OrdemDeServico, checkout_url: str = CHECKOUT_URL) -> None:
-    ordem.registrar_pagamento_solicitado(
-        pagamento_id=uuid4(),
-        valor=TOTAL,
-        checkout_url=checkout_url,
-        expira_em=EXPIRA_EM,
-    )
+def _pagamento(ordem: OrdemDeServico) -> None:
+    ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
 
 
 def _aguardando_pagamento_sem_resumo() -> OrdemDeServico:
@@ -303,47 +289,37 @@ class TestFatosDaSaga:
 
     def test_orcamento_gerado_guarda_o_resumo(self) -> None:
         ordem = ordem_em(S.EM_DIAGNOSTICO)
-        orcamento_id = uuid4()
+        resumo = resumo_do_orcamento()
 
-        ordem.registrar_orcamento_gerado(
-            orcamento_id=orcamento_id,
-            total=TOTAL,
-            link_decisao=LINK_DECISAO,
-            valido_ate=VALIDO_ATE,
-            ator=ATOR_PROCESSO,
+        ordem.registrar_orcamento_gerado(resumo, ator=ATOR_PROCESSO)
+
+        assert ordem.resumo_orcamento is resumo
+
+    def test_pecas_reservadas_sem_orcamento_levanta_sem_mutar(self) -> None:
+        # OS reidratada sem o resumo: o caminho legal grava o resumo no
+        # OrcamentoGerado, e o SolicitarPagamento seguinte precisa dele.
+        sem_orcamento = OrdemDeServico(
+            _cliente_id=uuid4(),
+            _veiculo_id=uuid4(),
+            _descricao_problema="x",
+            _status=S.AGUARDANDO_APROVACAO,
         )
+        antes = _fotografia(sem_orcamento)
 
-        resumo = ordem.resumo_orcamento
-        assert resumo is not None
-        assert (
-            resumo.orcamento_id,
-            resumo.total,
-            resumo.link_decisao,
-            resumo.valido_ate,
-        ) == (orcamento_id, TOTAL, LINK_DECISAO, VALIDO_ATE)
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem orcamento"):
+            sem_orcamento.registrar_pecas_reservadas(ator=ATOR_PROCESSO)
+
+        assert _fotografia(sem_orcamento) == antes
 
     def test_pagamento_solicitado_so_grava_o_resumo(self) -> None:
         ordem = _aguardando_pagamento_sem_resumo()
         historico = ordem.historico
         ordem.limpar_eventos()
-        pagamento_id = uuid4()
+        resumo = resumo_do_pagamento()
 
-        ordem.registrar_pagamento_solicitado(
-            pagamento_id=pagamento_id,
-            valor=TOTAL,
-            checkout_url=CHECKOUT_URL,
-            expira_em=EXPIRA_EM,
-        )
+        ordem.registrar_pagamento_solicitado(resumo)
 
-        resumo = ordem.resumo_pagamento
-        assert resumo is not None
-        assert resumo.pagamento_id == pagamento_id
-        assert resumo.status is StatusPagamento.SOLICITADO
-        assert (resumo.valor, resumo.checkout_url, resumo.expira_em) == (
-            TOTAL,
-            CHECKOUT_URL,
-            EXPIRA_EM,
-        )
+        assert ordem.resumo_pagamento is resumo
         assert (ordem.status, ordem.historico) == (S.AGUARDANDO_PAGAMENTO, historico)
         assert ordem.coletar_eventos() == []
         assert ordem.atualizado_em > historico[-1].ocorrido_em
@@ -357,7 +333,10 @@ class TestFatosDaSaga:
         ordem = ordem_em(estado)
         antes = _fotografia(ordem)
 
-        with pytest.raises(ViolacaoRegraDeNegocioException, match="aguardando"):
+        # O mesmo erro de estado do PagamentoConfirmado: 409 com o status atual.
+        with pytest.raises(
+            TransicaoStatusInvalidaException, match=f"status atual: {estado.value}"
+        ):
             _pagamento(ordem)
 
         assert _fotografia(ordem) == antes
@@ -368,6 +347,17 @@ class TestFatosDaSaga:
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
             _pagamento(ordem)
+
+        assert _fotografia(ordem) == antes
+
+    def test_pagamento_solicitado_em_outro_estado_levanta_sem_mutar(self) -> None:
+        ordem = _aguardando_pagamento_sem_resumo()
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="confirmado"):
+            ordem.registrar_pagamento_solicitado(
+                resumo_do_pagamento(StatusPagamento.CONFIRMADO)
+            )
 
         assert _fotografia(ordem) == antes
 
@@ -394,32 +384,6 @@ class TestFatosDaSaga:
             ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
 
         assert _fotografia(ordem) == antes
-
-    @pytest.mark.parametrize(
-        "link", ["javascript:alert(1)", "/relativo", "ftp://x.y/z", "https://"]
-    )
-    def test_link_de_decisao_invalido_levanta_sem_mutar(self, link: str) -> None:
-        ordem = ordem_em(S.EM_DIAGNOSTICO)
-        antes = _fotografia(ordem)
-
-        with pytest.raises(ValueError, match="URL http"):
-            _orcamento(ordem, link_decisao=link)
-
-        assert _fotografia(ordem) == antes
-
-    def test_checkout_url_invalida_levanta_sem_mutar(self) -> None:
-        ordem = _aguardando_pagamento_sem_resumo()
-        antes = _fotografia(ordem)
-
-        with pytest.raises(ValueError, match="checkout_url"):
-            _pagamento(ordem, checkout_url="data:text/html,oi")
-
-        assert _fotografia(ordem) == antes
-
-    def test_estado_invalido_tem_precedencia_sobre_dado_invalido(self) -> None:
-        ordem = ordem_em(S.RECEBIDA)
-        with pytest.raises(TransicaoStatusInvalidaException):
-            _orcamento(ordem, link_decisao="nao-e-url")
 
     def test_fluxo_completo_produz_linha_do_tempo_encadeada(
         self, monkeypatch: pytest.MonkeyPatch
@@ -452,56 +416,6 @@ class TestFatosDaSaga:
     def test_historico_e_vista_imutavel(self) -> None:
         ordem = abrir_ordem()
         assert isinstance(ordem.historico, tuple)
-
-
-class TestStatusDoPagamento:
-    @pytest.mark.parametrize(
-        "estado", [S.AGUARDANDO_PAGAMENTO, S.AGUARDANDO_EXECUCAO, S.ENTREGUE]
-    )
-    def test_so_o_resumo_muda(self, estado: StatusOrdem) -> None:
-        ordem = ordem_em(estado)
-        antes = ordem.resumo_pagamento
-        assert antes is not None
-        historico = ordem.historico
-        ordem.limpar_eventos()
-
-        ordem.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
-
-        depois = ordem.resumo_pagamento
-        assert depois is not None
-        assert depois.status is StatusPagamento.CONFIRMADO
-        assert (depois.pagamento_id, depois.valor) == (antes.pagamento_id, antes.valor)
-        assert (ordem.status, ordem.historico) == (estado, historico)
-        assert ordem.coletar_eventos() == []
-        assert ordem.atualizado_em > historico[-1].ocorrido_em
-
-    def test_estorno_depois_do_cancelamento(self) -> None:
-        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
-        ordem.cancelar("cliente desistiu", OM.ATENDIMENTO, ator=ATOR_ATENDENTE)
-
-        ordem.registrar_status_do_pagamento(StatusPagamento.ESTORNADO)
-
-        assert ordem.resumo_pagamento is not None
-        assert ordem.resumo_pagamento.status is StatusPagamento.ESTORNADO
-
-    def test_sem_pagamento_solicitado_levanta_sem_mutar(self) -> None:
-        ordem = ordem_em(S.AGUARDANDO_APROVACAO)
-        antes = _fotografia(ordem)
-
-        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            ordem.registrar_status_do_pagamento(StatusPagamento.CONFIRMADO)
-
-        assert _fotografia(ordem) == antes
-
-    def test_status_de_outro_tipo_levanta_sem_mutar(self) -> None:
-        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
-        antes = _fotografia(ordem)
-
-        with pytest.raises(ValueError, match="status do pagamento"):
-            # str de proposito: so o StatusPagamento passa na guarda.
-            ordem.registrar_status_do_pagamento("confirmado")  # type: ignore[arg-type]
-
-        assert _fotografia(ordem) == antes
 
 
 class TestCancelamento:

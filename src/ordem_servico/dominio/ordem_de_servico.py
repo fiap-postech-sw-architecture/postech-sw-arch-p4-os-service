@@ -9,12 +9,13 @@ saga (RFC-004 secoes 4.2, 4.4 e 6.1).
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
 from src.compartilhado.dominio.exceptions import (
+    TransicaoStatusInvalidaException,
     ValorInvalidoException,
     ViolacaoRegraDeNegocioException,
 )
@@ -27,14 +28,13 @@ from src.ordem_servico.dominio.maquina_de_status import MaquinaDeStatus
 from src.ordem_servico.dominio.resumos import (
     ResumoOrcamento,
     ResumoPagamento,
-    StatusPagamento,
+    pagamento_confirmado,
+    pagamento_solicitado,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
 
 if TYPE_CHECKING:
     from uuid import UUID
-
-    from src.compartilhado.dominio.dinheiro import Dinheiro
 
 # Limites dos textos livres (espelhados nas colunas e nos schemas HTTP).
 TAMANHO_MAXIMO_DESCRICAO: Final = 1000
@@ -69,11 +69,10 @@ def _texto_obrigatorio(valor: str, rotulo: str, maximo: int) -> str:
 class OrdemDeServico(AggregateRoot):
     """Aggregate root do contexto Ordem de Servico.
 
-    Construir via ``OrdemDeServico.abrir``. Cada metodo de transicao valida a
-    ``MaquinaDeStatus`` antes de mutar, registra a ``MudancaDeStatus`` no
-    historico e registra o ``StatusDaOrdemAlteradoEvent``. A
-    ``versao`` e controlada pela persistencia (lock otimista): escrita
-    concorrente sobre a mesma versao vira ``ConflitoDeConcorrenciaException``.
+    Construir via ``OrdemDeServico.abrir``. Cada transicao valida a
+    ``MaquinaDeStatus`` antes de mutar, anota a ``MudancaDeStatus`` no historico
+    e registra o ``StatusDaOrdemAlteradoEvent``. A ``versao`` e o lock otimista
+    da persistencia (escrita concorrente vira ``ConflitoDeConcorrenciaException``).
     """
 
     _cliente_id: UUID = field(kw_only=True, repr=False)
@@ -126,7 +125,7 @@ class OrdemDeServico(AggregateRoot):
         """Abre a OS em ``RECEBIDA``: primeira linha do historico + evento.
 
         ``ator`` (aqui e em cada transicao) e quem a provoca: o ``sub`` do JWT
-        ou o processo, gravado na linha do historico (RFC-004 secao 7.2).
+        ou o processo, gravado no historico (RFC-004 secao 7.2).
         """
         agora = datetime.now(UTC)
         ordem = cls(
@@ -218,111 +217,62 @@ class OrdemDeServico(AggregateRoot):
         )
 
     def registrar_orcamento_gerado(
-        self,
-        *,
-        orcamento_id: UUID,
-        total: Dinheiro,
-        link_decisao: str,
-        valido_ate: datetime,
-        ator: str | None,
+        self, resumo: ResumoOrcamento, *, ator: str | None
     ) -> None:
-        """``OrcamentoGerado`` (Billing).
+        """``OrcamentoGerado`` (Billing): EM_DIAGNOSTICO -> AGUARDANDO_APROVACAO.
 
-        EM_DIAGNOSTICO -> AGUARDANDO_APROVACAO, com o resumo do orcamento.
+        Guarda o resumo do orcamento, de onde sai o link de decisao do cliente.
         """
-        self._validar_transicao(StatusOrdem.AGUARDANDO_APROVACAO)
-        resumo = ResumoOrcamento(
-            orcamento_id=orcamento_id,
-            total=total,
-            link_decisao=link_decisao,
-            valido_ate=valido_ate,
-        )
-        self._aplicar_transicao(
+        self._transicionar(
             StatusOrdem.AGUARDANDO_APROVACAO, origem=OrigemMudanca.BILLING, ator=ator
         )
         self._resumo_orcamento = resumo
 
     def registrar_pecas_reservadas(self, *, ator: str | None) -> None:
-        """``PecasReservadas`` (Execucao).
+        """``PecasReservadas`` (Execucao): AGUARDANDO_APROVACAO -> AGUARDANDO_PAGAMENTO.
 
-        AGUARDANDO_APROVACAO -> AGUARDANDO_PAGAMENTO: o pagamento e pedido em
-        seguida, e o cliente ja ve que a cobranca vem ai.
+        O pagamento e pedido em seguida, sobre o orcamento gerado: sem o resumo
+        dele, levanta ``ViolacaoRegraDeNegocioException`` antes de mudar.
         """
-        self._transicionar(
+        self._validar_transicao(StatusOrdem.AGUARDANDO_PAGAMENTO)
+        if self._resumo_orcamento is None:
+            msg = f"Ordem {self.id} sem orcamento gerado"
+            raise ViolacaoRegraDeNegocioException(msg)
+        self._aplicar_transicao(
             StatusOrdem.AGUARDANDO_PAGAMENTO, origem=OrigemMudanca.EXECUCAO, ator=ator
         )
 
-    def registrar_pagamento_solicitado(
-        self,
-        *,
-        pagamento_id: UUID,
-        valor: Dinheiro,
-        checkout_url: str,
-        expira_em: datetime,
-    ) -> None:
-        """``PagamentoSolicitado`` (Billing): grava o resumo do pagamento.
+    def registrar_pagamento_solicitado(self, resumo: ResumoPagamento) -> None:
+        """``PagamentoSolicitado`` (Billing): grava o resumo, sem mudar o status.
 
-        O status nao muda (a OS ja esta em AGUARDANDO_PAGAMENTO desde o
-        ``PecasReservadas``), entao nao ha linha no historico nem evento.
-
-        Raises:
-            ViolacaoRegraDeNegocioException: OS fora de AGUARDANDO_PAGAMENTO ou
-                com pagamento ja solicitado.
+        So com a OS aguardando pagamento (``TransicaoStatusInvalidaException``);
+        o ciclo do resumo e o de ``resumos.pagamento_solicitado``.
         """
         if self._status is not StatusOrdem.AGUARDANDO_PAGAMENTO:
-            msg = "Pagamento so e solicitado com a ordem aguardando pagamento"
-            raise ViolacaoRegraDeNegocioException(msg)
-        if self._resumo_pagamento is not None:
-            msg = "Pagamento ja solicitado para esta ordem"
-            raise ViolacaoRegraDeNegocioException(msg)
-        self._resumo_pagamento = ResumoPagamento(
-            pagamento_id=pagamento_id,
-            status=StatusPagamento.SOLICITADO,
-            valor=valor,
-            checkout_url=checkout_url,
-            expira_em=expira_em,
-        )
+            raise TransicaoStatusInvalidaException(
+                mensagem="Pagamento so e solicitado com a ordem aguardando "
+                f"pagamento; status atual: {self._status.value}"
+            )
+        self._resumo_pagamento = pagamento_solicitado(self._resumo_pagamento, resumo)
         self._atualizado_em = datetime.now(UTC)
 
     def registrar_pagamento_confirmado(self, *, ator: str | None) -> None:
-        """``PagamentoConfirmado`` (Billing).
+        """``PagamentoConfirmado`` (Billing): o resumo passa a confirmado.
 
-        AGUARDANDO_PAGAMENTO -> AGUARDANDO_EXECUCAO, com o resumo do pagamento
-        ``confirmado``: o agendamento que vem depois e tecnico e nao falha por
-        regra de negocio (RFC-004 secao 4.1).
-
-        Raises:
-            TransicaoStatusInvalidaException: OS fora de AGUARDANDO_PAGAMENTO.
-            ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado.
+        AGUARDANDO_PAGAMENTO -> AGUARDANDO_EXECUCAO: o agendamento que vem depois
+        e tecnico e nao falha por regra de negocio (RFC-004 secao 4.1).
         """
         self._validar_transicao(StatusOrdem.AGUARDANDO_EXECUCAO)
-        if self._resumo_pagamento is None:
-            msg = "Ordem sem pagamento solicitado"
-            raise ViolacaoRegraDeNegocioException(msg)
-        confirmado = replace(self._resumo_pagamento, status=StatusPagamento.CONFIRMADO)
+        confirmado = pagamento_confirmado(self._resumo_pagamento)
         self._aplicar_transicao(
             StatusOrdem.AGUARDANDO_EXECUCAO, origem=OrigemMudanca.BILLING, ator=ator
         )
         self._resumo_pagamento = confirmado
 
-    def registrar_status_do_pagamento(self, status: StatusPagamento) -> None:
-        """Novo estado do pagamento vindo do Billing (recusado, estornado...).
-
-        So o resumo muda: o status da OS segue pelos fatos da Execucao e do
-        atendimento, sem linha no historico nem evento. Vale em qualquer
-        status da OS (um estorno chega depois do cancelamento), desde que o
-        pagamento ja tenha sido solicitado.
-        """
-        if self._resumo_pagamento is None:
-            msg = "Ordem sem pagamento solicitado"
-            raise ViolacaoRegraDeNegocioException(msg)
-        self._resumo_pagamento = replace(self._resumo_pagamento, status=status)
-        self._atualizado_em = datetime.now(UTC)
-
     def registrar_execucao_iniciada(self, *, ator: str | None) -> None:
-        """``ExecucaoIniciada`` (Execucao).
+        """``ExecucaoIniciada`` (Execucao), o pivot da saga.
 
-        AGUARDANDO_EXECUCAO -> EM_EXECUCAO: pivot da saga, sem cancelamento depois.
+        AGUARDANDO_EXECUCAO -> EM_EXECUCAO; depois dele nao ha cancelamento.
         """
         self._transicionar(
             StatusOrdem.EM_EXECUCAO, origem=OrigemMudanca.EXECUCAO, ator=ator

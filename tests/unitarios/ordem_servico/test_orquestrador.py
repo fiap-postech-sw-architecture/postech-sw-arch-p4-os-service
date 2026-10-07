@@ -517,3 +517,9 @@ def test_pecas_reservadas_sem_orcamento_na_os_e_erro_permanente() -> None:
         E.AGUARDANDO_RESERVA,
     )
     assert isinstance(exc.value.__cause__, ViolacaoRegraDeNegocioException)
+    # A OS recusa antes de mudar: nada de status novo nem comando.
+    assert (sem_orcamento.status, len(sem_orcamento.historico)) == (
+        StatusOrdem.AGUARDANDO_APROVACAO,
+        0,
+    )
+    assert cenario.publicador.comandos[-1][0] == "ReservarPecas"
