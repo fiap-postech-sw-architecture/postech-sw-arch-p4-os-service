@@ -2,9 +2,7 @@
 -- roda este script uma vez, no primeiro init do volume, como o superusuario
 -- postgres, que depois disso nao serve a ninguem. As senhas vem do ambiente do
 -- container do banco (Secret os-postgres) pelo \getenv do psql: nunca em
--- argumento de processo. A variavel fica na linha seguinte ao PASSWORD porque o
--- trivy (KSV-0109) toma a palavra seguida dos dois-pontos da variavel do psql
--- por uma senha gravada no ConfigMap.
+-- argumento de processo.
 
 -- O psql troca a variavel pela senha antes de enviar o comando, e o servidor a
 -- recebe em claro: a sessao desliga todo log que leva o texto do comando (o
@@ -21,16 +19,14 @@ SET log_transaction_sample_rate = 0;
 \getenv senha_exporter POSTGRES_EXPORTER_PASSWORD
 
 -- Dono do banco e das tabelas (DDL): o Job de migracao.
-CREATE ROLE os LOGIN PASSWORD
-  :'senha_dono';
+CREATE ROLE os LOGIN PASSWORD :'senha_dono';
 ALTER DATABASE os OWNER TO os;
 ALTER SCHEMA public OWNER TO os;
 
 -- Aplicacao (API, relay e consumidor): so DML nas tabelas que o dono criar.
 -- As tabelas nascem depois, no Job, e por isso o privilegio vem por default
 -- privileges, que cobrem tambem a alembic_version lida pelo aguarda-migracao.
-CREATE ROLE os_app LOGIN PASSWORD
-  :'senha_app';
+CREATE ROLE os_app LOGIN PASSWORD :'senha_app';
 GRANT CONNECT ON DATABASE os TO os_app;
 GRANT USAGE ON SCHEMA public TO os_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE os IN SCHEMA public
@@ -39,6 +35,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE os IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO os_app;
 
 -- postgres_exporter, sidecar do banco: estatisticas do servidor, nenhuma tabela.
-CREATE ROLE os_exporter LOGIN PASSWORD
-  :'senha_exporter';
+CREATE ROLE os_exporter LOGIN PASSWORD :'senha_exporter';
 GRANT pg_monitor TO os_exporter;

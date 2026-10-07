@@ -154,16 +154,19 @@ smoke:
 
 # Manifests Kubernetes (k8s/): os tres overlays pelo kubeconform, contra os
 # schemas da versao do no do kind do platform (Secret reprova: senha nao entra
-# nos manifests), e pelo trivy config, sem achado HIGH nem CRITICAL. Mesmas
-# imagens e opcoes do `make manifests` do platform.
+# nos manifests), e pelo trivy config, sem achado HIGH nem CRITICAL (o que ele
+# ignora, com o motivo, esta em k8s/trivy-ignore.rego). Mesmas imagens e opcoes
+# do `make manifests` do platform.
 KUBERNETES_VERSION := 1.35.0
 KUBECONFORM_IMAGE := ghcr.io/yannh/kubeconform:v0.8.0
 TRIVY_IMAGE := aquasec/trivy:0.72.0
 KUBECONFORM := docker run --rm -i $(KUBECONFORM_IMAGE) -strict -summary \
 	-output text -kubernetes-version $(KUBERNETES_VERSION) -reject Secret
-TRIVY_CONFIG := docker run --rm -i --entrypoint sh $(TRIVY_IMAGE) -c \
+TRIVY_CONFIG := docker run --rm -i \
+	-v "$(CURDIR)/k8s/trivy-ignore.rego:/trivy-ignore.rego:ro" \
+	--entrypoint sh $(TRIVY_IMAGE) -c \
 	'cat > /tmp/manifests.yaml && trivy config --quiet --severity HIGH,CRITICAL \
-	--exit-code 1 /tmp/manifests.yaml'
+	--exit-code 1 --ignore-policy /trivy-ignore.rego /tmp/manifests.yaml'
 
 # O render vai para uma variavel antes: num pipe, o sh sem pipefail esconderia
 # a falha do kustomize atras do kubeconform satisfeito com a entrada vazia.
