@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
@@ -14,42 +13,19 @@ from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.dominio.exceptions import VeiculoNaoEncontradoException
 from src.ordem_servico.interfaces.dependencies import obter_abrir_ordem
-from tests.integracao.seed_helpers import criar_cliente_com_veiculo
+from tests.integracao.seed_helpers import (
+    criar_cliente_com_veiculo,
+    outbox_recusando_insert,
+)
 from tests.rastreamento import traceparent
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
     from tests.rastreamento import Rastreador
 
 _ATOR = "6a1d3c0e-8f7b-4b8e-9f51-2d6c1e0a9b77"
-
-
-@contextmanager
-def outbox_recusando_insert(engine: Engine) -> Iterator[None]:
-    """Trigger que falha todo INSERT na outbox: a transacao inteira tem de cair."""
-    with engine.begin() as conexao:
-        conexao.execute(
-            text(
-                "CREATE FUNCTION recusar_outbox() RETURNS trigger LANGUAGE plpgsql "
-                "AS $$ BEGIN RAISE EXCEPTION 'outbox indisponivel'; END $$"
-            )
-        )
-        conexao.execute(
-            text(
-                "CREATE TRIGGER recusar_outbox BEFORE INSERT ON outbox "
-                "FOR EACH ROW EXECUTE FUNCTION recusar_outbox()"
-            )
-        )
-    try:
-        yield
-    finally:
-        with engine.begin() as conexao:
-            conexao.execute(text("DROP TRIGGER recusar_outbox ON outbox"))
-            conexao.execute(text("DROP FUNCTION recusar_outbox()"))
 
 
 def _cliente(

@@ -10,7 +10,10 @@ propria com commit real).
 from __future__ import annotations
 
 import itertools
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
+
+from sqlalchemy import text
 
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.contato import Contato
@@ -19,8 +22,10 @@ from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from uuid import UUID
 
+    from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
     from src.autenticacao.dominio.papel import Papel
@@ -125,3 +130,27 @@ def criar_usuario(
         UsuarioSQLAlchemyRepository(session=sess).salvar(usuario)
         sess.commit()
     return usuario
+
+
+@contextmanager
+def outbox_recusando_insert(engine: Engine) -> Iterator[None]:
+    """Trigger que falha todo INSERT na outbox: a transacao inteira tem de cair."""
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_outbox() RETURNS trigger LANGUAGE plpgsql "
+                "AS $$ BEGIN RAISE EXCEPTION 'outbox indisponivel'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE TRIGGER recusar_outbox BEFORE INSERT ON outbox "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_outbox()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER recusar_outbox ON outbox"))
+            conexao.execute(text("DROP FUNCTION recusar_outbox()"))

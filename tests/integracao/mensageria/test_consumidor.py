@@ -41,11 +41,11 @@ from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
+from tests.eventos import envelope_de_evento
 from tests.integracao.broker import (
     SENHAS,
     TTL_DE_RETRY_MS,
     EmSegundoPlano,
-    envelope_de_evento,
     esperar_ate,
 )
 from tests.integracao.seed_helpers import (
