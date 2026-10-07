@@ -6,7 +6,10 @@
 -- trivy (KSV-0109) toma a palavra seguida dos dois-pontos da variavel do psql
 -- por uma senha gravada no ConfigMap.
 
--- Um erro aqui nao leva o comando, com a senha, para o log do servidor.
+-- O psql troca a variavel pela senha antes de enviar o comando, e o servidor a
+-- recebe em claro: a sessao desliga o log de comandos (um log_statement em all
+-- ou ddl o gravaria) e a linha STATEMENT de um comando que falha.
+SET log_statement = 'none';
 SET log_min_error_statement = 'panic';
 
 \getenv senha_dono POSTGRES_OWNER_PASSWORD

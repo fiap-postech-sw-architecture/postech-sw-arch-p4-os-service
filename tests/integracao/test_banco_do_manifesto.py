@@ -120,13 +120,19 @@ def banco() -> Iterator[Banco]:
             "ADMIN_PASSWORD",
         )
     }
-    container = PostgresContainer(
-        postgres["image"],
-        username=ambiente["POSTGRES_USER"],
-        password=senhas["POSTGRES_PASSWORD"],
-        dbname=ambiente["POSTGRES_DB"],
-    ).with_volume_mapping(
-        str(_BASE / "papeis.sql"), "/docker-entrypoint-initdb.d/papeis.sql", "ro"
+    # O servidor loga todo comando, o pior caso para o script de init (a imagem
+    # passa os argumentos tambem ao servidor temporario em que ele roda).
+    container = (
+        PostgresContainer(
+            postgres["image"],
+            username=ambiente["POSTGRES_USER"],
+            password=senhas["POSTGRES_PASSWORD"],
+            dbname=ambiente["POSTGRES_DB"],
+        )
+        .with_command("postgres -c log_statement=all")
+        .with_volume_mapping(
+            str(_BASE / "papeis.sql"), "/docker-entrypoint-initdb.d/papeis.sql", "ro"
+        )
     )
     for nome, valor in {**ambiente, **senhas}.items():
         container.with_env(nome, valor)
@@ -143,6 +149,16 @@ def banco() -> Iterator[Banco]:
         assert _no_host(comando, job, prazo_s=120) == 0
         assert _no_host(comando, job, prazo_s=120) == 0
         yield banco
+
+
+def test_nenhuma_senha_chega_ao_log_do_servidor(banco: Banco) -> None:
+    # O psql troca o \getenv pela senha antes de enviar o CREATE ROLE: so os
+    # SET do inicio do papeis.sql a tiram do log, com o log de comandos ligado.
+    log = banco.container.get_wrapped_container().logs().decode()
+
+    # O proprio SET sai no log: o log de comandos valia na sessao do script.
+    assert "statement: SET log_statement = 'none';" in log
+    assert [chave for chave, senha in banco.senhas.items() if senha in log] == []
 
 
 def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nao_cria_tabela(
