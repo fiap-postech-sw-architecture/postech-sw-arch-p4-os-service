@@ -7,16 +7,21 @@ As filas de retry do broker de teste tem TTL de 100 ms, entao o ciclo inteiro
 from __future__ import annotations
 
 import json
+import struct
 import threading
+import time
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+import pika
 import pytest
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 from prometheus_client import REGISTRY
 from sqlalchemy import text
+from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import (
     Comando,
@@ -25,15 +30,21 @@ from src.compartilhado.aplicacao.mensageria import (
     MensagemRecebida,
 )
 from src.compartilhado.infraestrutura.mensageria import amqp
+from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
     Consumidor,
 )
-from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
-from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
+from tests.integracao.broker import (
+    SENHAS,
+    EmSegundoPlano,
+    envelope_de_evento,
+    esperar_ate,
+)
 from tests.integracao.seed_helpers import (
     criar_cliente_com_veiculo,
     criar_ordem_recebida,
@@ -530,83 +541,162 @@ def test_handler_que_comita_encerra_a_transacao_ou_nao_devolve_desfecho_vai_para
     )
 
 
+def _caso(
+    id_: str, montar: Callable[[Broker, dict[str, Any]], None], motivo: str
+) -> Any:
+    return pytest.param(montar, motivo, id=id_)
+
+
 @pytest.mark.parametrize(
-    ("descricao", "montar"),
+    ("montar", "motivo"),
     [
-        pytest.param(
-            "evento de billing publicado pela execucao",
+        # Origem (o `user_id` que o broker confere contra a conexao).
+        _caso(
+            "user-id-divergente",
             lambda b, e: b.publicar_evento(
-                e,
-                usuario="execucao",
-                routing_key="evento.execucao.orcamento_gerado",
+                e, usuario="execucao", routing_key="evento.execucao.orcamento_gerado"
             ),
-            id="user-id-divergente",
+            "produtor_divergente",
         ),
-        pytest.param(
-            "copia de retry do proprio usuario sem x-tentativa",
+        _caso(
+            "copia-de-retry-sem-tentativa",
             lambda b, e: b.publicar_evento(
                 e,
                 usuario="os",
                 exchange="pytstop.retry",
                 routing_key="os.eventos.retry.1s",
             ),
-            id="copia-de-retry-sem-tentativa",
+            "produtor_divergente",
         ),
-        pytest.param(
-            "tipo fora do catalogo",
+        _caso(
+            "x-tentativa-forjado-por-outro-produtor",
+            lambda b, e: b.publicar_evento(
+                e,
+                usuario="execucao",
+                routing_key="evento.execucao.orcamento_gerado",
+                cabecalhos={"x-tentativa": 1},
+            ),
+            "produtor_divergente",
+        ),
+        _caso(
+            "billing-com-o-tipo-da-execucao-e-tentativa-5",
+            lambda b, e: b.publicar_evento(
+                e,
+                routing_key="evento.billing.execucao_iniciada",
+                tipo="ExecucaoIniciada",
+                cabecalhos={"x-tentativa": 5},
+            ),
+            "produtor_divergente",
+        ),
+        _caso(
+            "sem-user-id",
+            lambda b, e: b.publicar_evento(e, sem_user_id=True),
+            "produtor_divergente",
+        ),
+        _caso(
+            "tipo-desconhecido",
             lambda b, e: b.publicar_evento(
                 e,
                 usuario="execucao",
                 routing_key="evento.execucao.inexistente",
                 tipo="Inexistente",
             ),
-            id="tipo-desconhecido",
+            "tipo_desconhecido",
         ),
-        pytest.param(
-            "versao desconhecida",
+        # Corpo e contrato.
+        _caso(
+            "versao-2",
             lambda b, e: b.publicar_evento({**e, "versao": 2}),
-            id="versao-2",
+            "contrato_invalido",
         ),
-        pytest.param(
-            "dados sem campo obrigatorio",
+        _caso(
+            "dados-invalidos",
             lambda b, e: b.publicar_evento({**e, "dados": {"ordem_id": e["id"]}}),
-            id="dados-invalidos",
+            "contrato_invalido",
         ),
-        pytest.param(
-            "corpo que nao e JSON",
+        _caso(
+            "data-com-quebra-de-linha-no-fim",
+            lambda b, e: b.publicar_evento(
+                {**e, "ocorrido_em": e["ocorrido_em"] + "\n"}
+            ),
+            "contrato_invalido",
+        ),
+        _caso(
+            "json-invalido",
             lambda b, e: b.publicar_evento(e, corpo=b"{nao e json"),
-            id="json-invalido",
+            "json_invalido",
         ),
-        pytest.param(
-            "message_id diferente do id do envelope",
+        _caso(
+            "corpo-acima-do-teto",
+            lambda b, e: b.publicar_evento(
+                {**e, "dados": {**e["dados"], "anexo": "x" * 70_000}}
+            ),
+            "corpo_grande_demais",
+        ),
+        # Propriedades AMQP x envelope.
+        _caso(
+            "message-id-divergente",
             lambda b, e: b.publicar_evento(e, message_id=str(uuid4())),
-            id="propriedades-divergentes",
+            "propriedades_divergentes",
         ),
-        pytest.param(
-            "x-tentativa fora de 0 a 5",
-            lambda b, e: b.publicar_evento(e, cabecalhos={"x-tentativa": 6}),
-            id="tentativa-invalida",
+        _caso(
+            "correlation-id-divergente",
+            lambda b, e: b.publicar_evento(e, correlation_id=str(uuid4())),
+            "propriedades_divergentes",
         ),
+        _caso(
+            "type-diferente-do-tipo-do-envelope",
+            lambda b, e: b.publicar_evento(
+                e,
+                routing_key="evento.billing.orcamento_aprovado",
+                tipo="OrcamentoAprovado",
+            ),
+            "propriedades_divergentes",
+        ),
+        # x-tentativa que nao e inteiro de 0 a 5.
+        *[
+            _caso(
+                f"tentativa-{nome}",
+                lambda b, e, valor=valor: b.publicar_evento(
+                    e, cabecalhos={"x-tentativa": valor}
+                ),
+                "tentativa_invalida",
+            )
+            for nome, valor in [
+                ("6", 6),
+                ("negativa", -1),
+                ("booleana", True),
+                ("texto", "1"),
+                ("decimal", Decimal("1.5")),
+                ("nula", None),
+            ]
+        ],
     ],
 )
 def test_mensagem_fora_do_contrato_ou_da_origem_vai_direto_para_a_dlq(
     engine: Engine,
     broker: Broker,
     consumidor: Callable[..., Consumidor],
-    descricao: str,
     montar: Callable[[Broker, dict[str, Any]], None],
+    motivo: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     espiao = Espiao()
     # OrcamentoGerado e do billing: os casos acima mexem em um aspecto so.
     envelope = envelope_de_evento("OrcamentoGerado")
     retries = _retries()
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
 
-    with EmSegundoPlano(consumidor(espiao)):
+    with capture_logs() as logs, EmSegundoPlano(consumidor(espiao)):
         montar(broker, envelope)
         propriedades, _ = esperar_ate(lambda: broker.pegar(_DLQ))
 
-    assert espiao.recebidas == [], descricao
+    assert espiao.recebidas == []
     assert _processadas(engine) == []
+    # Recusa classificada, com o motivo (nunca o caminho de falha inesperada).
+    assert [
+        (log["event"], log.get("motivo")) for log in logs if "dlq" in log["event"]
+    ] == [("message rejected to dlq", motivo)]
     # Direto: o consumidor nao republicou (com 100 ms por nivel, um desvio pelas
     # cinco filas de retry tambem chegaria a DLQ dentro do prazo do teste).
     assert _retries() == retries
@@ -616,7 +706,6 @@ def test_mensagem_fora_do_contrato_ou_da_origem_vai_direto_para_a_dlq(
         if (morte["queue"], morte["reason"]) == ("os.eventos", "rejected")
     ]
     assert rejeicoes == [1]
-    assert propriedades.headers.get("x-tentativa") in {None, 6}
 
 
 def test_apaga_as_mensagens_processadas_ha_mais_de_30_dias(
@@ -718,3 +807,227 @@ def test_conexao_derrubada_pelo_broker_reconecta_e_segue_consumindo(
         UUID(primeiro["id"]),
         UUID(segundo["id"]),
     ]
+
+
+def test_json_aninhado_sem_fim_vai_para_a_dlq_sem_derrubar_o_consumidor(
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Dentro do teto de 64 KiB o parser nao chega a estourar a pilha; acima
+    # dele (o teto e uma constante), o RecursionError tambem vira recusa.
+    monkeypatch.setattr(modulo_consumidor, "_CORPO_MAXIMO_BYTES", 1024 * 1024)
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+    espiao = Espiao()
+    envelope = envelope_de_evento("OrcamentoGerado")
+
+    with capture_logs() as logs, EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope, corpo=b"[" * 200_000 + b"]" * 200_000)
+        broker.publicar_evento(envelope_de_evento("OrcamentoGerado"))
+        esperar_ate(lambda: espiao.recebidas)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+
+    assert ("message rejected to dlq", "json_invalido") in [
+        (log["event"], log.get("motivo")) for log in logs
+    ]
+
+
+class _CabecalhoIlegivel(pika.BasicProperties):
+    """Header de tipo timestamp (``T``) com o epoch em milissegundos.
+
+    O broker repassa a mensagem, e o decoder do pika levanta ``ValueError`` ao
+    ler o frame: a conexao do consumidor cai a cada entrega dela, antes de o
+    codigo do servico a ver.
+    """
+
+    def encode(self) -> list[bytes]:
+        # O frame comeca pelas flags; sem content_type, os headers vem logo
+        # depois delas.
+        guardados = self.content_type, self.headers
+        self.content_type = self.headers = None
+        try:
+            flags, *pecas = super().encode()
+        finally:
+            self.content_type, self.headers = guardados
+        chave: list[bytes] = []
+        pika.data.encode_short_string(chave, "x-ilegivel")
+        tabela = b"".join(chave) + b"T" + struct.pack(">Q", 1_760_000_000_000)
+        (valor,) = struct.unpack(">H", flags)
+        return [
+            struct.pack(">H", valor | pika.spec.BasicProperties.FLAG_HEADERS),
+            struct.pack(">I", len(tabela)) + tabela,
+            *pecas,
+        ]
+
+
+def _reconexoes() -> float:
+    valor = REGISTRY.get_sample_value(
+        "pytstop_reconexoes_ao_broker_total", {"processo": "consumidor"}
+    )
+    return valor or 0.0
+
+
+def test_mensagem_que_o_pika_nao_le_sai_pelo_delivery_limit_e_a_seguinte_e_processada(
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Com prefetch 1 so a ilegivel derruba a conexao; a cada queda ela volta a
+    # fila, e o delivery-limit 5 da policy do platform a manda para a DLQ. A
+    # valida que vinha atras nao e arrastada junto.
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
+    espiao = Espiao()
+    ilegivel = envelope_de_evento("PagamentoConfirmado")
+    valida = envelope_de_evento("PagamentoConfirmado")
+    antes = _reconexoes()
+
+    broker.publicar_evento(ilegivel, propriedades=_CabecalhoIlegivel)
+    broker.publicar_evento(valida)
+    with EmSegundoPlano(consumidor(espiao)):
+        esperar_ate(lambda: espiao.recebidas, prazo_s=60)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1, prazo_s=60)
+
+    assert [m.id for m in espiao.recebidas] == [UUID(valida["id"])]
+    assert broker.contar("os.eventos") == 0
+    assert _reconexoes() > antes
+    # Lida pelo management (o pika nao a decodifica nem na DLQ).
+    codigo, saida = broker.container.get_wrapped_container().exec_run(
+        [
+            "rabbitmqadmin",
+            "--username",
+            "admin",
+            "--password",
+            SENHAS["admin"],
+            "get",
+            "messages",
+            "--queue",
+            _DLQ,
+            "--count",
+            "1",
+            "--ack-mode",
+            "ack_requeue_true",
+        ],
+        user="999:999",
+    )
+    assert codigo == 0
+    assert "delivery_limit" in saida.decode()
+
+
+def _fila(broker: Broker, nome: str) -> tuple[int, int]:
+    """Mensagens prontas e sem ack da fila (pelo rabbitmqctl)."""
+    saida = broker.rabbitmqctl(
+        "-q", "list_queues", "name", "messages_ready", "messages_unacknowledged"
+    )
+    for linha in saida.splitlines():
+        campos = linha.split()
+        if campos and campos[0] == nome:
+            return int(campos[1]), int(campos[2])
+    raise AssertionError(nome)
+
+
+def test_consumidor_segura_uma_mensagem_por_vez(
+    broker: Broker, consumidor: Callable[..., Consumidor]
+) -> None:
+    em_curso, liberar = threading.Event(), threading.Event()
+
+    def lento(_m: MensagemRecebida, _t: TransacaoDaMensagem) -> Desfecho:
+        em_curso.set()
+        liberar.wait(20)
+        return Desfecho.PROCESSADA
+
+    try:
+        with EmSegundoPlano(consumidor(lento)):
+            for _ in range(3):
+                broker.publicar_evento(envelope_de_evento("ExecucaoAgendada"))
+            esperar_ate(em_curso.is_set)
+            esperar_ate(lambda: _fila(broker, "os.eventos") == (2, 1))
+    finally:
+        liberar.set()
+
+
+@pytest.fixture
+def os_sem_leitura_da_fila(broker: Broker) -> Iterator[Callable[[], None]]:
+    """Tira do usuario `os` a leitura de os.eventos; devolve quem a restaura."""
+    permissoes = json.loads((CONTRATOS / "rabbitmq/permissoes.json").read_text())
+    (do_os,) = [p for p in permissoes["permissions"] if p["user"] == "os"]
+
+    def restaurar() -> None:
+        broker.rabbitmqctl(
+            "set_permissions",
+            "-p",
+            "/",
+            "os",
+            do_os["configure"],
+            do_os["write"],
+            do_os["read"],
+        )
+
+    broker.rabbitmqctl(
+        "set_permissions", "-p", "/", "os", do_os["configure"], do_os["write"], "^\\z"
+    )
+    try:
+        yield restaurar
+    finally:
+        restaurar()
+
+
+def test_fila_sem_permissao_no_boot_espera_e_consome_quando_ela_volta(
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    os_sem_leitura_da_fila: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A declaracao passiva de os.eventos recusada (403) deixa o consumidor fora
+    # de pronto, tentando de novo com backoff, sem derrubar o processo.
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
+    espiao = Espiao()
+    envelope = envelope_de_evento("ReservaLiberada")
+    antes = _reconexoes()
+
+    with EmSegundoPlano(consumidor(espiao)):
+        esperar_ate(lambda: _reconexoes() >= antes + 2)
+        assert not (tmp_path / "consumidor-pronto").exists()
+        os_sem_leitura_da_fila()
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: espiao.recebidas, prazo_s=30)
+
+    assert [m.id for m in espiao.recebidas] == [UUID(envelope["id"])]
+
+
+def test_handler_mais_lento_que_o_heartbeat_tem_efeito_uma_vez_e_nada_se_perde(
+    engine: Engine,
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # O handler roda na thread da conexao: enquanto ele trabalha, nenhum
+    # heartbeat sai (1 s aqui). Se o broker derrubar a conexao, o commit ja
+    # aconteceu: a mensagem volta, vira duplicada e recebe ack sem repetir o
+    # efeito nem passar pela escada de retry.
+    monkeypatch.setattr(amqp, "_HEARTBEAT_S", 1)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
+    chamadas: list[UUID] = []
+
+    def lento(mensagem: MensagemRecebida, _t: TransacaoDaMensagem) -> Desfecho:
+        chamadas.append(mensagem.id)
+        time.sleep(6)
+        return Desfecho.PROCESSADA
+
+    envelope = envelope_de_evento("ExecucaoFinalizada")
+    antes = _resolvidas("ExecucaoFinalizada")
+    retries = _retries()
+
+    with EmSegundoPlano(consumidor(lento)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _resolvidas("ExecucaoFinalizada") > antes, prazo_s=40)
+
+    assert chamadas == [UUID(envelope["id"])]
+    assert _processadas(engine) == [UUID(envelope["id"])]
+    assert (broker.contar("os.eventos"), broker.contar(_DLQ)) == (0, 0)
+    assert _retries() == retries
+
+
+def _resolvidas(tipo: str) -> float:
+    """Mensagens do tipo com ack: processadas ou duplicadas."""
+    return _consumidas(tipo, "processada") + _consumidas(tipo, "duplicada")

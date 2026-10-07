@@ -33,6 +33,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
+from uuid import UUID
 
 import pika
 import structlog
@@ -56,7 +57,6 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     INTERVALO_DE_LIMPEZA_S,
     Agenda,
     Sinalizador,
-    inteiro_do_ambiente,
     onde,
 )
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
@@ -101,6 +101,15 @@ _SQL_LIMPEZA: Final = text(
     "WHERE processada_em < now() - interval '30 days' LIMIT :lote)"
 )
 _TIPO_DESCONHECIDO: Final = "desconhecido"
+# Uma mensagem por vez: o volume de os.eventos e baixo, e uma mensagem que o
+# pika nao decodifica (header ilegivel) derruba a conexao sozinha, sem levar
+# junto as vizinhas pre-buscadas. Ela volta a fila a cada queda e sai pelo
+# delivery-limit da fila (5, na policy do platform) para a DLQ.
+_PREFETCH: Final = 1
+# Teto do corpo antes do parse: o maior evento do contrato tem poucos KB (um
+# OrcamentoGerado com 50 linhas fica em torno de 20 KB), e o broker aceita ate
+# 1 MiB.
+_CORPO_MAXIMO_BYTES: Final = 64 * 1024
 # Banco (fora do ar, deadlock, timeout, conflito de escrita) e dependencia
 # fora: a mesma mensagem tende a passar numa nova tentativa.
 _TRANSITORIOS: Final[tuple[type[Exception], ...]] = (
@@ -110,6 +119,43 @@ _TRANSITORIOS: Final[tuple[type[Exception], ...]] = (
     TimeoutError,
     ConnectionError,
 )
+
+
+def ler_tentativa(cabecalhos: Mapping[str, Any]) -> int:
+    """``x-tentativa`` da mensagem: 0 na primeira entrega, de 1 a 5 na copia.
+
+    Raises:
+        _MensagemRejeitadaError: valor fora de 0 a 5 ou que nao e inteiro
+            (texto, decimal, booleano, nulo).
+    """
+    tentativa = cabecalhos.get("x-tentativa", 0)
+    if (
+        not isinstance(tentativa, int)
+        or isinstance(tentativa, bool)
+        or not 0 <= tentativa <= len(NIVEIS_DE_RETRY)
+    ):
+        raise _MensagemRejeitadaError("tentativa_invalida")
+    return tentativa
+
+
+def conferir_origem(
+    *, usuario: object, produtor: str, consumidor: str, tentativa: int
+) -> None:
+    """Confere o ``user_id`` da mensagem contra quem pode publica-la.
+
+    O broker garante que o ``user_id``, quando vem, e o usuario da conexao de
+    quem publicou; ausente, nada garante. Vale o produtor do ``tipo``; a copia
+    de retry chega com o usuario deste consumidor, que a republicou, e so e
+    aceita com ``x-tentativa`` de 1 em diante.
+
+    Raises:
+        _MensagemRejeitadaError: ``produtor_divergente``.
+    """
+    copia_de_retry = usuario == consumidor and tentativa > 0
+    if usuario != produtor and not copia_de_retry:
+        raise _MensagemRejeitadaError(
+            "produtor_divergente", user_id=str(usuario), esperado=produtor
+        )
 
 
 def fila_de_retry_da_copia(tentativa: int) -> str | None:
@@ -134,17 +180,12 @@ class _MensagemRejeitadaError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ConfigConsumidor:
-    # Prefetch pequeno: o que esta no buffer de um consumidor espera por ele.
-    prefetch: int = 5
+    """Ajustes do laco do consumidor (os padroes valem para producao)."""
+
     # Intervalo maximo sem mensagem antes de bater o heartbeat e olhar o sinal
     # de parada.
     inatividade_s: float = 1.0
     diretorio_de_saude: Path = DIRETORIO_DE_SAUDE
-
-    @classmethod
-    def do_ambiente(cls) -> ConfigConsumidor:
-        """Le ``CONSUMIDOR_PREFETCH``."""
-        return cls(prefetch=inteiro_do_ambiente("CONSUMIDOR_PREFETCH", 5, minimo=1))
 
 
 class Consumidor:
@@ -182,7 +223,7 @@ class Consumidor:
         ack. Conexao perdida e consumo cancelado pelo broker reconectam com o
         backoff da ``ConexaoDoProcesso``.
         """
-        _log.info("consumer started", fila=FILA, prefetch=self._config.prefetch)
+        _log.info("consumer started", fila=FILA, prefetch=_PREFETCH)
         try:
             while not parar.is_set():
                 self._sinal.bater()
@@ -217,7 +258,7 @@ class Consumidor:
         # e o exchange de retry em que escreve.
         canal.queue_declare(FILA, passive=True)
         canal.exchange_declare(_EXCHANGE_DE_RETRY, passive=True)
-        canal.basic_qos(prefetch_count=self._config.prefetch)
+        canal.basic_qos(prefetch_count=_PREFETCH)
 
     def _consumir(self, parar: threading.Event) -> None:
         for metodo, propriedades, corpo in self._broker.canal.consume(
@@ -236,11 +277,22 @@ class Consumidor:
         tipo = propriedades.type if isinstance(propriedades.type, str) else ""
         rotulo = tipo if tipo in self._catalogo.consumidos else _TIPO_DESCONHECIDO
         cabecalhos = propriedades.headers or {}
+        # O que vai para log e span antes de validar a mensagem: so o id
+        # convertido em UUID (texto qualquer do produtor fica de fora).
+        message_id = _uuid_ou_nada(propriedades.message_id)
+        correlation_id = _uuid_ou_nada(propriedades.correlation_id)
+        ids = {
+            chave: valor
+            for chave, valor in (
+                ("messaging.message.id", message_id),
+                ("messaging.message.conversation_id", correlation_id),
+                ("correlation_id", correlation_id),
+            )
+            if valor is not None
+        }
         with (
             structlog.contextvars.bound_contextvars(
-                message_id=propriedades.message_id,
-                correlation_id=propriedades.correlation_id,
-                tipo=rotulo,
+                message_id=message_id, correlation_id=correlation_id, tipo=rotulo
             ),
             span_de_mensagem(
                 self._tracer,
@@ -251,16 +303,12 @@ class Consumidor:
                     "messaging.system": "rabbitmq",
                     "messaging.operation.type": "process",
                     "messaging.destination.name": FILA,
-                    "messaging.message.id": str(propriedades.message_id),
-                    "messaging.message.conversation_id": str(
-                        propriedades.correlation_id
-                    ),
-                    "correlation_id": str(propriedades.correlation_id),
+                    **ids,
                 },
             ) as span,
         ):
             try:
-                tentativa = self._tentativa(cabecalhos)
+                tentativa = ler_tentativa(cabecalhos)
                 resultado = self._processar(propriedades, corpo, tipo, tentativa)
             except _MensagemRejeitadaError as exc:
                 _log.warning(
@@ -290,17 +338,6 @@ class Consumidor:
             # minimo.
             self._broker.sucesso()
 
-    def _tentativa(self, cabecalhos: Mapping[str, Any]) -> int:
-        """``x-tentativa`` da mensagem: 0 na primeira entrega, ate 5 na copia."""
-        tentativa = cabecalhos.get("x-tentativa", 0)
-        if (
-            not isinstance(tentativa, int)
-            or isinstance(tentativa, bool)
-            or not 0 <= tentativa <= len(NIVEIS_DE_RETRY)
-        ):
-            raise _MensagemRejeitadaError("tentativa_invalida")
-        return tentativa
-
     def _processar(
         self,
         propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
@@ -314,28 +351,55 @@ class Consumidor:
         )
         if produtor is None:
             raise _MensagemRejeitadaError("tipo_desconhecido")
-        usuario = propriedades.user_id
-        copia_de_retry = usuario == self._usuario and tentativa > 0
-        if usuario != produtor and not copia_de_retry:
-            raise _MensagemRejeitadaError(
-                "produtor_divergente", user_id=str(usuario), esperado=produtor
-            )
-        try:
-            envelope = json.loads(corpo)
-            self._catalogo.validar(envelope)
-        except ValueError as exc:  # JSON invalido (UnicodeDecodeError incluso)
-            raise _MensagemRejeitadaError("json_invalido") from exc
-        except ContratoInvalidoError as exc:
-            raise _MensagemRejeitadaError(
-                "contrato_invalido", caminho=exc.caminho, regra=exc.regra
-            ) from exc
-        if envelope["tipo"] != tipo or envelope["id"] != propriedades.message_id:
-            raise _MensagemRejeitadaError("propriedades_divergentes")
-        mensagem = MensagemRecebida.do_envelope(envelope)
+        conferir_origem(
+            usuario=propriedades.user_id,
+            produtor=produtor,
+            consumidor=self._usuario,
+            tentativa=tentativa,
+        )
+        mensagem = self._ler(propriedades, corpo, tipo)
         handler = self._despachante.get(tipo)
         if handler is None:
             raise _MensagemRejeitadaError("sem_handler")
         return self._aplicar(handler, mensagem)
+
+    def _ler(
+        self,
+        propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
+        corpo: bytes,
+        tipo: str,
+    ) -> MensagemRecebida:
+        """Corpo -> envelope validado pelo contrato e coerente com as propriedades."""
+        if len(corpo) > _CORPO_MAXIMO_BYTES:
+            raise _MensagemRejeitadaError("corpo_grande_demais")
+        try:
+            envelope = json.loads(corpo)
+        except (ValueError, RecursionError) as exc:
+            # JSON invalido (UnicodeDecodeError incluso) ou aninhado sem fim.
+            raise _MensagemRejeitadaError("json_invalido") from exc
+        try:
+            self._catalogo.validar(envelope)
+            mensagem = MensagemRecebida.do_envelope(envelope)
+        except ContratoInvalidoError as exc:
+            raise _MensagemRejeitadaError(
+                "contrato_invalido", caminho=exc.caminho, regra=exc.regra
+            ) from exc
+        except (ValueError, RecursionError) as exc:
+            # O que o schema deixa passar e a conversao recusa (data com `\n`
+            # no fim casa o `$` do pattern em Python).
+            raise _MensagemRejeitadaError("contrato_invalido") from exc
+        propriedades_do_envelope = (
+            envelope["tipo"],
+            envelope["id"],
+            envelope["correlation_id"],
+        )
+        if propriedades_do_envelope != (
+            tipo,
+            propriedades.message_id,
+            propriedades.correlation_id,
+        ):
+            raise _MensagemRejeitadaError("propriedades_divergentes")
+        return mensagem
 
     def _aplicar(self, handler: Handler, mensagem: MensagemRecebida) -> str:
         """Handler e ``mensagens_processadas`` numa transacao so, comitada aqui."""
@@ -457,3 +521,13 @@ def _recusar_commit(_sessao: Session) -> None:
     """Commit pedido pelo handler: o consumidor comita, junto com o registro."""
     msg = "o handler nao comita: o consumidor comita com mensagens_processadas"
     raise RuntimeError(msg)
+
+
+def _uuid_ou_nada(valor: object) -> str | None:
+    """O valor como UUID canonico, ou None: o que nao for UUID fica fora do log."""
+    if not isinstance(valor, str):
+        return None
+    try:
+        return str(UUID(valor))
+    except ValueError:
+        return None

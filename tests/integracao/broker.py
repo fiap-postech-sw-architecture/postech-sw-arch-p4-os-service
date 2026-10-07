@@ -115,14 +115,18 @@ class Broker:
         exchange: str = "pytstop.eventos",
         tipo: str | None = None,
         message_id: str | None = None,
+        correlation_id: str | None = None,
+        sem_user_id: bool = False,
         cabecalhos: Mapping[str, Any] | None = None,
         corpo: bytes | None = None,
         expiracao_ms: int | None = None,
+        propriedades: type[pika.BasicProperties] = pika.BasicProperties,
     ) -> None:
         """Publica como o participante publicaria (``user_id`` = usuario).
 
         O produtor sai da ``origem`` do envelope; os demais argumentos montam as
-        mensagens fora do contrato que os testes negativos precisam.
+        mensagens fora do contrato que os testes negativos precisam
+        (``propriedades``: outra classe de propriedades, com outro encode).
         """
         produtor = usuario or _USUARIO_DA_ORIGEM[envelope["origem"]]
         tipo = tipo or envelope["tipo"]
@@ -132,11 +136,11 @@ class Broker:
                 exchange=exchange,
                 routing_key=chave,
                 body=corpo if corpo is not None else json.dumps(envelope).encode(),
-                properties=pika.BasicProperties(
+                properties=propriedades(
                     message_id=message_id or envelope["id"],
-                    correlation_id=envelope["correlation_id"],
+                    correlation_id=correlation_id or envelope["correlation_id"],
                     type=tipo,
-                    user_id=produtor,
+                    user_id=None if sem_user_id else produtor,
                     content_type="application/json",
                     delivery_mode=pika.DeliveryMode.Persistent,
                     headers=dict(cabecalhos or {}),

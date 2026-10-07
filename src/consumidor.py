@@ -16,7 +16,6 @@ import structlog
 from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
 from src.compartilhado.infraestrutura.database import criar_session_factory
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
-    ConfigConsumidor,
     Consumidor,
     Handler,
 )
@@ -87,7 +86,6 @@ def main() -> None:
             parametros=parametros,
             despachante=DESPACHANTE,
             tracer=criar_tracer("consumidor"),
-            config=ConfigConsumidor.do_ambiente(),
         )
         subir_metricas()
         consumidor.executar(parar)

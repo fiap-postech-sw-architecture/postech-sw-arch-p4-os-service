@@ -621,18 +621,14 @@ def test_metricas_da_outbox_com_o_banco_fora_viram_nan(
     assert math.isnan(valor)
 
 
-def test_config_do_relay_e_do_consumidor_vem_do_ambiente(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_config_do_relay_vem_do_ambiente(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OUTBOX_POLL_SEGUNDOS", "2.5")
     monkeypatch.setenv("OUTBOX_LOTE", "20")
     monkeypatch.setenv("OUTBOX_LEASE_SEGUNDOS", "90")
-    monkeypatch.setenv("CONSUMIDOR_PREFETCH", "3")
 
     relay = ConfigRelay.do_ambiente()
 
     assert (relay.poll_s, relay.lote, relay.lease) == (2.5, 20, timedelta(seconds=90))
-    assert ConfigConsumidor.do_ambiente().prefetch == 3
 
 
 def _entrega(envelope: dict[str, Any], tag: int) -> tuple[Any, Any, bytes]:
