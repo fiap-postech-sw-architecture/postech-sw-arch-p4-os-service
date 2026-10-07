@@ -27,6 +27,7 @@ _TABELAS = {
     "historico_status_ordem",
     "outbox",
     "mensagens_processadas",
+    "sagas",
 }
 
 
@@ -44,6 +45,28 @@ def test_schema_da_fase_4(engine: Engine) -> None:
     assert "versao" in colunas_os
     assert {"orcamento_id", "pagamento_id", "motivo_cancelamento"} <= colunas_os
     assert not {"orcamento_json", "escopo_aprovado_json"} & colunas_os
+    assert "ator" in {c["name"] for c in inspetor.get_columns("historico_status_ordem")}
+
+
+def test_indices_parciais_da_saga(engine: Engine) -> None:
+    # O compare_metadata nao confere o WHERE de indice parcial.
+    with engine.connect() as conn:
+        definicoes = dict(
+            conn.execute(
+                text(
+                    "SELECT indexname, indexdef FROM pg_indexes "
+                    "WHERE tablename = 'sagas' AND indexname LIKE 'ix_%'"
+                )
+            ).all()
+        )
+    assert definicoes["ix_sagas_prazo"].endswith(
+        "(prazo_resposta_em) WHERE (prazo_resposta_em IS NOT NULL)"
+    )
+    assert definicoes["ix_sagas_ativas"].endswith(
+        "(etapa, etapa_desde) WHERE ((etapa)::text <> ALL "
+        "((ARRAY['concluida'::character varying, "
+        "'compensada'::character varying])::text[]))"
+    )
 
 
 @pytest.fixture

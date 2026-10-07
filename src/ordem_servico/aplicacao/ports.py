@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
     from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+    from src.ordem_servico.aplicacao.saga.saga import Saga
 
 
 class ClientePort(Protocol):
@@ -42,5 +43,22 @@ class ConsultaAcompanhamento(Protocol):
 
         Recebe os VOs ja validados: quem chama garante que documento e placa
         invalidos nunca chegam ao banco.
+        """
+        pass
+
+
+class SagaRepository(Protocol):
+    """Persistencia da saga (agregado proprio, RFC-004 secao 4), sob a transacao."""
+
+    def obter(self, ordem_id: UUID) -> Saga | None:
+        """A saga da OS ``ordem_id``, ou ``None``."""
+        pass
+
+    def salvar(self, saga: Saga) -> None:
+        """Persiste a saga com lock otimista pela ``versao``.
+
+        Raises:
+            ConflitoDeConcorrenciaException: outra transacao gravou a mesma
+                saga desde a leitura.
         """
         pass

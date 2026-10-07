@@ -1,7 +1,8 @@
-"""Mapeamento imperativo SQLAlchemy do agregado ``OrdemDeServico``.
+"""Mapeamento imperativo SQLAlchemy da ``OrdemDeServico`` e da ``Saga``.
 
-Tabelas ``ordens_de_servico`` e ``historico_status_ordem`` (uma linha por
-``MudancaDeStatus``). Decisoes:
+Tabelas ``ordens_de_servico``, ``historico_status_ordem`` (uma linha por
+``MudancaDeStatus``) e ``sagas`` (uma instancia por OS, RFC-004 secao 7.2).
+Decisoes:
 
 - ``versao`` e o ``version_id_col`` do mapper: todo UPDATE sai com
   ``WHERE versao = <lida>`` e incrementa; 0 linhas afetadas vira
@@ -13,6 +14,10 @@ Tabelas ``ordens_de_servico`` e ``historico_status_ordem`` (uma linha por
   o atributo e instrumentado, entao trocar so o VO (ex.: novo estado do
   pagamento sem mudanca de status) suja a instancia, sai no UPDATE e sobe a
   ``versao``. Todas as colunas nulas = OS ainda sem aquele resumo.
+- A saga tem o proprio ``version_id_col`` (``sagas.versao``) e guarda
+  passos, plano, comando em voo e itens em JSONB: a ``Saga`` troca a lista
+  ou o dict inteiro a cada mudanca, porque mutacao no lugar nao suja o
+  atributo.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from sqlalchemy import (
+    JSON,
     Column,
     DateTime,
     Enum,
@@ -33,10 +39,12 @@ from sqlalchemy import (
     Uuid,
     event,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import composite, registry, relationship
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.infraestrutura.database import metadata
+from src.ordem_servico.aplicacao.saga.saga import EtapaSaga, Saga
 from src.ordem_servico.dominio.historico import MudancaDeStatus, OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import (
     TAMANHO_MAXIMO_DESCRICAO,
@@ -55,7 +63,14 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from enum import StrEnum
 
+    from src.compartilhado.dominio.aggregate_root import AggregateRoot
+
 _TAMANHO_ENUM = 30
+_TAMANHO_CODIGO = 30
+# JSONB no Postgres; a variante sqlite so existe para create_all de teste.
+_JSON = JSONB().with_variant(JSON(), "sqlite")
+# traceparent W3C da versao 00: 55 caracteres.
+_TAMANHO_TRACEPARENT = 55
 
 
 def _enum(tipo: type[StrEnum], nome: str) -> Enum:
@@ -135,6 +150,46 @@ historico_status_ordem_table = Table(
     ),
 )
 
+sagas_table = Table(
+    "sagas",
+    metadata,
+    Column(
+        "ordem_id",
+        Uuid,
+        ForeignKey("ordens_de_servico.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("etapa", _enum(EtapaSaga, "etapa_saga"), nullable=False),
+    # Codigos (motivo da compensacao, falha); texto livre nunca entra na saga.
+    Column("motivo", String(_TAMANHO_CODIGO), nullable=True),
+    Column("falha", String(_TAMANHO_CODIGO), nullable=True),
+    Column("passos", _JSON, nullable=False),
+    Column("passos_concluidos", _JSON, nullable=False),
+    Column("comando_em_voo", _JSON, nullable=True),
+    Column("plano_compensacao", _JSON, nullable=False),
+    Column("itens", _JSON, nullable=False),
+    Column("reenvios", Integer, nullable=False),
+    Column("prazo_resposta_em", DateTime(timezone=True), nullable=True),
+    Column("traceparent", String(_TAMANHO_TRACEPARENT), nullable=True),
+    Column("iniciada_em", DateTime(timezone=True), nullable=False),
+    Column("etapa_desde", DateTime(timezone=True), nullable=False),
+    Column("atualizada_em", DateTime(timezone=True), nullable=False),
+    Column("versao", Integer, nullable=False),
+)
+# Candidatas a prazo vencido, por indice (RFC-004 secao 4.6).
+Index(
+    "ix_sagas_prazo",
+    sagas_table.c.prazo_resposta_em,
+    postgresql_where=sagas_table.c.prazo_resposta_em.is_not(None),
+)
+# Gauges da saga: instancias ativas e a mais antiga por etapa (RFC-004 secao 9).
+Index(
+    "ix_sagas_ativas",
+    sagas_table.c.etapa,
+    sagas_table.c.etapa_desde,
+    postgresql_where=sagas_table.c.etapa.not_in(["concluida", "compensada"]),
+)
+
 _COLUNAS_ORCAMENTO = (
     "_orcamento_id",
     "_orcamento_total",
@@ -203,7 +258,7 @@ def _colunas_do_pagamento(resumo: ResumoPagamento) -> tuple[object, ...]:
 _RESUMOS: Final = frozenset({"_resumo_orcamento", "_resumo_pagamento"})
 
 
-def _ao_carregar(target: OrdemDeServico, _contexto: object) -> None:
+def _ao_carregar(target: AggregateRoot, _contexto: object) -> None:
     """Listener ``load``: o SQLAlchemy nao chama ``__init__`` na reidratacao,
     entao cria a lista de eventos para os metodos de dominio funcionarem."""
     object.__setattr__(target, "_eventos_pendentes", [])
@@ -227,7 +282,7 @@ _mapeamento_iniciado = False
 
 
 def iniciar_mapeamentos() -> None:
-    """Mapeia ``OrdemDeServico`` e ``MudancaDeStatus`` nas tabelas do contexto.
+    """Mapeia ``OrdemDeServico``, ``MudancaDeStatus`` e ``Saga`` nas tabelas.
 
     Idempotente: so a primeira chamada faz algo. Quem chama e
     ``bootstrap.iniciar_todos_mapeamentos``, depois de ``cliente_veiculo``,
@@ -300,5 +355,31 @@ def iniciar_mapeamentos() -> None:
         },
     )
 
+    sg = sagas_table
+    mapper_registry.map_imperatively(
+        Saga,
+        sg,
+        version_id_col=sg.c.versao,
+        properties={
+            "id": sg.c.ordem_id,
+            "_etapa": sg.c.etapa,
+            "_motivo": sg.c.motivo,
+            "_falha": sg.c.falha,
+            "_passos": sg.c.passos,
+            "_passos_concluidos": sg.c.passos_concluidos,
+            "_comando_em_voo": sg.c.comando_em_voo,
+            "_plano_compensacao": sg.c.plano_compensacao,
+            "_itens": sg.c.itens,
+            "_reenvios": sg.c.reenvios,
+            "_prazo_resposta_em": sg.c.prazo_resposta_em,
+            "traceparent": sg.c.traceparent,
+            "_iniciada_em": sg.c.iniciada_em,
+            "_etapa_desde": sg.c.etapa_desde,
+            "_atualizada_em": sg.c.atualizada_em,
+            "_versao": sg.c.versao,
+        },
+    )
+
     event.listen(OrdemDeServico, "load", _ao_carregar)
     event.listen(OrdemDeServico, "refresh", _ao_recarregar)
+    event.listen(Saga, "load", _ao_carregar)
