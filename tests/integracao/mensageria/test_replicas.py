@@ -1,10 +1,11 @@
 """Duas replicas ao mesmo tempo, com Postgres e RabbitMQ reais.
 
 Relay: o claim com ``SKIP LOCKED`` e o lease repartem as linhas sem repetir
-nenhuma nem furar a ordem de cada OS, e a linha reivindicada por quem caiu so
-volta depois do lease. Consumidor: a mesma mensagem em dois consumidores ao
-mesmo tempo tem efeito uma vez, decidido pela restricao unica de
-``mensagens_processadas``, sem passar pela fila de retry.
+nenhuma nem furar a ordem de cada OS, a linha reivindicada por quem caiu so
+volta depois do lease e a replica cujo lease venceu nao grava nada na linha que
+outra reivindicou (o fim do lease e o token). Consumidor: a mesma mensagem em
+dois consumidores ao mesmo tempo tem efeito uma vez, decidido pela restricao
+unica de ``mensagens_processadas``, sem passar pela fila de retry.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+import pytest
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 
@@ -34,11 +36,13 @@ from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
+    from src.compartilhado.infraestrutura.mensageria.outbox import LinhaDaOutbox
     from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
     from tests.integracao.broker import Broker
     from tests.rastreamento import Rastreador
@@ -123,6 +127,68 @@ def test_linha_reivindicada_por_relay_que_caiu_so_volta_depois_do_lease(
     )
     assert de_novo.mensagem_id == mensagem_id
     assert de_novo.lease_ate - reivindicada.lease_ate >= timedelta(seconds=29)
+
+
+def _estado(engine: Engine, linha_id: int) -> tuple[Any, ...]:
+    with engine.connect() as conexao:
+        return tuple(
+            conexao.execute(
+                text(
+                    "SELECT status, tentativas, proxima_tentativa_em, ultimo_erro "
+                    "FROM outbox WHERE id = :id"
+                ),
+                {"id": linha_id},
+            ).one()
+        )
+
+
+@pytest.mark.parametrize(
+    ("marcar", "recusa"),
+    [
+        pytest.param(
+            lambda outbox, linha: outbox.renovar(linha, timedelta(seconds=60)),
+            None,
+            id="renovar",
+        ),
+        pytest.param(
+            lambda outbox, linha: outbox.marcar_entregue(linha),
+            False,
+            id="marcar-entregue",
+        ),
+        pytest.param(
+            lambda outbox, linha: outbox.registrar_falha(linha, "recusada (nack)"),
+            "perdida",
+            id="registrar-falha",
+        ),
+        pytest.param(
+            lambda outbox, linha: outbox.marcar_dead(linha, "fora do contrato"),
+            False,
+            id="marcar-dead",
+        ),
+        pytest.param(lambda outbox, linha: outbox.liberar([linha]), None, id="liberar"),
+    ],
+)
+def test_replica_com_o_lease_vencido_nao_grava_nada_na_linha_que_outra_reivindicou(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    marcar: Callable[[Outbox, LinhaDaOutbox], object],
+    recusa: object,
+) -> None:
+    # O lease de A vence; B reivindica e renova a linha, que segue `pendente`
+    # enquanto B publica. O status e o mesmo para as duas replicas: so o token
+    # (o fim do lease que cada uma gravou) barra A.
+    _gravar(session_factory, uuid4())
+    outbox = Outbox(engine)
+    (atrasada,) = outbox.reivindicar(10, timedelta(seconds=0.2))
+    (reivindicada,) = esperar_ate(
+        lambda: outbox.reivindicar(10, timedelta(seconds=60)), prazo_s=10
+    )
+    vigente = outbox.renovar(reivindicada, timedelta(seconds=60))
+    assert vigente is not None
+
+    assert marcar(outbox, atrasada) == recusa
+    assert _estado(engine, vigente.id) == ("pendente", 0, vigente.lease_ate, None)
+    assert outbox.marcar_entregue(vigente)
 
 
 def _consumidas(tipo: str, resultado: str) -> float:
