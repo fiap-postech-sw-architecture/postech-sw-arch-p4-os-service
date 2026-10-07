@@ -9,7 +9,8 @@ do consumidor, com o despachante do processo.
 from __future__ import annotations
 
 from collections import deque
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
@@ -18,6 +19,7 @@ from sqlalchemy import select, update
 
 from src.compartilhado.aplicacao.mensageria import (
     Desfecho,
+    FalhaPermanenteError,
     FalhaTransitoriaError,
     MensagemRecebida,
 )
@@ -41,20 +43,23 @@ from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
+    from src.ordem_servico.aplicacao.dtos import OrdemDeServicoDTO
+
 scenarios("saga_atendimento.feature")
 
 _ATENDENTE: Final = "0f8e2d7c-6b5a-4c3d-9e1f-a2b3c4d5e6f7"
-# Fila de comandos e origem dos eventos de cada participante.
+# Usuario do broker de cada participante, como o catalogo diz quem publica.
 _PARTICIPANTE: Final = {"o Billing": "billing", "a Execução": "execucao"}
-_ORIGEM: Final = {"o Billing": "billing-service", "a Execução": "execution-service"}
 # A copia de retry volta cinco vezes; a falha seguinte iria para a DLQ.
 _ENTREGAS_ATE_A_DLQ: Final = 6
-# Evento espontaneo leva o id do comando que abriu o fluxo (RFC-004 secao 5.2).
+# Os eventos do caminho feliz, em ordem, e o comando que abriu o fluxo de cada
+# um: o evento espontaneo leva o id dele no causation_id (RFC-004 secao 5.2).
 _COMANDO_QUE_ABRIU: Final = {
     "DiagnosticoIniciado": "SolicitarDiagnostico",
     "DiagnosticoConcluido": "SolicitarDiagnostico",
     "OrcamentoGerado": "GerarOrcamento",
     "OrcamentoAprovado": "GerarOrcamento",
+    "OrcamentoRecusado": "GerarOrcamento",
     "PecasReservadas": "ReservarPecas",
     "PagamentoSolicitado": "SolicitarPagamento",
     "PagamentoConfirmado": "SolicitarPagamento",
@@ -62,6 +67,7 @@ _COMANDO_QUE_ABRIU: Final = {
     "ExecucaoIniciada": "AgendarExecucao",
     "ExecucaoFinalizada": "AgendarExecucao",
 }
+_CAMINHO_FELIZ: Final = tuple(t for t in _COMANDO_QUE_ABRIU if t != "OrcamentoRecusado")
 
 
 class Barramento:
@@ -72,9 +78,11 @@ class Barramento:
         self._despachante = montar_despachante(timedelta(seconds=120))
         self.fila_do_os: deque[tuple[dict[str, Any], int]] = deque()
         self.comandos: dict[str, dict[str, Any]] = {}
+        self.entregues: list[str] = []
         self.caixas: dict[str, list[str]] = {"billing": [], "execucao": []}
+        self.eventos: dict[str, dict[str, Any]] = {}
         self.desfechos: dict[str, str] = {}
-        self.dlq: list[str] = []
+        self.dlq: list[tuple[str, str]] = []
 
     def levar_a_outbox(self) -> None:
         """O relay: comandos pendentes vao, validados, a fila do participante."""
@@ -90,6 +98,7 @@ class Barramento:
                 destino = catalogo().destino(envelope["tipo"]).routing_key
                 self.caixas[destino.split(".")[1]].append(envelope["tipo"])
                 self.comandos[envelope["tipo"]] = envelope
+                self.entregues.append(envelope["tipo"])
             sessao.execute(
                 update(outbox_table)
                 .where(outbox_table.c.id.in_([linha.id for linha in linhas]))
@@ -99,6 +108,7 @@ class Barramento:
 
     def publicar(self, envelope: dict[str, Any]) -> None:
         catalogo().validar(envelope)
+        self.eventos[envelope["tipo"]] = envelope
         self.fila_do_os.append((envelope, 1))
         self.entregar()
 
@@ -107,7 +117,7 @@ class Barramento:
 
         Cada mensagem grava ``mensagens_processadas``, roda o handler e comita
         numa transacao; a transitoria volta para o fim da fila, como a copia
-        de retry.
+        de retry, e a permanente vai para a DLQ com o motivo.
         """
         andou = True
         while andou and self.fila_do_os:
@@ -117,7 +127,7 @@ class Barramento:
                 if self._consumir(envelope):
                     andou = True
                 elif entrega == _ENTREGAS_ATE_A_DLQ:
-                    self.dlq.append(envelope["tipo"])
+                    self.dlq.append((envelope["tipo"], "tentativas_esgotadas"))
                 else:
                     self.fila_do_os.append((envelope, entrega + 1))
         self.levar_a_outbox()
@@ -135,6 +145,11 @@ class Barramento:
                 sessao.rollback()
                 self.desfechos[mensagem.tipo] = "adiantada"
                 return False
+            except FalhaPermanenteError as exc:
+                sessao.rollback()
+                self.desfechos[mensagem.tipo] = "recusada"
+                self.dlq.append((mensagem.tipo, exc.motivo))
+                return True
             sessao.commit()
         self.desfechos[mensagem.tipo] = desfecho.value
         return True
@@ -146,6 +161,28 @@ class Atendimento:
         self.barramento = Barramento(session_factory)
         self.ordem_id = UUID(int=0)
         self.veiculo: tuple[UUID, UUID] | None = None
+        # Comandos entregues antes do ultimo evento publicado.
+        self.comandos_antes = 0
+
+    def publicar(self, tipo: str, participante: str | None = None) -> None:
+        """O participante publica o evento, no trace do comando que o abriu."""
+        produtor = catalogo().produtor(tipo)
+        if participante is not None and _PARTICIPANTE[participante] != produtor:
+            msg = f"o cenario poe {participante} publicando {tipo}, de {produtor}"
+            raise ValueError(msg)
+        self.comandos_antes = len(self.barramento.entregues)
+        self.barramento.publicar(
+            envelope_de_evento(
+                tipo,
+                correlation_id=self.ordem_id,
+                causation_id=self.barramento.comandos[_COMANDO_QUE_ABRIU[tipo]]["id"],
+            )
+        )
+
+    def ordem(self) -> OrdemDeServicoDTO:
+        """A OS como o ``GET /api/v1/ordens-de-servico/{id}`` a projeta."""
+        with self.session_factory() as sessao:
+            return obter_obter_ordem(sessao).executar(self.ordem_id)
 
 
 @given("um cliente com um veículo cadastrado", target_fixture="atendimento")
@@ -158,7 +195,7 @@ def _cliente_com_veiculo(session_factory: sessionmaker[Session]) -> Atendimento:
     return atendimento
 
 
-@when("o atendente abre a ordem de serviço")
+@given("uma ordem de serviço aberta pelo atendente")
 def _abrir(atendimento: Atendimento) -> None:
     assert atendimento.veiculo is not None
     cliente_id, veiculo_id = atendimento.veiculo
@@ -178,15 +215,16 @@ def _abrir(atendimento: Atendimento) -> None:
     atendimento.barramento.levar_a_outbox()
 
 
+@given(parsers.parse('os eventos do caminho feliz anteriores a "{evento}"'))
+def _caminho_feliz_ate(atendimento: Atendimento, evento: str) -> None:
+    anteriores = _CAMINHO_FELIZ[: _CAMINHO_FELIZ.index(evento)]
+    for tipo in anteriores:
+        atendimento.publicar(tipo)
+
+
 @when(parsers.parse('{participante} publica "{tipo}"'))
 def _publicar(atendimento: Atendimento, participante: str, tipo: str) -> None:
-    envelope = envelope_de_evento(
-        tipo,
-        correlation_id=atendimento.ordem_id,
-        causation_id=atendimento.barramento.comandos[_COMANDO_QUE_ABRIU[tipo]]["id"],
-    )
-    assert envelope["origem"] == _ORIGEM[participante]
-    atendimento.barramento.publicar(envelope)
+    atendimento.publicar(tipo, participante)
 
 
 @when("o atendente registra a entrega")
@@ -203,22 +241,68 @@ def _recebe(atendimento: Atendimento, participante: str, comando: str) -> None:
     assert envelope["correlation_id"] == str(atendimento.ordem_id)
 
 
+@then(parsers.parse('o comando enviado em seguida é "{comando}"'))
+def _comando_seguinte(atendimento: Atendimento, comando: str) -> None:
+    novos = atendimento.barramento.entregues[atendimento.comandos_antes :]
+    assert novos == ([] if comando == "nenhum" else [comando])
+
+
 @then(parsers.parse('a saga está na etapa "{etapa}" com a OS "{status}"'))
 def _etapa_e_status(atendimento: Atendimento, etapa: str, status: str) -> None:
-    with atendimento.session_factory() as sessao:
-        ordem = obter_obter_ordem(sessao).executar(atendimento.ordem_id)
+    ordem = atendimento.ordem()
     assert (ordem.etapa, ordem.status) == (etapa, status)
 
 
 @then(parsers.parse('a OS fica "{status}" com a saga "{etapa}"'))
 def _final(atendimento: Atendimento, status: str, etapa: str) -> None:
-    with atendimento.session_factory() as sessao:
-        ordem = obter_obter_ordem(sessao).executar(atendimento.ordem_id)
+    ordem = atendimento.ordem()
     assert (ordem.status, ordem.etapa) == (status, etapa)
-    assert [p["gatilho"] for p in ordem.passos] == [
-        "abertura",
-        *_COMANDO_QUE_ABRIU,
+
+
+@then("os registros da saga são, em ordem:")
+def _registros(atendimento: Atendimento, datatable: list[list[str]]) -> None:
+    _cabecalho, *linhas = datatable
+    assert [p["gatilho"] for p in atendimento.ordem().passos] == [
+        gatilho for (gatilho,) in linhas
     ]
+
+
+@then("a OS mostra o link de decisão e o checkout publicados pelo Billing")
+def _resumos(atendimento: Atendimento) -> None:
+    eventos = atendimento.barramento.eventos
+    orcamento = eventos["OrcamentoGerado"]["dados"]
+    pagamento = eventos["PagamentoSolicitado"]["dados"]
+    ordem = atendimento.ordem()
+    assert ordem.orcamento is not None
+    assert ordem.pagamento is not None
+    assert (
+        str(ordem.orcamento.orcamento_id),
+        ordem.orcamento.total,
+        ordem.orcamento.moeda,
+        ordem.orcamento.link_decisao,
+        ordem.orcamento.valido_ate,
+    ) == (
+        orcamento["orcamento_id"],
+        Decimal(orcamento["total"]),
+        orcamento["moeda"],
+        orcamento["link_decisao"],
+        datetime.fromisoformat(orcamento["valido_ate"]),
+    )
+    assert (
+        str(ordem.pagamento.pagamento_id),
+        ordem.pagamento.status,
+        ordem.pagamento.valor,
+        ordem.pagamento.moeda,
+        ordem.pagamento.checkout_url,
+        ordem.pagamento.expira_em,
+    ) == (
+        pagamento["pagamento_id"],
+        "solicitado",
+        Decimal(pagamento["valor"]),
+        pagamento["moeda"],
+        pagamento["checkout_url"],
+        datetime.fromisoformat(pagamento["expira_em"]),
+    )
 
 
 @then(parsers.parse('o evento "{tipo}" volta para a fila'))
@@ -231,6 +315,11 @@ def _volta(atendimento: Atendimento, tipo: str) -> None:
 @then(parsers.parse('o evento "{tipo}" é ignorado'))
 def _ignorado(atendimento: Atendimento, tipo: str) -> None:
     assert atendimento.barramento.desfechos[tipo] == Desfecho.IGNORADA.value
+
+
+@then(parsers.parse('o evento "{tipo}" vai para a DLQ com o motivo "{motivo}"'))
+def _na_dlq(atendimento: Atendimento, tipo: str, motivo: str) -> None:
+    assert atendimento.barramento.dlq == [(tipo, motivo)]
 
 
 @then("nenhuma mensagem ficou na fila do OS")
