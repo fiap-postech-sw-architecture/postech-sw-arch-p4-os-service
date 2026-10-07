@@ -58,6 +58,16 @@ class TestLogging:
     def test_configurar_logging(self) -> None:
         configurar_logging()
 
+    def test_configurar_logging_deixa_do_pika_so_o_error(self) -> None:
+        # O WARNING do pika na devolucao de uma mensagem traz o corpo dela.
+        logging.getLogger("pika").setLevel(logging.NOTSET)
+
+        configurar_logging()
+
+        pika = logging.getLogger("pika.adapters.blocking_connection")
+        assert not pika.isEnabledFor(logging.WARNING)
+        assert pika.isEnabledFor(logging.ERROR)
+
     def test_adicionar_versao_imagem_injeta_git_sha_e_date(self) -> None:
         # Defaults vem do env do processo (PYTSTOP_GIT_SHA/DATE); em
         # tests sem essas vars setadas, valor esperado e "unknown".

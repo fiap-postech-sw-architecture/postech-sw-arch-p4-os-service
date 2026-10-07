@@ -9,7 +9,6 @@ reinicia-lo: reiniciar nao traz o broker de volta.
 
 from __future__ import annotations
 
-import logging
 import math
 import os
 import signal
@@ -134,9 +133,6 @@ def preparar(processo: str) -> tuple[Engine, pika.URLParameters]:
             fora de development/test, ou banco sem configuracao.
     """
     configurar_logging()
-    # O pika narra cada etapa da conexao em INFO; os eventos do processo ja
-    # dizem quando conecta e quando cai.
-    logging.getLogger("pika").setLevel(logging.WARNING)
     git_sha = os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12]
     git_date = os.environ.get("PYTSTOP_GIT_DATE", "unknown")
     print(

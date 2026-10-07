@@ -58,6 +58,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,
     contexto_dos_cabecalhos,
+    span_de_mensagem,
 )
 from src.compartilhado.infraestrutura.outbox_mapping import CANAL_NOTIFY
 
@@ -279,13 +280,14 @@ class Relay:
         tipo = linha.envelope["tipo"]
         # O span cobre publicacao, marcacao da linha e logs: as linhas de log
         # saem com o trace_id e o span_id da publicacao.
-        with self._tracer.start_as_current_span(
+        with span_de_mensagem(
+            self._tracer,
             f"publish {tipo}",
-            context=contexto_dos_cabecalhos(
+            contexto=contexto_dos_cabecalhos(
                 {"traceparent": linha.traceparent, "tracestate": linha.tracestate}
             ),
-            kind=SpanKind.PRODUCER,
-            attributes={
+            tipo=SpanKind.PRODUCER,
+            atributos={
                 "messaging.system": "rabbitmq",
                 "messaging.operation.type": "send",
                 "messaging.destination.name": linha.exchange,
@@ -294,7 +296,6 @@ class Relay:
                 "messaging.message.conversation_id": str(linha.correlation_id),
                 "correlation_id": str(linha.correlation_id),
             },
-            record_exception=False,
         ) as span:
             falha = self._publicar(linha)
             if falha is not None:

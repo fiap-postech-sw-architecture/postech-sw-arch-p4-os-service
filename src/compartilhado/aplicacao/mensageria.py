@@ -16,16 +16,25 @@ DLQ. Fora do consumidor (API, prazos), o caso de uso publica pela
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(frozen=True, slots=True)
 class MensagemRecebida:
-    """Envelope de um comando ou evento recebido, com os tipos ja convertidos."""
+    """Envelope de um comando ou evento recebido, com os tipos ja convertidos.
+
+    ``dados`` fica fora do ``repr`` (o de uma excecao ou de um log o mostraria):
+    traz texto livre e tokens (``observacoes``, ``link_decisao``, ``checkout_url``,
+    RFC-004 secao 5.3). E so leitura e nao entra no ``hash``.
+    """
 
     id: UUID
     tipo: str
@@ -34,7 +43,7 @@ class MensagemRecebida:
     correlation_id: UUID
     causation_id: UUID | None
     ocorrido_em: datetime
-    dados: dict[str, Any]
+    dados: Mapping[str, Any] = field(repr=False, hash=False)
 
     @classmethod
     def do_envelope(cls, envelope: dict[str, Any]) -> MensagemRecebida:
@@ -48,7 +57,7 @@ class MensagemRecebida:
             correlation_id=UUID(envelope["correlation_id"]),
             causation_id=UUID(causa) if causa is not None else None,
             ocorrido_em=datetime.fromisoformat(envelope["ocorrido_em"]),
-            dados=envelope["dados"],
+            dados=MappingProxyType(envelope["dados"]),
         )
 
 

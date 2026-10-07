@@ -62,6 +62,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,
     contexto_dos_cabecalhos,
+    span_de_mensagem,
 )
 from src.compartilhado.infraestrutura.outbox_mapping import (
     apagar_em_lotes,
@@ -241,11 +242,12 @@ class Consumidor:
                 correlation_id=propriedades.correlation_id,
                 tipo=rotulo,
             ),
-            self._tracer.start_as_current_span(
+            span_de_mensagem(
+                self._tracer,
                 f"process {rotulo}",
-                context=contexto_dos_cabecalhos(cabecalhos),
-                kind=SpanKind.CONSUMER,
-                attributes={
+                contexto=contexto_dos_cabecalhos(cabecalhos),
+                tipo=SpanKind.CONSUMER,
+                atributos={
                     "messaging.system": "rabbitmq",
                     "messaging.operation.type": "process",
                     "messaging.destination.name": FILA,
@@ -255,7 +257,6 @@ class Consumidor:
                     ),
                     "correlation_id": str(propriedades.correlation_id),
                 },
-                record_exception=False,
             ) as span,
         ):
             try:

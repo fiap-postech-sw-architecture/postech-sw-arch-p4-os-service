@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import signal
 import threading
 from typing import TYPE_CHECKING
@@ -104,7 +103,6 @@ def test_preparar_monta_o_banco_e_os_parametros_do_broker(
             "connection_name": "pytstop-os-service relay"
         }
         assert "pytstop-os-service relay | commit" in capsys.readouterr().out
-        assert logging.getLogger("pika").level == logging.WARNING
     finally:
         engine.dispose()
 

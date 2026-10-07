@@ -343,3 +343,10 @@ def configurar_logging(stream: TextIO | None = None) -> None:
             continue
         uvlog.handlers = []
         uvlog.propagate = True
+
+    # O pika loga em WARNING a mensagem que o broker devolve (publish com
+    # mandatory sem rota): propriedades e os 255 primeiros bytes do corpo, com
+    # placa e texto livre. Os processos ja logam a devolucao e a queda do broker
+    # com o tipo do erro; do pika fica so o ERROR (e o INFO dele narra cada
+    # etapa da conexao).
+    logging.getLogger("pika").setLevel(logging.ERROR)
