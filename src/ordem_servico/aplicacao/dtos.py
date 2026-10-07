@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
     from uuid import UUID
 
-    from src.ordem_servico.aplicacao.saga.modelo import Passo
+    from src.ordem_servico.aplicacao.saga.modelo import RegistroDaSaga
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,7 +26,7 @@ class AbrirOrdemDTO:
     # Texto livre: fora do repr (pode conter PII).
     descricao_problema: str = field(repr=False)
     # sub do JWT de quem abre (vai para o historico).
-    ator: str | None
+    ator: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +97,7 @@ class OrdemDeServicoDTO:
     historico: tuple[MudancaDeStatusDTO, ...]
     # Etapa da saga (``None`` so para OS sem saga) e os passos dela.
     etapa: str | None
-    passos: tuple[Passo, ...]
+    passos: tuple[RegistroDaSaga, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,4 +141,4 @@ class SagaDTO:
     comando_em_voo: ComandoEmVooDTO | None
     reenvios: int
     prazo_resposta_em: datetime | None
-    passos: tuple[Passo, ...]
+    passos: tuple[RegistroDaSaga, ...]

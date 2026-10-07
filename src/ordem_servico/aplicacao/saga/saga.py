@@ -22,7 +22,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
     ItemDoDiagnostico,
-    Passo,
+    RegistroDaSaga,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
@@ -67,7 +67,9 @@ class Saga(AggregateRoot):
     _atualizada_em: datetime = field(kw_only=True)
     _motivo: str | None = field(default=None, kw_only=True)
     _falha: str | None = field(default=None, kw_only=True)
-    _passos: list[Passo] = field(default_factory=list, kw_only=True, repr=False)
+    _passos: list[RegistroDaSaga] = field(
+        default_factory=list, kw_only=True, repr=False
+    )
     _passos_concluidos: list[str] = field(default_factory=list, kw_only=True)
     _comando_em_voo: ComandoEmVoo | None = field(default=None, kw_only=True, repr=False)
     _plano_compensacao: list[str] = field(default_factory=list, kw_only=True)
@@ -102,7 +104,7 @@ class Saga(AggregateRoot):
 
     @classmethod
     def iniciar(
-        cls, ordem_id: UUID, *, envio: Envio, ator: str | None, agora: datetime
+        cls, ordem_id: UUID, *, envio: Envio, ator: str, agora: datetime
     ) -> Saga:
         """T1: abre a saga em ``aguardando_diagnostico``, com o passo ``abertura``.
 
@@ -167,7 +169,7 @@ class Saga(AggregateRoot):
         return self._falha
 
     @property
-    def passos(self) -> tuple[Passo, ...]:
+    def passos(self) -> tuple[RegistroDaSaga, ...]:
         """Copia: mudar um passo devolvido nao toca o estado da saga."""
         return tuple(deepcopy(self._passos))
 
@@ -252,7 +254,7 @@ class Saga(AggregateRoot):
         marcos: MarcosDaOrdem,
         *,
         agora: datetime,
-        ator: str | None,
+        ator: str,
         envio: Envio | None = None,
     ) -> None:
         """Aplica um evento do fluxo normal pela linha dele na tabela 4.1.
@@ -361,10 +363,10 @@ class Saga(AggregateRoot):
         gatilho: str,
         de: EtapaSaga | None,
         mensagem_id: UUID | None,
-        ator: str | None,
+        ator: str,
         envio: Envio | None,
-    ) -> Passo:
-        """Passo novo no instante da alteracao (``atualizada_em``)."""
+    ) -> RegistroDaSaga:
+        """RegistroDaSaga novo no instante da alteracao (``atualizada_em``)."""
         return {
             "seq": len(self._passos) + 1,
             "em": self._atualizada_em.isoformat(),

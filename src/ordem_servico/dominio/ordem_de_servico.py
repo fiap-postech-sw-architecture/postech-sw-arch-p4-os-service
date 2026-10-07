@@ -120,7 +120,7 @@ class OrdemDeServico(AggregateRoot):
         cliente_id: UUID,
         veiculo_id: UUID,
         descricao_problema: str,
-        ator: str | None,
+        ator: str,
     ) -> OrdemDeServico:
         """Abre a OS em ``RECEBIDA``: primeira linha do historico + evento.
 
@@ -210,15 +210,13 @@ class OrdemDeServico(AggregateRoot):
     # ----- fatos da saga (cada transicao valida, anota no historico e emite
     # evento; o status segue a tabela de etapas da RFC-004 secao 4.1)
 
-    def registrar_diagnostico_iniciado(self, *, ator: str | None) -> None:
+    def registrar_diagnostico_iniciado(self, *, ator: str) -> None:
         """``DiagnosticoIniciado`` (Execucao): RECEBIDA -> EM_DIAGNOSTICO."""
         self._transicionar(
             StatusOrdem.EM_DIAGNOSTICO, origem=OrigemMudanca.EXECUCAO, ator=ator
         )
 
-    def registrar_orcamento_gerado(
-        self, resumo: ResumoOrcamento, *, ator: str | None
-    ) -> None:
+    def registrar_orcamento_gerado(self, resumo: ResumoOrcamento, *, ator: str) -> None:
         """``OrcamentoGerado`` (Billing): EM_DIAGNOSTICO -> AGUARDANDO_APROVACAO.
 
         Guarda o resumo do orcamento, de onde sai o link de decisao do cliente.
@@ -228,7 +226,7 @@ class OrdemDeServico(AggregateRoot):
         )
         self._resumo_orcamento = resumo
 
-    def registrar_pecas_reservadas(self, *, ator: str | None) -> None:
+    def registrar_pecas_reservadas(self, *, ator: str) -> None:
         """``PecasReservadas`` (Execucao): AGUARDANDO_APROVACAO -> AGUARDANDO_PAGAMENTO.
 
         O pagamento e pedido em seguida, sobre o orcamento gerado: sem o resumo
@@ -256,7 +254,7 @@ class OrdemDeServico(AggregateRoot):
         self._resumo_pagamento = pagamento_solicitado(self._resumo_pagamento, resumo)
         self._atualizado_em = datetime.now(UTC)
 
-    def registrar_pagamento_confirmado(self, *, ator: str | None) -> None:
+    def registrar_pagamento_confirmado(self, *, ator: str) -> None:
         """``PagamentoConfirmado`` (Billing): o resumo passa a confirmado.
 
         AGUARDANDO_PAGAMENTO -> AGUARDANDO_EXECUCAO: o agendamento que vem depois
@@ -269,7 +267,7 @@ class OrdemDeServico(AggregateRoot):
         )
         self._resumo_pagamento = confirmado
 
-    def registrar_execucao_iniciada(self, *, ator: str | None) -> None:
+    def registrar_execucao_iniciada(self, *, ator: str) -> None:
         """``ExecucaoIniciada`` (Execucao), o pivot da saga.
 
         AGUARDANDO_EXECUCAO -> EM_EXECUCAO; depois dele nao ha cancelamento.
@@ -278,19 +276,19 @@ class OrdemDeServico(AggregateRoot):
             StatusOrdem.EM_EXECUCAO, origem=OrigemMudanca.EXECUCAO, ator=ator
         )
 
-    def finalizar(self, *, ator: str | None) -> None:
+    def finalizar(self, *, ator: str) -> None:
         """``ExecucaoFinalizada`` (Execucao): EM_EXECUCAO -> FINALIZADA."""
         self._transicionar(
             StatusOrdem.FINALIZADA, origem=OrigemMudanca.EXECUCAO, ator=ator
         )
 
-    def registrar_entrega(self, *, ator: str | None) -> None:
+    def registrar_entrega(self, *, ator: str) -> None:
         """Entrega ao cliente (atendimento, fora da saga): FINALIZADA -> ENTREGUE."""
         self._transicionar(
             StatusOrdem.ENTREGUE, origem=OrigemMudanca.ATENDIMENTO, ator=ator
         )
 
-    def cancelar(self, motivo: str, origem: OrigemMudanca, *, ator: str | None) -> None:
+    def cancelar(self, motivo: str, origem: OrigemMudanca, *, ator: str) -> None:
         """Cancela a OS antes do inicio da execucao.
 
         A maquina e validada primeiro: depois de EM_EXECUCAO (pivot) ou em
@@ -318,7 +316,7 @@ class OrdemDeServico(AggregateRoot):
         para: StatusOrdem,
         *,
         origem: OrigemMudanca,
-        ator: str | None,
+        ator: str,
         motivo: str | None = None,
     ) -> None:
         """Aplica a transicao ja validada: status, historico e evento."""
@@ -338,7 +336,7 @@ class OrdemDeServico(AggregateRoot):
         )
 
     def _transicionar(
-        self, para: StatusOrdem, *, origem: OrigemMudanca, ator: str | None
+        self, para: StatusOrdem, *, origem: OrigemMudanca, ator: str
     ) -> None:
         self._validar_transicao(para)
         self._aplicar_transicao(para, origem=origem, ator=ator)
@@ -350,7 +348,7 @@ class OrdemDeServico(AggregateRoot):
         para: StatusOrdem,
         origem: OrigemMudanca,
         motivo: str | None,
-        ator: str | None,
+        ator: str,
     ) -> None:
         """Linha nova do historico, no instante da alteracao (``atualizado_em``)."""
         self._historico.append(

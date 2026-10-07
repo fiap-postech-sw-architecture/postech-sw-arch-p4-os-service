@@ -174,7 +174,7 @@ class PassoDaSagaResponse(BaseModel):
     comando: str | None = Field(description="Comando enviado no passo.")
     comando_id: UUID | None = Field(description="Id do envelope do comando.")
     motivo: str | None = Field(description="Codigo da compensacao, quando houver.")
-    ator: str | None = Field(
+    ator: str = Field(
         description="sub do JWT de quem agiu ou o processo (consumidor, prazos)."
     )
     posicao_na_fila: int | None = Field(

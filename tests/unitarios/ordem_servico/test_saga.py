@@ -217,7 +217,7 @@ class TestIniciar:
             evento("DiagnosticoConcluido", saga.ordem_id),
             _marcos(),
             agora=DEPOIS,
-            ator=None,
+            ator=ATOR_PROCESSO,
             envio=_envio(Comando.GERAR_ORCAMENTO, saga),
         )
 
@@ -228,7 +228,7 @@ class TestIniciar:
         assert em_voo is not None
         em_voo["mensagem_ids"].append("outro")
 
-        assert saga.passos[0]["ator"] is None
+        assert saga.passos[0]["ator"] == ATOR_PROCESSO
         assert saga.itens[0]["quantidade"] == _ITENS[0]["quantidade"]
         assert saga.pecas == _PECAS
         assert saga.comando_em_voo is not None
@@ -458,7 +458,7 @@ class TestAvancar:
             evento("DiagnosticoConcluido", saga.ordem_id, itens=itens),
             _marcos(),
             agora=DEPOIS,
-            ator=None,
+            ator=ATOR_PROCESSO,
             envio=_envio(
                 Comando.GERAR_ORCAMENTO,
                 saga,
@@ -476,7 +476,7 @@ class TestAvancar:
             evento("ExecucaoAgendada", saga.ordem_id, posicao_na_fila=7),
             _marcos(checkout=True),
             agora=DEPOIS,
-            ator=None,
+            ator=ATOR_PROCESSO,
         )
 
         assert saga.passos[-1]["posicao_na_fila"] == 7
@@ -489,7 +489,7 @@ class TestAvancar:
             evento("DiagnosticoConcluido", saga.ordem_id),
             _marcos(),
             agora=AGORA + timedelta(minutes=10),
-            ator=None,
+            ator=ATOR_PROCESSO,
             envio=_envio(Comando.GERAR_ORCAMENTO, saga),
         )
         saga.limpar_eventos()
@@ -498,7 +498,7 @@ class TestAvancar:
             evento("OrcamentoGerado", saga.ordem_id),
             _marcos(),
             agora=AGORA + timedelta(minutes=25),
-            ator=None,
+            ator=ATOR_PROCESSO,
         )
 
         (mudanca,) = saga.coletar_eventos()
@@ -525,7 +525,9 @@ class TestAvancar:
         )
 
         with pytest.raises(KeyError):
-            saga.avancar(sem_posicao, _marcos(checkout=True), agora=DEPOIS, ator=None)
+            saga.avancar(
+                sem_posicao, _marcos(checkout=True), agora=DEPOIS, ator=ATOR_PROCESSO
+            )
 
         assert _foto(saga) == antes
 
@@ -592,7 +594,7 @@ class TestRecusasDoAvancar:
                 recebido,
                 mudanca.get("marcos", _marcos()),
                 agora=mudanca.get("agora", DEPOIS),
-                ator=None,
+                ator=ATOR_PROCESSO,
                 envio=envio,
             )
 
@@ -634,7 +636,9 @@ class TestRecusasDoAvancar:
         antes = _foto(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match=tipo):
-            saga.avancar(evento(tipo, saga.ordem_id), marcos, agora=DEPOIS, ator=None)
+            saga.avancar(
+                evento(tipo, saga.ordem_id), marcos, agora=DEPOIS, ator=ATOR_PROCESSO
+            )
 
         assert _foto(saga) == antes
 
@@ -647,7 +651,7 @@ class TestRecusasDoAvancar:
                 evento("DiagnosticoIniciado", saga.ordem_id),
                 _marcos(diagnostico=False),
                 agora=DEPOIS,
-                ator=None,
+                ator=ATOR_PROCESSO,
                 envio=_envio(Comando.GERAR_ORCAMENTO, saga),
             )
 
@@ -666,7 +670,7 @@ class TestRecusasDoAvancar:
                 evento("OrcamentoAprovado", saga.ordem_id),
                 _marcos(),
                 agora=DEPOIS,
-                ator=None,
+                ator=ATOR_PROCESSO,
                 envio=_envio(
                     Comando.RESERVAR_PECAS,
                     saga,

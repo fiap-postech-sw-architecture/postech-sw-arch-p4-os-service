@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
 import structlog
@@ -36,6 +36,7 @@ from src.compartilhado.dominio.exceptions import (
     ViolacaoRegraDeNegocioException,
 )
 from src.ordem_servico.aplicacao.saga.modelo import (
+    DadosDoContrato,
     Envio,
     EtapaSaga,
     TransicaoDaSagaInvalidaError,
@@ -113,7 +114,7 @@ class EventoRecusadoError(FalhaPermanenteError):
 
 
 # O comando que a linha da tabela envia: tipo e ``dados`` (sem ele, ``None``).
-type _Pedido = tuple[Comando, dict[str, Any]] | None
+type _Pedido = tuple[Comando, DadosDoContrato] | None
 type _Aplicacao = Callable[[MensagemRecebida, Saga, OrdemDeServico], _Pedido]
 
 
@@ -221,7 +222,7 @@ class OrquestradorDaSaga:
 
     def _enviar(
         self,
-        pedido: tuple[Comando, dict[str, Any]],
+        pedido: tuple[Comando, DadosDoContrato],
         evento: MensagemRecebida,
         agora: datetime,
     ) -> Envio:

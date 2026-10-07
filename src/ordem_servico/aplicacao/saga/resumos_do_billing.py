@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
@@ -20,10 +20,10 @@ from src.ordem_servico.dominio.resumos import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from src.ordem_servico.aplicacao.saga.modelo import DadosDoContrato
 
 
-def resumo_do_orcamento(dados: Mapping[str, Any]) -> ResumoOrcamento:
+def resumo_do_orcamento(dados: DadosDoContrato) -> ResumoOrcamento:
     """Resumo do ``OrcamentoGerado``: id, total, link de decisao e validade."""
     return ResumoOrcamento(
         orcamento_id=UUID(dados["orcamento_id"]),
@@ -33,7 +33,7 @@ def resumo_do_orcamento(dados: Mapping[str, Any]) -> ResumoOrcamento:
     )
 
 
-def resumo_do_pagamento(dados: Mapping[str, Any]) -> ResumoPagamento:
+def resumo_do_pagamento(dados: DadosDoContrato) -> ResumoPagamento:
     """Resumo do ``PagamentoSolicitado``: id, valor, checkout e expiracao."""
     return ResumoPagamento(
         pagamento_id=UUID(dados["pagamento_id"]),

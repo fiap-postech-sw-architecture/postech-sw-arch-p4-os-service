@@ -287,9 +287,7 @@ class CancelarOrdem:
         self._uow = uow
         self._sagas = sagas
 
-    def executar(
-        self, ordem_id: UUID, motivo: str, *, ator: str | None
-    ) -> OrdemDeServicoDTO:
+    def executar(self, ordem_id: UUID, motivo: str, *, ator: str) -> OrdemDeServicoDTO:
         """Cancela a ordem com origem ATENDIMENTO; ``ator`` e o sub do JWT.
 
         Raises:
@@ -324,7 +322,7 @@ class RegistrarEntrega:
         self._uow = uow
         self._sagas = sagas
 
-    def executar(self, ordem_id: UUID, *, ator: str | None) -> OrdemDeServicoDTO:
+    def executar(self, ordem_id: UUID, *, ator: str) -> OrdemDeServicoDTO:
         """Registra a entrega com origem ATENDIMENTO; ``ator`` e o sub do JWT.
 
         Raises:

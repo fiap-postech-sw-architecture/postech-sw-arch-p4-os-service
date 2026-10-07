@@ -6,6 +6,7 @@ pessoal ficam na OS (RFC-004 secao 7.2).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -16,7 +17,6 @@ from src.compartilhado.dominio.events import DomainEvent
 from src.compartilhado.dominio.exceptions import EntidadeNaoEncontradaException
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from datetime import datetime, timedelta
     from uuid import UUID
 
@@ -45,11 +45,13 @@ class EtapaSaga(StrEnum):
     FALHA_NA_COMPENSACAO = "falha_na_compensacao"
 
 
-class Passo(TypedDict):
-    """Linha do tempo da saga (coluna ``passos``): so codigos, nunca texto livre.
+class RegistroDaSaga(TypedDict):
+    """Registro da linha do tempo da saga (coluna ``passos``): so codigos.
 
-    ``gatilho`` e o tipo do evento ou ``abertura``; ``comando`` e
-    ``comando_id``, o comando que o passo enviou. ``em`` e ISO 8601 em UTC.
+    Um por transicao aplicada, inclusive as que nao concluem um passo T (o
+    ``DiagnosticoIniciado``, o ``PagamentoSolicitado``): ``gatilho`` e o tipo
+    do evento ou ``abertura``; ``comando`` e ``comando_id``, o comando que a
+    transicao enviou. ``em`` e ISO 8601 em UTC. Nunca texto livre.
     """
 
     seq: int
@@ -61,9 +63,14 @@ class Passo(TypedDict):
     comando: str | None
     comando_id: str | None
     motivo: str | None
-    ator: str | None
-    # So no passo do ExecucaoAgendada: a fila viva e a da Execucao.
+    ator: str
+    # So no registro do ExecucaoAgendada: a fila viva e a da Execucao.
     posicao_na_fila: NotRequired[int]
+
+
+# JSON ja validado pelo schema do contrato (contratos/, RFC-004 secao 5.5): os
+# ``dados`` das mensagens e dos comandos.
+type DadosDoContrato = Mapping[str, Any]
 
 
 class ComandoEmVoo(TypedDict):
@@ -75,7 +82,7 @@ class ComandoEmVoo(TypedDict):
     """
 
     tipo: str
-    dados: dict[str, Any]
+    dados: DadosDoContrato
     mensagem_ids: list[str]
     enviado_em: str
 
@@ -99,7 +106,7 @@ class Envio:
 
     tipo: Comando
     id: UUID
-    dados: Mapping[str, Any] = field(default_factory=dict, hash=False)
+    dados: DadosDoContrato = field(default_factory=dict, hash=False)
     prazo_resposta_em: datetime | None = None
 
     def __post_init__(self) -> None:
@@ -132,7 +139,7 @@ class SagaNaoEncontradaException(EntidadeNaoEncontradaException):
         super().__init__(mensagem=f"Saga da ordem {ordem_id} nao encontrada")
 
 
-def itens_do_diagnostico(dados: Mapping[str, Any]) -> list[ItemDoDiagnostico]:
+def itens_do_diagnostico(dados: DadosDoContrato) -> list[ItemDoDiagnostico]:
     """Itens do ``DiagnosticoConcluido`` so com os campos do contrato.
 
     O leitor e tolerante (RFC-004 secao 5.5): campo a mais no item nao entra
