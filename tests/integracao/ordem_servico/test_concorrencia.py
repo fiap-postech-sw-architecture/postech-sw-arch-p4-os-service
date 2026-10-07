@@ -7,10 +7,8 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.compartilhado.infraestrutura.outbox_mapping import outbox_table
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
@@ -107,13 +105,13 @@ def test_releitura_apos_conflito_decide_sobre_o_estado_novo(
         assert relida.versao == 3
 
 
-def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_a_outbox_so_tem_o_dele(
+def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_o_historico_so_tem_o_dele(
     session_factory: sessionmaker[Session],
 ) -> None:
     # Mesmo wiring da API (obter_cancelar_ordem): repositorio e UoW reais na
     # session da request. B le a versao 1 antes de A cancelar e decide sobre
-    # ela; o UPDATE condicional na versao barra B e o evento dele nao entra na
-    # outbox (rollback da transacao inteira).
+    # ela; o UPDATE condicional na versao barra B e a transicao dele nao entra
+    # no historico (rollback da transacao inteira).
     ordem_id = _ordem_commitada(session_factory)
     sessao_b = session_factory()
     lida_por_b = OrdemDeServicoSQLAlchemyRepository(sessao_b).obter_por_id(ordem_id)
@@ -130,7 +128,7 @@ def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_a_outbox_so_tem_o_d
         assert final.status is StatusOrdem.CANCELADA
         assert final.versao == 2
         assert final.motivo_cancelamento == "cliente desistiu"
-        eventos = sess.execute(
-            select(outbox_table.c.tipo).where(outbox_table.c.agregado_id == ordem_id)
-        ).scalars()
-        assert list(eventos) == ["StatusDaOrdemAlteradoEvent"]
+        assert [(m.para, m.motivo) for m in final.historico] == [
+            (StatusOrdem.RECEBIDA, None),
+            (StatusOrdem.CANCELADA, "cliente desistiu"),
+        ]

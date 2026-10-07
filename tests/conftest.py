@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.rastreamento import Rastreador
+
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter() -> None:
@@ -17,6 +19,12 @@ def _reset_encryption_singleton() -> None:
     from src.compartilhado.infraestrutura.encryption import EncryptionService
 
     EncryptionService._instance = None
+
+
+@pytest.fixture
+def rastreador() -> Rastreador:
+    """Spans do teste em memoria (InMemorySpanExporter)."""
+    return Rastreador()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

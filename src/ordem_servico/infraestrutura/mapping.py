@@ -214,7 +214,7 @@ def _ao_recarregar(
 
     O composite remonta o VO no primeiro acesso depois de um flush e avisa
     com um ``refresh`` so com a chave dele. Isso nao e releitura do banco e
-    nao pode apagar eventos ainda nao enfileirados na outbox.
+    nao pode apagar os eventos pendentes do agregado.
     """
     if atributos is not None and set(atributos) <= _RESUMOS:
         return

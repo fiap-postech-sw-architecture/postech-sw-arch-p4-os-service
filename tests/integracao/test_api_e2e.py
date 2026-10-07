@@ -1,7 +1,7 @@
 """API ponta a ponta contra o app real (lifespan, middlewares, JWT) e Postgres.
 
 Cobre o que mocks nao pegam: wiring da session no lifespan, mapeamento real,
-envelope de erro, commit real com outbox e o filtro de OS ativa entre os
+envelope de erro, commit real e o filtro de OS ativa entre os
 contextos de OS e de Cliente+Veiculo.
 """
 
@@ -14,7 +14,7 @@ from uuid import UUID
 import httpx
 import jwt
 import pytest
-from sqlalchemy import event, text
+from sqlalchemy import event
 from sqlalchemy.engine import Engine
 
 from scripts.validar_token import validar_access_token
@@ -264,38 +264,6 @@ class TestCicloDaOrdem:
             f"{_OS}/{ordem_id}/cancelamento", headers=h_mecanico, json={"motivo": "x"}
         )
         assert resp.status_code == 403
-
-
-class TestOutboxViaApi:
-    def test_abertura_e_cancelamento_gravam_eventos_no_mesmo_commit(
-        self,
-        api_client: TestClient,
-        admin_user: Usuario,
-        session_factory: sessionmaker[Session],
-    ) -> None:
-        headers = _login(api_client, admin_user.email)
-        cliente_id, veiculo_id = _cliente_com_veiculo(
-            api_client, headers, documento="21249722519", placa="OBX1A23"
-        )
-        ordem_id = _abrir(api_client, headers, cliente_id, veiculo_id)["id"]
-        api_client.post(
-            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
-        )
-
-        with session_factory() as sess:
-            linhas = sess.execute(
-                text(
-                    "SELECT tipo, payload FROM outbox "
-                    "WHERE agregado_id = :id ORDER BY id"
-                ),
-                {"id": ordem_id},
-            ).all()
-        assert [linha.tipo for linha in linhas] == [
-            "OrdemAbertaEvent",
-            "StatusDaOrdemAlteradoEvent",
-        ]
-        assert linhas[1].payload["status_novo"] == "cancelada"
-        assert "motivo" not in linhas[1].payload
 
 
 class TestAcompanhamentoPublico:

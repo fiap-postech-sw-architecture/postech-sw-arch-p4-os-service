@@ -1,23 +1,25 @@
-"""Tabelas Core da Transactional Outbox + helpers transacionais.
+"""Tabelas Core da mensageria e as escritas transacionais delas (ADR-036).
 
 ``outbox`` e ``mensagens_processadas`` sao tabelas Core (sem agregado de
-dominio mapeado), registradas no ``metadata`` compartilhado para entrarem no
-``create_all`` dos testes e na comparacao com a migracao Alembic.
+dominio mapeado), registradas no ``metadata`` compartilhado para entrarem na
+comparacao com a migracao Alembic.
 
-- ``outbox``: a ``UnitOfWork`` grava os ``IntegrationEvent`` na mesma
-  transacao do estado; o relay para o RabbitMQ le daqui.
+- ``outbox``: cada linha e um comando no envelope do contrato (RFC-004 secao
+  5.2), com exchange, routing key e o contexto W3C (``traceparent``,
+  ``tracestate``) de quem a gravou, na mesma transacao do efeito. O relay a
+  publica no RabbitMQ.
 - ``mensagens_processadas``: idempotencia do consumidor (RFC-004 secao 5.4):
   chave = ``id`` da mensagem, gravada na mesma transacao do efeito.
 
-``pg_notify_outbox`` emite ``pg_notify('outbox_novo','')`` — NOTIFY e
-transacional, entao so chega ao relay quando o COMMIT concluir. No-op em
-backend nao-Postgres.
+``pg_notify('outbox_novo','')`` acorda o relay; o NOTIFY e transacional e so
+chega quando o COMMIT conclui.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from sqlalchemy import (
     JSON,
@@ -32,106 +34,134 @@ from sqlalchemy import (
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, insert
 
 from src.compartilhado.infraestrutura.database import metadata
+from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+from src.compartilhado.infraestrutura.mensageria.telemetria import (
+    cabecalhos_do_contexto_atual,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping
 
     from sqlalchemy.orm import Session
 
-    from src.compartilhado.aplicacao.outbox import OutboxRegistro
-
 CANAL_NOTIFY = "outbox_novo"
+# Tamanho que a W3C recomenda suportar no tracestate; maior que isso, o
+# contexto segue so pelo traceparent (descartar o tracestate e permitido).
+_TRACESTATE_MAXIMO = 512
+
+
+def _agora() -> datetime:
+    return datetime.now(UTC)
+
 
 outbox_table = Table(
     "outbox",
     metadata,
     Column("id", BigInteger, primary_key=True, autoincrement=True),
-    Column("agregado_id", Uuid, nullable=False),
-    Column("tipo", String(255), nullable=False),
+    Column("mensagem_id", Uuid, nullable=False, unique=True),
+    Column("correlation_id", Uuid, nullable=False),
+    Column("exchange", String(64), nullable=False),
+    Column("routing_key", String(255), nullable=False),
     # JSONB no Postgres; a variante sqlite so existe para create_all de teste.
-    Column("payload", JSONB().with_variant(JSON(), "sqlite"), nullable=False),
+    Column("envelope", JSONB().with_variant(JSON(), "sqlite"), nullable=False),
+    Column("traceparent", String(128), nullable=True),
+    Column("tracestate", String(_TRACESTATE_MAXIMO), nullable=True),
     Column("status", String(20), nullable=False, default="pendente"),
     Column("tentativas", Integer, nullable=False, default=0),
     Column(
-        "proxima_tentativa_em",
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
+        "proxima_tentativa_em", DateTime(timezone=True), nullable=False, default=_agora
     ),
-    Column(
-        "criado_em",
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
-    ),
+    Column("criado_em", DateTime(timezone=True), nullable=False, default=_agora),
     Column("entregue_em", DateTime(timezone=True), nullable=True),
     Column("ultimo_erro", Text, nullable=True),
 )
 
-Index(
-    "ix_outbox_claim",
-    outbox_table.c.status,
-    outbox_table.c.proxima_tentativa_em,
-)
+Index("ix_outbox_claim", outbox_table.c.status, outbox_table.c.proxima_tentativa_em)
 
-# Suporta o claim com ordem por agregado do relay (head-of-line):
-# `NOT EXISTS (... WHERE p.agregado_id = o.agregado_id AND p.id < o.id ...)`.
+# Claim com ordem por OS (head-of-line): `NOT EXISTS (... WHERE
+# p.correlation_id = o.correlation_id AND p.id < o.id AND p.status = 'pendente')`.
 Index(
-    "ix_outbox_agregado_ordering",
-    outbox_table.c.agregado_id,
+    "ix_outbox_correlation_ordering",
+    outbox_table.c.correlation_id,
     outbox_table.c.id,
     outbox_table.c.status,
 )
 
-# Consumidor idempotente (ADR-036): o ``id`` da mensagem e a chave; o
-# INSERT acontece na mesma transacao do efeito, entao reentrega da mesma
-# mensagem viola a PK e o efeito nao se repete.
+# Consumidor idempotente (ADR-036): o INSERT acontece na mesma transacao do
+# efeito, entao a reentrega da mesma mensagem nao repete o efeito.
 mensagens_processadas_table = Table(
     "mensagens_processadas",
     metadata,
-    Column("id", Uuid, primary_key=True),
-    Column("tipo", String(100), nullable=False),
-    Column(
-        "processada_em",
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(UTC),
-    ),
+    Column("mensagem_id", Uuid, primary_key=True),
+    Column("processada_em", DateTime(timezone=True), nullable=False, default=_agora),
 )
 
 
-def inserir_na_outbox(session: Session, registros: Sequence[OutboxRegistro]) -> None:
-    """INSERT dos registros na ``outbox`` usando a transacao da session.
+def gravar_comando(
+    session: Session,
+    tipo: str,
+    dados: Mapping[str, Any],
+    *,
+    correlation_id: UUID,
+    causation_id: UUID | None,
+) -> UUID:
+    """INSERT do comando na outbox, na transacao da ``session`` (sem commit).
 
-    ``payload`` (``dict`` JSON-serializavel produzido por
-    ``serializar_integration_event``) e passado cru para a coluna JSONB; o
-    driver psycopg2 + SQLAlchemy fazem a adaptacao para ``jsonb``. Nao
-    commita — o caller (UoW) controla a fronteira transacional.
+    Monta e valida o envelope pelo contrato e captura o contexto W3C corrente,
+    para o relay publicar como filho dele (ADR-043).
+
+    Raises:
+        ContratoInvalidoError: comando que o OS nao publica ou ``dados`` fora do
+            schema (bug de quem chama).
     """
-    if not registros:
-        return
-    session.execute(
-        outbox_table.insert(),
-        [
-            {
-                "agregado_id": r.agregado_id,
-                "tipo": r.tipo,
-                "payload": r.payload,
-            }
-            for r in registros
-        ],
+    contratos = catalogo()
+    envelope = contratos.montar_envelope(
+        tipo,
+        dados,
+        correlation_id=correlation_id,
+        causation_id=causation_id,
+        ocorrido_em=_agora(),
     )
+    destino = contratos.destino(tipo)
+    contexto = cabecalhos_do_contexto_atual()
+    tracestate = contexto.get("tracestate")
+    if tracestate is not None and len(tracestate) > _TRACESTATE_MAXIMO:
+        tracestate = None
+    session.execute(
+        outbox_table.insert().values(
+            mensagem_id=envelope["id"],
+            correlation_id=correlation_id,
+            exchange=destino.exchange,
+            routing_key=destino.routing_key,
+            envelope=envelope,
+            traceparent=contexto.get("traceparent"),
+            tracestate=tracestate,
+        )
+    )
+    pg_notify_outbox(session)
+    return UUID(envelope["id"])
+
+
+def registrar_processada(session: Session, mensagem_id: UUID) -> bool:
+    """Grava a mensagem como processada; False se ela ja estava (reentrega).
+
+    ``ON CONFLICT DO NOTHING``: duas entregas concorrentes da mesma mensagem
+    nao estouram a PK; a segunda espera a primeira e devolve False.
+    """
+    inserida = session.execute(
+        insert(mensagens_processadas_table)
+        .values(mensagem_id=mensagem_id, processada_em=_agora())
+        .on_conflict_do_nothing(index_elements=["mensagem_id"])
+        .returning(mensagens_processadas_table.c.mensagem_id)
+    ).first()
+    return inserida is not None
 
 
 def pg_notify_outbox(session: Session) -> None:
-    """Emite ``pg_notify('outbox_novo','')`` na transacao corrente (so Postgres).
-
-    NOTIFY e transacional: a mensagem so e entregue aos ``LISTEN``ers
-    quando esta transacao comita. No-op em backend nao-Postgres.
-    """
+    """Emite ``pg_notify('outbox_novo','')`` na transacao corrente (so Postgres)."""
     bind = session.get_bind()
     if bind.dialect.name != "postgresql":
         return
