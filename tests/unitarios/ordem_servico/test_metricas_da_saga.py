@@ -25,6 +25,7 @@ def test_coletor_e_registrado_uma_vez_por_processo(
     # describe, e nao collect, no registro: nenhuma consulta antes do boot.
     assert sorted(registro._names_to_collectors) == [
         "pytstop_saga_ativas",
+        "pytstop_saga_coletor_disponivel",
         "pytstop_saga_etapa_mais_antiga_segundos",
     ]
 

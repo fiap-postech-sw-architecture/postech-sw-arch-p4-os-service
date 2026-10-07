@@ -8,8 +8,10 @@ retry nao conta duas vezes. Quem emite e
 o processo que tira a saga da etapa (API na abertura, consumidor nos eventos).
 
 Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` na hora
-da raspagem e continua certo com os outros processos fora do ar; as replicas
-repetem o valor, e os paineis agregam com ``max``.
+da raspagem, numa conexao propria e com prazo curto, e continua certo com os
+outros processos fora do ar; as replicas repetem o valor, e os paineis agregam
+com ``max``. A serie ``pytstop_saga_coletor_disponivel`` diz se a leitura deu
+certo.
 
 Series de rotulo fechado comecam em zero no boot de cada processo, para o
 ``increase()`` dos paineis nao perder o primeiro evento.
@@ -23,8 +25,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from prometheus_client import REGISTRY, Counter, Histogram
 from prometheus_client.core import GaugeMetricFamily
-from sqlalchemy import event, func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import String, event, func, select, text, type_coerce
 from sqlalchemy.orm import Session
 
 from src.ordem_servico.aplicacao.saga.modelo import (
@@ -38,9 +39,11 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from typing import Any
 
     from prometheus_client.registry import Collector
+    from sqlalchemy import Connection, Row
     from sqlalchemy.orm import SessionTransaction
 
     from src.compartilhado.dominio.events import DomainEvent
@@ -49,6 +52,10 @@ _log = structlog.get_logger(__name__)
 
 SAGAS_INICIADAS: Final = Counter(
     "pytstop_saga_iniciadas_total", "Sagas abertas junto com a OS."
+)
+FALHAS_DO_COLETOR: Final = Counter(
+    "pytstop_saga_coletor_falhas_total",
+    "Raspagens em que o coletor dos gauges da saga nao leu as sagas.",
 )
 SAGAS_FINALIZADAS: Final = Counter(
     "pytstop_saga_finalizadas_total",
@@ -131,46 +138,60 @@ def _ao_encerrar(sessao: Session, transacao: SessionTransaction) -> None:
 
 
 class ColetorDaSaga:
-    """``pytstop_saga_ativas`` e ``..._etapa_mais_antiga_segundos`` por etapa.
+    """Gauges por consulta: ``pytstop_saga_ativas``, ``..._etapa_mais_antiga_segundos``.
 
-    Uma consulta por raspagem, pelo indice parcial ``ix_sagas_ativas``. Banco
-    fora do ar: a raspagem segue sem os dois gauges (ausentes, nunca zero, que
-    esconderia uma saga parada).
+    Uma consulta por raspagem, pelo indice parcial ``ix_sagas_ativas``, numa
+    conexao propria (fora do pool das requisicoes) e com prazo de 2 s para a
+    consulta e de 1 s para esperar um lock. Qualquer falha (banco fora, tabela
+    travada, prazo esgotado) omite os dois gauges, que ficam ausentes e nunca
+    zero, conta em ``pytstop_saga_coletor_falhas_total`` e publica
+    ``pytstop_saga_coletor_disponivel`` em 0: o alerta "Saga parada" nao fica
+    mudo com o coletor quebrado. Etapa que esta versao nao conhece (rollout com
+    versoes misturadas) fica fora da contagem, sem derrubar a raspagem.
     """
 
-    def __init__(self, abrir_sessao: Callable[[], Session]) -> None:
-        self._abrir_sessao = abrir_sessao
+    def __init__(self, abrir_conexao: Callable[[], Connection]) -> None:
+        self._abrir_conexao = abrir_conexao
 
     def describe(self) -> Iterator[GaugeMetricFamily]:
         """Nomes dos gauges sem consultar o banco (registro antes do boot)."""
         yield from _gauges()
+        yield _disponibilidade()
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
+        try:
+            linhas = self._consultar()
+        except Exception as exc:  # noqa: BLE001  # a raspagem nunca cai pelo coletor
+            FALHAS_DO_COLETOR.inc()
+            _log.warning("saga gauges unavailable", erro=type(exc).__name__)
+            yield _disponibilidade(0)
+            return
+        por_etapa = {etapa: (total, float(idade)) for etapa, total, idade in linhas}
+        ativas, mais_antiga = _gauges()
+        for etapa in ETAPAS_NAO_FINAIS:
+            total, idade = por_etapa.get(etapa.value, (0, 0.0))
+            ativas.add_metric([etapa.value], total)
+            mais_antiga.add_metric([etapa.value], idade)
+        yield ativas
+        yield mais_antiga
+        yield _disponibilidade(1)
+
+    def _consultar(self) -> Sequence[Row[Any]]:
         t = sagas_table
         consulta = (
             select(
-                t.c.etapa,
+                # Texto, nao o enum: uma etapa de outra versao nao quebra a leitura.
+                type_coerce(t.c.etapa, String),
                 func.count(),
                 func.extract("epoch", func.now() - func.min(t.c.etapa_desde)),
             )
             .where(t.c.etapa.not_in(ETAPAS_FINAIS))
             .group_by(t.c.etapa)
         )
-        try:
-            with self._abrir_sessao() as sessao:
-                linhas = sessao.execute(consulta).all()
-        except (SQLAlchemyError, RuntimeError) as exc:
-            # RuntimeError: raspagem antes de a API configurar a sessao.
-            _log.warning("saga gauges unavailable", erro=type(exc).__name__)
-            return
-        por_etapa = {etapa: (total, float(idade)) for etapa, total, idade in linhas}
-        ativas, mais_antiga = _gauges()
-        for etapa in ETAPAS_NAO_FINAIS:
-            total, idade = por_etapa.get(etapa, (0, 0.0))
-            ativas.add_metric([etapa.value], total)
-            mais_antiga.add_metric([etapa.value], idade)
-        yield ativas
-        yield mais_antiga
+        with self._abrir_conexao() as conexao, conexao.begin():
+            conexao.execute(text("SET LOCAL statement_timeout = '2s'"))
+            conexao.execute(text("SET LOCAL lock_timeout = '1s'"))
+            return conexao.execute(consulta).all()
 
 
 def _gauges() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
@@ -186,13 +207,21 @@ def _gauges() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
     )
 
 
+def _disponibilidade(valor: int | None = None) -> GaugeMetricFamily:
+    return GaugeMetricFamily(
+        "pytstop_saga_coletor_disponivel",
+        "1 se o coletor leu as sagas nesta raspagem; 0 se falhou.",
+        value=valor,
+    )
+
+
 _coletor: Collector | None = None
 
 
-def registrar_coletor(abrir_sessao: Callable[[], Session]) -> None:
+def registrar_coletor(abrir_conexao: Callable[[], Connection]) -> None:
     """Registra o ``ColetorDaSaga`` no registro padrao (uma vez por processo)."""
     global _coletor  # noqa: PLW0603  # init-once flag
     if _coletor is not None:
         return
-    _coletor = ColetorDaSaga(abrir_sessao)
+    _coletor = ColetorDaSaga(abrir_conexao)
     REGISTRY.register(_coletor)

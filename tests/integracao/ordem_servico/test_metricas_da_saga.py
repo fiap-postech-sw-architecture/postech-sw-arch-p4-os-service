@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+import structlog
 from prometheus_client import REGISTRY, CollectorRegistry
-from sqlalchemy import update
+from sqlalchemy import text, update
 from sqlalchemy.exc import DBAPIError
+from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura.database import criar_engine_de_metricas
 from src.ordem_servico.aplicacao.saga.modelo import (
     Envio,
     EtapaSaga,
@@ -21,6 +25,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPAS_NAO_FINAIS
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
+from src.ordem_servico.infraestrutura import metricas_da_saga as modulo_metricas
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 from src.ordem_servico.infraestrutura.metricas_da_saga import ColetorDaSaga
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
@@ -34,7 +39,7 @@ from tests.integracao.seed_helpers import (
 if TYPE_CHECKING:
     from uuid import UUID
 
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
     from sqlalchemy.orm import Session, sessionmaker
 
 AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
@@ -311,17 +316,17 @@ def _gravar_em(sess: Session, etapa: EtapaSaga, desde: datetime) -> UUID:
 
 
 def test_coletor_conta_as_ativas_e_a_mais_antiga_por_etapa(
-    session_factory: sessionmaker[Session],
+    engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
-    agora = datetime.now(UTC)
     with session_factory() as sess:
+        # O relogio do banco, o mesmo do now() da consulta do coletor.
+        agora = sess.execute(text("SELECT now()")).scalar_one()
         _gravar_em(sess, EtapaSaga.AGUARDANDO_DECISAO, agora - timedelta(hours=3))
         _gravar_em(sess, EtapaSaga.AGUARDANDO_DECISAO, agora - timedelta(hours=1))
         _gravar_em(sess, EtapaSaga.FALHA_NA_COMPENSACAO, agora - timedelta(minutes=5))
         _gravar_em(sess, EtapaSaga.CONCLUIDA, agora - timedelta(days=9))
         sess.commit()
-    registro = CollectorRegistry()
-    registro.register(ColetorDaSaga(session_factory))
+    registro = _registro(ColetorDaSaga(engine.connect))
 
     def gauge(nome: str, etapa: str) -> float | None:
         return registro.get_sample_value(nome, {"etapa": etapa})
@@ -333,19 +338,118 @@ def test_coletor_conta_as_ativas_e_a_mais_antiga_por_etapa(
     assert gauge("pytstop_saga_ativas", "concluida") is None
     antiga = gauge("pytstop_saga_etapa_mais_antiga_segundos", "aguardando_decisao")
     assert antiga is not None
-    assert 3 * 3600 - 60 <= antiga <= 3 * 3600 + 60
+    # A consulta roda segundos depois do now() lido acima.
+    assert 3 * 3600 <= antiga <= 3 * 3600 + 30
     assert gauge("pytstop_saga_etapa_mais_antiga_segundos", "em_execucao") == 0
+    assert registro.get_sample_value("pytstop_saga_coletor_disponivel") == 1
 
 
-def test_coletor_sem_banco_omite_os_gauges() -> None:
-    def sem_sessao() -> Session:
-        msg = "Session factory nao configurada"
+def test_etapa_de_outra_versao_fica_fora_sem_derrubar_a_raspagem(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    with session_factory() as sess:
+        ordem_id = _gravar_em(sess, EtapaSaga.AGUARDANDO_DECISAO, AGORA)
+        sess.execute(
+            text(
+                "UPDATE sagas SET etapa = 'etapa_de_outra_versao' WHERE ordem_id = :id"
+            ),
+            {"id": ordem_id},
+        )
+        sess.commit()
+
+    registro = _registro(ColetorDaSaga(engine.connect))
+
+    assert registro.get_sample_value("pytstop_saga_coletor_disponivel") == 1
+    assert (
+        registro.get_sample_value(
+            "pytstop_saga_ativas", {"etapa": "aguardando_decisao"}
+        )
+        == 0
+    )
+
+
+def _registro(coletor: ColetorDaSaga) -> CollectorRegistry:
+    registro = CollectorRegistry()
+    registro.register(coletor)
+    return registro
+
+
+def _falhas() -> float:
+    return _amostra("pytstop_saga_coletor_falhas_total")
+
+
+def _raspar(coletor: ColetorDaSaga) -> dict[str, list[float]]:
+    """Uma raspagem: os valores de cada familia que o coletor publicou."""
+    return {f.name: [a.value for a in f.samples] for f in coletor.collect()}
+
+
+def _so_indisponivel(raspagem: dict[str, list[float]]) -> None:
+    # Gauges ausentes, nunca zero (zero esconderia uma saga parada), e a serie
+    # de disponibilidade em 0 para o alerta.
+    assert raspagem == {"pytstop_saga_coletor_disponivel": [0]}
+
+
+def test_coletor_antes_do_boot_marca_o_coletor_indisponivel() -> None:
+    def sem_conexao() -> Connection:
+        msg = "Engine de metricas nao configurada"
         raise RuntimeError(msg)
 
-    registro = CollectorRegistry()
-    registro.register(ColetorDaSaga(sem_sessao))
+    falhas = _falhas()
 
-    assert (
-        registro.get_sample_value("pytstop_saga_ativas", {"etapa": "em_execucao"})
-        is None
+    _so_indisponivel(_raspar(ColetorDaSaga(sem_conexao)))
+    assert _falhas() == falhas + 1
+
+
+def test_banco_fora_do_ar_marca_o_coletor_indisponivel_e_loga(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(modulo_metricas, "_log", structlog.get_logger())
+    # Porta sem servidor: a conexao e recusada (OperationalError, do SQLAlchemy).
+    fora = criar_engine_de_metricas("postgresql://os:os@127.0.0.1:1/os")
+    falhas = _falhas()
+
+    with capture_logs() as logs:
+        _so_indisponivel(_raspar(ColetorDaSaga(fora.connect)))
+
+    assert _falhas() == falhas + 1
+    assert {
+        "event": "saga gauges unavailable",
+        "log_level": "warning",
+        "erro": "OperationalError",
+    } in logs
+    fora.dispose()
+
+
+def test_tabela_travada_esgota_o_prazo_do_coletor_em_segundos(
+    engine: Engine,
+) -> None:
+    coletor = ColetorDaSaga(
+        criar_engine_de_metricas(
+            engine.url.render_as_string(hide_password=False)
+        ).connect
     )
+    with engine.connect() as trava, trava.begin():
+        trava.execute(text("LOCK TABLE sagas IN ACCESS EXCLUSIVE MODE"))
+        inicio = time.monotonic()
+        raspagem = _raspar(coletor)
+        decorrido = time.monotonic() - inicio
+
+    # O lock_timeout (1 s) corta a espera, bem antes do prazo da raspagem.
+    _so_indisponivel(raspagem)
+    assert decorrido < 5
+
+
+def test_coletor_nao_espera_a_conexao_ocupada_alem_do_prazo(engine: Engine) -> None:
+    metricas = criar_engine_de_metricas(
+        engine.url.render_as_string(hide_password=False)
+    )
+    with metricas.connect():
+        # A unica conexao da engine das metricas esta em uso: o coletor espera
+        # o pool_timeout (1 s) e desiste.
+        inicio = time.monotonic()
+        raspagem = _raspar(ColetorDaSaga(metricas.connect))
+        decorrido = time.monotonic() - inicio
+
+    _so_indisponivel(raspagem)
+    assert decorrido < 5
+    metricas.dispose()

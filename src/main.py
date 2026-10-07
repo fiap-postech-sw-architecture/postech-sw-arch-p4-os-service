@@ -53,11 +53,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # descartado no shutdown para liberar o pool de conexoes.
     from src.compartilhado.infraestrutura.database import (
         criar_engine,
+        criar_engine_de_metricas,
         criar_session_factory,
         resolver_database_url,
     )
     from src.compartilhado.infraestrutura.observability import configurar_otel
     from src.compartilhado.interfaces.dependencies import (
+        configurar_engine_de_metricas,
         configurar_session_factory,
     )
 
@@ -74,6 +76,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     engine = criar_engine(database_url)
     configurar_session_factory(criar_session_factory(engine))
+    # Os gauges da saga consultam o banco na raspagem por uma conexao propria,
+    # com prazo curto: requisicoes lentas nao seguram o /metrics.
+    engine_de_metricas = criar_engine_de_metricas(database_url)
+    configurar_engine_de_metricas(engine_de_metricas)
 
     # Observabilidade OTLP: unico ponto onde app + engine existem
     # juntos. Default OFF (OTEL_ENABLED ausente/false) — no-op sem custo.
@@ -82,6 +88,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         yield
     finally:
         engine.dispose()
+        engine_de_metricas.dispose()
 
 
 def criar_app() -> FastAPI:
@@ -147,7 +154,9 @@ def criar_app() -> FastAPI:
     from src.compartilhado.infraestrutura.metrics import configurar_metricas_api
 
     if configurar_metricas_api(application):
-        from src.compartilhado.interfaces.dependencies import abrir_session
+        from src.compartilhado.interfaces.dependencies import (
+            abrir_conexao_de_metricas,
+        )
         from src.ordem_servico.infraestrutura.metricas_da_saga import (
             registrar_coletor,
         )
@@ -157,7 +166,7 @@ def criar_app() -> FastAPI:
 
         instrumentar_metricas_de_ordens()
         # Gauges da saga por consulta: so a API os calcula (RFC-004 secao 9).
-        registrar_coletor(abrir_session)
+        registrar_coletor(abrir_conexao_de_metricas)
 
     return application
 
