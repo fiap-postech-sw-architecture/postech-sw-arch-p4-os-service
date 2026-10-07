@@ -14,7 +14,7 @@ from src.ordem_servico.dominio.resumos import (
     ResumoOrcamento,
     ResumoPagamento,
     StatusPagamento,
-    pagamento_confirmado,
+    pagamento_no_status,
     pagamento_solicitado,
 )
 from tests.fabricas import EXPIRA_EM, VALIDO_ATE
@@ -141,16 +141,6 @@ class TestResumoPagamento:
 
 
 class TestCicloDoPagamento:
-    def test_confirmado_e_o_mesmo_pagamento_com_outro_estado(self) -> None:
-        solicitado = _pagamento()
-
-        confirmado = solicitado.confirmado()
-
-        assert confirmado == _pagamento(
-            pagamento_id=solicitado.pagamento_id, status=StatusPagamento.CONFIRMADO
-        )
-        assert solicitado.status is StatusPagamento.SOLICITADO
-
     def test_o_primeiro_resumo_e_o_solicitado(self) -> None:
         novo = _pagamento()
 
@@ -169,14 +159,28 @@ class TestCicloDoPagamento:
         with pytest.raises(ViolacaoRegraDeNegocioException, match=status.value):
             pagamento_solicitado(None, _pagamento(status=status))
 
-    def test_confirmado_parte_do_solicitado(self) -> None:
+    @pytest.mark.parametrize(
+        "status", [s for s in StatusPagamento if s is not StatusPagamento.SOLICITADO]
+    )
+    def test_estado_seguinte_e_o_mesmo_pagamento_com_outro_estado(
+        self, status: StatusPagamento
+    ) -> None:
         solicitado = _pagamento()
 
-        assert pagamento_confirmado(solicitado) == solicitado.confirmado()
+        seguinte = pagamento_no_status(solicitado, status)
 
-    def test_confirmado_sem_solicitado_levanta(self) -> None:
+        assert seguinte == _pagamento(
+            pagamento_id=solicitado.pagamento_id, status=status
+        )
+        assert solicitado.status is StatusPagamento.SOLICITADO
+
+    def test_estado_seguinte_sem_solicitado_levanta(self) -> None:
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            pagamento_confirmado(None)
+            pagamento_no_status(None, StatusPagamento.CONFIRMADO)
+
+    def test_solicitado_outra_vez_levanta(self) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
+            pagamento_no_status(_pagamento(), StatusPagamento.SOLICITADO)
 
 
 def test_status_de_pagamento_cobre_o_ciclo_do_billing() -> None:

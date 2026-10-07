@@ -4,6 +4,7 @@ cancelamento e eventos para a outbox."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from itertools import pairwise
 from uuid import uuid4
@@ -83,7 +84,9 @@ FATOS: list[tuple[str, Callable[[OrdemDeServico], None], S, S, OM, str]] = [
     ),
     (
         "pagamento_confirmado",
-        lambda o: o.registrar_pagamento_confirmado(ator=ATOR_PROCESSO),
+        lambda o: o.registrar_status_do_pagamento(
+            StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+        ),
         S.AGUARDANDO_PAGAMENTO,
         S.AGUARDANDO_EXECUCAO,
         OM.BILLING,
@@ -389,7 +392,9 @@ class TestFatosDaSaga:
         solicitado = ordem.resumo_pagamento
         assert solicitado is not None
 
-        ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+        ordem.registrar_status_do_pagamento(
+            StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+        )
 
         confirmado = ordem.resumo_pagamento
         assert confirmado is not None
@@ -404,7 +409,67 @@ class TestFatosDaSaga:
         antes = _fotografia(ordem)
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+            ordem.registrar_status_do_pagamento(
+                StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+            )
+
+        assert _fotografia(ordem) == antes
+
+    @pytest.mark.usefixtures("relogio_que_avanca")
+    @pytest.mark.parametrize(
+        "status",
+        [
+            StatusPagamento.RECUSADO,
+            StatusPagamento.EXPIRADO,
+            StatusPagamento.CANCELADO,
+            StatusPagamento.ESTORNADO,
+        ],
+    )
+    @pytest.mark.parametrize(
+        "estado", [S.AGUARDANDO_PAGAMENTO, S.AGUARDANDO_EXECUCAO, S.ENTREGUE]
+    )
+    def test_outros_estados_do_pagamento_so_trocam_o_resumo(
+        self, status: StatusPagamento, estado: StatusOrdem
+    ) -> None:
+        # A OS espelha o Billing: recusado e expirado na etapa do pagamento,
+        # cancelado e estornado na compensacao ou no estorno automatico, que
+        # chega com a OS em qualquer status (RFC-004 secao 4.4).
+        ordem = ordem_em(estado)
+        solicitado = ordem.resumo_pagamento
+        historico = ordem.historico
+        ordem.limpar_eventos()
+
+        ordem.registrar_status_do_pagamento(status, ator=ATOR_PROCESSO)
+
+        assert solicitado is not None
+        assert ordem.resumo_pagamento == replace(solicitado, status=status)
+        assert (ordem.status, ordem.historico) == (estado, historico)
+        assert ordem.coletar_eventos() == []
+        assert ordem.atualizado_em > historico[-1].ocorrido_em
+
+    @pytest.mark.parametrize(
+        "status", [s for s in StatusPagamento if s is not StatusPagamento.CONFIRMADO]
+    )
+    def test_estado_do_pagamento_sem_pagamento_solicitado_levanta_sem_mutar(
+        self, status: StatusPagamento
+    ) -> None:
+        ordem = _aguardando_pagamento_sem_resumo()
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
+            ordem.registrar_status_do_pagamento(status, ator=ATOR_PROCESSO)
+
+        assert _fotografia(ordem) == antes
+
+    def test_pagamento_solicitado_pelo_estado_levanta_sem_mutar(self) -> None:
+        # O primeiro resumo vem completo do PagamentoSolicitado, nunca daqui.
+        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
+            ordem.registrar_status_do_pagamento(
+                StatusPagamento.SOLICITADO, ator=ATOR_PROCESSO
+            )
 
         assert _fotografia(ordem) == antes
 
@@ -423,6 +488,77 @@ class TestFatosDaSaga:
     def test_historico_e_vista_imutavel(self) -> None:
         ordem = abrir_ordem()
         assert isinstance(ordem.historico, tuple)
+
+
+class TestPedidoDeCancelamento:
+    @pytest.mark.usefixtures("relogio_que_avanca")
+    @pytest.mark.parametrize("estado", CANCELAVEIS)
+    def test_guarda_o_texto_sem_mudar_o_status(self, estado: StatusOrdem) -> None:
+        # A OS so fica CANCELADA quando a saga termina de compensar (RFC-004
+        # secao 4.4); o texto fica na OS, ao alcance da eliminacao LGPD.
+        ordem = ordem_em(estado)
+        historico = ordem.historico
+        ordem.limpar_eventos()
+
+        ordem.registrar_pedido_de_cancelamento("  cliente\r\ndesistiu  ")
+
+        assert ordem.motivo_cancelamento == "cliente\ndesistiu"
+        assert (ordem.status, ordem.historico) == (estado, historico)
+        assert ordem.coletar_eventos() == []
+        assert ordem.atualizado_em > historico[-1].ocorrido_em
+
+    @pytest.mark.parametrize("estado", NAO_CANCELAVEIS)
+    def test_depois_do_pivot_ou_encerrada_levanta_sem_mutar(
+        self, estado: StatusOrdem
+    ) -> None:
+        ordem = ordem_em(estado)
+        antes = _fotografia(ordem)
+
+        # O estado vem antes do texto: 409, e nao o 422 do motivo vazio.
+        with pytest.raises(TransicaoStatusInvalidaException):
+            ordem.registrar_pedido_de_cancelamento("")
+
+        assert _fotografia(ordem) == antes
+
+    @pytest.mark.parametrize(
+        ("motivo", "erro"),
+        [
+            pytest.param("   ", "obrigatorio", id="espacos"),
+            pytest.param("x" * (TAMANHO_MAXIMO_MOTIVO + 1), "excede", id="longo"),
+            pytest.param("desistiu\x00", "caractere de controle", id="nul"),
+        ],
+    )
+    def test_texto_invalido_levanta_sem_mutar(self, motivo: str, erro: str) -> None:
+        ordem = ordem_em(S.AGUARDANDO_EXECUCAO)
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ValorInvalidoException, match=erro):
+            ordem.registrar_pedido_de_cancelamento(motivo)
+
+        assert _fotografia(ordem) == antes
+
+    def test_inicio_da_execucao_descarta_o_pedido(self) -> None:
+        # Corrida do pivot: o inicio venceu o cancelamento (RFC-004 secao 4.5).
+        ordem = ordem_em(S.AGUARDANDO_EXECUCAO)
+        ordem.registrar_pedido_de_cancelamento("cliente desistiu")
+
+        ordem.registrar_execucao_iniciada(ator=ATOR_PROCESSO)
+
+        assert (ordem.status, ordem.motivo_cancelamento) == (S.EM_EXECUCAO, None)
+
+    def test_cancelar_depois_do_pedido_leva_o_texto_ao_historico(self) -> None:
+        ordem = ordem_em(S.AGUARDANDO_EXECUCAO)
+        ordem.registrar_pedido_de_cancelamento("cliente desistiu")
+
+        ordem.cancelar(ordem.motivo_cancelamento or "", OM.SAGA, ator=ATOR_PROCESSO)
+
+        ultima = ordem.historico[-1]
+        assert (ordem.status, ultima.origem, ultima.motivo, ultima.ator) == (
+            S.CANCELADA,
+            OM.SAGA,
+            "cliente desistiu",
+            ATOR_PROCESSO,
+        )
 
 
 class TestCancelamento:

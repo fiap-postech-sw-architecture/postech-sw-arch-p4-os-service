@@ -112,10 +112,6 @@ class ResumoPagamento(ValueObject):
         _exigir_url_http(self.checkout_url, "checkout_url do pagamento")
         _exigir_instante(self.expira_em, "expiracao do pagamento")
 
-    def confirmado(self) -> ResumoPagamento:
-        """O mesmo pagamento, confirmado pelo Billing."""
-        return replace(self, status=StatusPagamento.CONFIRMADO)
-
 
 def pagamento_solicitado(
     atual: ResumoPagamento | None, novo: ResumoPagamento
@@ -135,13 +131,22 @@ def pagamento_solicitado(
     return novo
 
 
-def pagamento_confirmado(atual: ResumoPagamento | None) -> ResumoPagamento:
-    """O resumo do ``PagamentoConfirmado``: o solicitado, agora confirmado.
+def pagamento_no_status(
+    atual: ResumoPagamento | None, status: StatusPagamento
+) -> ResumoPagamento:
+    """O mesmo pagamento, no estado que o Billing informou (RFC-004 secao 7.1).
+
+    O Billing decide o ciclo: a OS so exige o pagamento ja solicitado, e o
+    ``SOLICITADO`` e o do primeiro resumo (``pagamento_solicitado``).
 
     Raises:
-        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado.
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, ou o
+            ``SOLICITADO`` outra vez.
     """
     if atual is None:
         msg = "Ordem sem pagamento solicitado"
         raise ViolacaoRegraDeNegocioException(msg)
-    return atual.confirmado()
+    if status is StatusPagamento.SOLICITADO:
+        msg = "Pagamento ja solicitado para esta ordem"
+        raise ViolacaoRegraDeNegocioException(msg)
+    return replace(atual, status=status)
