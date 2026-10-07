@@ -199,6 +199,38 @@ def test_salvar_grava_o_contexto_do_span_corrente(
     assert gravado == traceparent(abertura)
 
 
+def test_transicao_no_span_grava_o_traceparent_no_mesmo_update(
+    engine: Engine, session_factory: sessionmaker[Session], rastreador: Rastreador
+) -> None:
+    with session_factory() as sess:
+        ordem_id = _ordem(sess)
+        SagaSQLAlchemyRepository(sess).salvar(_iniciada(ordem_id))
+        sess.commit()
+
+    # Saga ja gravada e alterada no span do consumo: o `before_flush` olha as
+    # instancias alteradas, nao so as novas. O flush de fora do repositorio da
+    # saga (o da OS, que o orquestrador faz antes) leva o UPDATE dela junto.
+    with (
+        rastreador.tracer.start_as_current_span("process DiagnosticoConcluido"),
+        session_factory() as sess,
+    ):
+        saga = SagaSQLAlchemyRepository(sess).obter(ordem_id)
+        assert saga is not None
+        _ate_aguardando_orcamento(saga)
+        sess.flush()
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        sess.commit()
+    (consumo,) = rastreador.spans("process DiagnosticoConcluido")
+
+    with engine.connect() as conexao:
+        gravado, versao = conexao.execute(
+            text("SELECT traceparent, versao FROM sagas WHERE ordem_id = :id"),
+            {"id": ordem_id},
+        ).one()
+    # Um UPDATE so por transicao: a versao sobe de 1 para 2.
+    assert (gravado, versao) == (traceparent(consumo), 2)
+
+
 def test_consulta_da_os_le_a_saga_no_mesmo_select(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
