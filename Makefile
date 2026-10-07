@@ -13,7 +13,7 @@ GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch typecheck security test check audit \
-	smoke compose-up compose-down manifests
+	smoke compose-up compose-down manifests kind-deploy
 
 lock-check:
 	uv lock --check
@@ -174,6 +174,16 @@ manifests:
 		printf '%s\n' "$$manifestos" | $(KUBECONFORM) -; \
 		printf '%s\n' "$$manifestos" | $(TRIVY_CONFIG); \
 	done
+
+# Implantacao no kind do platform (README, "Implantacao"), com a plataforma
+# de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do
+# servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
+# carrega no kind e aplica o overlay kind na ordem (banco, Job de migracao,
+# Deployments). PLATFORM e o clone do platform, por padrao o vizinho deste.
+PLATFORM ?= ../postech-sw-arch-p4-platform
+
+kind-deploy:
+	$(PLATFORM)/scripts/ci/implantar-servicos.sh --overlay kind os-service=$(CURDIR)
 
 # Stack local do servico: API, relay e consumidor + PostgreSQL 16 e RabbitMQ
 # (migracoes e admin seed no boot).
