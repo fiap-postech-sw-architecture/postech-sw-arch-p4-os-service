@@ -7,18 +7,26 @@ contextos de OS e de Cliente+Veiculo.
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import httpx
 import jwt
+import pytest
 from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
+from scripts.validar_token import validar_access_token
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
+)
+from tests.chaves_jwt import (
+    OUTRA_CHAVE,
+    assinar,
+    claims,
+    forjar_hmac_com_a_chave_publica,
 )
 from tests.fabricas import FLUXO, aplicar_fato
 from tests.integracao.seed_helpers import SENHA_PADRAO, criar_usuario
@@ -308,19 +316,27 @@ class TestAcompanhamentoPublico:
         assert achada.status_code == 200
         assert achada.json()["situacao"] == "Recebida"
 
+        mesmo_id = {"X-Request-ID": "acompanhamento-e2e"}
         placa_errada = api_client.post(
-            self._ROTA, json={"placa": "ZZZ9Z99", "documento": "52998224725"}
+            self._ROTA,
+            json={"placa": "ZZZ9Z99", "documento": "52998224725"},
+            headers=mesmo_id,
         )
         documento_errado = api_client.post(
-            self._ROTA, json={"placa": "PUB1A23", "documento": "11144477735"}
+            self._ROTA,
+            json={"placa": "PUB1A23", "documento": "11144477735"},
+            headers=mesmo_id,
         )
-        # Anti-enumeracao: mesmo status e mesmo corpo (resposta do p3).
+        # Anti-enumeracao: mesmo status e mesmo corpo, no envelope de erro.
         assert placa_errada.status_code == documento_errado.status_code == 404
-        assert (
-            placa_errada.json()
-            == documento_errado.json()
-            == {"detail": "Ordem nao encontrada"}
-        )
+        assert placa_errada.content == documento_errado.content
+        assert placa_errada.json() == {
+            "erro": {
+                "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                "mensagem": "Ordem nao encontrada",
+                "id_requisicao": "acompanhamento-e2e",
+            }
+        }
 
     def test_documento_ou_placa_invalidos_dao_o_404_sem_ir_ao_banco(
         self, api_client: TestClient
@@ -330,13 +346,16 @@ class TestAcompanhamentoPublico:
         def _contar(*args: object) -> None:
             comandos.append(str(args[2]))
 
+        mesmo_id = {"X-Request-ID": "acompanhamento-invalido"}
         nao_encontrada = api_client.post(
-            self._ROTA, json={"placa": "ZZZ9Z99", "documento": "52998224725"}
+            self._ROTA,
+            json={"placa": "ZZZ9Z99", "documento": "52998224725"},
+            headers=mesmo_id,
         )
         event.listen(Engine, "before_cursor_execute", _contar)
         try:
             respostas = [
-                api_client.post(self._ROTA, json=corpo)
+                api_client.post(self._ROTA, json=corpo, headers=mesmo_id)
                 for corpo in (
                     {"placa": "PUB1A23", "documento": "529.982.247-26"},
                     {"placa": "PUB1A23", "documento": "11.111.111/0001-11"},
@@ -349,7 +368,7 @@ class TestAcompanhamentoPublico:
         assert comandos == []
         for resposta in respostas:
             assert resposta.status_code == nao_encontrada.status_code == 404
-            assert resposta.json() == nao_encontrada.json()
+            assert resposta.content == nao_encontrada.content
 
 
 class TestFalhaDeCredencialUniforme:
@@ -358,23 +377,12 @@ class TestFalhaDeCredencialUniforme:
     def test_gate_responde_o_mesmo_401_para_qualquer_falha(
         self, api_client: TestClient, admin_user: Usuario
     ) -> None:
-        segredo = os.environ["JWT_SECRET"]
-        claims = {"sub": str(admin_user.id), "jti": "x", "papel": "admin"}
-        expirado = jwt.encode(
-            {**claims, "type": "access", "exp": datetime.now(UTC) - timedelta(1)},
-            segredo,
-            algorithm="HS256",
-        )
-        outro_algoritmo = jwt.encode(
-            {**claims, "type": "access", "exp": datetime.now(UTC) + timedelta(1)},
-            segredo,
-            algorithm="HS384",
-        )
+        valido = claims(sub=str(admin_user.id))
+        expirado = assinar({**valido, "exp": datetime.now(UTC) - timedelta(1)})
         # Assinatura, type e exp validos; o claim `papel` e que nao e de quem
         # emite aqui (ausente, desconhecido ou de tipo errado).
-        valido = {**claims, "type": "access", "exp": datetime.now(UTC) + timedelta(1)}
         papel_invalido = [
-            jwt.encode(corpo, segredo, algorithm="HS256")
+            assinar(corpo)
             for corpo in (
                 {k: v for k, v in valido.items() if k != "papel"},
                 {**valido, "papel": "cliente"},
@@ -398,7 +406,8 @@ class TestFalhaDeCredencialUniforme:
                 {},
                 {"Authorization": "Bearer lixo"},
                 {"Authorization": f"Bearer {expirado}"},
-                {"Authorization": f"Bearer {outro_algoritmo}"},
+                {"Authorization": f"Bearer {forjar_hmac_com_a_chave_publica()}"},
+                {"Authorization": f"Bearer {assinar(valido, chave=OUTRA_CHAVE)}"},
                 {"Authorization": f"Bearer {login['refresh_token']}"},
                 {"Authorization": f"Bearer {revogado}"},
                 *({"Authorization": f"Bearer {token}"} for token in papel_invalido),
@@ -410,7 +419,7 @@ class TestFalhaDeCredencialUniforme:
             assert resposta.json() == {
                 "erro": {
                     "codigo": "NAO_AUTENTICADO",
-                    "mensagem": "Credenciais invalidas",
+                    "mensagem": "Credencial ausente, invalida ou expirada",
                     "id_requisicao": resposta.headers["X-Request-ID"],
                 }
             }
@@ -434,7 +443,123 @@ class TestFalhaDeCredencialUniforme:
         for resposta in (senha_errada, email_desconhecido, refresh_invalido):
             assert resposta.status_code == 401
             assert resposta.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
-            assert resposta.json()["erro"]["mensagem"] == "Credenciais invalidas"
+            assert (
+                resposta.json()["erro"]["mensagem"]
+                == "Credencial ausente, invalida ou expirada"
+            )
+
+
+class TestRodizioDoRefresh:
+    """Login, /refresh e o reuso do refresh antigo, pela app real e o Postgres."""
+
+    _ROTA = "/api/v1/autenticacao"
+
+    @staticmethod
+    def _entrar(api_client: TestClient, email: str) -> dict[str, str]:
+        resp = api_client.post(
+            "/api/v1/autenticacao/login", json={"email": email, "senha": SENHA_PADRAO}
+        )
+        assert resp.status_code == 200
+        tokens: dict[str, str] = resp.json()
+        return tokens
+
+    def test_refresh_troca_o_par_e_o_antigo_deixa_de_valer(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        login = self._entrar(api_client, admin_user.email)
+
+        rodizio = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+
+        assert rodizio.status_code == 200
+        par = rodizio.json()
+        assert par["refresh_token"] != login["refresh_token"]
+        # O access novo autentica uma rota protegida.
+        autenticada = api_client.get(
+            _OS, headers={"Authorization": f"Bearer {par['access_token']}"}
+        )
+        assert autenticada.status_code == 200
+        # O refresh antigo foi consumido: o reuso e o mesmo 401 de qualquer
+        # credencial recusada, no envelope e com o header do esquema.
+        reuso = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+        assert reuso.status_code == 401
+        assert reuso.json() == {
+            "erro": {
+                "codigo": "NAO_AUTENTICADO",
+                "mensagem": "Credencial ausente, invalida ou expirada",
+                "id_requisicao": reuso.headers["X-Request-ID"],
+            }
+        }
+        assert reuso.headers["WWW-Authenticate"] == "Bearer"
+        # O refresh novo segue o mesmo rodizio.
+        segundo = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": par["refresh_token"]}
+        )
+        assert segundo.status_code == 200
+
+    def test_logout_com_o_refresh_encerra_a_sessao_inteira(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        login = self._entrar(api_client, admin_user.email)
+        headers = {"Authorization": f"Bearer {login['access_token']}"}
+
+        saida = api_client.post(
+            f"{self._ROTA}/logout",
+            headers=headers,
+            json={"refresh_token": login["refresh_token"]},
+        )
+
+        assert saida.status_code == 200
+        assert api_client.get(_OS, headers=headers).status_code == 401
+        refresh = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+        assert refresh.status_code == 401
+        assert refresh.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
+
+    def test_logout_so_com_o_header_deixa_o_refresh_valer(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        # O refresh so e revogado se vier no corpo: sem ele, o logout encerra o
+        # access e o refresh ainda cunha um par novo (README, Autenticacao).
+        login = self._entrar(api_client, admin_user.email)
+
+        saida = api_client.post(
+            f"{self._ROTA}/logout",
+            headers={"Authorization": f"Bearer {login['access_token']}"},
+        )
+        refresh = api_client.post(
+            f"{self._ROTA}/refresh", json={"refresh_token": login["refresh_token"]}
+        )
+
+        assert saida.status_code == 200
+        assert refresh.status_code == 200
+
+
+class TestTokenValidadoPeloJwks:
+    """ADR-039: Billing e Execucao validam o token so com o JWKS publico."""
+
+    def test_access_token_do_login_vale_no_validador_independente(
+        self, url_base_da_app: str, admin_user: Usuario
+    ) -> None:
+        login = httpx.post(
+            f"{url_base_da_app}/api/v1/autenticacao/login",
+            json={"email": admin_user.email, "senha": SENHA_PADRAO},
+            timeout=10,
+        )
+        assert login.status_code == 200
+        tokens = login.json()
+
+        resultado = validar_access_token(url_base_da_app, tokens["access_token"])
+
+        assert (resultado["sub"], resultado["papel"]) == (str(admin_user.id), "admin")
+        assert "email" not in resultado
+        # O refresh tem a mesma assinatura, mas nao passa como access.
+        with pytest.raises(jwt.InvalidTokenError, match="access"):
+            validar_access_token(url_base_da_app, tokens["refresh_token"])
 
 
 class TestCadastroComDocumentoInvalido:

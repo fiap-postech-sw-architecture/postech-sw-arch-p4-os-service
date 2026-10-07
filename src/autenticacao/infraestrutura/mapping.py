@@ -4,7 +4,6 @@ from sqlalchemy import Column, DateTime, String, Table, Uuid, event
 from sqlalchemy.orm import registry
 
 from src.autenticacao.dominio.papel import Papel
-from src.autenticacao.dominio.token_revogado import TokenRevogado
 from src.autenticacao.dominio.usuario import Usuario
 from src.compartilhado.infraestrutura.database import metadata
 
@@ -17,6 +16,9 @@ usuarios_table = Table(
     Column("papel", String(20), nullable=False),
 )
 
+# Sem mapeamento imperativo do TokenRevogado: o repositorio grava e le por SQL
+# Core (o INSERT ... ON CONFLICT (jti) DO NOTHING) e a entidade do dominio so
+# valida o jti e entrega o id e o instante da revogacao.
 tokens_revogados_table = Table(
     "tokens_revogados",
     metadata,
@@ -48,16 +50,6 @@ def iniciar_mapeamentos() -> None:
             "_email": usuarios_table.c.email,
             "_senha_hash": usuarios_table.c.senha_hash,
             "_papel_valor": usuarios_table.c.papel,
-        },
-    )
-
-    mapper_registry.map_imperatively(
-        TokenRevogado,
-        tokens_revogados_table,
-        properties={
-            "id": tokens_revogados_table.c.id,
-            "_jti": tokens_revogados_table.c.jti,
-            "_revogado_em": tokens_revogados_table.c.revogado_em,
         },
     )
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, status
+from fastapi import APIRouter, Body, Depends, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # Runtime import (nao TYPE_CHECKING): com `from __future__ import annotations`,
@@ -15,6 +15,7 @@ from starlette.requests import Request  # noqa: TC002
 from src.autenticacao.aplicacao.dtos import LoginDTO, RegistrarDTO
 from src.autenticacao.dominio.exceptions import TokenInvalidoException
 from src.autenticacao.interfaces.dependencies import (
+    obter_jwt_service,
     obter_login,
     obter_logout,
     obter_refresh_token,
@@ -22,6 +23,7 @@ from src.autenticacao.interfaces.dependencies import (
 )
 from src.autenticacao.interfaces.middleware import exigir_papel
 from src.autenticacao.interfaces.schemas import (
+    JwksResponse,
     LoginRequest,
     RefreshRequest,
     RegistrarRequest,
@@ -32,6 +34,8 @@ from src.compartilhado.interfaces.dependencies import obter_session
 from src.compartilhado.interfaces.middleware import limiter
 
 router = APIRouter(prefix="/api/v1/autenticacao", tags=["autenticacao"])
+# Fora de /api/v1: o caminho padrao do JWKS, lido por Billing e Execucao.
+router_jwks = APIRouter(tags=["autenticacao"])
 
 # auto_error=False: o HTTPBearer default responde 403 sem WWW-Authenticate
 # para header ausente; o 401 manual abaixo espelha `obter_usuario_atual`.
@@ -47,8 +51,9 @@ def login(
 ) -> TokenResponse:
     """Valida e-mail + senha e devolve access + refresh tokens (rate limit 5/min).
 
-    Credenciais invalidas -> 401 (mesma resposta para e-mail inexistente ou
-    senha errada, evitando enumeration).
+    E-mail inexistente e senha errada respondem o mesmo 401 (`NAO_AUTENTICADO`,
+    "Credencial ausente, invalida ou expirada"), para nao revelar quais e-mails
+    existem.
     """
     uc = obter_login(session)
     dto = LoginDTO(email=body.email, senha=body.senha)
@@ -128,3 +133,39 @@ def refresh(
         refresh_token=result.refresh_token,
         token_type=result.token_type,
     )
+
+
+@router_jwks.get(
+    "/.well-known/jwks.json",
+    summary="Chaves publicas que validam os tokens (JWKS)",
+    # O response_model valida o que o servico monta: um JWKS inconsistente e
+    # erro do servidor (500), nao 422 de quem chamou.
+    response_model=JwksResponse,
+    responses={
+        200: {
+            "description": (
+                "JWK Set com a chave que assina os tokens e, durante uma rotacao, "
+                "a outra chave publicada."
+            ),
+            "headers": {
+                "Cache-Control": {
+                    "description": "Os consumidores podem guardar o JWKS por 10 min.",
+                    "schema": {"type": "string", "example": "public, max-age=600"},
+                }
+            },
+        },
+        429: {"description": "Rate limit excedido (60/minute por IP)."},
+    },
+)
+@limiter.limit("60/minute")
+# `async` de proposito: a rota so monta um dict em memoria e, no event loop,
+# responde mesmo com o threadpool das rotas sincronas cheio.
+async def jwks(request: Request, response: Response) -> dict[str, list[dict[str, str]]]:
+    """JWK Set (RFC 7517) com as chaves publicas que validam os tokens do servico.
+
+    Publico, sem token: Billing e Execucao validam os JWT localmente com estas
+    chaves (ADR-039). A resposta traz a chave que assina e, durante uma rotacao,
+    a outra chave publicada.
+    """
+    response.headers["Cache-Control"] = "public, max-age=600"
+    return obter_jwt_service().jwks()

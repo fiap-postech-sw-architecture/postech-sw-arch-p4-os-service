@@ -32,8 +32,9 @@ class TestMain:
         assert "/api/v1/saude" in paths
         assert any("/api/v1/clientes" in p for p in paths)
         assert any("/api/v1/autenticacao" in p for p in paths)
-        # Superficie de OS da fase 4 (RFC-004 secao 6.1), sem saga e sem JWKS.
+        # Superficie de OS da fase 4 (RFC-004 secao 6.1), sem saga.
         assert {
+            "/.well-known/jwks.json",
             "/api/v1/ordens-de-servico",
             "/api/v1/ordens-de-servico/{ordem_id}",
             "/api/v1/ordens-de-servico/{ordem_id}/historico",
@@ -163,14 +164,19 @@ class TestMain:
         assert schema["openapi"].startswith("3.")
         assert len(schema["paths"]) > 0
 
+    def test_criar_app_configura_o_log_json_antes_do_servidor_subir(self) -> None:
+        # O uvicorn importa o app antes de "Started server process": configurar o
+        # log so no lifespan deixava o boot em texto puro e sem o scrub.
+        with patch("src.main.configurar_logging") as mock_logging:
+            criar_app()
+
+        mock_logging.assert_called_once_with()
+
     def test_lifespan_executa_mapeamentos(self) -> None:
         app = FastAPI()
 
         async def _run() -> None:
             with (
-                patch(
-                    "src.compartilhado.infraestrutura.logging.configurar_logging"
-                ) as mock_logging,
                 patch(
                     "src.compartilhado.infraestrutura.bootstrap.iniciar_todos_mapeamentos"
                 ) as mock_mapeamentos,
@@ -200,7 +206,6 @@ class TestMain:
                 mock_engine.return_value.dispose = lambda: None
                 async with lifespan(app):
                     pass
-                mock_logging.assert_called_once()
                 mock_mapeamentos.assert_called_once()
                 mock_engine.assert_called_once()
                 mock_factory.assert_called_once()
@@ -216,7 +221,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -251,7 +255,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -290,7 +293,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -325,7 +327,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -351,7 +352,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -381,7 +381,6 @@ class TestMain:
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -395,6 +394,7 @@ class TestMain:
                     "src.compartilhado.interfaces.dependencies.configurar_session_factory"
                 ),
                 patch("src.main.validar_segredos_no_startup") as mock_validar,
+                patch("src.main.validar_chave_jwt_no_startup") as mock_validar_jwt,
                 patch.dict(
                     os.environ,
                     {"DATABASE_URL": "postgresql://x:x@localhost:5432/x"},
@@ -405,28 +405,30 @@ class TestMain:
                 async with lifespan(app):
                     pass
                 mock_validar.assert_called_once()
+                mock_validar_jwt.assert_called_once()
 
         asyncio.run(_run())
 
-    def test_lifespan_aborta_com_segredos_demo_em_producao(self) -> None:
-        """Boot em producao falha se um segredo de demonstracao esta em uso.
+    def test_lifespan_aborta_com_a_chave_rsa_de_demo_em_producao(self) -> None:
+        """Boot em producao falha com a chave RSA de demonstracao do compose.
 
-        Prova a integracao ponta-a-ponta: o lifespan (sem mockar a guarda)
-        aborta antes de aceitar requisicoes quando JWT_SECRET e o literal demo.
-        DATABASE_URL valida e setada para isolar a falha na guarda de segredos.
+        Prova a integracao ponta-a-ponta: o lifespan (sem mockar as guardas)
+        aborta antes de aceitar requisicoes. DATABASE_URL e ENCRYPTION_KEY
+        validas isolam a falha na guarda da chave do JWT.
         """
+        from cryptography.fernet import Fernet
+
+        from tests.chaves_jwt import pem_demo_do_compose
+
         app = FastAPI()
         env = dict(os.environ)
         env["ENVIRONMENT"] = "production"
         env["DATABASE_URL"] = "postgresql://x:x@localhost:5432/x"
-        env["JWT_SECRET"] = "demo-jwt-secret-os-service-fase4-nao-usar-em-producao"
-        # ENCRYPTION_KEY presente e nao-demo isola a falha no JWT_SECRET demo:
-        # sem ela, a guarda abortaria antes por ENCRYPTION_KEY ausente.
-        env["ENCRYPTION_KEY"] = "chave-encryption-forte-de-producao-nao-demo-1234"
+        env["ENCRYPTION_KEY"] = Fernet.generate_key().decode()
+        env["JWT_PRIVATE_KEY"] = pem_demo_do_compose()
 
         async def _run() -> None:
             with (
-                patch("src.compartilhado.infraestrutura.logging.configurar_logging"),
                 patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
                 patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
@@ -442,5 +444,5 @@ class TestMain:
                 async with lifespan(app):
                     pass
 
-        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        with pytest.raises(RuntimeError, match="chave RSA de demonstracao"):
             asyncio.run(_run())

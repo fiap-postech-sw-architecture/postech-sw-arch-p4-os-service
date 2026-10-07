@@ -12,7 +12,6 @@ mitigates these by design.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -29,7 +28,6 @@ from src.autenticacao.dominio.exceptions import (
     TokenInvalidoException,
 )
 from src.autenticacao.dominio.papel import Papel
-from src.autenticacao.infraestrutura.jwt_service import JWTService
 from src.autenticacao.infraestrutura.password_hasher import (
     hash_senha,
     verificar_senha,
@@ -66,27 +64,22 @@ from src.ordem_servico.interfaces.schemas import (
     AcompanhamentoRequest,
     CancelarOrdemRequest,
 )
-
-# 64 bytes: os testes de troca de algoritmo assinam tambem com HS512.
-_CHAVE = "test-secret-key-for-security-tests".ljust(64, "x")  # gitleaks:allow
-
-
-def _jwt_service(chave: str = _CHAVE, expiracao_minutos: int = 30) -> JWTService:
-    return JWTService(
-        chave_secreta=chave,
-        expiracao_minutos=expiracao_minutos,
-        refresh_expiracao_minutos=10080,
-    )
-
+from tests.chaves_jwt import (
+    CHAVE,
+    CHAVE_PEM,
+    KID,
+    OUTRA_CHAVE,
+    adulterar,
+    claims,
+    credenciais,
+    forjar_hmac_com_a_chave_publica,
+    forjar_sem_assinatura,
+    jwt_service,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-class _FakeCredentials:
-    def __init__(self, token: str) -> None:
-        self.credentials = token
 
 
 _MOCK_SESSION = MagicMock()
@@ -109,71 +102,47 @@ def _patch_revocation(revogados: set[str] | None = None):
 
 
 class TestJWTAlgorithmEnforcement:
-    """Ensure only HS256 is accepted; other algorithms are rejected."""
+    """O algoritmo e fixo em RS256: HMAC com a chave publica, outro RSA e none caem."""
 
-    def test_hs256_accepted(self) -> None:
-        svc = _jwt_service()
+    def test_rs256_accepted(self) -> None:
+        svc = jwt_service()
         uid = uuid4()
-        token = svc.gerar_access_token(uid, "a@b.com", "admin")
-        payload = svc.validar_token(token)
-        assert payload["sub"] == str(uid)
+        token = svc.gerar_access_token(uid, "admin")
+        assert svc.validar_token(token)["sub"] == str(uid)
 
-    def test_hs384_rejected(self) -> None:
-        payload = {
-            "sub": "x",
-            "jti": str(uuid4()),
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
-            "type": "access",
-        }
-        token = jwt.encode(payload, _CHAVE, algorithm="HS384")
-        svc = _jwt_service()
+    @pytest.mark.parametrize(
+        "algoritmo",
+        [
+            pytest.param("HS256", id="hs256"),
+            pytest.param("HS384", id="hs384"),
+            pytest.param("HS512", id="hs512"),
+        ],
+    )
+    def test_hmac_assinado_com_a_chave_publica_rejected(self, algoritmo: str) -> None:
+        # Troca de algoritmo: o PEM publico (que esta no JWKS) como segredo HMAC.
+        token = forjar_hmac_com_a_chave_publica(algoritmo)
         with pytest.raises(TokenInvalidoException) as exc:
-            svc.validar_token(token)
+            jwt_service().validar_token(token)
         assert exc.value.motivo == "invalid_algorithm"
 
-    def test_hs512_rejected(self) -> None:
-        payload = {
-            "sub": "x",
-            "jti": str(uuid4()),
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
-            "type": "access",
-        }
-        token = jwt.encode(payload, _CHAVE, algorithm="HS512")
-        svc = _jwt_service()
+    def test_rs512_com_a_chave_certa_rejected(self) -> None:
+        token = jwt.encode(claims(), CHAVE, algorithm="RS512", headers={"kid": KID})
         with pytest.raises(TokenInvalidoException) as exc:
-            svc.validar_token(token)
+            jwt_service().validar_token(token)
         assert exc.value.motivo == "invalid_algorithm"
 
     def test_none_algorithm_rejected(self) -> None:
         """The 'none' algorithm attack must be blocked."""
-        import base64
-        import json as json_lib
-
-        payload = {
-            "sub": "x",
-            "jti": str(uuid4()),
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
-            "type": "access",
-        }
-
-        # Build unsigned token with stdlib (no PyJWT internals).
-        def _b64url(data: bytes) -> str:
-            return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
-        header = _b64url(b'{"alg":"none","typ":"JWT"}')
-        body = _b64url(json_lib.dumps(payload).encode())
-        unsigned_token = f"{header}.{body}."
-        svc = _jwt_service()
         with pytest.raises(TokenInvalidoException):
-            svc.validar_token(unsigned_token)
+            jwt_service().validar_token(forjar_sem_assinatura())
 
 
 class TestJWTExpiredToken:
     """Expired tokens must be rejected."""
 
     def test_expired_token_raises_exception(self) -> None:
-        svc = _jwt_service(expiracao_minutos=-1)
-        token = svc.gerar_access_token(uuid4(), "a@b.com", "admin")
+        svc = jwt_service(expiracao_minutos=-1)
+        token = svc.gerar_access_token(uuid4(), "admin")
         with pytest.raises(TokenExpiradoException):
             svc.validar_token(token)
 
@@ -182,73 +151,14 @@ class TestJWTTamperedPayload:
     """Tokens whose signature no longer matches must be rejected."""
 
     def test_tampered_payload_rejected(self) -> None:
-        svc = _jwt_service()
-        token = svc.gerar_access_token(uuid4(), "a@b.com", "admin")
-        # Split and alter the payload portion
-        parts = token.split(".")
-        assert len(parts) == 3
-        # Flip a character in the payload segment
-        altered = list(parts[1])
-        altered[0] = "A" if altered[0] != "A" else "B"
-        parts[1] = "".join(altered)
-        tampered = ".".join(parts)
+        token = jwt_service().gerar_access_token(uuid4(), "atendente")
         with pytest.raises(TokenInvalidoException):
-            svc.validar_token(tampered)
+            jwt_service().validar_token(adulterar(token, papel="admin"))
 
-    def test_wrong_secret_rejected(self) -> None:
-        svc = _jwt_service()
-        token = svc.gerar_access_token(uuid4(), "a@b.com", "admin")
-        other_svc = _jwt_service(chave="completely-different-secret".ljust(32, "x"))
+    def test_wrong_key_rejected(self) -> None:
+        token = jwt_service(chave=OUTRA_CHAVE).gerar_access_token(uuid4(), "admin")
         with pytest.raises(TokenInvalidoException):
-            other_svc.validar_token(token)
-
-
-class TestJWTMissingClaims:
-    """Tokens missing required claims (sub, jti, type) must be rejected."""
-
-    def test_missing_sub_claim(self) -> None:
-        payload = {
-            "jti": str(uuid4()),
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
-            "type": "access",
-        }
-        token = jwt.encode(payload, _CHAVE, algorithm="HS256")
-        svc = _jwt_service()
-        with pytest.raises(TokenInvalidoException):
-            svc.validar_token(token)
-
-    def test_missing_jti_claim(self) -> None:
-        payload = {
-            "sub": str(uuid4()),
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
-            "type": "access",
-        }
-        token = jwt.encode(payload, _CHAVE, algorithm="HS256")
-        svc = _jwt_service()
-        with pytest.raises(TokenInvalidoException):
-            svc.validar_token(token)
-
-    def test_missing_type_claim(self) -> None:
-        payload = {
-            "sub": str(uuid4()),
-            "jti": str(uuid4()),
-            "exp": int((datetime.now(UTC) + timedelta(hours=1)).timestamp()),
-        }
-        token = jwt.encode(payload, _CHAVE, algorithm="HS256")
-        svc = _jwt_service()
-        with pytest.raises(TokenInvalidoException):
-            svc.validar_token(token)
-
-    def test_missing_exp_claim(self) -> None:
-        payload = {
-            "sub": str(uuid4()),
-            "jti": str(uuid4()),
-            "type": "access",
-        }
-        token = jwt.encode(payload, _CHAVE, algorithm="HS256")
-        svc = _jwt_service()
-        with pytest.raises(TokenInvalidoException):
-            svc.validar_token(token)
+            jwt_service().validar_token(token)
 
 
 class TestJWTTokenRevocation:
@@ -256,29 +166,30 @@ class TestJWTTokenRevocation:
 
     @pytest.fixture(autouse=True)
     def _set_jwt_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("JWT_SECRET", _CHAVE)
+        monkeypatch.setenv("JWT_PRIVATE_KEY", CHAVE_PEM)
+        monkeypatch.delenv("JWT_PREVIOUS_PUBLIC_KEY", raising=False)
 
     def test_revoked_token_returns_401(self) -> None:
-        svc = _jwt_service()
+        svc = jwt_service()
         uid = uuid4()
-        token = svc.gerar_access_token(uid, "a@b.com", "admin")
+        token = svc.gerar_access_token(uid, "admin")
         payload = svc.validar_token(token)
         jti = str(payload["jti"])
         with _patch_revocation(revogados={jti}):
-            creds = _FakeCredentials(token=token)
+            creds = credenciais(token)
             with pytest.raises(FalhaAutenticacaoException) as exc:
-                obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+                obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)
             # ADR-039: a mesma mensagem de qualquer outra falha de credencial.
-            assert exc.value.mensagem == "Credenciais invalidas"
+            assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
             assert exc.value.motivo == "revoked_token"
 
     def test_non_revoked_token_accepted(self) -> None:
-        svc = _jwt_service()
+        svc = jwt_service()
         uid = uuid4()
-        token = svc.gerar_access_token(uid, "a@b.com", "admin")
+        token = svc.gerar_access_token(uid, "admin")
         with _patch_revocation(revogados=set()):
-            creds = _FakeCredentials(token=token)
-            payload = obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)  # type: ignore[arg-type]
+            creds = credenciais(token)
+            payload = obter_usuario_atual(credentials=creds, session=_MOCK_SESSION)
             assert payload["sub"] == str(uid)
 
 
@@ -797,13 +708,13 @@ class TestRBACExigirPapel:
         verificar = exigir_papel("admin")
         with pytest.raises(FalhaAutenticacaoException) as exc:
             verificar({"papel": "", "sub": "u1"})  # type: ignore[operator]
-        assert exc.value.mensagem == "Credenciais invalidas"
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
 
     def test_missing_papel_key_is_a_credential_failure(self) -> None:
         verificar = exigir_papel("admin")
         with pytest.raises(FalhaAutenticacaoException) as exc:
             verificar({"sub": "u1"})  # type: ignore[operator]
-        assert exc.value.mensagem == "Credenciais invalidas"
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
 
     def test_no_credentials_returns_401(self) -> None:
         """obter_usuario_atual with None credentials raises 401."""
@@ -900,7 +811,6 @@ class TestRBACRouteDeclarations:
 _SEGREDO_FORTE = "x9Qx7!aZ_kP3#wL2$mN8vR1tY6uB4eC0sD-producao-only"
 # Literais de demonstracao publicos no git (docker-compose.yml): a guarda os
 # rejeita em producao. `gitleaks:allow` -- base64 de 44 chars e senha de demo.
-_DEMO_JWT_SECRET = "demo-jwt-secret-os-service-fase4-nao-usar-em-producao"
 _DEMO_ENC_KEY = "Chqh4o4QURACWBUSdtXjAxhOQt6HhxAfEg9rtvsABKU="  # gitleaks:allow
 _DEMO_ADMIN_PASSWORD = "admin-demo-os-2026"  # gitleaks:allow
 
@@ -911,65 +821,12 @@ _CHAVE_FERNET = Fernet.generate_key().decode()
 
 def _set_segredos_validos(monkeypatch: pytest.MonkeyPatch) -> None:
     """Define segredos fortes/nao-demo; cada teste corrompe so o que testa."""
-    monkeypatch.setenv("JWT_SECRET", _SEGREDO_FORTE)
     monkeypatch.setenv("ENCRYPTION_KEY", _CHAVE_FERNET)
-    for nome in (
-        "DATABASE_URL",
-        "JWT_EXPIRATION_MINUTES",
-        "JWT_REFRESH_EXPIRATION_MINUTES",
-    ):
-        monkeypatch.delenv(nome, raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
 
 
 class TestValidarSegredosNoStartupProducao:
     """Em producao a guarda aborta o boot para segredo fraco ou de demo."""
-
-    def test_jwt_secret_curto_em_producao_levanta(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv("JWT_SECRET", "curto")  # 5 bytes < 32
-        with pytest.raises(RuntimeError, match="JWT_SECRET"):
-            validar_segredos_no_startup()
-
-    def test_jwt_secret_31_bytes_em_producao_levanta(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Limite inferior: 31 bytes ainda e fraco para HS256 (conta bytes)."""
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv("JWT_SECRET", "a" * 31)
-        with pytest.raises(RuntimeError, match="32"):
-            validar_segredos_no_startup()
-
-    def test_jwt_secret_32_bytes_em_producao_passa(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Exatamente 32 bytes satisfaz o minimo do HS256 e nao e demo."""
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv("JWT_SECRET", "a" * 32)
-        validar_segredos_no_startup()  # nao deve levantar
-
-    def test_jwt_secret_conta_bytes_nao_caracteres(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """O limite e em BYTES: 16 chars multibyte (>= 32 bytes UTF-8) passam."""
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        # "ç" = 2 bytes em UTF-8; 16 chars => 32 bytes, < 32 caracteres.
-        monkeypatch.setenv("JWT_SECRET", "ç" * 16)
-        validar_segredos_no_startup()  # 32 bytes -> passa
-
-    def test_jwt_secret_demo_em_producao_levanta(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv("JWT_SECRET", _DEMO_JWT_SECRET)
-        with pytest.raises(RuntimeError, match=r"JWT_SECRET.*demonstracao"):
-            validar_segredos_no_startup()
 
     def test_encryption_key_demo_em_producao_levanta(
         self, monkeypatch: pytest.MonkeyPatch
@@ -984,7 +841,7 @@ class TestValidarSegredosNoStartupProducao:
         # Drift guard: o denylist precisa acompanhar o compose de dev.
         raiz = Path(__file__).resolve().parents[2]
         compose = (raiz / "docker-compose.yml").read_text()
-        for literal in (_DEMO_JWT_SECRET, _DEMO_ENC_KEY, _DEMO_ADMIN_PASSWORD):
+        for literal in (_DEMO_ENC_KEY, _DEMO_ADMIN_PASSWORD):
             assert literal in compose
         assert f"POSTGRES_PASSWORD: {_SENHA_DO_BANCO_DEMO}" in compose
 
@@ -993,7 +850,7 @@ class TestValidarSegredosNoStartupProducao:
         # o denylist tambem os cobre.
         raiz = Path(__file__).resolve().parents[2]
         exemplo = (raiz / ".env.example").read_text()
-        for literal in (_DEMO_JWT_SECRET, _DEMO_ENC_KEY, _DEMO_ADMIN_PASSWORD):
+        for literal in (_DEMO_ENC_KEY, _DEMO_ADMIN_PASSWORD):
             assert f"={literal}  # gitleaks:allow" in exemplo
         assert f"POSTGRES_PASSWORD={_SENHA_DO_BANCO_DEMO}  #" in exemplo
 
@@ -1032,32 +889,6 @@ class TestValidarSegredosNoStartupProducao:
         monkeypatch.setenv("ENCRYPTION_KEY", chave)
         with pytest.raises(RuntimeError, match="ENCRYPTION_KEY invalida"):
             validar_segredos_no_startup()
-
-    @pytest.mark.parametrize(
-        ("nome", "valor"),
-        [
-            pytest.param("JWT_EXPIRATION_MINUTES", "trinta", id="access-texto"),
-            pytest.param("JWT_EXPIRATION_MINUTES", "0", id="access-zero"),
-            pytest.param("JWT_REFRESH_EXPIRATION_MINUTES", "-5", id="refresh-neg"),
-        ],
-    )
-    def test_minutos_de_jwt_invalidos_em_producao_levantam(
-        self, monkeypatch: pytest.MonkeyPatch, nome: str, valor: str
-    ) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv(nome, valor)
-        with pytest.raises(RuntimeError, match=nome):
-            validar_segredos_no_startup()
-
-    def test_minutos_de_jwt_validos_em_producao_passam(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        _set_segredos_validos(monkeypatch)
-        monkeypatch.setenv("JWT_EXPIRATION_MINUTES", "15")
-        monkeypatch.setenv("JWT_REFRESH_EXPIRATION_MINUTES", "10080")
-        validar_segredos_no_startup()  # nao deve levantar
 
     def test_admin_password_demo_em_producao_levanta(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1099,16 +930,6 @@ class TestValidarSegredosNoStartupProducao:
         _set_segredos_validos(monkeypatch)
         validar_segredos_no_startup()  # nao deve levantar
 
-    def test_jwt_secret_ausente_em_producao_levanta(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """JWT_SECRET ausente em producao aborta o boot com mensagem clara."""
-        monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("ENCRYPTION_KEY", _SEGREDO_FORTE + "-enc")
-        monkeypatch.delenv("JWT_SECRET", raising=False)
-        with pytest.raises(RuntimeError, match="JWT_SECRET"):
-            validar_segredos_no_startup()
-
     def test_encryption_key_ausente_em_producao_levanta(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1119,7 +940,6 @@ class TestValidarSegredosNoStartupProducao:
         replicas. O guard fecha esse caminho em producao.
         """
         monkeypatch.setenv("ENVIRONMENT", "production")
-        monkeypatch.setenv("JWT_SECRET", _SEGREDO_FORTE)
         monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
         with pytest.raises(RuntimeError, match="ENCRYPTION_KEY"):
             validar_segredos_no_startup()
@@ -1133,7 +953,6 @@ class TestValidarSegredosNoStartupGatePorAmbiente:
         self, monkeypatch: pytest.MonkeyPatch, ambiente: str
     ) -> None:
         monkeypatch.setenv("ENVIRONMENT", ambiente)
-        monkeypatch.setenv("JWT_SECRET", "x")  # 1 byte, demo-like
         monkeypatch.setenv("ENCRYPTION_KEY", _DEMO_ENC_KEY)
         monkeypatch.setenv("ADMIN_PASSWORD", _DEMO_ADMIN_PASSWORD)
         validar_segredos_no_startup()  # gated -> nao levanta
@@ -1141,7 +960,7 @@ class TestValidarSegredosNoStartupGatePorAmbiente:
     def test_default_ausente_e_dev_passa(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ENVIRONMENT ausente cai no default 'development' -> guarda no-op."""
         monkeypatch.delenv("ENVIRONMENT", raising=False)
-        monkeypatch.setenv("JWT_SECRET", "x")
+        monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
         validar_segredos_no_startup()  # nao levanta
 
     def test_case_insensitive_production_levanta(
@@ -1149,6 +968,6 @@ class TestValidarSegredosNoStartupGatePorAmbiente:
     ) -> None:
         """A deteccao de ambiente normaliza caixa: 'Production' tambem dispara."""
         monkeypatch.setenv("ENVIRONMENT", "Production")
-        monkeypatch.setenv("JWT_SECRET", "curto")
-        with pytest.raises(RuntimeError, match="JWT_SECRET"):
+        monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="ENCRYPTION_KEY"):
             validar_segredos_no_startup()

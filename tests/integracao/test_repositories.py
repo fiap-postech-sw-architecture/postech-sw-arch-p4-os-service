@@ -15,7 +15,7 @@ from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.placa import Placa
 
 if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
+    from sqlalchemy.orm import Session, sessionmaker
 
 pytestmark = pytest.mark.integracao
 
@@ -212,6 +212,33 @@ class TestTokenRevogadoRepository:
         repo = TokenRevogadoSQLAlchemyRepository(session=session)
 
         assert repo.esta_revogado("jti-que-nao-existe") is False
+
+    def test_revogar_so_devolve_true_na_primeira_vez(self, session: Session) -> None:
+        from src.autenticacao.infraestrutura.token_revogado_repository import (
+            TokenRevogadoSQLAlchemyRepository,
+        )
+
+        repo = TokenRevogadoSQLAlchemyRepository(session=session)
+
+        assert repo.revogar("token-jti-repetido") is True
+        assert repo.revogar("token-jti-repetido") is False
+        assert repo.esta_revogado("token-jti-repetido") is True
+
+    def test_revogar_jti_ja_commitado_por_outra_transacao_devolve_false(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        from src.autenticacao.infraestrutura.token_revogado_repository import (
+            TokenRevogadoSQLAlchemyRepository,
+        )
+
+        with session_factory() as primeira:
+            assert TokenRevogadoSQLAlchemyRepository(primeira).revogar("jti-2tx")
+            primeira.commit()
+
+        with session_factory() as segunda:
+            repo = TokenRevogadoSQLAlchemyRepository(segunda)
+            assert repo.revogar("jti-2tx") is False
+            assert repo.esta_revogado("jti-2tx") is True
 
     def test_revogar_multiplos_tokens(self, session: Session) -> None:
         from src.autenticacao.infraestrutura.token_revogado_repository import (

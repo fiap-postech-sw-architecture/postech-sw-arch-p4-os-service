@@ -60,12 +60,12 @@ class FalhaAutenticacaoException(DomainException):
     """401 de credencial: a mensagem publica e sempre a mesma (ADR-039).
 
     Vale para o login, o refresh e o gate de qualquer rota autenticada: o
-    codigo da resposta e ``NAO_AUTENTICADO``, o mesmo dos outros servicos.
+    codigo (``NAO_AUTENTICADO``) e a mensagem sao os de Billing e Execucao.
     ``motivo`` (identificador em ingles) diz o que falhou e vai so para o
     log: a resposta nao da dica a quem testa credenciais.
     """
 
-    MENSAGEM: ClassVar[str] = "Credenciais invalidas"
+    MENSAGEM: ClassVar[str] = "Credencial ausente, invalida ou expirada"
 
     def __init__(self, motivo: str = "authentication_failed") -> None:
         super().__init__(codigo="NAO_AUTENTICADO", mensagem=self.MENSAGEM)
@@ -79,5 +79,7 @@ class AcessoNegadoException(DomainException):
     (``FalhaAutenticacaoException``), nao esta.
     """
 
-    def __init__(self, mensagem: str = "Papel nao autorizado") -> None:
+    def __init__(
+        self, mensagem: str = "Papel nao autorizado para esta operacao"
+    ) -> None:
         super().__init__(codigo="ACESSO_NEGADO", mensagem=mensagem)

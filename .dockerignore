@@ -28,6 +28,9 @@ reports/
 .scannerwork/
 .sonar/
 sonar-project.properties
+# Dos scripts, so os do CI saem. Ficam os que o container roda: o seed_admin.py
+# (entrypoint) e o validar_token.py, que o `make smoke` roda dentro da imagem so
+# com o PyJWT que ela ja tem.
 scripts/sonar/
 scripts/cobertura_resumo.py
 
@@ -38,6 +41,11 @@ scripts/cobertura_resumo.py
 .venv
 build/
 dist/
+
+# Chaves privadas (a JWT_PRIVATE_KEY entra por Secret): nunca na imagem. No
+# .dockerignore `*.pem` so alcanca a raiz; o `**/` alcanca todas as pastas.
+**/*.pem
+**/*.key
 
 # Ambiente local e orquestracao
 .env

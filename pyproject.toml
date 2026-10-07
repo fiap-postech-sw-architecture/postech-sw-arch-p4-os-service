@@ -9,7 +9,9 @@ dependencies = [
     "sqlalchemy>=2.0,<2.1",
     "psycopg2-binary>=2.9",
     "alembic>=1.14",
-    "pyjwt>=2.15.1",  # 2.13.x tem 27 advisories (bypass de HMAC vazio, forja de token)
+    # 2.13.x tem 27 advisories (bypass de HMAC vazio, forja de token); [crypto]
+    # traz o cryptography exigido pelo RS256.
+    "pyjwt[crypto]>=2.15.1",
     # Transitiva do starlette; o piso evita resolver versao com advisory (out/2026).
     "anyio>=4.15.1",
     "pwdlib[bcrypt]>=0.3.0",
@@ -17,7 +19,7 @@ dependencies = [
     "pydantic[email]>=2.13.4,<3",
     "structlog>=24.0",
     "slowapi>=0.1",
-    "cryptography>=42.0",
+    "cryptography>=50.0.1",  # PYSEC-2026-3552 / CVE-2026-69247 antes da 50.0.1
     # Importados direto (middlewares, readiness, validacao do RATE_LIMIT):
     # declarados para nao depender das transitivas do FastAPI e do slowapi.
     "starlette>=1.7",
@@ -271,8 +273,7 @@ testpaths = ["tests"]
 # pendurar o job.
 timeout = 120
 # So os warnings conhecidos de terceiros ficam calados: um novo aparece no
-# resumo do pytest. Segredos de JWT dos testes tem 32 bytes ou mais (o PyJWT
-# avisa abaixo do tamanho do hash).
+# resumo do pytest.
 filterwarnings = [
     # starlette 1.7 (StarletteDeprecationWarning e UserWarning): o TestClient
     # ainda usa httpx (httpx2 nao e dependencia).

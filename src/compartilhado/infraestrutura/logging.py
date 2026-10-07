@@ -48,22 +48,51 @@ _EMAIL_PATTERN = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"
 )
 
+# Chave privada em PEM solta no texto (mensagem de erro, traceback, repr, JSON):
+# do BEGIN ao END ou, se a mensagem foi truncada, ate onde o corpo base64
+# termina. O corpo aceita a quebra de linha real e a escapada (`\n` literal, como
+# no `repr` e no `json.dumps`). A parte publica (`PUBLIC KEY`) sai no JWKS e nao e
+# segredo. O quantificador possessivo (`*+`) evita o backtracking: o scrubber roda
+# sobre qualquer string do log.
+_PEM_PRIVADA_PATTERN = re.compile(
+    r"-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----(?:[A-Za-z0-9+/=\s]|\\[nrt])*+"
+    r"(?:-----END [A-Z ]{0,20}PRIVATE KEY-----)?"
+)
+# JWT solto no texto (header Authorization, query da URL, mensagem de erro):
+# cabecalho e corpo comecam em `eyJ` (o JSON `{"` em base64url) e a assinatura
+# pode ser vazia (alg=none). Possessivo e so a partir do inicio de uma sequencia
+# de caracteres base64url (o lookbehind): sem isso, uma linha longa de `eyJ-eyJ-`
+# faria o scrubber reler o resto da linha a cada `eyJ` (tempo quadratico). O
+# token logo depois de uma quebra de linha escapada (`\n` literal) tambem conta
+# como inicio.
+_JWT_PATTERN = re.compile(
+    r"(?:(?<![A-Za-z0-9_-])|(?<=\\[nrt]))"
+    r"eyJ[A-Za-z0-9_-]++\.[A-Za-z0-9_-]++\.[A-Za-z0-9_-]*+"
+)
+
 # Telefone BR: duas formas estruturais, escolhidas para nao gerar falso-positivo
 # em precos (`1500.00`), ids (`12345`), anos (`2026`), portas (`8000`) e CEPs
 # (`12345-678`) -- nenhum deles tem o split `\d{4,5}-\d{4}` nem prefixo `+55`:
 #   1. DDD (com/sem parenteses) + separador OPCIONAL + bloco local com hifen
 #      4-4/5-4 -- cobre `(11)99999-0000` e `1199999-0000` alem dos formatados.
 #      Colateral aceito (direcao LGPD-safe): ids numericos hifenizados com
-#      shape 6+4 (`123456-7890`) tambem sao mascarados -- nenhum log site
-#      atual emite esse formato (ordens usam UUID).
+#      shape 6+4 (`123456-7890`) tambem sao mascarados.
 #   2. `+55` seguido de 10-11 digitos corridos -- cobre `+5511999990000` (o
 #      prefixo de pais e estrutura suficiente; nada legitimo em log tem essa
 #      forma). `+55 11999990000` (com espaco) e `11999990000` (sem nada) tem
 #      11 digitos corridos com shape de CPF e caem no _CPF_PATTERN acima
 #      antes desta regex; campos NOMEADOS telefone/celular/contato sao
 #      mascarados pela denylist abaixo.
+# O numero nao pode comecar colado a um digito hexadecimal: os ids do servico
+# (`ordem_id`, `request_id`, `jti` e o ator da auditoria, o `sub`) sao UUID, e o
+# v4 traz entre os grupos trechos `dd-dddd-dddd` (`732ffc02-3465-4237-...`) que o
+# split 4-4 casaria (cerca de 1,4% dos UUID saiam mascarados). Em todo UUID o
+# `dd` desse trecho vem depois de outro digito hexadecimal, entao o lookbehind o
+# barra sem deixar de mascarar o telefone colado a hifen, `_` ou a letra que nao
+# e hexadecimal (`tel-11 99999-0000`). Telefone que comeca em `(` ou `+` dispensa
+# o lookbehind, porque UUID nao tem nenhum dos dois (`fone(11)99999-0000`).
 _TELEFONE_PATTERN = re.compile(
-    r"(?<!\d)"  # nao precedido de digito (evita capturar parte de numero maior)
+    r"(?:(?<![0-9A-Fa-f])|(?=[(+]))"  # nao colado a digito hexadecimal (UUID)
     r"(?:"
     r"(?:\+55[\s.-]?)?"  # codigo do pais opcional
     r"(?:\(\d{2}\)|\d{2})"  # DDD com ou sem parenteses
@@ -72,7 +101,7 @@ _TELEFONE_PATTERN = re.compile(
     r"|"
     r"\+55[\s.-]?\d{10,11}"  # +55 com numero corrido (sem hifen local)
     r")"
-    r"(?!\d)"  # nao seguido de digito
+    r"(?!\d)"  # nao seguido de digito (evita capturar parte de numero maior)
 )
 
 # Denylist de chaves: quando o NOME do campo indica segredo ou PII, o valor
@@ -90,6 +119,8 @@ _CHAVES_SENSIVEIS = frozenset(
         "refresh_token",
         "access_token",
         "api_key",
+        "jwt_private_key",
+        "private_key",
         "telefone",
         "celular",
         "phone",
@@ -101,7 +132,8 @@ _MASCARA = "***"
 
 # Loggers que o uvicorn configura com handler proprio + `propagate=False`.
 # `configurar_logging` os religa ao root para passarem pelo scrubber (p3 #86).
-_LOGGERS_UVICORN = ("uvicorn", "uvicorn.error", "uvicorn.access")
+_LOGGER_DE_ACESSO = "uvicorn.access"
+_LOGGERS_UVICORN = ("uvicorn", "uvicorn.error", _LOGGER_DE_ACESSO)
 
 # Cap on recursion depth when scrubbing nested structures. Guards against
 # pathological or cyclic structured log payloads without sacrificing coverage
@@ -128,6 +160,10 @@ def _mask_email(match: re.Match[str]) -> str:
 
 
 def _mask_string(value: str) -> str:
+    # Chave e token primeiro: o corpo em base64 pode ter sequencias de digitos
+    # que os padroes de documento e telefone achariam.
+    value = _PEM_PRIVADA_PATTERN.sub(_MASCARA, value)
+    value = _JWT_PATTERN.sub(_MASCARA, value)
     value = _CPF_PATTERN.sub(_mask_cpf, value)
     value = _CNPJ_PATTERN.sub(_mask_cnpj, value)
     value = _EMAIL_PATTERN.sub(_mask_email, value)
@@ -168,9 +204,10 @@ def scrub_pii(
 ) -> MutableMapping[str, Any]:
     """Structlog processor que mascara PII e segredos em todo o event_dict.
 
-    Mascara CPF, CNPJ, email e telefone BR formatado por regex de VALOR; e mascara
-    o valor inteiro quando o NOME do campo esta na denylist `_CHAVES_SENSIVEIS`
-    (password/token/secret/...). Percorre recursivamente strings, dicts, listas e
+    Mascara CPF, CNPJ, email, telefone BR formatado, chave privada em PEM e JWT
+    por regex de VALOR; e mascara o valor inteiro quando o NOME do campo esta na
+    denylist `_CHAVES_SENSIVEIS` (password/token/secret/jwt_private_key/...).
+    Percorre recursivamente strings, dicts, listas e
     tuplas ate `_MAX_SCRUB_DEPTH` para pegar PII em payloads estruturados. Aplicado
     automaticamente pelo pipeline de logging (inclusive na chave `exception` do
     traceback, que `format_exc_info` monta ANTES deste processor) para impedir
@@ -185,13 +222,13 @@ _MAX_ERRO_LEN = 200
 
 
 def redigir_pii_erro(erro: str) -> str:
-    """Remove PII (CPF, CNPJ, e-mail, telefone) de strings de erro.
+    """Remove PII e segredos (CPF, CNPJ, e-mail, telefone, chave PEM e JWT) de erros.
 
-    Complementa o scrubber de log (``scrub_pii``): aquele actua no pipeline
-    de structlog em memoria; esta funcao actua em strings que serao gravadas
-    no banco (``outbox.ultimo_erro``) e devolvidas por endpoints admin /
-    CLI — necessario para conformidade LGPD porque o scrubber de log nao
-    alcanca o banco.
+    Complementa o scrubber de log (``scrub_pii``): aquele atua no pipeline de
+    structlog em memoria; esta funcao atua nas strings de erro que saem do
+    processo por outro caminho: a mensagem do 422 de ``ValueError`` devolvida
+    ao cliente e, quando o relay da outbox chegar, a ``outbox.ultimo_erro``
+    gravada no banco (LGPD: o scrubber de log nao alcanca nenhum dos dois).
 
     Trunca o resultado em ``_MAX_ERRO_LEN`` caracteres para evitar que
     mensagens de excepcao excessivamente longas ocupem espaco excessivo.
@@ -273,11 +310,18 @@ def configurar_logging(stream: TextIO | None = None) -> None:
     # uvicorn (lancado por CLI no container) instala os PROPRIOS handlers nos
     # loggers `uvicorn`/`uvicorn.access` com `propagate=False` -- seus logs (inclui
     # access logs, que podem trazer PII em path/query) NAO chegariam ao handler de
-    # scrub do root. `configurar_logging` roda no lifespan startup, DEPOIS de
-    # uvicorn montar seus loggers; aqui removemos os handlers crus de uvicorn e
-    # religamos `propagate=True` para que tudo flua pelo ProcessorFormatter do root
-    # (scrubado, JSON unico). Idempotente. p3 #86.
+    # scrub do root. `configurar_logging` roda na fabrica do app, que o uvicorn
+    # importa DEPOIS de montar seus loggers e antes da primeira linha do servidor;
+    # aqui removemos os handlers crus de uvicorn e religamos `propagate=True` para
+    # que tudo flua pelo ProcessorFormatter do root (scrubado, JSON unico).
+    # Idempotente. p3 #86.
     for nome in _LOGGERS_UVICORN:
         uvlog = logging.getLogger(nome)
+        if nome == _LOGGER_DE_ACESSO and not uvlog.handlers and not uvlog.propagate:
+            # `--no-access-log` deixa o logger assim, e o uvicorn decide por
+            # `hasHandlers()`, a cada conexao, se escreve o acesso. Religar a
+            # propagacao o ligaria de novo ao handler do root: a linha de acesso
+            # voltaria mesmo com a flag.
+            continue
         uvlog.handlers = []
         uvlog.propagate = True

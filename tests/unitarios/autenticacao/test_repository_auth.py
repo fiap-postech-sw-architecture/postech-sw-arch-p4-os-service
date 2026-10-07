@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.autenticacao.infraestrutura.repository import (
     UsuarioSQLAlchemyRepository,
 )
@@ -40,27 +42,27 @@ class TestRepositoryAuth:
 
 
 class TestTokenRevogadoRepository:
-    def test_revogar(self) -> None:
+    @pytest.mark.parametrize(
+        ("linhas_inseridas", "revogou_agora"),
+        [
+            pytest.param(1, True, id="revogou-agora"),
+            pytest.param(0, False, id="ja-estava-revogado"),
+        ],
+    )
+    def test_revogar_devolve_se_o_insert_gravou_a_linha(
+        self, linhas_inseridas: int, revogou_agora: bool
+    ) -> None:
+        # O ON CONFLICT DO NOTHING deixa o banco decidir (p3 #121 e #167): zero
+        # linhas inseridas e "ja estava revogado", sem IntegrityError. O
+        # comportamento real, inclusive em corrida, e testado na integracao.
         session = MagicMock()
-        # O guard de idempotencia (p3 #121) consulta esta_revogado antes de
-        # inserir; simula "ainda nao revogado" para exercitar o INSERT.
-        session.scalar.return_value = False
+        conexao = session.connection.return_value
+        conexao.execute.return_value.rowcount = linhas_inseridas
         repo = TokenRevogadoSQLAlchemyRepository(session=session)
-        assert repo.revogar("some-jti") is True
-        session.add.assert_called_once()
-        session.flush.assert_called_once()
 
-    def test_revogar_idempotente_nao_reinsere(self) -> None:
-        # p3 #121: jti ja revogado -> revogar nao tenta novo INSERT, evitando
-        # o IntegrityError do UNIQUE que virava 500 no logout duplo/retry.
-        # O retorno False (p3 #167) sinaliza "ja estava revogado" ao fluxo de
-        # refresh (single-use).
-        session = MagicMock()
-        session.scalar.return_value = True  # ja revogado
-        repo = TokenRevogadoSQLAlchemyRepository(session=session)
-        assert repo.revogar("some-jti") is False
+        assert repo.revogar("some-jti") is revogou_agora
+        conexao.execute.assert_called_once()
         session.add.assert_not_called()
-        session.flush.assert_not_called()
 
     def test_esta_revogado_false(self) -> None:
         session = MagicMock()

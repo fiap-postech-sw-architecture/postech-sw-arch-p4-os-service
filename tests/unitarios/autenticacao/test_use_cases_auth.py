@@ -4,7 +4,10 @@ from uuid import UUID
 
 import jwt
 import pytest
+import structlog
+import structlog.testing
 
+from src.autenticacao.aplicacao import use_cases
 from src.autenticacao.aplicacao.dtos import LoginDTO, RegistrarDTO
 from src.autenticacao.aplicacao.use_cases import (
     _HASH_DUMMY_TIMING,
@@ -23,16 +26,9 @@ from src.autenticacao.dominio.papel import Papel
 from src.autenticacao.dominio.usuario import Usuario
 from src.autenticacao.infraestrutura.jwt_service import JWTService
 from src.autenticacao.infraestrutura.password_hasher import PasswordHasher, hash_senha
+from tests.chaves_jwt import CHAVE
+from tests.chaves_jwt import jwt_service as _jwt_service
 from tests.unitarios.fakes import FakeUnitOfWork
-
-# 32 bytes: o minimo do HS256 (abaixo disso o PyJWT avisa InsecureKeyLength).
-_CHAVE_TESTE = "test-secret-de-32-bytes-do-hs256"  # gitleaks:allow
-
-
-def _jwt_service(chave: str = _CHAVE_TESTE) -> JWTService:
-    return JWTService(
-        chave_secreta=chave, expiracao_minutos=30, refresh_expiracao_minutos=10080
-    )
 
 
 class FakeUsuarioRepository:
@@ -58,8 +54,10 @@ class FakeUsuarioRepository:
 class FakeTokenRevogadoRepository:
     def __init__(self) -> None:
         self._revogados: set[str] = set()
+        self.ordem_das_revogacoes: list[str] = []
 
     def revogar(self, jti: str) -> bool:
+        self.ordem_das_revogacoes.append(jti)
         if jti in self._revogados:
             return False
         self._revogados.add(jti)
@@ -92,7 +90,7 @@ class FakeJWTService:
         self.access_calls = 0
         self.refresh_calls = 0
 
-    def gerar_access_token(self, usuario_id: UUID, email: str, papel: str) -> str:
+    def gerar_access_token(self, usuario_id: UUID, papel: str) -> str:
         self.access_calls += 1
         return "fake-access"
 
@@ -327,7 +325,7 @@ class TestLogout:
         uow = FakeUnitOfWork()
         from uuid import uuid4
 
-        token = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        token = jwt_svc.gerar_access_token(uuid4(), "admin")
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
         result = uc.executar(token)
         assert "mensagem" in result
@@ -340,7 +338,7 @@ class TestLogout:
         uow = FakeUnitOfWork()
         from uuid import uuid4
 
-        token = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        token = jwt_svc.gerar_access_token(uuid4(), "admin")
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
         result = uc.executar(token)
         assert result["mensagem"] == "Logout realizado com sucesso"
@@ -354,7 +352,7 @@ class TestLogout:
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
         usuario_id = uuid4()
-        access = jwt_svc.gerar_access_token(usuario_id, "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario_id, "admin")
         refresh = jwt_svc.gerar_refresh_token(usuario_id)
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
@@ -363,9 +361,32 @@ class TestLogout:
         assert token_repo.esta_revogado(str(jwt_svc.validar_token(access)["jti"]))
         assert token_repo.esta_revogado(str(jwt_svc.validar_token(refresh)["jti"]))
 
-    def test_refresh_pos_logout_e_rejeitado(self) -> None:
+    def test_revoga_os_jti_sempre_na_mesma_ordem(self) -> None:
+        # Dois logouts simultaneos da mesma sessao, em pods diferentes, travariam
+        # em deadlock se revogassem access e refresh em ordens opostas: o jti do
+        # access vem antes na leitura, mas depois na ordem de revogacao.
+        class _JwtComJtiFixo(FakeJWTService):
+            def validar_token(self, token: str) -> dict[str, object]:
+                jti = {"access": "z-do-access", "refresh": "a-do-refresh"}[token]
+                return {"sub": "u", "type": token, "jti": jti}
+
+        token_repo = FakeTokenRevogadoRepository()
+        uc = Logout(
+            jwt_service=_JwtComJtiFixo(), token_repo=token_repo, uow=FakeUnitOfWork()
+        )
+
+        uc.executar("access", refresh_token="refresh")
+
+        assert token_repo.ordem_das_revogacoes == ["a-do-refresh", "z-do-access"]
+
+    def test_refresh_pos_logout_e_rejeitado(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Prova end-to-end de p3 #118: apos o logout com refresh, o fluxo de
-        # refresh rejeita o token revogado (antes: cunhava novo par).
+        # refresh rejeita o token revogado (antes: cunhava novo par). O evento de
+        # reuso sai tambem aqui: a tabela de revogados nao distingue o refresh
+        # consumido na rotacao do revogado no logout.
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
         repo = FakeUsuarioRepository()
         usuario = Usuario.criar(
             email="t@t.com",
@@ -376,7 +397,7 @@ class TestLogout:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(usuario.id, "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario.id, "admin")
         refresh = jwt_svc.gerar_refresh_token(usuario.id)
         Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow).executar(
             access, refresh_token=refresh
@@ -387,8 +408,12 @@ class TestLogout:
             usuario_repo=repo,
             uow=uow,
         )
-        with pytest.raises(TokenRevogadoException):
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(TokenRevogadoException),
+        ):
             refresh_uc.executar(refresh)
+        assert [e["event"] for e in logs] == ["refresh_reuse_detected"]
 
     def test_logout_com_refresh_token_no_header_e_rejeitado(self) -> None:
         # Simetria com o gate de acesso (TD-029, p3 #167): so um ACCESS token
@@ -413,7 +438,7 @@ class TestLogout:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(uuid4(), "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(uuid4(), "admin")
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
         uc.executar(access, refresh_token="nao-e-jwt")
@@ -426,14 +451,12 @@ class TestLogout:
 
         jwt_svc = _jwt_service()
         expirado_svc = JWTService(
-            chave_secreta=_CHAVE_TESTE,
-            expiracao_minutos=30,
-            refresh_expiracao_minutos=-1,
+            chave_privada=CHAVE, expiracao_minutos=30, refresh_expiracao_minutos=-1
         )
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
         usuario_id = uuid4()
-        access = jwt_svc.gerar_access_token(usuario_id, "t@t.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario_id, "admin")
         refresh = expirado_svc.gerar_refresh_token(usuario_id)
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
@@ -452,7 +475,7 @@ class TestLogout:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(uuid4(), "eu@t.com", "admin")
+        access = jwt_svc.gerar_access_token(uuid4(), "admin")
         refresh_alheio = jwt_svc.gerar_refresh_token(uuid4())
         uc = Logout(jwt_service=jwt_svc, token_repo=token_repo, uow=uow)
 
@@ -499,7 +522,7 @@ class TestRefreshToken:
         jwt_svc = _jwt_service()
         token_repo = FakeTokenRevogadoRepository()
         uow = FakeUnitOfWork()
-        access = jwt_svc.gerar_access_token(usuario.id, "test@test.com", "admin")
+        access = jwt_svc.gerar_access_token(usuario.id, "admin")
         uc = RefreshToken(
             jwt_service=jwt_svc,
             token_repo=token_repo,
@@ -530,8 +553,72 @@ class TestRefreshToken:
             usuario_repo=repo,
             uow=uow,
         )
-        with pytest.raises(TokenRevogadoException):
+        with pytest.raises(TokenRevogadoException) as exc:
             uc.executar(refresh)
+        # A mesma mensagem publica de qualquer credencial recusada (ADR-039).
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
+        assert exc.value.motivo == "revoked_token"
+
+    def test_reuso_do_refresh_gera_o_evento_com_usuario_e_jti(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # O 401 e o de sempre; o evento e o sinal para quem opera.
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
+        repo = FakeUsuarioRepository()
+        usuario = Usuario.criar(
+            email="test@test.com",
+            senha_hash=hash_senha("senhaforte1234"),
+            papel=Papel.ADMIN,
+        )
+        repo.salvar(usuario)
+        jwt_svc = _jwt_service()
+        uc = RefreshToken(
+            jwt_service=jwt_svc,
+            token_repo=FakeTokenRevogadoRepository(),
+            usuario_repo=repo,
+            uow=FakeUnitOfWork(),
+        )
+        refresh = jwt_svc.gerar_refresh_token(usuario.id)
+        uc.executar(refresh)
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(TokenRevogadoException),
+        ):
+            uc.executar(refresh)
+
+        assert logs == [
+            {
+                "event": "refresh_reuse_detected",
+                "sub": str(usuario.id),
+                "jti": str(jwt_svc.validar_token(refresh)["jti"]),
+                "log_level": "warning",
+            }
+        ]
+
+    def test_refresh_valido_nao_gera_o_evento_de_reuso(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
+        repo = FakeUsuarioRepository()
+        usuario = Usuario.criar(
+            email="test@test.com",
+            senha_hash=hash_senha("senhaforte1234"),
+            papel=Papel.ADMIN,
+        )
+        repo.salvar(usuario)
+        jwt_svc = _jwt_service()
+        uc = RefreshToken(
+            jwt_service=jwt_svc,
+            token_repo=FakeTokenRevogadoRepository(),
+            usuario_repo=repo,
+            uow=FakeUnitOfWork(),
+        )
+
+        with structlog.testing.capture_logs() as logs:
+            uc.executar(jwt_svc.gerar_refresh_token(usuario.id))
+
+        assert logs == []
 
     def test_usuario_inexistente(self) -> None:
         repo = FakeUsuarioRepository()
@@ -550,7 +637,7 @@ class TestRefreshToken:
         with pytest.raises(CredenciaisInvalidasException) as exc:
             uc.executar(refresh)
         # Mesma mensagem publica do login errado (ADR-039); motivo so no log.
-        assert exc.value.mensagem == "Credenciais invalidas"
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
         assert exc.value.motivo == "user_not_found"
 
     def test_segundo_uso_do_mesmo_refresh_e_rejeitado(self) -> None:
@@ -571,14 +658,20 @@ class TestRefreshToken:
         )
         refresh = jwt_svc.gerar_refresh_token(usuario.id)
         uc.executar(refresh)
-        with pytest.raises(TokenRevogadoException):
+        with pytest.raises(TokenRevogadoException) as exc:
             uc.executar(refresh)
+        assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
+        assert exc.value.motivo == "revoked_token"
 
-    def test_corrida_de_uso_simultaneo_do_refresh_e_rejeitada(self) -> None:
+    def test_corrida_de_uso_simultaneo_do_refresh_e_rejeitada(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Corrida do single-use (p3 #167): dois refreshes concorrentes passam
         # ambos no pre-check `esta_revogado` (aqui simulado por um fake que
         # sempre responde False); a atomicidade vem do `revogar` devolver
         # False para o perdedor -- que recebe TokenRevogadoException.
+        monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
+
         class RepoComJanelaDeCorrida(FakeTokenRevogadoRepository):
             def esta_revogado(self, jti: str) -> bool:
                 return False
@@ -599,5 +692,10 @@ class TestRefreshToken:
         )
         refresh = jwt_svc.gerar_refresh_token(usuario.id)
         uc.executar(refresh)
-        with pytest.raises(TokenRevogadoException):
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(TokenRevogadoException),
+        ):
             uc.executar(refresh)
+        # O perdedor da corrida tambem e reuso: o mesmo evento.
+        assert [e["event"] for e in logs] == ["refresh_reuse_detected"]

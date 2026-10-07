@@ -16,6 +16,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from src.compartilhado.infraestrutura.database import AMBIENTES_DEV
 from src.compartilhado.interfaces.error_handler import resposta_erro_interno
 
 _CSP_DEFAULT = "default-src 'none'"
@@ -75,28 +76,20 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains"
         )
-        response.headers["Cache-Control"] = "no-store"
+        # A rota que define o proprio cache (o JWKS publico) o mantem.
+        response.headers.setdefault("Cache-Control", "no-store")
         if not _caminho_de_docs(request.url.path):
             response.headers["Content-Security-Policy"] = _CSP_DEFAULT
         response.headers["X-Request-ID"] = request_id
         return response
 
 
-# Ambientes que NAO exercem a guarda de segredos: dev local, docker compose e
-# a suite de testes sobem deliberadamente com segredos de demonstracao.
-# Qualquer outro valor de ENVIRONMENT (notadamente "production") dispara a
-# validacao -- mesma postura de `resolver_database_url` (database.py).
-_AMBIENTES_SEM_VALIDACAO_DE_SEGREDOS = frozenset({"development", "test"})
-
-# HS256 exige chave com no minimo 32 BYTES; abaixo disso e forjavel.
-_JWT_SECRET_MIN_BYTES = 32
-
 # Literais de segredo de DEMONSTRACAO publicos no git -- proibidos em producao.
 # Fonte: docker-compose.yml e .env.example. Mantenha em sincronia quando um
-# default de demo mudar ou quando k8s/ ganhar um Secret de demo.
+# default de demo mudar ou quando k8s/ ganhar um Secret de demo. A chave RSA
+# de demonstracao do JWT e barrada por `validar_chave_jwt_no_startup`.
 _SEGREDOS_DEMO_PROIBIDOS = frozenset(
     {
-        "demo-jwt-secret-os-service-fase4-nao-usar-em-producao",
         # Chave Fernet de demo (base64 de 44 chars dispara o generic-api-key).
         "Chqh4o4QURACWBUSdtXjAxhOQt6HhxAfEg9rtvsABKU=",  # gitleaks:allow
         "admin-demo-os-2026",  # gitleaks:allow
@@ -105,46 +98,30 @@ _SEGREDOS_DEMO_PROIBIDOS = frozenset(
 # Senha do Postgres de demonstracao (compose), comparada com a da DATABASE_URL.
 _SENHA_DO_BANCO_DEMO = "pytstop"  # gitleaks:allow - senha do compose local
 
-# Validade dos tokens: inteiros positivos (minutos), lidos a cada request.
-_VARIAVEIS_DE_MINUTOS_JWT = ("JWT_EXPIRATION_MINUTES", "JWT_REFRESH_EXPIRATION_MINUTES")
-
 
 def validar_segredos_no_startup() -> None:
     """Valida os segredos sensiveis no startup; aborta o boot em producao.
 
     EM PRODUCAO (qualquer ENVIRONMENT que nao seja `development`/`test`):
 
-    1. ``JWT_SECRET`` ausente ou com menos de 32 BYTES -> aborta.
-    2. ``ENCRYPTION_KEY`` ausente -> aborta: a chave efemera de fallback
+    1. ``ENCRYPTION_KEY`` ausente -> aborta: a chave efemera de fallback
        tornaria os dados cifrados irrecuperaveis apos restart e divergiria o
        ``documento_hash`` entre replicas.
-    3. ``JWT_SECRET`` / ``ENCRYPTION_KEY`` / ``ADMIN_PASSWORD`` iguais a um
-       literal de demonstracao publico no git -> aborta (cada um so quando
-       presente); idem para a senha do Postgres de demo na ``DATABASE_URL``.
-    4. ``ENCRYPTION_KEY`` que nao e chave Fernet, ou minutos de JWT que nao
-       sao inteiros positivos -> aborta.
+    2. ``ENCRYPTION_KEY`` / ``ADMIN_PASSWORD`` iguais a um literal de
+       demonstracao publico no git -> aborta (cada um so quando presente);
+       idem para a senha do Postgres de demo na ``DATABASE_URL``.
+    3. ``ENCRYPTION_KEY`` que nao e chave Fernet -> aborta.
+
+    A guarda da chave RSA do JWT e da validade dos tokens fica no contexto que
+    os usa (``validar_chave_jwt_no_startup``).
 
     Falha o boot (``raise``), nao apenas avisa: pre-condicao de seguranca
     nao satisfeita nunca sobe aceitando requisicoes. Fora de producao e no-op.
     """
-    environment = os.environ.get("ENVIRONMENT", "development").lower()
-    if environment in _AMBIENTES_SEM_VALIDACAO_DE_SEGREDOS:
+    # Dev local, compose e testes sobem deliberadamente com segredos de
+    # demonstracao: os mesmos ambientes de `resolver_database_url`.
+    if os.environ.get("ENVIRONMENT", "development").lower() in AMBIENTES_DEV:
         return
-
-    jwt_secret = os.environ.get("JWT_SECRET")
-    if not jwt_secret:
-        msg = (
-            "JWT_SECRET nao configurado em producao. HS256 exige uma chave de "
-            f">= {_JWT_SECRET_MIN_BYTES} bytes; defina um segredo forte via Secret."
-        )
-        raise RuntimeError(msg)
-    if len(jwt_secret.encode("utf-8")) < _JWT_SECRET_MIN_BYTES:
-        msg = (
-            f"JWT_SECRET tem menos de {_JWT_SECRET_MIN_BYTES} bytes. HS256 exige "
-            f">= {_JWT_SECRET_MIN_BYTES} bytes; gere um segredo forte "
-            "(ex.: openssl rand -hex 32)."
-        )
-        raise RuntimeError(msg)
 
     if not os.environ.get("ENCRYPTION_KEY"):
         msg = (
@@ -155,7 +132,7 @@ def validar_segredos_no_startup() -> None:
         )
         raise RuntimeError(msg)
 
-    for nome in ("JWT_SECRET", "ENCRYPTION_KEY", "ADMIN_PASSWORD"):
+    for nome in ("ENCRYPTION_KEY", "ADMIN_PASSWORD"):
         valor = os.environ.get(nome)
         if valor and valor in _SEGREDOS_DEMO_PROIBIDOS:
             msg = (
@@ -179,8 +156,7 @@ def _validar_formatos_de_configuracao() -> None:
     """Configuracao malformada aborta o boot, nao vira 4xx na primeira request.
 
     Sem isto, uma ``ENCRYPTION_KEY`` invalida subia o app e o primeiro
-    documento devolvia 422 (erro de configuracao com cara de erro do cliente),
-    e minutos de JWT nao numericos virariam 500 em todo login.
+    documento devolvia 422 (erro de configuracao com cara de erro do cliente).
     """
     try:
         Fernet(os.environ["ENCRYPTION_KEY"])
@@ -190,17 +166,6 @@ def _validar_formatos_de_configuracao() -> None:
             "base64 url-safe, gere com Fernet.generate_key())."
         )
         raise RuntimeError(msg) from exc
-    for nome in _VARIAVEIS_DE_MINUTOS_JWT:
-        bruto = os.environ.get(nome)
-        if bruto is None:
-            continue
-        try:
-            minutos = int(bruto)
-        except ValueError:
-            minutos = 0
-        if minutos <= 0:
-            msg = f"{nome} precisa ser um inteiro positivo (minutos)."
-            raise RuntimeError(msg)
 
 
 def configurar_cors(app: FastAPI) -> None:
@@ -291,11 +256,18 @@ def configurar_proxy_headers(app: FastAPI) -> None:
 # senao os contadores ficam em instancias diferentes e o limite nao vale.
 #
 # O limite padrao vem de ``RATE_LIMIT`` no import, validado EAGER: valor
-# malformado aborta o boot em vez de virar 500 na primeira request.
+# malformado aborta o boot em vez de virar 500 na primeira request. Ele so
+# alcanca as rotas registradas direto no app (Swagger e OpenAPI): o SlowAPI nao
+# acha o handler de uma rota de ``include_router`` (o app guarda o router
+# incluido como um todo) e a deixa sem limite. Por isso as rotas sem token e as
+# de credencial levam o proprio ``@limiter.limit`` (login, registrar, logout,
+# refresh, JWKS e acompanhamento publico); as demais, atras do gate de
+# autenticacao, ficam sem limite no servico e so o Kong as limita.
 #
-# O contador e em memoria, por processo. O limite agregado entre replicas e do
-# API Gateway (Kong, ADR-038); este fica como defesa em profundidade. Um
-# storage compartilhado (ex.: Redis) so entra se o gateway sair.
+# O contador e em memoria, por processo. O limite agregado, entre rotas e
+# replicas, e do API Gateway (Kong, ADR-038); este fica como defesa em
+# profundidade. Um storage compartilhado (ex.: Redis) so entra se o gateway
+# sair.
 _default_limit = os.environ.get("RATE_LIMIT", "60/minute")
 try:
     parse_many(_default_limit)

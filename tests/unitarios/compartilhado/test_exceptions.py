@@ -58,12 +58,12 @@ class TestExceptionsEspecificas:
             (
                 FalhaAutenticacaoException,
                 "NAO_AUTENTICADO",
-                "Credenciais invalidas",
+                "Credencial ausente, invalida ou expirada",
             ),
             (
                 AcessoNegadoException,
                 "ACESSO_NEGADO",
-                "Papel nao autorizado",
+                "Papel nao autorizado para esta operacao",
             ),
         ],
     )

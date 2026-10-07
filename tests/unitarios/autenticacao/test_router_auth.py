@@ -131,7 +131,10 @@ class TestAuthRouter:
             client = TestClient(app)
             resp = client.post("/api/v1/autenticacao/logout")
             assert resp.status_code == 401
-            assert resp.json()["erro"]["mensagem"] == "Credenciais invalidas"
+            assert (
+                resp.json()["erro"]["mensagem"]
+                == "Credencial ausente, invalida ou expirada"
+            )
             assert resp.headers["WWW-Authenticate"] == "Bearer"
             mock_uc.executar.assert_not_called()
 

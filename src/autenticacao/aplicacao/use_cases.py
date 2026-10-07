@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.autenticacao.aplicacao.dtos import TokenDTO, UsuarioDTO
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
         UsuarioRepository,
     )
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
+
+_log = structlog.get_logger(__name__)
 
 # Hash bcrypt fixo de uma string aleatoria constante (nao corresponde a senha
 # de ninguem). Quando o e-mail nao existe, o Login verifica a senha contra este
@@ -86,9 +89,7 @@ class Login:
         if not self._password_hasher.verificar_senha(dto.senha, usuario.senha_hash):
             raise CredenciaisInvalidasException(motivo="wrong_password")
         access = self._jwt_service.gerar_access_token(
-            usuario_id=usuario.id,
-            email=usuario.email,
-            papel=usuario.papel.value,
+            usuario_id=usuario.id, papel=usuario.papel.value
         )
         refresh = self._jwt_service.gerar_refresh_token(
             usuario_id=usuario.id,
@@ -124,15 +125,18 @@ class Logout:
         # sessao; um refresh valido no header nao pode autenticar o logout.
         if payload.get("type") != "access":
             raise TokenInvalidoException(motivo="not_an_access_token")
-        jtis = {str(payload["jti"])}
+        jtis = [str(payload["jti"])]
         if refresh_token is not None:
             jti_refresh = self._jti_refresh_para_revogar(
                 refresh_token, sub=str(payload.get("sub"))
             )
             if jti_refresh is not None:
-                jtis.add(jti_refresh)
+                jtis.append(jti_refresh)
         with self._uow:
-            for jti in jtis:
+            # Sempre na mesma ordem: dois logouts simultaneos da mesma sessao
+            # (pods diferentes) esperam um pelo outro no UNIQUE do jti e
+            # travariam em deadlock se revogassem os dois jti em ordens opostas.
+            for jti in sorted(jtis):
                 self._token_repo.revogar(jti)
             self._uow.commit()
         return {"mensagem": "Logout realizado com sucesso"}
@@ -167,7 +171,7 @@ class RefreshToken:
             raise TokenInvalidoException(motivo="not_a_refresh_token")
         jti = str(payload["jti"])
         if self._token_repo.esta_revogado(jti):
-            raise TokenRevogadoException()
+            raise self._reuso_detectado(payload)
         usuario_id = UUID(str(payload["sub"]))
         usuario = self._usuario_repo.obter_por_id(usuario_id)
         if usuario is None:
@@ -178,14 +182,28 @@ class RefreshToken:
             # `revogar` devolve False quando o jti ja foi consumido -- o
             # perdedor da corrida recebe 401 em vez de um segundo par valido.
             if not self._token_repo.revogar(jti):
-                raise TokenRevogadoException()
+                raise self._reuso_detectado(payload)
             self._uow.commit()
         access = self._jwt_service.gerar_access_token(
-            usuario_id=usuario.id,
-            email=usuario.email,
-            papel=usuario.papel.value,
+            usuario_id=usuario.id, papel=usuario.papel.value
         )
         refresh = self._jwt_service.gerar_refresh_token(
             usuario_id=usuario.id,
         )
         return TokenDTO(access_token=access, refresh_token=refresh)
+
+    @staticmethod
+    def _reuso_detectado(payload: dict[str, object]) -> TokenRevogadoException:
+        """401 de um refresh ja usado ou revogado, com o evento que avisa quem opera.
+
+        O cliente repetiu o pedido, o refresh foi revogado no logout ou ele
+        vazou e alguem o usa depois do dono: a tabela de revogados e a mesma
+        para os tres casos, e o log e o unico sinal, com o usuario e o ``jti``
+        reapresentado. A resposta e a de sempre e a descendencia do refresh segue
+        valida: a revogacao da familia (RFC 9700, 4.14.2) esta como divida no
+        MEMORY.
+        """
+        _log.warning(
+            "refresh_reuse_detected", sub=str(payload["sub"]), jti=str(payload["jti"])
+        )
+        return TokenRevogadoException()

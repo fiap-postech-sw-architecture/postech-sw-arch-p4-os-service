@@ -6,6 +6,7 @@ migracao, e ``test_migracao.py`` confere que ela bate com o metadata.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,7 @@ import pytest
 from tests.integracao.seed_helpers import criar_usuario
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterator
 
     from alembic.config import Config
     from fastapi.testclient import TestClient
@@ -157,14 +158,34 @@ def api_client(engine: Engine) -> Generator[TestClient]:
 
     from src.main import criar_app
 
+    with ambiente_da_app(engine), TestClient(criar_app()) as client:
+        yield client
+
+
+@pytest.fixture(scope="module")
+def url_base_da_app(engine: Engine) -> Generator[str]:
+    """A app real (lifespan, banco efemero) servida por HTTP de verdade.
+
+    Para quem busca por urllib, como o ``PyJWKClient`` do validador independente.
+    """
+    from src.main import criar_app
+    from tests.servidor_http import servir
+
+    with ambiente_da_app(engine), servir(criar_app(), lifespan="on") as url:
+        yield url
+
+
+@contextmanager
+def ambiente_da_app(engine: Engine) -> Iterator[None]:
+    """Chave RSA da sessao de testes e banco efemero no ambiente da app."""
+    from tests.chaves_jwt import CHAVE_PEM
+
     mp = pytest.MonkeyPatch()
-    # Segredo ficticio, so para assinar tokens contra o banco de teste.
-    jwt_teste = "test-secret-at-least-32-bytes-long-for-hs256-signing"  # gitleaks:allow
-    mp.setenv("JWT_SECRET", jwt_teste)
+    mp.setenv("JWT_PRIVATE_KEY", CHAVE_PEM)
+    mp.delenv("JWT_PREVIOUS_PUBLIC_KEY", raising=False)
     mp.setenv("ENVIRONMENT", "test")
     mp.setenv("DATABASE_URL", engine.url.render_as_string(hide_password=False))
     try:
-        with TestClient(criar_app()) as client:
-            yield client
+        yield
     finally:
         mp.undo()

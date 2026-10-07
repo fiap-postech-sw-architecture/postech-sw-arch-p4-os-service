@@ -2,7 +2,8 @@
 # Uso: `make compose-up` (build + migracoes + admin seed) e `make compose-down`.
 # Todos os valores abaixo sao de DEMONSTRACAO para dev local; em qualquer
 # ambiente exposto entram por Secret e o boot com ENVIRONMENT=production
-# recusa estes literais (validar_segredos_no_startup).
+# recusa estes literais (validar_segredos_no_startup e, para a chave RSA do
+# JWT, validar_chave_jwt_no_startup).
 # Credenciais do Postgres de demo num lugar so: o banco as usa para se criar e
 # a API (e o Alembic e o seed) monta a URL com elas (ENVIRONMENT=development).
 x-banco-demo: &banco-demo
@@ -29,7 +30,8 @@ services:
       <<: *banco-demo
       POSTGRES_HOST: postgres
       ENVIRONMENT: development
-      JWT_SECRET: demo-jwt-secret-os-service-fase4-nao-usar-em-producao
+      # Chave RSA de assinatura do JWT, so de desenvolvimento (escapes \n do YAML).
+      JWT_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrnHu8kBQQGe7e\naDIDjS058VmeT2PJs2e3nXC+YCS0FQJ6xoYwOlJhWu/6xiK/ETR/hkf/wWDMlSqY\n8Gd36n4e9EL2sW1oQQiZXIxCbaZidz/xlJqk10ZZaFSc1ZJYOfj0gp3+maoNvwMU\nEZmlFBgNQtCvYodHDDfaf/Dm/GDfsr/cIsW6cpB9jFZG2D/5lB1Xmw0WXTiDwx+Q\nLE1xH1Sm8I7f2nQWgzTk/iJUXvcOTDG7c0UCHI87NUFW/5KAbDddoQ0agnaN/G/J\n7VxGBeihPgTxVXNIV6P09tUv9WQPGVIBY3+MAiUehKgpmyGEh8GzYO8uwczFEgRy\nHLizs0LRAgMBAAECggEABDK7jzEaIIu13YCAirgzLUnzdo08JHTMWoBSQAIDm9kw\nupatNTRUDBgoq0KaGoD9/wmmrMHLD64tgNjOuy8EH1c75SORiN2ga3oJX12l1p5S\ntOL9Bn/Ss4C7IywRXLGsXrTsTwxszdHIrj7A+robXYWvK782Dn2kxyZemxP8/bPs\nMmssmOj5IFohPQMs6Xm4pf8c/Lg7GTPRgq0TmiAOOE81nhP/q4vpMX9OLG/4O7I/\nplFTJMoWZEey32B/yCHXtOlVkJ4fQXwCIlfVla2oxLwTNimDQ2C7R/CX2E6/4nAL\nZyOofltYhqBXTeZH7u8uTBsxdtx6KpCEAwpTEa6OkQKBgQDm+Zi/0HcOEsKOso+M\nArgUau3OO0cJ+Vr1coghhManQq+Gg3DCArfe7zEAcOxSlakaisPFmrLxtNXTbndm\nZQePRMRXt0qTFslNLN88ens6aX2MKkBhyNLPFLv8P4IpkgW8Sm/v1SDnz+wyFCqX\nv0iTJaBCmhyM8NkOpkyLqFF/GQKBgQC+NFqEXRjsgnWJSHOq9Vx5YZjt7Ut2cf1j\nKSn5rEqSG8/+dIFeKRkZdS7JY682Tvbx5TP0bZAl6Lfx8rEaj8biBND55WdpiUff\nxeWyp52cT6X5ZgDr1Qapk5DTxAFZWx3oy+Yq1j3o9nnQiqC/Ojsc8Y0q4BoB/Okm\naI+cDtWweQKBgCn+//MAaGU6q/1eIhOG+wlbV9nDlWsO16cBKBdQGP6YdWmzxHDC\nJcR3ISW/YnixlYmp6WaodhjUlHxY/YS0oec+zaRVQ03zOq65le1dJ8K7I4S0ufgN\nl6bnUjbPJU+BqWFO94NX8R+1AnEokYX91ahLkxQJCV/m+tBbFFfgRtEhAoGBAIzW\nWTvvb3gY9Y0Mn9Ez0yBxuvpaHel7aENXhKRCBgmAHJfujqg5SEOIeHdYn7FX8RSW\nQc04n2bilenKaYcgdQSAynhvfA4yP40bjQSnhlXqyBwOgpodZ8yC3tdfKByREmmB\nKVIIx1jLwNFBBNvz8zdwSLY5sChOrBjrjYLhnSsJAoGAbrYrm/sHss9D78DUMcQs\nQLc5CEupusuQm9TWanFkmH9IRaG3GCmTJ1pI593t61///DcnUQtM3EtB12s5fQGJ\n1IT/hCQSJQLK/raOG/9NGg/daWkb1DnybAkdMtjP3KySdWGVXEKx9k9F5udb/3LW\nSmSFJR4e5p1A+K3QghW+aL0=\n-----END PRIVATE KEY-----\n"  # gitleaks:allow (chave RSA de demo)
       ENCRYPTION_KEY: Chqh4o4QURACWBUSdtXjAxhOQt6HhxAfEg9rtvsABKU=  # gitleaks:allow (chave Fernet de demo)
       RUN_MIGRATIONS_ON_STARTUP: "true"
       RUN_SEED_ON_STARTUP: "true"

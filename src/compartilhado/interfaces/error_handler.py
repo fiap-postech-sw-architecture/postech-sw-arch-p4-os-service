@@ -7,6 +7,7 @@ import structlog
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import DBAPIError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.compartilhado.dominio.exceptions import (
     AcessoNegadoException,
@@ -44,6 +45,20 @@ _EXCEPTION_STATUS_MAP: dict[type[DomainException], int] = {
 # esperada e carrega codigo/mensagem proprios).
 _STATUS_DEFAULT = 409
 
+# HTTPException do roteamento (rota inexistente, metodo errado) e das rotas:
+# os mesmos codigos de Billing e Execucao.
+_CODIGOS_HTTP: dict[int, str] = {
+    401: "NAO_AUTENTICADO",
+    403: "ACESSO_NEGADO",
+    404: "ENTIDADE_NAO_ENCONTRADA",
+    405: "METODO_NAO_PERMITIDO",
+}
+# O Starlette usa a frase HTTP em ingles como detail ("Not Found").
+_MENSAGENS_PADRAO: dict[int, str] = {
+    404: "Recurso nao encontrado",
+    405: "Metodo nao permitido para este recurso",
+}
+
 
 def _status_para(exc: DomainException) -> int:
     """Resolve o status HTTP pela hierarquia da excecao (mais especifico vence).
@@ -79,7 +94,8 @@ def registrar_error_handlers(app: FastAPI) -> None:
 
     Cada DomainException levantada no request vira um JSONResponse com o envelope
     `{erro: {codigo, mensagem, id_requisicao}}`. Os codigos suportados sao 401,
-    403, 404, 409 e 422. A invariante de agregado (`ValorInvalidoException`) e a
+    403, 404, 409 e 422; a `HTTPException` (rota inexistente, metodo errado)
+    sai no mesmo envelope. A invariante de agregado (`ValorInvalidoException`) e a
     de value object (`ValueError`, com a mensagem sem PII) viram 422
     VALOR_INVALIDO -- ver p3 #83. O resto vira 500 ERRO_INTERNO com o
     `id_requisicao` na resposta; o log leva o traceback, ou so tipo, `pgcode` e
@@ -114,6 +130,29 @@ def registrar_error_handlers(app: FastAPI) -> None:
                 if status_code == HTTPStatus.UNAUTHORIZED
                 else None
             ),
+        )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        request_id = _obter_request_id(request)
+        codigo = _CODIGOS_HTTP.get(exc.status_code, f"HTTP_{exc.status_code}")
+        logger.warning(
+            "http_exception_handled",
+            codigo=codigo,
+            status=exc.status_code,
+            request_id=request_id,
+        )
+        mensagem = str(exc.detail)
+        padrao = _MENSAGENS_PADRAO.get(exc.status_code)
+        if padrao is not None and mensagem == HTTPStatus(exc.status_code).phrase:
+            mensagem = padrao
+        # Mantem os headers da excecao (o `Allow` do 405).
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_criar_envelope(codigo, mensagem, request_id),
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
