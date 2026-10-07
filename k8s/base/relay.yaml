@@ -39,7 +39,11 @@ spec:
             - sh
             - -c
             - |
-              until alembic current 2>&1 | grep -q -e '(head)' -e "Can't locate revision"; do
+              while :; do
+                saida=$(alembic current 2>&1)
+                printf '%s\n' "$saida" | grep -q -e '(head)' -e "Can't locate revision" && break
+                motivo=$(printf '%s\n' "$saida" | grep -E -e 'Error: ' -e '^[0-9a-z_]+$' | tail -n 1)
+                echo "waiting for the migration Job: ${motivo:-no revision yet}" >&2
                 sleep 2
               done
           env:
@@ -90,9 +94,11 @@ spec:
                 secretKeyRef:
                   name: rabbitmq
                   key: RABBITMQ_URL
-          # Sem shell nem curl na imagem: as sondas sao comandos diretos. A de
-          # vida tolera 90 s sem heartbeat (um publish preso no broker mudo dura
-          # ate cerca de 70 s); a de startup e a mesma, com 1 min para o boot.
+          # Sondas por comando direto, em Python (a imagem slim nao tem curl). A
+          # de vida tolera 90 s sem heartbeat (um publish preso no broker mudo
+          # dura ate cerca de 70 s); a de startup e a mesma, com 1 min para o
+          # boot, e nao o arquivo de pronto: broker fora no boot nao reinicia o
+          # pod, so o deixa fora de pronto.
           startupProbe:
             exec:
               command:
