@@ -120,8 +120,8 @@ seguinte; as secoes acima ficam como estavam.
 
 ## Consolidacao de 2026-10-07
 
-Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (83 das 119), na
-ordem e nas secoes originais. As outras 36 seguem inteiras no `MEMORY.md`, e o que o
+Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (86 das 119), na
+ordem e nas secoes originais. As outras 33 seguem inteiras no `MEMORY.md`, e o que o
 README, os ADR e a RFC-004 do platform ou os comentarios do codigo ja registram virou
 linhas de la que apontam para essas fontes. O texto exato das 119 esta no historico
 do git (`git show 0ccdca8:MEMORY.md`); aqui ele so mudou onde citava um documento ou um
@@ -225,8 +225,11 @@ fechadas e a linha `CORRIGIDO (conferencia ...)`, uma entrada que a conferencia 
 
 ### Review lessons
 
+- 2026-10-07 - Fencing por token se testa com a linha ainda `pendente` (a outra replica reivindicou e renovou): com a linha ja marcada pela outra, a clausula de status barra a atrasada sozinha e a conferencia do token sobrevivia a mutacao em quatro marcacoes - PR #4
 - 2026-10-07 - `SKIP LOCKED` se prova com uma replica segurando a transacao do claim aberta (gancho no `before_cursor_execute`) e a outra publicando nesse meio tempo: sem a clausula o claim concorrente so espera o lock, com o mesmo resultado final - PR #4
 - 2026-10-07 - Teste de PII em log e span cobre cada caminho que leva texto de excecao para la, inclusive os de fora do handler (queda da conexao, retries esgotados, falha antes do handler), e justificativa de "nao se provoca no teste" se confere com experimento: o nack da fila de retry cheia se provocava redeclarando a fila - PR #4
+- 2026-10-07 - Mutante que sobrevive com o canal falso se mata no broker real, onde ele produz a falha: o `mandatory` da copia de retry so tinha teste com um fake que devolvia a mensagem de qualquer jeito - PR #4
 - 2026-10-07 - Teste de PII em log confere tambem o log do cliente AMQP, com o dado sensivel no comeco do corpo (o pika imprime so os 255 primeiros bytes); e teste de concorrencia prova a sobreposicao (uma sessao esperando lock no `pg_stat_activity`), nao so o resultado - PR #4
 - 2026-10-07 - Borda de retencao se testa a um minuto de cada lado e pelo relogio do banco; com 31 e 29 dias, a retencao trocada por 31 passava - PR #4
+- 2026-10-06 - Teste de "vai direto para a DLQ" prova o "direto": metrica de retry inalterada e `x-death` com um so reject da fila de trabalho. Com o TTL curto das filas de retry do broker de teste, um desvio pelas cinco tentativas tambem chegava a DLQ no prazo e o teste passava - PR #4
 - 2026-10-06 - Teste de tolerancia de relogio (leeway) congela o relogio e afirma os dois lados da borda (9 s vale, 10 s nao): com o relogio real e folgas largas, leeways de 6 a 14 s passavam - PR #3
