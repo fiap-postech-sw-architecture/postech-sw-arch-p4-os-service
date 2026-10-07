@@ -72,6 +72,8 @@ dev = [
     "import-linter>=2.13",
     "types-jsonschema>=4.26.0",
     "types-pyyaml>=6.0.12",
+    # BDD de componente da saga (ADR-041): Gherkin em portugues exige o 8+.
+    "pytest-bdd>=8.1",
 ]
 
 [build-system]
@@ -318,6 +320,8 @@ markers = [
 # fail_under do .coveragerc. Para rodar um subconjunto sem o gate, use --no-cov.
 addopts = "--strict-markers --cov=src --cov-report=term-missing:skip-covered"
 testpaths = ["tests"]
+# Gherkin em tests/bdd; os passos ficam ao lado das fixtures de integracao.
+bdd_features_base_dir = "tests/bdd"
 # Teto por teste: regressao de concorrencia vira falha em ~120s em vez de
 # pendurar o job.
 timeout = 120
