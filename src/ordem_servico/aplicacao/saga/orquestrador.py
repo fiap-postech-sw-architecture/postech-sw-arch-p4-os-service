@@ -212,7 +212,10 @@ class OrquestradorDaSaga:
             # trata-la: consumida agora, ela se perderia; na DLQ, espera o redrive
             # da versao com as compensacoes.
             raise EventoRecusadoError("sem_tratador_nesta_versao", saga.etapa)
-        agora = self._relogio()
+        # O registro anterior pode vir de outra replica (ou da API), com o
+        # relogio uns milissegundos a frente: o novo nunca fica antes dele, que
+        # a saga recusaria como instante que volta.
+        agora = max(self._relogio(), saga.atualizada_em)
         try:
             pedido = aplicar(evento, saga, ordem)
             envio = self._enviar(pedido, evento, agora) if pedido else None

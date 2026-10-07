@@ -3,7 +3,7 @@ matriz etapa x tipo pelo handler (processada, ignorada ou adiantada)."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -371,6 +371,19 @@ def test_adiantado_e_falha_transitoria_e_passa_quando_a_saga_alcanca() -> None:
     cenario.receber("ExecucaoAgendada")
     assert cenario.orquestrador.tratar(iniciada).desfecho is Desfecho.PROCESSADA
     assert cenario.saga.etapa is E.EM_EXECUCAO
+
+
+def test_relogio_atrasado_de_outra_replica_nao_recua_o_registro() -> None:
+    # A replica que trata o DiagnosticoConcluido le um relogio 5 ms atras do
+    # que gravou o DiagnosticoIniciado: o evento passa no instante do anterior.
+    cenario = CenarioDaSaga()
+    cenario.receber("DiagnosticoIniciado")
+    anterior = cenario.saga.atualizada_em
+    cenario.relogio.agora = anterior - timedelta(seconds=1, milliseconds=5)
+
+    assert cenario.receber("DiagnosticoConcluido").desfecho is Desfecho.PROCESSADA
+    assert cenario.saga.passos[-1]["em"] == anterior.isoformat()
+    assert cenario.saga.prazo_resposta_em == anterior + PRAZO
 
 
 def test_resposta_repetida_com_id_novo_nao_muda_nada() -> None:
