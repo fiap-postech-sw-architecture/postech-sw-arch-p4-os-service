@@ -300,13 +300,14 @@ def test_execucao_iniciada_antes_da_agendada_volta_pela_retry_e_passa(
     atendimento.ate_aguardando_agendamento()
     retries = _retries()
 
-    # O inicio ultrapassa o agendamento (retry ou consumidores concorrentes).
+    # O inicio ultrapassa o agendamento (retry ou consumidores concorrentes):
+    # primeiro na fila, ele chega antes ao consumidor (prefetch 1) e e
+    # adiantado; publicados em seguida, nao dependem de tempo do teste.
     atendimento.responder("AgendarExecucao", "ExecucaoIniciada")
-    esperar_ate(lambda: _retries() > retries)
-    assert atendimento.etapa() == "aguardando_agendamento"
     atendimento.responder("AgendarExecucao", "ExecucaoAgendada")
 
     esperar_ate(lambda: atendimento.etapa() == "em_execucao")
+    assert _retries() > retries
     assert broker.contar(_DLQ) == 0
     assert atendimento.gatilhos()[-2:] == ["ExecucaoAgendada", "ExecucaoIniciada"]
     adiantado = [
