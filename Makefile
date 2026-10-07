@@ -57,8 +57,14 @@ audit:
 
 # Smoke da imagem pelo entrypoint real (migracao, seed, usuario 1001): sobe a
 # stack, confere a readiness e o login do admin semeado e derruba tudo com os
-# volumes, inclusive em falha (depois de mostrar os logs). Projeto e porta
+# volumes, inclusive em falha (depois de mostrar os logs). Projeto e portas
 # proprios para nao derrubar a stack do compose-up.
+#
+# Relay e consumidor sobem da mesma imagem com o RabbitMQ do compose (a
+# topologia do platform e o usuario `os`) e tem de ficar saudaveis (healthcheck
+# conferido no `docker inspect`, nao so o `up --wait`): conectados ao broker
+# depois da declaracao passiva do que usam e com o heartbeat em dia. O /metrics
+# de cada um responde na porta 9100.
 #
 # O access token do login passa pelo validador independente
 # (scripts/validar_token.py, so PyJWT): JWKS buscado por HTTP, RS256, iss, aud,
@@ -80,7 +86,10 @@ APP_IMAGE ?= pytstop-os-service:dev
 SMOKE_PORT ?= 18000
 SMOKE_URL := http://127.0.0.1:$(SMOKE_PORT)
 SMOKE_COMPOSE := APP_PORT=$(SMOKE_PORT) APP_IMAGE=$(APP_IMAGE) \
+	RABBITMQ_PORT=18674 RABBITMQ_UI_PORT=18675 \
 	$(DOCKER_COMPOSE) -p pytstop-os-smoke
+SMOKE_METRICAS := python -c "import urllib.request; \
+	print(urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=5).read().decode())"
 
 smoke:
 	@status=0; \
@@ -116,18 +125,28 @@ smoke:
 			2>&1 >/dev/null; true)" \
 	&& { printf '%s' "$$erro" | grep -q 'Signature verification failed' \
 		|| { echo "smoke: o validador nao recusou o token de assinatura adulterada" >&2; false; }; } \
+	&& { [ "$$(docker inspect -f '{{.State.Health.Status}}' "$$($(SMOKE_COMPOSE) ps -q relay)")" = healthy ] \
+		|| { echo "smoke: o relay nao ficou pronto" >&2; false; }; } \
+	&& { [ "$$(docker inspect -f '{{.State.Health.Status}}' "$$($(SMOKE_COMPOSE) ps -q consumidor)")" = healthy ] \
+		|| { echo "smoke: o consumidor nao ficou pronto" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T relay $(SMOKE_METRICAS) | grep -q '^outbox_pendentes ' \
+		|| { echo "smoke: o /metrics do relay nao traz outbox_pendentes" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T consumidor $(SMOKE_METRICAS) \
+			| grep -q '^# TYPE pytstop_mensagens_consumidas_total counter' \
+		|| { echo "smoke: o /metrics do consumidor nao traz as mensagens consumidas" >&2; false; }; } \
 	&& logs="$$($(SMOKE_COMPOSE) logs --no-color --no-log-prefix api)" \
 	&& { printf '%s\n' "$$logs" | grep -q '"event": "Started server process' \
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
 	&& { ! printf '%s\n' "$$logs" | grep -Eq '^(INFO|WARNING|ERROR|CRITICAL): ' \
 		|| { echo "smoke: o uvicorn escreveu log em texto puro" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON e imagem de producao" \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON, imagem de producao, relay e consumidor prontos" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
 	exit $$status
 
-# Stack local do servico: API + PostgreSQL 16 (migracoes e admin seed no boot).
+# Stack local do servico: API, relay e consumidor + PostgreSQL 16 e RabbitMQ
+# (migracoes e admin seed no boot).
 compose-up:
 	$(DOCKER_COMPOSE) up -d --build --wait
 

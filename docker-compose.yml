@@ -1,15 +1,26 @@
-# Stack local do OS Service: API + PostgreSQL 16 proprio (banco `os`).
+# Stack local do OS Service: API, relay da outbox e consumidor de `os.eventos`
+# (a mesma imagem, com comandos diferentes), PostgreSQL 16 proprio (banco `os`)
+# e um RabbitMQ 4 com a topologia do platform (contratos/rabbitmq/).
 # Uso: `make compose-up` (build + migracoes + admin seed) e `make compose-down`.
 # Todos os valores abaixo sao de DEMONSTRACAO para dev local; em qualquer
 # ambiente exposto entram por Secret e o boot com ENVIRONMENT=production
-# recusa estes literais (validar_segredos_no_startup e, para a chave RSA do
-# JWT, validar_chave_jwt_no_startup).
+# recusa estes literais (validar_segredos_no_startup, para a chave RSA do JWT
+# validar_chave_jwt_no_startup e, no relay e no consumidor, a senha do broker).
 # Credenciais do Postgres de demo num lugar so: o banco as usa para se criar e
 # a API (e o Alembic e o seed) monta a URL com elas (ENVIRONMENT=development).
 x-banco-demo: &banco-demo
   POSTGRES_DB: os
   POSTGRES_USER: pytstop
   POSTGRES_PASSWORD: pytstop  # gitleaks:allow (senha do banco de demo)
+
+# Relay e consumidor: banco (montado das POSTGRES_* em development) e o usuario
+# `os` do RabbitMQ, com a mesma senha de demonstracao do platform.
+x-mensageria: &mensageria
+  <<: *banco-demo
+  POSTGRES_HOST: postgres
+  ENVIRONMENT: development
+  RABBITMQ_URL: amqp://os:pytstop-os-demo-2026@rabbitmq:5672/%2F  # gitleaks:allow (senha de demo)
+  OTEL_ENABLED: ${OTEL_ENABLED:-false}
 
 services:
   api:
@@ -52,6 +63,121 @@ services:
       retries: 6
       start_period: 20s
 
+  # Relay da outbox (python -m src.relay) e consumidor de os.eventos (python -m
+  # src.consumidor): a imagem da API, sem HTTP de negocio. Sobem depois da API
+  # pronta (migracoes aplicadas) e dos usuarios do RabbitMQ criados. Saudavel =
+  # conectado ao broker (arquivo de pronto) e laco vivo (heartbeat de ate 60 s).
+  relay:
+    image: ${APP_IMAGE:-pytstop-os-service:dev}
+    # Imagem construida pelo servico api; nunca baixada de registry.
+    pull_policy: never
+    restart: unless-stopped
+    command: ["python", "-m", "src.relay"]
+    environment: *mensageria
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq-usuarios:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/relay-pronto') and time.time() - os.path.getmtime('/tmp/relay-heartbeat') < 60 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  consumidor:
+    image: ${APP_IMAGE:-pytstop-os-service:dev}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["python", "-m", "src.consumidor"]
+    environment: *mensageria
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq-usuarios:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/consumidor-pronto') and time.time() - os.path.getmtime('/tmp/consumidor-heartbeat') < 60 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # RabbitMQ com as mesmas definitions do platform (copiadas em
+  # contratos/rabbitmq/, com o checksum conferido nos testes): exchanges,
+  # filas, policies e o admin. Portas so no loopback, fora das do compose do
+  # platform (5672/15672) para os dois conviverem.
+  rabbitmq:
+    image: rabbitmq:4.3.6-management
+    # Nome do no Erlang fixo: com o hostname aleatorio do container, cada
+    # recriacao viraria um no novo e o volume ficaria com um broker orfao.
+    hostname: rabbitmq
+    # Healthcheck rodando como root antes do boot criaria o .erlang.cookie com
+    # dono root e o broker nao subiria.
+    user: "999:999"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5674}:5672"
+      - "127.0.0.1:${RABBITMQ_UI_PORT:-15674}:15672"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./contratos/rabbitmq/rabbitmq.conf:/etc/rabbitmq/conf.d/20-pytstop.conf:ro
+      - ./contratos/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+      - ./contratos/rabbitmq/definitions.json:/etc/rabbitmq/definitions/definitions.json:ro
+      - ./contratos/rabbitmq/rabbitmq-admin.json:/etc/rabbitmq/definitions/admin.json:ro
+    healthcheck:
+      # pytstop.retry so existe se o definitions.json entrou no boot.
+      test: ["CMD-SHELL", "rabbitmqctl -s list_exchanges name | grep -qx pytstop.retry && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 10s
+      timeout: 20s
+      retries: 12
+      start_period: 20s
+
+  # Usuarios os, billing e execucao com as permissoes de permissoes.json, pelo
+  # script do platform. Depois do script o container fica parado em vez de
+  # sair: o `up --wait` trata container encerrado como falha. Saudavel =
+  # usuarios criados.
+  rabbitmq-usuarios:
+    image: rabbitmq:4.3.6-management
+    user: "999:999"
+    # init: o sleep vira PID 1 e ignoraria o SIGTERM do `down`.
+    init: true
+    entrypoint: ["sh", "-c", "sh /scripts/criar-usuarios.sh && touch /tmp/usuarios-criados && exec sleep infinity"]
+    volumes:
+      - ./contratos/rabbitmq/criar-usuarios.sh:/scripts/criar-usuarios.sh:ro
+      - ./contratos/rabbitmq/permissoes.json:/scripts/permissoes.json:ro
+    environment:
+      RABBITMQADMIN_TARGET_HOST: rabbitmq
+      RABBITMQADMIN_TARGET_PORT: "15672"
+      RABBITMQADMIN_NON_INTERACTIVE_MODE: "true"
+      RABBITMQADMIN_USERNAME: admin
+      RABBITMQADMIN_PASSWORD: pytstop-rabbitmq-admin-demo-2026  # gitleaks:allow (senha de demo)
+      RABBITMQ_OS_PASSWORD: pytstop-os-demo-2026  # gitleaks:allow (senha de demo)
+      RABBITMQ_BILLING_PASSWORD: pytstop-billing-demo-2026  # gitleaks:allow (senha de demo)
+      RABBITMQ_EXECUCAO_PASSWORD: pytstop-execucao-demo-2026  # gitleaks:allow (senha de demo)
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/usuarios-criados"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    restart: "no"
+
   postgres:
     image: postgres:16
     restart: unless-stopped
@@ -68,3 +194,4 @@ services:
 
 volumes:
   postgres_data:
+  rabbitmq_data:
