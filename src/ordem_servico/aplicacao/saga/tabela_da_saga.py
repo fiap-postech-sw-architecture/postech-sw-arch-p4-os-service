@@ -13,12 +13,11 @@ from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
-from src.ordem_servico.dominio.status import StatusOrdem
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+    from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 _E = EtapaSaga
 
@@ -128,24 +127,34 @@ class Classificacao(StrEnum):
     FORA_DO_FLUXO = "fora_do_fluxo"
     # Resposta de compensacao sem compensacao em curso.
     FORA_DA_COMPENSACAO = "fora_da_compensacao"
+    # OS cancelada ou entregue com a saga viva: o cancelamento recusa esse
+    # estado, e nenhum evento o toca (nem comando para uma OS encerrada).
+    ORDEM_ENCERRADA = "ordem_encerrada"
 
 
-def classificar(etapa: EtapaSaga, tipo: str, ordem: OrdemDeServico) -> Classificacao:
+def classificar(etapa: EtapaSaga, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
     """Classifica o evento ``tipo`` ANTES de tocar no dominio (RFC-004 secao 4.5).
 
-    Etapa ja passada e saga encerrada ou em compensacao: ignorado. Etapa a
-    frente: adiantado. Na mesma etapa, o estado da OS desempata:
-    ``DiagnosticoConcluido`` com a OS ainda ``recebida`` e
-    ``PagamentoConfirmado``, ``Recusado`` ou ``Expirado`` sem o resumo do
-    pagamento sao adiantados; ``DiagnosticoIniciado`` com a OS ja em
-    diagnostico e ``PagamentoSolicitado`` com o resumo gravado, repetidos.
+    Saga encerrada: ignorado. OS encerrada com a saga viva: recusado. Etapa ja
+    passada e saga em compensacao: ignorado. Etapa a frente: adiantado. Na
+    mesma etapa, os marcos da OS desempatam: ``DiagnosticoConcluido`` antes do
+    diagnostico iniciado e ``PagamentoConfirmado``, ``Recusado`` ou
+    ``Expirado`` antes do checkout aberto sao adiantados;
+    ``DiagnosticoIniciado`` com o diagnostico ja iniciado e
+    ``PagamentoSolicitado`` com o checkout ja aberto, repetidos.
     """
     esperada = ETAPA_ESPERADA[tipo]
+    if etapa in ETAPAS_FINAIS:
+        if esperada is _E.COMPENSANDO:
+            return Classificacao.FORA_DA_COMPENSACAO
+        return Classificacao.FORA_DO_FLUXO
+    if marcos.encerrada:
+        return Classificacao.ORDEM_ENCERRADA
     if esperada is _E.COMPENSANDO:
         if etapa is _E.COMPENSANDO:
             return Classificacao.PROCESSAR
         return Classificacao.FORA_DA_COMPENSACAO
-    if etapa not in FLUXO_DA_SAGA or etapa is _E.CONCLUIDA:
+    if etapa not in FLUXO_DA_SAGA:
         return Classificacao.FORA_DO_FLUXO
     atual = FLUXO_DA_SAGA.index(etapa)
     alvo = FLUXO_DA_SAGA.index(esperada)
@@ -153,21 +162,20 @@ def classificar(etapa: EtapaSaga, tipo: str, ordem: OrdemDeServico) -> Classific
         return Classificacao.OBSOLETO
     if alvo > atual:
         return Classificacao.ADIANTADO
-    return _na_mesma_etapa(tipo, ordem)
+    return _na_mesma_etapa(tipo, marcos)
 
 
-def _na_mesma_etapa(tipo: str, ordem: OrdemDeServico) -> Classificacao:
-    """Fora de ordem dentro da etapa, pelo estado da OS (RFC-004 secao 4.5)."""
-    pagamento_solicitado = ordem.resumo_pagamento is not None
+def _na_mesma_etapa(tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
+    """Fora de ordem dentro da etapa, pelos marcos da OS (RFC-004 secao 4.5)."""
     match tipo:
-        case "DiagnosticoIniciado" if ordem.status is not StatusOrdem.RECEBIDA:
+        case "DiagnosticoIniciado" if marcos.diagnostico_iniciado:
             return Classificacao.REPETIDO
-        case "DiagnosticoConcluido" if ordem.status is StatusOrdem.RECEBIDA:
+        case "DiagnosticoConcluido" if not marcos.diagnostico_iniciado:
             return Classificacao.ADIANTADO
-        case "PagamentoSolicitado" if pagamento_solicitado:
+        case "PagamentoSolicitado" if marcos.checkout_aberto:
             return Classificacao.REPETIDO
         case "PagamentoConfirmado" | "PagamentoRecusado" | "PagamentoExpirado" if (
-            not pagamento_solicitado
+            not marcos.checkout_aberto
         ):
             return Classificacao.ADIANTADO
     return Classificacao.PROCESSAR

@@ -305,6 +305,7 @@ O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa an
 | Mesma etapa, antes do fato que o habilita | `DiagnosticoConcluido` com a OS ainda `recebida`; `PagamentoConfirmado` antes do `PagamentoSolicitado` | adiantado |
 | Saga concluída ou fora do fluxo normal | `ExecucaoFinalizada` repetida em `concluida` | ignorado com log |
 | OS sem saga, ou `ordem_id` dos dados diferente do `correlation_id` | | erro permanente: DLQ com o motivo `saga_inexistente` ou `ordem_id_divergente` |
+| OS cancelada ou entregue com a saga viva (estado que o cancelamento recusa) | | DLQ com o motivo `ordem_encerrada`: nenhum comando para OS encerrada |
 | Falha de negócio ou resposta de compensação na etapa em que caberia tratá-la | `OrcamentoRecusado` em `aguardando_decisao` | DLQ com o motivo `sem_tratador_nesta_versao` (nesta versão, sem compensações) |
 | Fato que a OS ou a saga recusam | | DLQ com o motivo `transicao_invalida` |
 

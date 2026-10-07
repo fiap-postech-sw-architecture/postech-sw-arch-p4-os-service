@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.ordem_servico.aplicacao.saga.modelo import Envio
     from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
-    from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+    from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 
 @dataclass(eq=False)
@@ -174,9 +174,9 @@ class Saga(AggregateRoot):
     def versao(self) -> int:
         return self._versao
 
-    def classificar(self, tipo: str, ordem: OrdemDeServico) -> Classificacao:
+    def classificar(self, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
         """Classifica o evento ``tipo`` na etapa atual (``tabela_da_saga``)."""
-        return classificar(self._etapa, tipo, ordem)
+        return classificar(self._etapa, tipo, marcos)
 
     def avancar(
         self,

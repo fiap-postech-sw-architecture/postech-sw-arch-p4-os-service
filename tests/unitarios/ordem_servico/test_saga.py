@@ -22,13 +22,16 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 )
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
 from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
 from tests.unitarios.ordem_servico.cenario_da_saga import (
     ESPERADA,
+    PERFIS,
     STATUS_DE_ENTRADA,
     esperado,
+    ordem_no_perfil,
 )
 
 AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
@@ -297,27 +300,30 @@ class TestAvancar:
         )
 
 
+# Marcos de cada perfil da OS, calculados uma vez para a matriz.
+_MARCOS = {perfil: MarcosDaOrdem.da_ordem(ordem_no_perfil(perfil)) for perfil in PERFIS}
+
+
 class TestClassificar:
     @pytest.mark.parametrize(
-        ("etapa", "tipo"),
+        ("etapa", "perfil", "tipo"),
         [
-            pytest.param(etapa, tipo, id=f"{etapa}-{tipo}")
+            pytest.param(etapa, perfil, tipo, id=f"{etapa}-{perfil}-{tipo}")
             for etapa in STATUS_DE_ENTRADA
+            for perfil in PERFIS
             for tipo in ESPERADA
         ],
     )
-    def test_matriz_etapa_por_tipo(self, etapa: str, tipo: str) -> None:
+    def test_matriz_etapa_por_perfil_da_os_por_tipo(
+        self, etapa: str, perfil: str, tipo: str
+    ) -> None:
         saga = saga_em(etapa)
-        ordem = ordem_em(STATUS_DE_ENTRADA[etapa])
-        if etapa == "aguardando_pagamento":
-            # Status de entrada sem o resumo: o checkout ainda nao abriu.
-            ordem = ordem_em(S.AGUARDANDO_APROVACAO)
-            ordem.registrar_pecas_reservadas(ator=ATOR_PROCESSO)
 
-        assert saga.classificar(tipo, ordem) is esperado(etapa, tipo)
+        assert saga.classificar(tipo, _MARCOS[perfil]) is esperado(etapa, tipo, perfil)
 
-    def test_matriz_cobre_as_12_etapas_e_os_23_tipos(self) -> None:
+    def test_matriz_cobre_as_12_etapas_os_10_perfis_e_os_23_tipos(self) -> None:
         assert set(STATUS_DE_ENTRADA) == {e.value for e in EtapaSaga}
+        assert len(PERFIS) == len(S) + 1
         assert len(ESPERADA) == 23
 
     @pytest.mark.parametrize(
@@ -373,7 +379,7 @@ class TestClassificar:
             ),
         ],
     )
-    def test_dentro_da_mesma_etapa_o_estado_da_os_desempata(
+    def test_dentro_da_mesma_etapa_os_marcos_da_os_desempatam(
         self,
         etapa: str,
         status: StatusOrdem,
@@ -384,10 +390,22 @@ class TestClassificar:
         ordem = ordem_em(status)
         assert (ordem.resumo_pagamento is not None) is pagamento
 
-        assert saga_em(etapa).classificar(tipo, ordem) is classificacao
+        marcos = MarcosDaOrdem.da_ordem(ordem)
+        assert saga_em(etapa).classificar(tipo, marcos) is classificacao
+
+    def test_os_cancelada_antes_do_diagnostico_recusa_o_evento(self) -> None:
+        # Nem repetido nem processado: a saga viva com a OS encerrada e o
+        # estado que o cancelamento recusa, e nenhum evento a toca.
+        marcos = MarcosDaOrdem.da_ordem(ordem_em(S.CANCELADA))
+
+        classificacao = saga_em("aguardando_diagnostico").classificar(
+            "DiagnosticoIniciado", marcos
+        )
+
+        assert classificacao is C.ORDEM_ENCERRADA
 
     def test_falha_na_compensacao_ignora_resposta_atrasada(self) -> None:
-        ordem = ordem_em(S.AGUARDANDO_APROVACAO)
+        marcos = MarcosDaOrdem.da_ordem(ordem_em(S.AGUARDANDO_APROVACAO))
         saga = saga_em("falha_na_compensacao")
 
-        assert saga.classificar("ReservaLiberada", ordem) is C.FORA_DA_COMPENSACAO
+        assert saga.classificar("ReservaLiberada", marcos) is C.FORA_DA_COMPENSACAO

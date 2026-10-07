@@ -18,7 +18,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
 from src.ordem_servico.aplicacao.use_cases import AbrirOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
-from tests.fabricas import ATOR_ATENDENTE, ordem_em
+from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
 from tests.unitarios.fakes import (
     ClientePortFake,
     FakeUnitOfWork,
@@ -104,25 +104,70 @@ STATUS_DE_ENTRADA: Final = {
 }
 
 
-def esperado(etapa: str, tipo: str) -> Classificacao:
-    """A regra da RFC-004 secao 4.5 para a OS no status de entrada da etapa."""
+# Perfis da OS na matriz: os 9 status (AGUARDANDO_PAGAMENTO com o checkout
+# aberto) e o AGUARDANDO_PAGAMENTO antes do PagamentoSolicitado.
+SEM_CHECKOUT: Final = "aguardando_pagamento_sem_checkout"
+PERFIS: Final = (*(s.value for s in StatusOrdem), SEM_CHECKOUT)
+_COM_CHECKOUT: Final = {
+    "aguardando_pagamento",
+    "aguardando_execucao",
+    "em_execucao",
+    "finalizada",
+}
+
+
+def perfil_de_entrada(etapa: str) -> str:
+    """Perfil da OS ao entrar na etapa (o checkout ainda fechado no pagamento)."""
+    if etapa == "aguardando_pagamento":
+        return SEM_CHECKOUT
+    return STATUS_DE_ENTRADA[etapa].value
+
+
+def ordem_no_perfil(perfil: str) -> OrdemDeServico:
+    """OS no perfil pedido, so pelos fatos de dominio (``CANCELADA`` na abertura)."""
+    if perfil == SEM_CHECKOUT:
+        ordem = ordem_em(S.AGUARDANDO_APROVACAO)
+        ordem.registrar_pecas_reservadas(ator=ATOR_PROCESSO)
+        return ordem
+    return ordem_em(S(perfil))
+
+
+def esperado(etapa: str, tipo: str, perfil: str | None = None) -> Classificacao:
+    """A regra da RFC-004 secao 4.5, com a OS no ``perfil`` (o de entrada, sem ele).
+
+    OS encerrada (cancelada ou entregue) com a saga viva e o estado que o
+    cancelamento recusa: o evento e recusado, nunca aplicado.
+    """
+    perfil = perfil or perfil_de_entrada(etapa)
     alvo = ESPERADA[tipo]
+    if etapa in {"concluida", "compensada"}:
+        return C.FORA_DA_COMPENSACAO if alvo == "compensando" else C.FORA_DO_FLUXO
+    if perfil in {"entregue", "cancelada"}:
+        return C.ORDEM_ENCERRADA
     if alvo == "compensando":
         return C.PROCESSAR if etapa == "compensando" else C.FORA_DA_COMPENSACAO
-    if etapa not in LINEAR[:-1]:
+    if etapa not in LINEAR:
         return C.FORA_DO_FLUXO
     if LINEAR.index(alvo) < LINEAR.index(etapa):
         return C.OBSOLETO
     if LINEAR.index(alvo) > LINEAR.index(etapa):
         return C.ADIANTADO
-    # Mesma etapa, OS no status de entrada: so o DiagnosticoConcluido (OS
-    # ainda recebida) e os desfechos do pagamento (checkout fechado) esperam.
-    if tipo in {
-        "DiagnosticoConcluido",
-        "PagamentoConfirmado",
-        "PagamentoRecusado",
-        "PagamentoExpirado",
-    }:
+    # Mesma etapa: o diagnostico (so a OS recebida nao o iniciou) e o checkout
+    # desempatam o repetido e o adiantado.
+    diagnostico, checkout = perfil != "recebida", perfil in _COM_CHECKOUT
+    repetido = {
+        "DiagnosticoIniciado": diagnostico,
+        "PagamentoSolicitado": checkout,
+    }
+    if repetido.get(tipo):
+        return C.REPETIDO
+    adiantado = {
+        "DiagnosticoConcluido": not diagnostico,
+        "PagamentoConfirmado": not checkout,
+        "PagamentoRecusado": not checkout,
+        "PagamentoExpirado": not checkout,
+    }
+    if adiantado.get(tipo):
         return C.ADIANTADO
     return C.PROCESSAR
 
@@ -178,6 +223,24 @@ class CenarioDaSaga:
             cenario.levar_ate(etapa)
             return cenario
         ordem = ordem_em(STATUS_DE_ENTRADA[etapa])
+        cenario.ordens.ordens = {ordem.id: ordem}
+        cenario.sagas.sagas = {
+            ordem.id: Saga(
+                id=ordem.id,
+                _etapa=EtapaSaga(etapa),
+                _iniciada_em=INICIO,
+                _etapa_desde=INICIO,
+                _atualizada_em=INICIO,
+            )
+        }
+        cenario.ordem_id = ordem.id
+        return cenario
+
+    @classmethod
+    def com_os(cls, etapa: str, perfil: str) -> CenarioDaSaga:
+        """Saga reidratada na ``etapa`` com a OS no ``perfil`` (par legal ou nao)."""
+        cenario = cls()
+        ordem = ordem_no_perfil(perfil)
         cenario.ordens.ordens = {ordem.id: ordem}
         cenario.sagas.sagas = {
             ordem.id: Saga(

@@ -228,10 +228,12 @@ def _desfecho(cenario: CenarioDaSaga, tipo: str) -> str:
         return f"recusada:{exc.motivo}"
 
 
-def _desfecho_esperado(etapa: str, tipo: str) -> str:
-    classificacao = esperado(etapa, tipo).value
+def _desfecho_esperado(etapa: str, tipo: str, perfil: str | None = None) -> str:
+    classificacao = esperado(etapa, tipo, perfil).value
     if classificacao == "adiantado":
         return "adiantada"
+    if classificacao == "ordem_encerrada":
+        return "recusada:ordem_encerrada"
     if classificacao != "processar":
         return "ignorada"
     # So o fluxo normal tem tratador; falhas de negocio e respostas de
@@ -252,18 +254,52 @@ def test_matriz_pelo_handler_processa_ignora_adianta_ou_recusa(
 ) -> None:
     cenario = CenarioDaSaga.em(etapa)
     assert cenario.ordem.status is STATUS_DE_ENTRADA[etapa]
-    passos, versao_da_os = len(cenario.saga.passos), cenario.ordem.versao
+    antes = _foto(cenario)
 
     desfecho = _desfecho(cenario, tipo)
 
     assert desfecho == _desfecho_esperado(etapa, tipo)
     if desfecho != "processada":
-        # Ignorado, adiantado ou recusado nao toca saga nem OS.
-        assert (len(cenario.saga.passos), cenario.ordem.versao) == (
-            passos,
-            versao_da_os,
-        )
-        assert cenario.saga.etapa.value == etapa
+        # Ignorado, adiantado ou recusado nao toca saga, OS nem a outbox.
+        assert _foto(cenario) == antes
+
+
+@pytest.mark.parametrize(
+    ("etapa", "perfil", "tipo"),
+    [
+        pytest.param(etapa, perfil, tipo, id=f"{etapa}-{perfil}-{tipo}")
+        for etapa in STATUS_DE_ENTRADA
+        for perfil in ("entregue", "cancelada")
+        for tipo in ESPERADA
+    ],
+)
+def test_os_encerrada_com_a_saga_viva_recusa_o_evento_sem_tocar_em_nada(
+    etapa: str, perfil: str, tipo: str
+) -> None:
+    # O cancelamento recusa esse estado; se ele existisse, nenhum evento o
+    # tocaria: nem comando para a OS encerrada, nem pagamento confirmado
+    # consumido em silencio (a DLQ alerta).
+    cenario = CenarioDaSaga.com_os(etapa, perfil)
+    antes = _foto(cenario)
+
+    desfecho = _desfecho(cenario, tipo)
+
+    assert desfecho == _desfecho_esperado(etapa, tipo, perfil)
+    assert _foto(cenario) == antes
+
+
+def _foto(cenario: CenarioDaSaga) -> tuple[object, ...]:
+    saga, ordem = cenario.saga, cenario.ordem
+    return (
+        saga.etapa,
+        saga.passos,
+        saga.comando_em_voo,
+        ordem.status,
+        ordem.historico,
+        ordem.resumo_orcamento,
+        ordem.resumo_pagamento,
+        tuple(cenario.publicador.comandos),
+    )
 
 
 def test_adiantado_e_falha_transitoria_e_passa_quando_a_saga_alcanca() -> None:

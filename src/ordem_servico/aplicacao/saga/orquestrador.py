@@ -9,10 +9,11 @@ entram no mesmo commit ou nao entram.
 Evento de etapa ja passada, repetido ou com a saga fora do fluxo e ignorado com
 log; o adiantado volta pela fila de retry (``EventoAdiantadoError``). O que
 nenhuma tentativa resolve vai para a DLQ com o motivo em codigo
-(``EventoRecusadoError``): OS sem saga, ``ordem_id`` divergente, fato que a OS
-ou a saga recusam e, enquanto as compensacoes nao chegam ao orquestrador, a
-falha de negocio e a resposta de compensacao na etapa em que caberia trata-las
-(``sem_tratador_nesta_versao``, para o redrive na versao que as trata).
+(``EventoRecusadoError``): OS sem saga, ``ordem_id`` divergente, OS encerrada
+com a saga viva, fato que a OS ou a saga recusam e, enquanto as compensacoes
+nao chegam ao orquestrador, a falha de negocio e a resposta de compensacao na
+etapa em que caberia trata-las (``sem_tratador_nesta_versao``, para o redrive
+na versao que as trata).
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     COMANDOS_COM_PRAZO,
     Classificacao,
 )
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -142,7 +144,8 @@ class OrquestradorDaSaga:
             EventoRecusadoError: permanente, DLQ com o motivo:
                 ``ordem_id_divergente`` (``ordem_id`` dos dados diferente do
                 ``correlation_id``), ``saga_inexistente`` (OS sem saga, ou saga
-                sem OS), ``sem_tratador_nesta_versao`` (falha de negocio ou
+                sem OS), ``ordem_encerrada`` (OS cancelada ou entregue com a
+                saga viva), ``sem_tratador_nesta_versao`` (falha de negocio ou
                 resposta de compensacao na etapa em que caberia trata-la) e
                 ``transicao_invalida`` (a OS ou a saga recusam o fato).
         """
@@ -155,10 +158,14 @@ class OrquestradorDaSaga:
             raise EventoRecusadoError("saga_inexistente")
         etapa = saga.etapa
         contexto = {"correlation_id": str(ordem_id), "tipo": evento.tipo}
-        classificacao = saga.classificar(evento.tipo, ordem)
+        classificacao = saga.classificar(evento.tipo, MarcosDaOrdem.da_ordem(ordem))
         if classificacao is Classificacao.ADIANTADO:
             _log.warning("saga event ahead", etapa=etapa.value, **contexto)
             raise EventoAdiantadoError(etapa)
+        if classificacao is Classificacao.ORDEM_ENCERRADA:
+            # Estado que o cancelamento recusa: nunca comando para OS encerrada,
+            # e o alerta da DLQ o mostra (o pagamento confirmado inclusive).
+            raise EventoRecusadoError("ordem_encerrada", etapa)
         if classificacao is not Classificacao.PROCESSAR:
             _log.info(
                 "saga event ignored",
