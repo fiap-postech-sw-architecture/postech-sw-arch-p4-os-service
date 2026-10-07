@@ -90,6 +90,10 @@ OUTBOX_DEAD: Final = Gauge(
 _POLL_PADRAO_S: Final = 5.0
 _LOTE_PADRAO: Final = 10
 _LEASE_PADRAO_S: Final = 60
+# O lease cobre o publish bloqueado por alarme do broker (30 s) e a marcacao
+# da linha (statement_timeout de 15 s): abaixo disso, outra replica publicaria
+# de novo cada linha presa num alarme.
+_LEASE_MINIMO_S: Final = 45
 # Keepalives TCP da conexao dedicada de LISTEN: um peer que sumiu em silencio
 # e detectado em cerca de 60 s, em vez de deixar o relay surdo ao NOTIFY.
 _KEEPALIVES: Final = {
@@ -133,7 +137,7 @@ class ConfigRelay:
             lote=inteiro_do_ambiente("OUTBOX_LOTE", _LOTE_PADRAO, minimo=1),
             lease=timedelta(
                 seconds=inteiro_do_ambiente(
-                    "OUTBOX_LEASE_SEGUNDOS", _LEASE_PADRAO_S, minimo=10
+                    "OUTBOX_LEASE_SEGUNDOS", _LEASE_PADRAO_S, minimo=_LEASE_MINIMO_S
                 )
             ),
         )

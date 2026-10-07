@@ -180,7 +180,7 @@ Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como
 | `METRICS_PORT` | 9100 | porta do `/metrics` do relay e do consumidor |
 | `OUTBOX_POLL_SEGUNDOS` | 5 | poll de segurança do relay, de 0,1 a 15 s (o laço ocioso atende o heartbeat AMQP) |
 | `OUTBOX_LOTE` | 10 | linhas por lote do relay (1 ou mais) |
-| `OUTBOX_LEASE_SEGUNDOS` | 60 | lease de cada linha reivindicada (10 ou mais) |
+| `OUTBOX_LEASE_SEGUNDOS` | 60 | lease de cada linha reivindicada (45 ou mais: cobre o publish bloqueado por alarme do broker, de até 30 s, e a marcação da linha) |
 | `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `false`, `http://jaeger:4317` | exportação OTLP dos spans |
 | `OTEL_SERVICE_NAME` | `pytstop-os-service` | `service.name` dos spans |
 

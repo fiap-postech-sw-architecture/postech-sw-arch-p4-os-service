@@ -1150,6 +1150,16 @@ def test_logs_da_entrega_saem_dentro_do_span_da_publicacao(
     )
 
 
+def test_lease_do_relay_abaixo_de_45_s_aborta_o_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Menos que o publish bloqueado por alarme (30 s) mais a marcacao da linha.
+    monkeypatch.setenv("OUTBOX_LEASE_SEGUNDOS", "44")
+
+    with pytest.raises(RuntimeError, match="OUTBOX_LEASE_SEGUNDOS"):
+        ConfigRelay.do_ambiente()
+
+
 def test_poll_do_relay_acima_de_15_s_aborta_o_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
