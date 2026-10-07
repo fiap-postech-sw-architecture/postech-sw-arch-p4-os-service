@@ -8,21 +8,33 @@ from uuid import UUID
 
 import pytest
 
-from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.dominio.exceptions import (
+    ConflitoDeConcorrenciaException,
+    TransicaoStatusInvalidaException,
+)
+from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
-from src.ordem_servico.interfaces.dependencies import obter_cancelar_ordem
+from src.ordem_servico.interfaces.dependencies import (
+    obter_abrir_ordem,
+    obter_cancelar_ordem,
+    obter_registrar_entrega,
+)
+from tests.fabricas import FLUXO, aplicar_fato
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
 
-def _ordem_commitada(session_factory: sessionmaker[Session]) -> UUID:
+def _ordem_commitada(
+    session_factory: sessionmaker[Session], ate: StatusOrdem = StatusOrdem.RECEBIDA
+) -> UUID:
+    """OS sem saga, levada a ``ate`` pelos fatos de dominio."""
     with session_factory() as sess:
         cliente = criar_cliente_com_veiculo(sess)
         ordem = OrdemDeServico.abrir(
@@ -31,6 +43,8 @@ def _ordem_commitada(session_factory: sessionmaker[Session]) -> UUID:
             descricao_problema="Direcao pesada",
             ator="atendente-teste",
         )
+        for proximo in FLUXO[1 : FLUXO.index(ate) + 1]:
+            aplicar_fato(ordem, proximo)
         OrdemDeServicoSQLAlchemyRepository(sess).salvar(ordem)
         sess.commit()
         return ordem.id
@@ -116,18 +130,18 @@ def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_o_historico_so_tem_
     # ela; o UPDATE condicional na versao barra B e a transicao dele nao entra
     # no historico (rollback da transacao inteira).
     ordem_id = _ordem_commitada(session_factory)
-    sessao_b = session_factory()
-    lida_por_b = OrdemDeServicoSQLAlchemyRepository(sessao_b).obter_por_id(ordem_id)
-    assert lida_por_b is not None
-    assert lida_por_b.versao == 1
+    with session_factory() as sessao_a, session_factory() as sessao_b:
+        lida_por_b = OrdemDeServicoSQLAlchemyRepository(sessao_b).obter_por_id(ordem_id)
+        assert lida_por_b is not None
+        assert lida_por_b.versao == 1
 
-    obter_cancelar_ordem(session_factory()).executar(
-        ordem_id, "cliente desistiu", ator="atendente-teste"
-    )
-    with pytest.raises(ConflitoDeConcorrenciaException):
-        obter_cancelar_ordem(sessao_b).executar(
-            ordem_id, "outro motivo", ator="atendente-teste"
+        obter_cancelar_ordem(sessao_a).executar(
+            ordem_id, "cliente desistiu", ator="atendente-teste"
         )
+        with pytest.raises(ConflitoDeConcorrenciaException):
+            obter_cancelar_ordem(sessao_b).executar(
+                ordem_id, "outro motivo", ator="atendente-teste"
+            )
 
     with session_factory() as sess:
         final = OrdemDeServicoSQLAlchemyRepository(sess).obter_por_id(ordem_id)
@@ -139,3 +153,49 @@ def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_o_historico_so_tem_
             (StatusOrdem.RECEBIDA, None),
             (StatusOrdem.CANCELADA, "cliente desistiu"),
         ]
+
+
+def test_cancelamento_e_entrega_terminam_sem_transacao_aberta(
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Le tudo dentro da unidade de trabalho: uma leitura depois do commit
+    # abriria transacao nova, ociosa ate a sessao fechar, segurando locks.
+    sem_saga = _ordem_commitada(session_factory)
+    with session_factory() as sess:
+        obter_cancelar_ordem(sess).executar(
+            sem_saga, "cliente desistiu", ator="atendente-teste"
+        )
+        assert not sess.in_transaction()
+
+    com_saga = _ordem_aberta_com_saga(session_factory)
+    with session_factory() as sess:
+        with pytest.raises(TransicaoStatusInvalidaException):
+            obter_cancelar_ordem(sess).executar(
+                com_saga, "cliente desistiu", ator="atendente-teste"
+            )
+        assert not sess.in_transaction()
+
+    finalizada = _ordem_commitada(session_factory, ate=StatusOrdem.FINALIZADA)
+    with session_factory() as sess:
+        obter_registrar_entrega(sess).executar(finalizada, ator="atendente-teste")
+        assert not sess.in_transaction()
+
+
+def _ordem_aberta_com_saga(session_factory: sessionmaker[Session]) -> UUID:
+    with session_factory() as sess:
+        cliente = criar_cliente_com_veiculo(sess)
+        sess.commit()
+        cliente_id, veiculo_id = cliente.id, cliente.veiculos[0].id
+    with session_factory() as sess:
+        return (
+            obter_abrir_ordem(sess)
+            .executar(
+                AbrirOrdemDTO(
+                    cliente_id=cliente_id,
+                    veiculo_id=veiculo_id,
+                    descricao_problema="Direcao pesada",
+                    ator="atendente-teste",
+                )
+            )
+            .id
+        )

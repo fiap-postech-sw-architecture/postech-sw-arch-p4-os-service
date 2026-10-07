@@ -133,9 +133,12 @@ def session_factory(engine: Engine) -> Generator[sessionmaker[Session]]:
     yield factory
 
     # Testes de API e de concorrencia commitam de verdade: o rollback da
-    # fixture `session` nao os alcanca.
+    # fixture `session` nao os alcanca. Uma sessao esquecida ociosa em
+    # transacao seguraria o TRUNCATE para sempre: com o lock_timeout ele
+    # falha em segundos e aponta o teste.
     tabelas = ", ".join(t.name for t in reversed(metadata.sorted_tables))
     with factory() as sess:
+        sess.execute(text("SET LOCAL lock_timeout = '5s'"))
         sess.execute(text(f"TRUNCATE TABLE {tabelas} CASCADE"))
         sess.commit()
 
