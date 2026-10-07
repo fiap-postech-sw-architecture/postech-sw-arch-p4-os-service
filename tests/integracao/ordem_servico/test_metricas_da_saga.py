@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 from prometheus_client import REGISTRY, CollectorRegistry
 from sqlalchemy import update
+from sqlalchemy.exc import DBAPIError
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
@@ -27,11 +28,13 @@ from tests.eventos import evento
 from tests.integracao.seed_helpers import (
     criar_cliente_com_veiculo,
     criar_ordem_recebida,
+    sagas_recusando_no_commit,
 )
 
 if TYPE_CHECKING:
     from uuid import UUID
 
+    from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
 AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
@@ -179,6 +182,104 @@ def test_saga_concluida_conta_nas_finalizadas(
         _amostra("pytstop_saga_finalizadas_total", resultado="concluida")
         == concluidas + 1
     )
+
+
+def test_commit_que_falha_nao_conta_a_saga_concluida(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    with session_factory() as sess:
+        saga = Saga(
+            id=_ordem_id(sess),
+            _etapa=EtapaSaga.EM_EXECUCAO,
+            _iniciada_em=AGORA,
+            _etapa_desde=AGORA,
+            _atualizada_em=AGORA,
+        )
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        sess.commit()
+    concluidas = _amostra("pytstop_saga_finalizadas_total", resultado="concluida")
+    duracoes = _duracoes("em_execucao")
+
+    # O trigger deferido so falha no COMMIT, depois do UPDATE da saga: contar
+    # antes dele (before_commit) contaria uma saga que nao concluiu.
+    with sagas_recusando_no_commit(engine), session_factory() as sess:
+        lida = SagaSQLAlchemyRepository(sess).obter(saga.ordem_id)
+        assert lida is not None
+        lida.avancar(
+            evento("ExecucaoFinalizada", lida.ordem_id),
+            _MARCOS_DA_EXECUCAO,
+            agora=AGORA + timedelta(hours=2),
+            ator="consumidor",
+        )
+        SagaSQLAlchemyRepository(sess).salvar(lida)
+        with pytest.raises(DBAPIError):
+            sess.commit()
+
+    assert (
+        _amostra("pytstop_saga_finalizadas_total", resultado="concluida") == concluidas
+    )
+    assert _duracoes("em_execucao") == duracoes
+
+
+def test_duracao_e_contada_desde_a_entrada_na_etapa(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as sess:
+        saga = _nova_saga(sess)
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        _concluir_diagnostico(saga, timedelta(minutes=10))
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        sess.commit()
+    contagem, soma = _duracoes("aguardando_orcamento")
+
+    with session_factory() as sess:
+        lida = SagaSQLAlchemyRepository(sess).obter(saga.ordem_id)
+        assert lida is not None
+        lida.avancar(
+            evento("OrcamentoGerado", lida.ordem_id),
+            _MARCOS,
+            agora=AGORA + timedelta(minutes=25),
+            ator="consumidor",
+        )
+        SagaSQLAlchemyRepository(sess).salvar(lida)
+        sess.commit()
+
+    # 15 min em aguardando_orcamento (de 10 a 25), nao 25 desde a abertura.
+    assert _duracoes("aguardando_orcamento") == (contagem + 1, soma + 900)
+
+
+def test_salvar_a_mesma_saga_duas_vezes_conta_o_fato_uma_vez(
+    session_factory: sessionmaker[Session],
+) -> None:
+    iniciadas = _iniciadas()
+
+    with session_factory() as sess:
+        saga = _nova_saga(sess)
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        sess.commit()
+
+    assert _iniciadas() == iniciadas + 1
+
+
+def test_savepoint_liberado_nao_conta_antes_do_commit_da_raiz(
+    session_factory: sessionmaker[Session],
+) -> None:
+    iniciadas = _iniciadas()
+
+    with session_factory() as sess:
+        with sess.begin_nested():
+            SagaSQLAlchemyRepository(sess).salvar(_nova_saga(sess))
+        # O savepoint foi liberado, mas a transacao raiz ainda pode cair.
+        assert _iniciadas() == iniciadas
+        sess.rollback()
+    assert _iniciadas() == iniciadas
+
+    with session_factory() as sess:
+        with sess.begin_nested():
+            SagaSQLAlchemyRepository(sess).salvar(_nova_saga(sess))
+        sess.commit()
+    assert _iniciadas() == iniciadas + 1
 
 
 def test_series_de_rotulo_fechado_existem_desde_o_boot() -> None:

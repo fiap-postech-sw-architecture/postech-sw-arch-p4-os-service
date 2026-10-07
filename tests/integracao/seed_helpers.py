@@ -184,3 +184,29 @@ def outbox_recusando_no_commit(engine: Engine) -> Iterator[None]:
         with engine.begin() as conexao:
             conexao.execute(text("DROP TRIGGER recusar_outbox_no_commit ON outbox"))
             conexao.execute(text("DROP FUNCTION recusar_outbox_no_commit()"))
+
+
+@contextmanager
+def sagas_recusando_no_commit(engine: Engine) -> Iterator[None]:
+    """Trigger DEFERIDO em ``sagas``: o UPDATE passa e o COMMIT falha."""
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_saga_no_commit() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'sagas indisponivel no commit'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER recusar_saga_no_commit "
+                "AFTER UPDATE ON sagas DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_saga_no_commit()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER recusar_saga_no_commit ON sagas"))
+            conexao.execute(text("DROP FUNCTION recusar_saga_no_commit()"))

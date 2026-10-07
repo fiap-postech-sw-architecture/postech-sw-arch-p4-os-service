@@ -2,8 +2,9 @@
 
 Contadores e histograma: a ``Saga`` registra os fatos (``SagaIniciadaEvent``,
 ``EtapaDaSagaAlteradaEvent``), o repositorio os entrega a sessao no ``salvar``
-e eles so viram metrica no ``after_commit``. Rollback ou conflito de versao os
-descartam: a mensagem que volta pela retry nao conta duas vezes. Quem emite e
+e eles so viram metrica no ``after_commit`` da transacao raiz. Rollback,
+conflito de versao ou commit que falha os descartam: a mensagem que volta pela
+retry nao conta duas vezes. Quem emite e
 o processo que tira a saga da etapa (API na abertura, consumidor nos eventos).
 
 Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` na hora
@@ -16,6 +17,7 @@ Series de rotulo fechado comecam em zero no boot de cada processo, para o
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -71,9 +73,34 @@ _sessoes_instrumentadas = False
 
 
 def anotar(sessao: Session, fatos: Iterable[DomainEvent]) -> None:
-    """Guarda os fatos da saga ate o commit da transacao da ``sessao``."""
+    """Guarda a metrica de cada fato da saga ate o commit da transacao da ``sessao``.
+
+    Raises:
+        TypeError: fato sem metrica (um fato novo da saga sem a observacao
+            dele), antes do commit: nada se perde em silencio.
+    """
+    observacoes = [_observacao(fato) for fato in fatos]
     _instrumentar_sessoes()
-    sessao.info.setdefault(_FATOS, []).extend(fatos)
+    sessao.info.setdefault(_FATOS, []).extend(observacoes)
+
+
+def _observacao(fato: DomainEvent) -> Callable[[], None]:
+    """A metrica do fato, para rodar depois do commit."""
+    match fato:
+        case SagaIniciadaEvent():
+            return SAGAS_INICIADAS.inc
+        case EtapaDaSagaAlteradaEvent():
+            return partial(_etapa_alterada, fato)
+    msg = f"fato da saga sem metrica: {type(fato).__name__}"
+    raise TypeError(msg)
+
+
+def _etapa_alterada(fato: EtapaDaSagaAlteradaEvent) -> None:
+    DURACAO_DA_ETAPA.labels(etapa=fato.etapa_anterior.value).observe(
+        fato.permanencia.total_seconds()
+    )
+    if fato.etapa_nova in ETAPAS_FINAIS:
+        SAGAS_FINALIZADAS.labels(resultado=fato.etapa_nova.value).inc()
 
 
 def _instrumentar_sessoes() -> None:
@@ -86,25 +113,21 @@ def _instrumentar_sessoes() -> None:
 
 
 def _ao_comitar(sessao: Session) -> None:
-    for fato in sessao.info.pop(_FATOS, ()):
-        _observar(fato)
+    """Commit da transacao raiz: as metricas dos fatos valem.
+
+    Liberar um SAVEPOINT tambem dispara o ``after_commit``; a transacao raiz
+    ainda pode ser desfeita, entao ali nada conta.
+    """
+    if sessao.in_nested_transaction():
+        return
+    for observar in sessao.info.pop(_FATOS, ()):
+        observar()
 
 
 def _ao_encerrar(sessao: Session, transacao: SessionTransaction) -> None:
     """Transacao raiz encerrada sem commit (rollback ou close): descarta os fatos."""
     if transacao.parent is None:
         sessao.info.pop(_FATOS, None)
-
-
-def _observar(fato: DomainEvent) -> None:
-    if isinstance(fato, SagaIniciadaEvent):
-        SAGAS_INICIADAS.inc()
-    elif isinstance(fato, EtapaDaSagaAlteradaEvent):
-        DURACAO_DA_ETAPA.labels(etapa=fato.etapa_anterior.value).observe(
-            fato.permanencia.total_seconds()
-        )
-        if fato.etapa_nova in ETAPAS_FINAIS:
-            SAGAS_FINALIZADAS.labels(resultado=fato.etapa_nova.value).inc()
 
 
 class ColetorDaSaga:
