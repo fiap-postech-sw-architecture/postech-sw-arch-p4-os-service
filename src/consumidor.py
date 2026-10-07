@@ -9,13 +9,13 @@ efeito, comandos e ``mensagens_processadas`` juntos (ADR-036).
 from __future__ import annotations
 
 import threading
-from datetime import timedelta
 from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from opentelemetry import trace
 
+from src.compartilhado.infraestrutura.ambiente import prazo_de_resposta_da_saga
 from src.compartilhado.infraestrutura.database import criar_session_factory
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     Consumidor,
@@ -23,7 +23,6 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
 )
 from src.compartilhado.infraestrutura.mensageria.processo import (
     instalar_sinais,
-    inteiro_do_ambiente,
     preparar,
     subir_metricas,
 )
@@ -41,12 +40,10 @@ from src.ordem_servico.infraestrutura.repository import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import timedelta
 
     from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
     from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
-
-# Espera por resposta a comando, gravada pela saga no envio (RFC-004 secao 10.3).
-_PRAZO_RESPOSTA_PADRAO_S: Final = 120
 
 
 def tratar_evento_da_saga(
@@ -105,15 +102,10 @@ def main() -> None:
     instalar_sinais(parar)
     engine, parametros = preparar("consumidor")
     try:
-        prazo_resposta = timedelta(
-            seconds=inteiro_do_ambiente(
-                "SAGA_PRAZO_RESPOSTA_SEGUNDOS", _PRAZO_RESPOSTA_PADRAO_S, minimo=1
-            )
-        )
         consumidor = Consumidor(
             session_factory=criar_session_factory(engine),
             parametros=parametros,
-            despachante=montar_despachante(prazo_resposta),
+            despachante=montar_despachante(prazo_de_resposta_da_saga()),
             tracer=criar_tracer("consumidor"),
         )
         subir_metricas()
