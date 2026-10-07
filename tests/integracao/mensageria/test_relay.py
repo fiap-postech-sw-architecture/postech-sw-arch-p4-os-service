@@ -501,7 +501,9 @@ def test_excecao_inesperada_na_publicacao_conta_tentativa_e_nao_derruba_o_relay(
         return propriedades(*args, **kwargs)
 
     monkeypatch.setattr(amqp, "propriedades", propriedades_com_falha)
-    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+    # A nova tentativa sai 1 s depois: tempo para a espera abaixo ver a linha
+    # com o erro, antes de a entrega limpar o `ultimo_erro`.
+    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(1.0,) * 4)
 
     with EmSegundoPlano(relay):
         primeira = esperar_ate(

@@ -505,7 +505,9 @@ def test_falha_depois_de_renovar_o_lease_conta_tentativa_na_linha_renovada(
         validar(self, envelope)
 
     monkeypatch.setattr(Catalogo, "validar", validar_com_falha)
-    relay = _relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+    # A nova tentativa sai 1 s depois: tempo para a espera abaixo ver a linha
+    # com o erro, antes de a entrega limpar o `ultimo_erro`.
+    relay = _relay(engine, rastreador, tmp_path, atrasos_s=(1.0,) * 4)
 
     with EmSegundoPlano(relay):
         primeira = esperar_ate(
@@ -1345,6 +1347,9 @@ def test_lease_do_relay_abaixo_de_45_s_aborta_o_boot(
 
     with pytest.raises(RuntimeError, match="OUTBOX_LEASE_SEGUNDOS"):
         ConfigRelay.do_ambiente()
+
+    monkeypatch.setenv("OUTBOX_LEASE_SEGUNDOS", "45")
+    assert ConfigRelay.do_ambiente().lease == timedelta(seconds=45)
 
 
 def test_poll_do_relay_acima_de_15_s_aborta_o_boot(
