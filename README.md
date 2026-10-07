@@ -336,7 +336,7 @@ curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" 
 - Unitários: cada linha da tabela de etapas (status, comando e `dados`, prazo) e a matriz etapa x tipo (12 x 23), gerada da tabela da RFC e conferida pelo handler (`tests/unitarios/ordem_servico/test_saga.py` e `test_orquestrador.py`).
 - Propriedade: em mil sementes, participantes simulados respondem a cada comando com eventos embaralhados, repetidos com id novo e atrasados, com retry nos atrasos das filas; só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada e nada vai para a DLQ (`test_propriedades_da_saga.py`).
 - BDD de componente: `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ.
-- Integração: relay, consumidor e RabbitMQ reais com participantes falsos, do caminho feliz até `ENTREGUE` num trace só, o adiantado passando pela retry e o INSERT da outbox recusado sem efeito nenhum (`tests/integracao/mensageria/test_saga_com_broker.py`).
+- Integração: relay, consumidor e RabbitMQ reais com participantes falsos, do caminho feliz até `ENTREGUE` num trace só, o adiantado passando pela retry, as recusas na DLQ com o motivo e a transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga e o comando desfaz tudo, inclusive o registro da mensagem (`tests/integracao/mensageria/test_saga_com_broker.py`).
 
 ## Como rodar local
 

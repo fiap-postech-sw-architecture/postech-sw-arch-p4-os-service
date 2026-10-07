@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 import structlog
 from prometheus_client import REGISTRY
-from sqlalchemy import text
+from sqlalchemy import event, text
 from structlog.testing import capture_logs
 
 from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
@@ -40,7 +40,7 @@ from tests.eventos import envelope_de_evento
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
 from tests.integracao.seed_helpers import (
     criar_cliente_com_veiculo,
-    outbox_recusando_insert,
+    outbox_recusando_no_commit,
 )
 from tests.rastreamento import traceparent
 
@@ -168,8 +168,8 @@ class Atendimento:
     def esperar_passo(self, gatilho: str) -> None:
         esperar_ate(lambda: gatilho in self.gatilhos())
 
-    def ate_aguardando_agendamento(self) -> None:
-        """Do pedido de diagnostico ao AgendarExecucao, na ordem."""
+    def ate_aguardando_pagamento_com_checkout(self) -> None:
+        """Do pedido de diagnostico ao PagamentoSolicitado, na ordem."""
         self.receber("SolicitarDiagnostico")
         self.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
         self.esperar_passo("DiagnosticoIniciado")
@@ -183,6 +183,10 @@ class Atendimento:
         self.receber("SolicitarPagamento")
         self.responder("SolicitarPagamento", "PagamentoSolicitado")
         self.esperar_passo("PagamentoSolicitado")
+
+    def ate_aguardando_agendamento(self) -> None:
+        """Do pedido de diagnostico ao AgendarExecucao, na ordem."""
+        self.ate_aguardando_pagamento_com_checkout()
         self.responder("SolicitarPagamento", "PagamentoConfirmado")
         self.receber("AgendarExecucao")
 
@@ -321,41 +325,72 @@ def test_execucao_iniciada_antes_da_agendada_volta_pela_retry_e_passa(
     assert adiantado
 
 
-def test_falha_no_insert_da_outbox_nao_grava_nada_do_evento(
+def test_commit_recusado_depois_das_escritas_desfaz_os_saga_comando_e_registro(
     atendimento: Atendimento, engine: Engine, broker: Broker
 ) -> None:
     ordem_id = atendimento.abrir()
-    atendimento.receber("SolicitarDiagnostico")
-    atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
-    atendimento.esperar_passo("DiagnosticoIniciado")
+    atendimento.ate_aguardando_pagamento_com_checkout()
+    antes = _estado(engine, ordem_id)
+    escritas: list[str] = []
 
-    # O GerarOrcamento nao entra na outbox: a transacao da mensagem inteira cai,
-    # tentativa apos tentativa, ate a DLQ.
-    with outbox_recusando_insert(engine):
-        concluido = atendimento.responder(
-            "SolicitarDiagnostico", "DiagnosticoConcluido"
-        )
-        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+    def registrar(_conexao: Any, _cursor: Any, sql: str, *_: Any) -> None:
+        escritas.append(sql.split("(")[0].split(" SET ")[0].strip())
 
+    # O PagamentoConfirmado muda a OS (status, resumo, historico), a saga
+    # (etapa, passo, comando em voo) e grava o AgendarExecucao; o trigger
+    # deferido so falha no COMMIT, depois de tudo isso. Tentativa apos
+    # tentativa, a transacao inteira cai, ate a DLQ.
+    with outbox_recusando_no_commit(engine):
+        event.listen(engine, "before_cursor_execute", registrar)
+        try:
+            confirmado = atendimento.responder(
+                "SolicitarPagamento", "PagamentoConfirmado"
+            )
+            esperar_ate(lambda: broker.contar(_DLQ) == 1)
+        finally:
+            event.remove(engine, "before_cursor_execute", registrar)
+
+    # A falha veio depois das escritas pendentes de OS, saga e outbox.
+    assert {
+        "UPDATE ordens_de_servico",
+        "INSERT INTO historico_status_ordem",
+        "UPDATE sagas",
+        "INSERT INTO outbox",
+    } <= set(escritas)
+    assert _estado(engine, ordem_id) == antes
     with engine.connect() as conexao:
-        processada = conexao.execute(
+        registrada = conexao.execute(
             text("SELECT count(*) FROM mensagens_processadas WHERE mensagem_id = :id"),
-            {"id": concluido["id"]},
+            {"id": confirmado["id"]},
         ).scalar_one()
-        status, itens = conexao.execute(
+    assert registrada == 0
+
+
+def _estado(engine: Engine, ordem_id: UUID) -> tuple[object, ...]:
+    """OS, historico, saga e comandos da outbox, lidos do banco."""
+    with engine.connect() as conexao:
+        os_ = conexao.execute(
             text(
-                "SELECT o.status, s.itens FROM ordens_de_servico o "
-                "JOIN sagas s ON s.ordem_id = o.id WHERE o.id = :id"
+                "SELECT status, pagamento_status, versao FROM ordens_de_servico "
+                "WHERE id = :id"
+            ),
+            {"id": ordem_id},
+        ).one()
+        historico = conexao.execute(
+            text("SELECT count(*) FROM historico_status_ordem WHERE ordem_id = :id"),
+            {"id": ordem_id},
+        ).scalar_one()
+        saga = conexao.execute(
+            text(
+                "SELECT etapa, passos, comando_em_voo, versao FROM sagas "
+                "WHERE ordem_id = :id"
             ),
             {"id": ordem_id},
         ).one()
         comandos = conexao.execute(
             text("SELECT envelope ->> 'tipo' FROM outbox ORDER BY id")
         ).scalars()
-        assert list(comandos) == ["SolicitarDiagnostico"]
-    assert (processada, status, itens) == (0, "em_diagnostico", [])
-    assert atendimento.etapa() == "aguardando_diagnostico"
-    assert atendimento.gatilhos() == ["abertura", "DiagnosticoIniciado"]
+        return (tuple(os_), historico, tuple(saga), tuple(comandos))
 
 
 @pytest.mark.parametrize(

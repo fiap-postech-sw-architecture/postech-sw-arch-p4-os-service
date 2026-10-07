@@ -154,3 +154,33 @@ def outbox_recusando_insert(engine: Engine) -> Iterator[None]:
         with engine.begin() as conexao:
             conexao.execute(text("DROP TRIGGER recusar_outbox ON outbox"))
             conexao.execute(text("DROP FUNCTION recusar_outbox()"))
+
+
+@contextmanager
+def outbox_recusando_no_commit(engine: Engine) -> Iterator[None]:
+    """Trigger DEFERIDO: o INSERT na outbox passa e o COMMIT falha.
+
+    A falha vem depois de todas as escritas da transacao (OS, saga, historico e
+    a propria linha da outbox), entao so a transacao unica desfaz tudo.
+    """
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_outbox_no_commit() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'outbox indisponivel no commit'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER recusar_outbox_no_commit "
+                "AFTER INSERT ON outbox DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_outbox_no_commit()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER recusar_outbox_no_commit ON outbox"))
+            conexao.execute(text("DROP FUNCTION recusar_outbox_no_commit()"))
