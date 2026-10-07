@@ -260,6 +260,46 @@ class TestMain:
 
         asyncio.run(_run())
 
+    def test_lifespan_liga_a_engine_das_metricas_e_a_descarta_no_fim(self) -> None:
+        """Os gauges da saga raspam por uma engine propria (uma conexao, prazos
+        curtos), criada com a URL do banco, configurada no boot e descartada no
+        shutdown; a das requisicoes e outra."""
+        app = FastAPI()
+        url = "postgresql://x:x@localhost:5432/x"
+
+        async def _run() -> None:
+            with (
+                patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_engine"
+                ) as mock_engine,
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_engine_de_metricas"
+                ) as mock_metricas,
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_engine_de_metricas"
+                ) as mock_configurar,
+                patch.dict(os.environ, {"DATABASE_URL": url}, clear=False),
+            ):
+                async with lifespan(app):
+                    mock_metricas.assert_called_once_with(url)
+                    mock_configurar.assert_called_once_with(mock_metricas.return_value)
+                    # No ar, as duas engines seguem abertas.
+                    mock_engine.return_value.dispose.assert_not_called()
+                    mock_metricas.return_value.dispose.assert_not_called()
+                mock_engine.return_value.dispose.assert_called_once_with()
+                mock_metricas.return_value.dispose.assert_called_once_with()
+
+        asyncio.run(_run())
+
     def test_lifespan_configura_session_factory_com_database_url(self) -> None:
         app = FastAPI()
         url_customizada = "postgresql://custom:custom@remote:5433/db"
