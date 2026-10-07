@@ -10,11 +10,13 @@ espelhando o contrato da ``SQLAlchemyUnitOfWork`` real). Quem nao afere
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import TracebackType
     from uuid import UUID
 
@@ -28,6 +30,8 @@ class FakeUnitOfWork:
     def __init__(self) -> None:
         self.committed = False
         self.rolled_back = False
+        # (tipo, dados, correlation_id, causation_id) de cada publicar_comando.
+        self.comandos: list[tuple[str, dict[str, Any], UUID, UUID | None]] = []
 
     def __enter__(self) -> FakeUnitOfWork:
         return self
@@ -46,6 +50,17 @@ class FakeUnitOfWork:
 
     def rollback(self) -> None:
         self.rolled_back = True
+
+    def publicar_comando(
+        self,
+        tipo: str,
+        dados: Mapping[str, Any],
+        *,
+        correlation_id: UUID,
+        causation_id: UUID | None = None,
+    ) -> UUID:
+        self.comandos.append((tipo, dict(dados), correlation_id, causation_id))
+        return uuid4()
 
 
 class RepoEmMemoria:

@@ -19,6 +19,7 @@ from prometheus_client import REGISTRY
 from sqlalchemy import text
 
 from src.compartilhado.aplicacao.mensageria import (
+    Comando,
     Desfecho,
     FalhaTransitoriaError,
     MensagemRecebida,
@@ -29,7 +30,14 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
     Consumidor,
 )
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+from src.ordem_servico.infraestrutura.repository import (
+    OrdemDeServicoSQLAlchemyRepository,
+)
 from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
+from tests.integracao.seed_helpers import (
+    criar_cliente_com_veiculo,
+    criar_ordem_recebida,
+)
 from tests.rastreamento import traceparent
 
 if TYPE_CHECKING:
@@ -39,6 +47,7 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
+    from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
     from tests.integracao.broker import Broker
     from tests.rastreamento import Rastreador
 
@@ -54,7 +63,9 @@ class Espiao:
         self.contextos: list[dict[str, Any]] = []
         self.spans: list[Any] = []
 
-    def __call__(self, mensagem: MensagemRecebida, _sessao: Session) -> Desfecho:
+    def __call__(
+        self, mensagem: MensagemRecebida, _transacao: TransacaoDaMensagem
+    ) -> Desfecho:
         self.recebidas.append(mensagem)
         self.contextos.append(structlog.contextvars.get_contextvars())
         self.spans.append(trace.get_current_span().get_span_context())
@@ -277,6 +288,188 @@ def test_erro_permanente_do_handler_vai_direto_para_a_dlq(
     assert _processadas(engine) == []
 
 
+class _Saga:
+    """Handler como o da saga: a OS vai a EM_DIAGNOSTICO e sai um GerarOrcamento.
+
+    ``depois`` roda dentro do handler, depois do efeito e do comando.
+    """
+
+    def __init__(self, depois: Callable[[TransacaoDaMensagem], Any]) -> None:
+        self.chamadas = 0
+        self._depois = depois
+
+    def __call__(
+        self, mensagem: MensagemRecebida, transacao: TransacaoDaMensagem
+    ) -> Any:  # um dos casos devolve o que nao e Desfecho
+        self.chamadas += 1
+        ordens = OrdemDeServicoSQLAlchemyRepository(session=transacao.session)
+        ordem = ordens.obter_por_id(mensagem.correlation_id)
+        assert ordem is not None
+        ordem.registrar_diagnostico_iniciado()
+        ordens.salvar(ordem)
+        transacao.publicar_comando(
+            Comando.GERAR_ORCAMENTO,
+            {
+                "ordem_id": ordem.id,
+                "itens": [{"tipo": "servico", "codigo": "SRV-01", "quantidade": 1}],
+            },
+            correlation_id=ordem.id,
+            causation_id=mensagem.id,
+        )
+        return self._depois(transacao)
+
+
+def _ordem_recebida(session_factory: sessionmaker[Session]) -> UUID:
+    with session_factory() as sessao:
+        cliente = criar_cliente_com_veiculo(sessao)
+        ordem = criar_ordem_recebida(
+            sessao, cliente_id=cliente.id, veiculo_id=cliente.veiculos[0].id
+        )
+        sessao.commit()
+    return ordem.id
+
+
+def _gravado(engine: Engine, ordem_id: UUID) -> Any:
+    """Status da OS, linhas da outbox e de processadas, e o xmin de cada uma."""
+    with engine.connect() as conexao:
+        return conexao.execute(
+            text(
+                "SELECT o.status, o.xmin::text AS xmin_os, "
+                "(SELECT count(*) FROM outbox) AS comandos, "
+                "(SELECT min(xmin::text) FROM outbox) AS xmin_comando, "
+                "(SELECT count(*) FROM mensagens_processadas) AS processadas, "
+                "(SELECT min(xmin::text) FROM mensagens_processadas) "
+                "AS xmin_processada "
+                "FROM ordens_de_servico o WHERE o.id = :id"
+            ),
+            {"id": ordem_id},
+        ).one()
+
+
+def test_efeito_comando_e_registro_da_mensagem_entram_num_commit_so_do_consumidor(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+) -> None:
+    ordem_id = _ordem_recebida(session_factory)
+    saga = _Saga(depois=lambda _t: Desfecho.PROCESSADA)
+    envelope = envelope_de_evento("DiagnosticoIniciado", correlation_id=ordem_id)
+
+    with EmSegundoPlano(consumidor(saga)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _gravado(engine, ordem_id).processadas == 1)
+
+    gravado = _gravado(engine, ordem_id)
+    assert (gravado.status, gravado.comandos) == ("em_diagnostico", 1)
+    # Mesmo xmin: as tres linhas sao da mesma transacao.
+    assert gravado.xmin_os == gravado.xmin_comando == gravado.xmin_processada
+    with engine.connect() as conexao:
+        comando = conexao.execute(text("SELECT envelope FROM outbox")).scalar_one()
+    assert comando["tipo"] == "GerarOrcamento"
+    assert comando["causation_id"] == envelope["id"]
+
+
+@pytest.fixture
+def commit_que_falha_uma_vez(engine: Engine) -> Iterator[None]:
+    """O banco recusa o primeiro commit que leva uma linha da outbox.
+
+    Constraint trigger adiada: o erro (40001, transitorio) vem no COMMIT, depois
+    de o handler ja ter gravado efeito e comando na transacao.
+    """
+    with engine.begin() as conexao:
+        conexao.execute(text("CREATE SEQUENCE falha_no_commit"))
+        conexao.execute(
+            text(
+                "CREATE FUNCTION falhar_no_primeiro_commit() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN "
+                "IF nextval('falha_no_commit') = 1 THEN "
+                "RAISE EXCEPTION 'falha no commit' USING ERRCODE = '40001'; END IF; "
+                "RETURN NULL; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER falha_no_commit AFTER INSERT ON outbox "
+                "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+                "EXECUTE FUNCTION falhar_no_primeiro_commit()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            conexao.execute(text("DROP TRIGGER falha_no_commit ON outbox"))
+            conexao.execute(text("DROP FUNCTION falhar_no_primeiro_commit()"))
+            conexao.execute(text("DROP SEQUENCE falha_no_commit"))
+
+
+@pytest.mark.usefixtures("commit_que_falha_uma_vez")
+def test_falha_no_commit_depois_do_handler_desfaz_tudo_e_a_mensagem_volta_pela_retry(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+) -> None:
+    ordem_id = _ordem_recebida(session_factory)
+    saga = _Saga(depois=lambda _t: Desfecho.PROCESSADA)
+    envelope = envelope_de_evento("DiagnosticoIniciado", correlation_id=ordem_id)
+    retries = _consumidas("DiagnosticoIniciado", "retry")
+
+    with EmSegundoPlano(consumidor(saga)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _gravado(engine, ordem_id).processadas == 1)
+
+    gravado = _gravado(engine, ordem_id)
+    # A primeira passada foi desfeita inteira: uma transicao e um comando so.
+    assert saga.chamadas == 2
+    assert (gravado.status, gravado.comandos) == ("em_diagnostico", 1)
+    assert _consumidas("DiagnosticoIniciado", "retry") == retries + 1
+    with engine.connect() as conexao:
+        transicoes = conexao.execute(
+            text("SELECT count(*) FROM historico_status_ordem WHERE ordem_id = :id"),
+            {"id": ordem_id},
+        ).scalar_one()
+    assert transicoes == 2  # abertura (RECEBIDA) e EM_DIAGNOSTICO
+
+
+@pytest.mark.parametrize(
+    ("depois", "motivo"),
+    [
+        pytest.param(lambda t: t.session.commit(), "commit", id="handler-comita"),
+        pytest.param(
+            lambda t: (t.session.rollback(), Desfecho.PROCESSADA)[1],
+            "rollback",
+            id="handler-encerra-a-transacao",
+        ),
+        pytest.param(lambda _t: None, "desfecho", id="handler-devolve-nada"),
+    ],
+)
+def test_handler_que_comita_encerra_a_transacao_ou_nao_devolve_desfecho_vai_para_a_dlq(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    depois: Callable[[TransacaoDaMensagem], Any],
+    motivo: str,
+) -> None:
+    ordem_id = _ordem_recebida(session_factory)
+    saga = _Saga(depois=depois)
+    envelope = envelope_de_evento("DiagnosticoIniciado", correlation_id=ordem_id)
+
+    with EmSegundoPlano(consumidor(saga)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+
+    gravado = _gravado(engine, ordem_id)
+    assert saga.chamadas == 1, motivo
+    assert (gravado.status, gravado.comandos, gravado.processadas) == (
+        "recebida",
+        0,
+        0,
+    )
+
+
 @pytest.mark.parametrize(
     ("descricao", "montar"),
     [
@@ -392,7 +585,7 @@ def test_encerramento_conclui_a_mensagem_em_curso_e_devolve_as_pre_buscadas(
     em_curso = threading.Event()
     liberar = threading.Event()
 
-    def lento(mensagem: MensagemRecebida, _sessao: Session) -> Desfecho:
+    def lento(mensagem: MensagemRecebida, _transacao: TransacaoDaMensagem) -> Desfecho:
         em_curso.set()
         liberar.wait(10)
         return Desfecho.PROCESSADA

@@ -30,12 +30,14 @@ from src.compartilhado.infraestrutura.observability import criar_tracer
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from sqlalchemy.orm import Session
+    from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 
 _log = structlog.get_logger(__name__)
 
 
-def registrar_recebimento(mensagem: MensagemRecebida, _sessao: Session) -> Desfecho:
+def registrar_recebimento(
+    mensagem: MensagemRecebida, _transacao: TransacaoDaMensagem
+) -> Desfecho:
     """Handler provisorio: so registra o recebimento (sem texto livre nem PII)."""
     _log.info(
         "event received",

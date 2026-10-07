@@ -9,8 +9,10 @@ Para cada mensagem, na ordem:
 2. Trace: o span CONSUMER e filho do contexto que veio nos headers.
 3. Contrato: envelope e ``dados`` validados pelo schema do ``tipo``; leitor
    tolerante (campo extra passa), ``versao`` desconhecida reprova.
-4. Efeito: na mesma transacao, grava ``mensagens_processadas`` e chama o
-   handler do ``tipo``; ``id`` repetido recebe ack sem efeito.
+4. Efeito: grava ``mensagens_processadas`` e chama o handler do ``tipo`` com
+   a ``TransacaoDaMensagem``; o handler grava efeito e comandos nela, e o
+   consumidor comita tudo uma vez (o handler nao comita nem encerra a
+   transacao). ``id`` repetido recebe ack sem efeito.
 
 Erro transitorio (banco fora, ``FalhaTransitoriaError``, conflito de versao):
 copia em ``pytstop.retry``, com confirm, e so entao o ack da original. A
@@ -37,7 +39,7 @@ import structlog
 from opentelemetry.trace import SpanKind, StatusCode
 from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.compartilhado.aplicacao.mensageria import (
@@ -65,6 +67,7 @@ from src.compartilhado.infraestrutura.outbox_mapping import (
     apagar_em_lotes,
     registrar_processada,
 )
+from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 
 if TYPE_CHECKING:
     import threading
@@ -84,7 +87,7 @@ MENSAGENS_CONSUMIDAS: Final = Counter(
     ["tipo", "resultado"],
 )
 
-type Handler = Callable[[MensagemRecebida, Session], Desfecho]
+type Handler = Callable[[MensagemRecebida, TransacaoDaMensagem], Desfecho]
 
 # Fila de retry de cada tentativa (`os.eventos.retry.<nivel>`, TTL no
 # definitions.json do platform); depois da quinta, DLQ.
@@ -320,12 +323,18 @@ class Consumidor:
         handler = self._despachante.get(tipo)
         if handler is None:
             raise _MensagemRejeitadaError("sem_handler")
+        return self._aplicar(handler, mensagem)
+
+    def _aplicar(self, handler: Handler, mensagem: MensagemRecebida) -> str:
+        """Handler e ``mensagens_processadas`` numa transacao so, comitada aqui."""
         with self._session_factory() as sessao:
             if not registrar_processada(sessao, mensagem.id):
                 _log.info("duplicate message acknowledged without effect")
                 return "duplicada"
+            transacao = sessao.get_transaction()
+            event.listen(sessao, "before_commit", _recusar_commit)
             try:
-                desfecho = handler(mensagem, sessao)
+                desfecho = handler(mensagem, TransacaoDaMensagem(sessao))
             except _TRANSITORIOS:
                 raise
             except Exception as exc:
@@ -335,6 +344,16 @@ class Consumidor:
                 raise _MensagemRejeitadaError(
                     "erro_no_handler", erro=type(exc).__name__, onde=onde(exc)
                 ) from exc
+            finally:
+                event.remove(sessao, "before_commit", _recusar_commit)
+            # Antes do commit: com um bug aqui nada do efeito fica gravado e o
+            # redrive da DLQ repete a mensagem.
+            if not isinstance(desfecho, Desfecho):
+                raise _MensagemRejeitadaError("desfecho_invalido")
+            if sessao.get_transaction() is not transacao:
+                # Rollback (ou close) no handler: o registro da mensagem se foi
+                # e o que veio depois estaria numa transacao propria.
+                raise _MensagemRejeitadaError("transacao_encerrada_pelo_handler")
             sessao.commit()
         return desfecho.value
 
@@ -414,3 +433,9 @@ class Consumidor:
             return
         if apagadas:
             _log.info("old processed messages deleted", linhas=apagadas)
+
+
+def _recusar_commit(_sessao: Session) -> None:
+    """Commit pedido pelo handler: o consumidor comita, junto com o registro."""
+    msg = "o handler nao comita: o consumidor comita com mensagens_processadas"
+    raise RuntimeError(msg)

@@ -1,13 +1,16 @@
 """O que a aplicacao enxerga da mensageria (RFC-004 secao 5, ADR-036).
 
 O consumidor entrega ao handler do ``tipo`` uma ``MensagemRecebida`` ja
-conferida (produtor, envelope e schema do contrato) e espera um ``Desfecho``.
-Voltam pela fila de retry: ``FalhaTransitoriaError``, conflito de versao
-(``ConflitoDeConcorrenciaException``), erro de banco (``SQLAlchemyError``),
-``TimeoutError`` e ``ConnectionError``; qualquer outra excecao do handler e erro
-permanente e manda a mensagem para a DLQ. Para publicar um comando, o caso de
-uso chama ``UnitOfWork.publicar_comando``: a linha vai para a outbox na mesma
-transacao do efeito, e mensagem fora do contrato levanta
+conferida (produtor, envelope e schema do contrato) e a transacao da mensagem,
+e espera um ``Desfecho``. O handler grava o efeito e os comandos
+(``PublicadorDeComandos.publicar_comando``) nessa transacao, e quem comita e o
+consumidor, uma vez, junto com ``mensagens_processadas``: efeito, comandos e o
+registro da mensagem entram juntos ou nao entram. Voltam pela fila de retry:
+``FalhaTransitoriaError``, conflito de versao (``ConflitoDeConcorrenciaException``),
+erro de banco (``SQLAlchemyError``), ``TimeoutError`` e ``ConnectionError``;
+qualquer outra excecao do handler e erro permanente e manda a mensagem para a
+DLQ. Fora do consumidor (API, prazos), o caso de uso publica pela
+``UnitOfWork``, que comita. Comando fora do contrato levanta
 ``ContratoInvalidoError``.
 """
 
@@ -47,6 +50,22 @@ class MensagemRecebida:
             ocorrido_em=datetime.fromisoformat(envelope["ocorrido_em"]),
             dados=envelope["dados"],
         )
+
+
+class Comando(StrEnum):
+    """Os comandos que o OS publica (RFC-004 secao 5.3); o valor e o ``tipo``."""
+
+    SOLICITAR_DIAGNOSTICO = "SolicitarDiagnostico"
+    DESCARTAR_DIAGNOSTICO = "DescartarDiagnostico"
+    GERAR_ORCAMENTO = "GerarOrcamento"
+    CANCELAR_ORCAMENTO = "CancelarOrcamento"
+    RESERVAR_PECAS = "ReservarPecas"
+    LIBERAR_RESERVA = "LiberarReserva"
+    SOLICITAR_PAGAMENTO = "SolicitarPagamento"
+    ESTORNAR_PAGAMENTO = "EstornarPagamento"
+    AGENDAR_EXECUCAO = "AgendarExecucao"
+    CANCELAR_EXECUCAO = "CancelarExecucao"
+    ANONIMIZAR_VEICULO = "AnonimizarVeiculo"
 
 
 class Desfecho(StrEnum):

@@ -746,7 +746,7 @@ def test_consumo_cancelado_pelo_broker_reconecta_e_segue(
     conexoes.extend([(ConexaoFalsa(), _CanalCancelado()), (ConexaoFalsa(), canal)])
     recebidas: list[Any] = []
 
-    def registrar(mensagem: Any, _sessao: Any) -> Desfecho:
+    def registrar(mensagem: Any, _transacao: Any) -> Desfecho:
         recebidas.append(mensagem.id)
         return Desfecho.PROCESSADA
 
@@ -838,6 +838,7 @@ def test_mensagem_ignorada_recebe_ack_e_fica_registrada(
 
 
 def test_falha_inesperada_vai_para_a_dlq_sem_derrubar_o_consumidor(
+    engine: Engine,
     session_factory: sessionmaker[Session],
     conexoes: list[Any],
     rastreador: Rastreador,
@@ -862,6 +863,12 @@ def test_falha_inesperada_vai_para_a_dlq_sem_derrubar_o_consumidor(
 
     assert canal.rejeitadas == [1]
     assert canal.confirmadas == [2]
+    # A venenosa nao ficou registrada: o redrive da DLQ a processa de novo.
+    with engine.connect() as conexao:
+        registradas = conexao.execute(
+            text("SELECT mensagem_id FROM mensagens_processadas")
+        ).scalars()
+        assert [str(m) for m in registradas] == [seguinte["id"]]
 
 
 @pytest.fixture

@@ -139,7 +139,8 @@ class Catalogo:
         self.destino(tipo)
         envelope = {
             "id": str(uuid4()),
-            "tipo": tipo,
+            # O Comando e StrEnum: no JSON vai so o texto.
+            "tipo": str(tipo),
             "versao": VERSAO,
             "origem": ORIGEM,
             "correlation_id": str(correlation_id),
