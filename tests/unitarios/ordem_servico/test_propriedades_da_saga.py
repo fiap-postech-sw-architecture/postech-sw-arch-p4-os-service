@@ -25,7 +25,9 @@ from __future__ import annotations
 import heapq
 import itertools
 import random
+from collections import Counter
 from dataclasses import dataclass, field
+from functools import cache
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -35,6 +37,7 @@ from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaExceptio
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
 from src.ordem_servico.aplicacao.use_cases import CancelarOrdem, RegistrarEntrega
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
 from tests.fabricas import ATOR_ATENDENTE
 from tests.unitarios.fakes import FakeUnitOfWork
@@ -91,6 +94,8 @@ class Simulacao:
     sequencia: itertools.count[int] = field(default_factory=itertools.count)
     entregas: list[str] = field(default_factory=list)
     adiantados: int = 0
+    # Como cada entrega se classificou na etapa em que chegou.
+    classificacoes: Counter[str] = field(default_factory=Counter)
     dlq: list[str] = field(default_factory=list)
     # (acao, etapa da saga na tentativa, se passou)
     encerramentos: list[tuple[str, EtapaSaga, bool]] = field(default_factory=list)
@@ -148,6 +153,8 @@ class Simulacao:
             instante, _, tipo, mensagem, copias = heapq.heappop(self.agenda)
             mensagem = mensagem or cenario.evento(tipo)
             self.entregas.append(tipo)
+            marcos = MarcosDaOrdem.da_ordem(cenario.ordem)
+            self.classificacoes[cenario.saga.classificar(tipo, marcos).value] += 1
             antes = _foto(cenario)
             try:
                 tratamento = cenario.orquestrador.tratar(mensagem)
@@ -209,7 +216,9 @@ def _conferir_estado(cenario: CenarioDaSaga) -> None:
     assert ordem.status not in ESTADOS_TERMINAIS or saga.encerrada
 
 
+@cache
 def _simular(semente: int) -> Simulacao:
+    """Uma simulacao por semente, a mesma para a propriedade e para a guarda."""
     rnd = random.Random(semente)  # noqa: S311  # roteiro de teste, nao segredo
     simulacao = Simulacao(CenarioDaSaga(), rnd)
     simulacao.rodar()
@@ -237,20 +246,31 @@ def test_fora_de_ordem_nao_quebra_a_saga_nem_vai_para_a_dlq(semente: int) -> Non
     ]
 
 
-def test_simulacao_produz_fora_de_ordem_repetidos_e_retry() -> None:
-    # Guarda do gerador: as sementes produzem de fato o que a propriedade promete.
-    simulacoes = [_simular(s) for s in range(200)]
-    fora_de_ordem = sum(1 for s in simulacoes if s.entregas[:10] != list(FLUXO_FELIZ))
-    repetidos = sum(1 for s in simulacoes if len(set(s.entregas)) < len(s.entregas))
-    com_retry = sum(1 for s in simulacoes if s.adiantados)
-    # Tentativas de encerrar a OS com a saga em andamento, todas recusadas.
+def test_gerador_produz_cada_situacao_da_classificacao() -> None:
+    # Guarda do gerador: nas mil sementes, as entregas caem em cada situacao da
+    # RFC-004 secao 4.5 que a propriedade promete exercitar. Medido com este
+    # gerador: obsoleto 1.128 (629 sementes), repetido 63 (62), fora do fluxo
+    # 1.820 (822) e adiantado 3.509 (901). Sem republicacao com id novo, nao ha
+    # obsoleto nem repetido; sem os atrasos longos, o obsoleto cai a 476 e o
+    # adiantado a 1.946; com as emissoes do mesmo passo simultaneas, o
+    # adiantado sobe a 5.015 e passa a dominar.
+    simulacoes = [_simular(s) for s in SEMENTES]
+    total: Counter[str] = sum((s.classificacoes for s in simulacoes), Counter())
+    sementes = Counter(c for s in simulacoes for c in s.classificacoes)
+    assert total["obsoleto"] > 700
+    assert sementes["obsoleto"] > 400
+    assert total["repetido"] > 40
+    assert sementes["repetido"] > 40
+    assert total["fora_do_fluxo"] > 1200
+    assert sementes["fora_do_fluxo"] > 600
+    assert 2500 < total["adiantado"] < 4500
+    assert sementes["adiantado"] > 800
+    assert sum(1 for s in simulacoes if s.dlq) == 0
+    # Tentativas de cancelar a OS com a saga em andamento, todas recusadas.
     cancelamentos_com_saga_viva = sum(
         1
         for s in simulacoes
-        for acao, etapa, _ in s.encerramentos
-        if acao == "cancelar" and etapa is not EtapaSaga.CONCLUIDA
+        for acao, etapa, ok in s.encerramentos
+        if acao == "cancelar" and etapa is not EtapaSaga.CONCLUIDA and not ok
     )
-    assert fora_de_ordem > 150
-    assert repetidos > 150
-    assert com_retry > 100
-    assert cancelamentos_com_saga_viva > 100
+    assert cancelamentos_com_saga_viva > 400
