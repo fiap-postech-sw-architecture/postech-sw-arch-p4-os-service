@@ -4,7 +4,7 @@
   "versao": 1,
   "origem": "execution-service",
   "correlation_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
-  "causation_id": null,
+  "causation_id": "9679cd4d-e061-4e62-b1cb-5430bfa40a03",
   "ocorrido_em": "2026-10-06T15:00:00Z",
   "dados": {
     "ordem_id": "495db021-ac8d-4a7e-94d1-734c7eab475c",
