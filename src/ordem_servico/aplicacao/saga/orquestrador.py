@@ -31,13 +31,15 @@ from src.compartilhado.aplicacao.mensageria import (
 )
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
-from src.ordem_servico.aplicacao.saga.saga import (
-    COMANDOS_COM_PRAZO,
-    Classificacao,
+from src.ordem_servico.aplicacao.saga.modelo import (
     Envio,
     EtapaSaga,
     SagaNaoEncontradaException,
     itens_do_diagnostico,
+)
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    COMANDOS_COM_PRAZO,
+    Classificacao,
 )
 
 if TYPE_CHECKING:

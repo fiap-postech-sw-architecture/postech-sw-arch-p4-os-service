@@ -13,15 +13,15 @@ from uuid import uuid4
 import pytest
 
 from src.compartilhado.aplicacao.mensageria import Comando
-from src.ordem_servico.aplicacao.saga.saga import (
-    Classificacao,
+from src.ordem_servico.aplicacao.saga.modelo import (
     Envio,
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
-    Saga,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
 )
+from src.ordem_servico.aplicacao.saga.saga import Saga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
 from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em

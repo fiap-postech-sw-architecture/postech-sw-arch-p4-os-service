@@ -44,7 +44,8 @@ from sqlalchemy.orm import composite, registry, relationship
 
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.infraestrutura.database import metadata
-from src.ordem_servico.aplicacao.saga.saga import EtapaSaga, Saga
+from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.historico import MudancaDeStatus, OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import (
     TAMANHO_MAXIMO_DESCRICAO,

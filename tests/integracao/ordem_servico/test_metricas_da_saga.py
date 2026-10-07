@@ -12,12 +12,9 @@ from sqlalchemy import update
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.ordem_servico.aplicacao.saga.saga import (
-    ETAPAS_NAO_FINAIS,
-    Envio,
-    EtapaSaga,
-    Saga,
-)
+from src.ordem_servico.aplicacao.saga.modelo import Envio, EtapaSaga
+from src.ordem_servico.aplicacao.saga.saga import Saga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPAS_NAO_FINAIS
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 from src.ordem_servico.infraestrutura.metricas_da_saga import ColetorDaSaga
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository

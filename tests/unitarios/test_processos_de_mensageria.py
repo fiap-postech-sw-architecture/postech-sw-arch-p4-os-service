@@ -15,11 +15,11 @@ import src.relay as processo_relay
 from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
+from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
     Tratamento,
 )
-from src.ordem_servico.aplicacao.saga.saga import EtapaSaga
 
 if TYPE_CHECKING:
     from tests.rastreamento import Rastreador

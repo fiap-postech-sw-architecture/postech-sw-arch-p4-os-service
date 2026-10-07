@@ -32,7 +32,7 @@ from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
     OrquestradorDaSaga,
 )
-from src.ordem_servico.aplicacao.saga.saga import ETAPA_ESPERADA
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
     SagaSQLAlchemyRepository,

@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaError
-from src.ordem_servico.aplicacao.saga.saga import COMANDOS_COM_PRAZO, EtapaSaga
+from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.unitarios.ordem_servico.cenario_da_saga import FLUXO_FELIZ, CenarioDaSaga
 

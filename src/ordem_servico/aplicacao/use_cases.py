@@ -28,11 +28,8 @@ from src.ordem_servico.aplicacao.dtos import (
     ResumoPagamentoDTO,
     SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.saga import (
-    Envio,
-    Saga,
-    SagaNaoEncontradaException,
-)
+from src.ordem_servico.aplicacao.saga.modelo import Envio, SagaNaoEncontradaException
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.exceptions import (
     ClienteNaoEncontradoException,
     OrdemNaoEncontradaException,

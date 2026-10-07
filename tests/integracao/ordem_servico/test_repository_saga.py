@@ -11,7 +11,8 @@ from sqlalchemy import text
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.ordem_servico.aplicacao.saga.saga import Envio, EtapaSaga, Saga
+from src.ordem_servico.aplicacao.saga.modelo import Envio, EtapaSaga
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
 from tests.eventos import evento
 from tests.integracao.seed_helpers import (

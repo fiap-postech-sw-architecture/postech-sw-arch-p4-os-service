@@ -20,7 +20,8 @@ from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
-from src.ordem_servico.aplicacao.saga.saga import Envio, Saga
+from src.ordem_servico.aplicacao.saga.modelo import Envio
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,

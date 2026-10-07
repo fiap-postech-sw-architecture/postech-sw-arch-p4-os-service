@@ -11,8 +11,10 @@ from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
+from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
-from src.ordem_servico.aplicacao.saga.saga import Classificacao, EtapaSaga, Saga
+from src.ordem_servico.aplicacao.saga.saga import Saga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
 from src.ordem_servico.aplicacao.use_cases import AbrirOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento

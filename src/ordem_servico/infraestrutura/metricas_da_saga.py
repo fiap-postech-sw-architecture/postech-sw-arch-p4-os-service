@@ -25,12 +25,12 @@ from sqlalchemy import event, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from src.ordem_servico.aplicacao.saga.saga import (
-    ETAPAS_NAO_FINAIS,
+from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
     SagaIniciadaEvent,
 )
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPAS_NAO_FINAIS
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 
 if TYPE_CHECKING:

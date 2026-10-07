@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from decimal import Decimal
     from uuid import UUID
 
-    from src.ordem_servico.aplicacao.saga.saga import Passo
+    from src.ordem_servico.aplicacao.saga.modelo import Passo
 
 
 @dataclass(frozen=True, slots=True)

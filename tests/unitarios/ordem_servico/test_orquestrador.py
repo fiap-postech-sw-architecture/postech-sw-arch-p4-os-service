@@ -20,13 +20,13 @@ from src.compartilhado.dominio.exceptions import (
     ViolacaoRegraDeNegocioException,
 )
 from src.ordem_servico.aplicacao.saga import orquestrador as modulo
+from src.ordem_servico.aplicacao.saga.modelo import (
+    EtapaSaga,
+    SagaNaoEncontradaException,
+)
 from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
     Tratamento,
-)
-from src.ordem_servico.aplicacao.saga.saga import (
-    EtapaSaga,
-    SagaNaoEncontradaException,
 )
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem

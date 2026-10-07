@@ -22,7 +22,7 @@ from src.ordem_servico.aplicacao.dtos import (
     ComandoEmVooDTO,
     SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.saga import SagaNaoEncontradaException
+from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,
