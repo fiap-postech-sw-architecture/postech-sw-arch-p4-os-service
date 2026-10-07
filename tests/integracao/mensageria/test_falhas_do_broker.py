@@ -101,9 +101,6 @@ class CanalFalso:
                 time.sleep(inactivity_timeout)
                 yield None, None, None
 
-    def cancel(self) -> int:
-        return 0
-
     def basic_ack(self, delivery_tag: int) -> None:
         self.confirmadas.append(delivery_tag)
 

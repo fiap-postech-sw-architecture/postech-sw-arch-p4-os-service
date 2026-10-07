@@ -162,8 +162,8 @@ class Consumidor:
         """Laco principal; queda do broker nao derruba o processo.
 
         Encerramento gracioso: com o ``parar`` sinalizado, conclui a mensagem em
-        curso, cancela o consumo (as mensagens pre-buscadas voltam para a fila)
-        e fecha a conexao.
+        curso e fecha a conexao; o broker devolve a fila as pre-buscadas sem
+        ack.
         """
         _log.info("consumer started", fila=FILA, prefetch=self._config.prefetch)
         try:
