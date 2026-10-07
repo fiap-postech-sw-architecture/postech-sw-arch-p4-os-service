@@ -159,12 +159,14 @@ class TestCicloDaOrdem:
         assert cancelada.json()["versao"] == 2
 
         historico = api_client.get(f"{_OS}/{ordem_id}/historico", headers=headers)
+        # O ator de cada linha e o sub do JWT de quem agiu (RFC-004 secao 7.2).
+        sub = str(admin_user.id)
         assert [
-            (m["de"], m["para"], m["origem"], m["motivo"])
+            (m["de"], m["para"], m["origem"], m["motivo"], m["ator"])
             for m in historico.json()["mudancas"]
         ] == [
-            (None, "recebida", "atendimento", None),
-            ("recebida", "cancelada", "atendimento", "cliente desistiu"),
+            (None, "recebida", "atendimento", None, sub),
+            ("recebida", "cancelada", "atendimento", "cliente desistiu", sub),
         ]
 
         de_novo = api_client.post(
@@ -205,7 +207,7 @@ class TestCicloDaOrdem:
         corpo = entregue.json()
         assert corpo["situacao"] == "Entregue"
         assert corpo["orcamento"]["total"] == "350.00"
-        assert corpo["pagamento"]["status"] == "solicitado"
+        assert corpo["pagamento"]["status"] == "confirmado"
 
         mudancas = api_client.get(
             f"{_OS}/{ordem_id}/historico", headers=headers

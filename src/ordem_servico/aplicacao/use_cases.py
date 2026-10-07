@@ -84,6 +84,7 @@ def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
                 para=m.para.value,
                 origem=m.origem.value,
                 motivo=m.motivo,
+                ator=m.ator,
                 ocorrido_em=m.ocorrido_em,
             )
             for m in ordem.historico
@@ -131,6 +132,7 @@ class AbrirOrdem:
             cliente_id=dto.cliente_id,
             veiculo_id=dto.veiculo_id,
             descricao_problema=dto.descricao_problema,
+            ator=dto.ator,
         )
         with self._uow:
             self._repo.salvar(ordem)
@@ -189,8 +191,10 @@ class CancelarOrdem:
         self._repo = repo
         self._uow = uow
 
-    def executar(self, ordem_id: UUID, motivo: str) -> OrdemDeServicoDTO:
-        """Cancela a ordem com origem ATENDIMENTO.
+    def executar(
+        self, ordem_id: UUID, motivo: str, *, ator: str | None
+    ) -> OrdemDeServicoDTO:
+        """Cancela a ordem com origem ATENDIMENTO; ``ator`` e o sub do JWT.
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
@@ -202,7 +206,7 @@ class CancelarOrdem:
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
-            ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO)
+            ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
         return _ordem_dto(ordem)
@@ -215,8 +219,8 @@ class RegistrarEntrega:
         self._repo = repo
         self._uow = uow
 
-    def executar(self, ordem_id: UUID) -> OrdemDeServicoDTO:
-        """Registra a entrega com origem ATENDIMENTO.
+    def executar(self, ordem_id: UUID, *, ator: str | None) -> OrdemDeServicoDTO:
+        """Registra a entrega com origem ATENDIMENTO; ``ator`` e o sub do JWT.
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
@@ -225,7 +229,7 @@ class RegistrarEntrega:
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
-            ordem.registrar_entrega()
+            ordem.registrar_entrega(ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
         return _ordem_dto(ordem)

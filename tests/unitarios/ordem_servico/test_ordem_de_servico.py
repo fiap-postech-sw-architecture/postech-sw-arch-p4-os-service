@@ -28,6 +28,8 @@ from src.ordem_servico.dominio.ordem_de_servico import (
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import (
+    ATOR_ATENDENTE,
+    ATOR_PROCESSO,
     CHECKOUT_URL,
     EXPIRA_EM,
     LINK_DECISAO,
@@ -47,6 +49,7 @@ def _orcamento(ordem: OrdemDeServico, link_decisao: str = LINK_DECISAO) -> None:
         total=TOTAL,
         link_decisao=link_decisao,
         valido_ate=VALIDO_ATE,
+        ator=ATOR_PROCESSO,
     )
 
 
@@ -59,14 +62,22 @@ def _pagamento(ordem: OrdemDeServico, checkout_url: str = CHECKOUT_URL) -> None:
     )
 
 
-# (nome, fato, estado de origem, estado de destino, origem do historico)
-FATOS: list[tuple[str, Callable[[OrdemDeServico], None], S, S, OM]] = [
+def _aguardando_pagamento_sem_resumo() -> OrdemDeServico:
+    """``PecasReservadas`` aplicado e ``PagamentoSolicitado`` ainda nao."""
+    ordem = ordem_em(S.AGUARDANDO_APROVACAO)
+    ordem.registrar_pecas_reservadas(ator=ATOR_PROCESSO)
+    return ordem
+
+
+# (nome, fato, estado de origem, estado de destino, origem e ator do historico)
+FATOS: list[tuple[str, Callable[[OrdemDeServico], None], S, S, OM, str]] = [
     (
         "diagnostico_iniciado",
-        OrdemDeServico.registrar_diagnostico_iniciado,
+        lambda o: o.registrar_diagnostico_iniciado(ator=ATOR_PROCESSO),
         S.RECEBIDA,
         S.EM_DIAGNOSTICO,
         OM.EXECUCAO,
+        ATOR_PROCESSO,
     ),
     (
         "orcamento_gerado",
@@ -74,41 +85,53 @@ FATOS: list[tuple[str, Callable[[OrdemDeServico], None], S, S, OM]] = [
         S.EM_DIAGNOSTICO,
         S.AGUARDANDO_APROVACAO,
         OM.BILLING,
+        ATOR_PROCESSO,
     ),
     (
-        "pagamento_solicitado",
-        _pagamento,
+        "pecas_reservadas",
+        lambda o: o.registrar_pecas_reservadas(ator=ATOR_PROCESSO),
         S.AGUARDANDO_APROVACAO,
         S.AGUARDANDO_PAGAMENTO,
-        OM.BILLING,
+        OM.EXECUCAO,
+        ATOR_PROCESSO,
     ),
     (
-        "aguardando_execucao",
-        OrdemDeServico.registrar_aguardando_execucao,
+        "pagamento_confirmado",
+        lambda o: o.registrar_pagamento_confirmado(ator=ATOR_PROCESSO),
         S.AGUARDANDO_PAGAMENTO,
         S.AGUARDANDO_EXECUCAO,
-        OM.EXECUCAO,
+        OM.BILLING,
+        ATOR_PROCESSO,
     ),
     (
         "execucao_iniciada",
-        OrdemDeServico.registrar_execucao_iniciada,
+        lambda o: o.registrar_execucao_iniciada(ator=ATOR_PROCESSO),
         S.AGUARDANDO_EXECUCAO,
         S.EM_EXECUCAO,
         OM.EXECUCAO,
+        ATOR_PROCESSO,
     ),
-    ("finalizar", OrdemDeServico.finalizar, S.EM_EXECUCAO, S.FINALIZADA, OM.EXECUCAO),
+    (
+        "finalizar",
+        lambda o: o.finalizar(ator=ATOR_PROCESSO),
+        S.EM_EXECUCAO,
+        S.FINALIZADA,
+        OM.EXECUCAO,
+        ATOR_PROCESSO,
+    ),
     (
         "entrega",
-        OrdemDeServico.registrar_entrega,
+        lambda o: o.registrar_entrega(ator=ATOR_ATENDENTE),
         S.FINALIZADA,
         S.ENTREGUE,
         OM.ATENDIMENTO,
+        ATOR_ATENDENTE,
     ),
 ]
 
 FATOS_ILEGAIS = [
     pytest.param(fato, estado, id=f"{nome}-em-{estado.value}")
-    for nome, fato, de, _para, _origem in FATOS
+    for nome, fato, de, _para, _origem, _ator in FATOS
     for estado in S
     if estado is not de
 ]
@@ -143,6 +166,7 @@ class TestAbertura:
             cliente_id=cliente_id,
             veiculo_id=veiculo_id,
             descricao_problema="  Motor falhando na partida  ",
+            ator=ATOR_ATENDENTE,
         )
 
         assert ordem.status is S.RECEBIDA
@@ -157,6 +181,7 @@ class TestAbertura:
         (abertura,) = ordem.historico
         assert (abertura.sequencia, abertura.de, abertura.para) == (1, None, S.RECEBIDA)
         assert abertura.origem is OM.ATENDIMENTO
+        assert abertura.ator == ATOR_ATENDENTE
         assert abertura.motivo is None
         assert abertura.ocorrido_em == ordem.criado_em
         assert ordem.coletar_eventos() == [
@@ -211,6 +236,7 @@ class TestAbertura:
             "cliente_id": uuid4(),
             "veiculo_id": uuid4(),
             "descricao_problema": "x",
+            "ator": ATOR_ATENDENTE,
             campo: None,
         }
         with pytest.raises(ValorInvalidoException, match=f"{campo} e obrigatorio"):
@@ -224,8 +250,8 @@ class TestAbertura:
 
 class TestFatosDaSaga:
     @pytest.mark.parametrize(
-        ("fato", "de", "para", "origem"),
-        [pytest.param(f, d, p, o, id=n) for n, f, d, p, o in FATOS],
+        ("fato", "de", "para", "origem", "ator"),
+        [pytest.param(f, d, p, o, a, id=n) for n, f, d, p, o, a in FATOS],
     )
     def test_fato_legal_transiciona_anota_e_emite(
         self,
@@ -233,6 +259,7 @@ class TestFatosDaSaga:
         de: StatusOrdem,
         para: StatusOrdem,
         origem: OrigemMudanca,
+        ator: str,
     ) -> None:
         ordem = ordem_em(de)
         historico_antes = ordem.historico
@@ -244,11 +271,12 @@ class TestFatosDaSaga:
         assert ordem.historico[:-1] == historico_antes
         nova = ordem.historico[-1]
         assert nova.sequencia == len(historico_antes) + 1
-        assert (nova.de, nova.para, nova.origem, nova.motivo) == (
+        assert (nova.de, nova.para, nova.origem, nova.motivo, nova.ator) == (
             de,
             para,
             origem,
             None,
+            ator,
         )
         assert ordem.atualizado_em == nova.ocorrido_em
         assert ordem.coletar_eventos() == [
@@ -282,6 +310,7 @@ class TestFatosDaSaga:
             total=TOTAL,
             link_decisao=LINK_DECISAO,
             valido_ate=VALIDO_ATE,
+            ator=ATOR_PROCESSO,
         )
 
         resumo = ordem.resumo_orcamento
@@ -293,8 +322,10 @@ class TestFatosDaSaga:
             resumo.valido_ate,
         ) == (orcamento_id, TOTAL, LINK_DECISAO, VALIDO_ATE)
 
-    def test_pagamento_solicitado_guarda_o_resumo(self) -> None:
-        ordem = ordem_em(S.AGUARDANDO_APROVACAO)
+    def test_pagamento_solicitado_so_grava_o_resumo(self) -> None:
+        ordem = _aguardando_pagamento_sem_resumo()
+        historico = ordem.historico
+        ordem.limpar_eventos()
         pagamento_id = uuid4()
 
         ordem.registrar_pagamento_solicitado(
@@ -313,6 +344,56 @@ class TestFatosDaSaga:
             CHECKOUT_URL,
             EXPIRA_EM,
         )
+        assert (ordem.status, ordem.historico) == (S.AGUARDANDO_PAGAMENTO, historico)
+        assert ordem.coletar_eventos() == []
+        assert ordem.atualizado_em > historico[-1].ocorrido_em
+
+    @pytest.mark.parametrize(
+        "estado", [s for s in S if s is not S.AGUARDANDO_PAGAMENTO]
+    )
+    def test_pagamento_solicitado_fora_de_aguardando_pagamento_levanta_sem_mutar(
+        self, estado: StatusOrdem
+    ) -> None:
+        ordem = ordem_em(estado)
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="aguardando"):
+            _pagamento(ordem)
+
+        assert _fotografia(ordem) == antes
+
+    def test_pagamento_solicitado_de_novo_levanta_sem_mutar(self) -> None:
+        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
+            _pagamento(ordem)
+
+        assert _fotografia(ordem) == antes
+
+    def test_pagamento_confirmado_marca_o_resumo(self) -> None:
+        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
+        solicitado = ordem.resumo_pagamento
+        assert solicitado is not None
+
+        ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+
+        confirmado = ordem.resumo_pagamento
+        assert confirmado is not None
+        assert confirmado.status is StatusPagamento.CONFIRMADO
+        assert (confirmado.pagamento_id, confirmado.valor) == (
+            solicitado.pagamento_id,
+            solicitado.valor,
+        )
+
+    def test_pagamento_confirmado_sem_resumo_levanta_sem_mutar(self) -> None:
+        ordem = _aguardando_pagamento_sem_resumo()
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
+            ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+
+        assert _fotografia(ordem) == antes
 
     @pytest.mark.parametrize(
         "link", ["javascript:alert(1)", "/relativo", "ftp://x.y/z", "https://"]
@@ -327,7 +408,7 @@ class TestFatosDaSaga:
         assert _fotografia(ordem) == antes
 
     def test_checkout_url_invalida_levanta_sem_mutar(self) -> None:
-        ordem = ordem_em(S.AGUARDANDO_APROVACAO)
+        ordem = _aguardando_pagamento_sem_resumo()
         antes = _fotografia(ordem)
 
         with pytest.raises(ValueError, match="checkout_url"):
@@ -396,7 +477,7 @@ class TestStatusDoPagamento:
 
     def test_estorno_depois_do_cancelamento(self) -> None:
         ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
-        ordem.cancelar("cliente desistiu", OM.ATENDIMENTO)
+        ordem.cancelar("cliente desistiu", OM.ATENDIMENTO, ator=ATOR_ATENDENTE)
 
         ordem.registrar_status_do_pagamento(StatusPagamento.ESTORNADO)
 
@@ -432,7 +513,7 @@ class TestCancelamento:
         ordem = ordem_em(estado)
         ordem.limpar_eventos()
 
-        ordem.cancelar("  orcamento recusado  ", origem)
+        ordem.cancelar("  orcamento recusado  ", origem, ator=ATOR_ATENDENTE)
 
         assert ordem.status is S.CANCELADA
         assert ordem.motivo_cancelamento == "orcamento recusado"
@@ -443,6 +524,7 @@ class TestCancelamento:
             origem,
             "orcamento recusado",
         )
+        assert ultima.ator == ATOR_ATENDENTE
         assert ordem.coletar_eventos() == [
             StatusDaOrdemAlteradoEvent(
                 agregado_id=ordem.id,
@@ -461,14 +543,14 @@ class TestCancelamento:
         antes = _fotografia(ordem)
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            ordem.cancelar("tarde demais", OM.ATENDIMENTO)
+            ordem.cancelar("tarde demais", OM.ATENDIMENTO, ator=ATOR_ATENDENTE)
 
         assert _fotografia(ordem) == antes
 
     def test_estado_tem_precedencia_sobre_motivo_vazio(self) -> None:
         ordem = ordem_em(S.EM_EXECUCAO)
         with pytest.raises(TransicaoStatusInvalidaException):
-            ordem.cancelar("", OM.ATENDIMENTO)
+            ordem.cancelar("", OM.ATENDIMENTO, ator=ATOR_ATENDENTE)
 
     @pytest.mark.parametrize(
         "motivo",
@@ -484,7 +566,7 @@ class TestCancelamento:
         with pytest.raises(
             ValorInvalidoException, match="motivo de cancelamento e obrigatorio"
         ):
-            ordem.cancelar(motivo, OM.ATENDIMENTO)
+            ordem.cancelar(motivo, OM.ATENDIMENTO, ator=ATOR_ATENDENTE)
 
         assert _fotografia(ordem) == antes
 
@@ -493,20 +575,26 @@ class TestCancelamento:
         antes = _fotografia(ordem)
 
         with pytest.raises(ValorInvalidoException, match="caractere de controle"):
-            ordem.cancelar("desistiu\x00", OM.ATENDIMENTO)
+            ordem.cancelar("desistiu\x00", OM.ATENDIMENTO, ator=ATOR_ATENDENTE)
 
         assert _fotografia(ordem) == antes
 
     def test_motivo_acima_do_limite_levanta(self) -> None:
         ordem = ordem_em(S.RECEBIDA)
-        ordem.cancelar("x" * TAMANHO_MAXIMO_MOTIVO, OM.ATENDIMENTO)  # no limite passa
+        ordem.cancelar(
+            "x" * TAMANHO_MAXIMO_MOTIVO, OM.ATENDIMENTO, ator=ATOR_ATENDENTE
+        )  # no limite passa
         outra = ordem_em(S.RECEBIDA)
         with pytest.raises(ValorInvalidoException, match="excede"):
-            outra.cancelar("x" * (TAMANHO_MAXIMO_MOTIVO + 1), OM.ATENDIMENTO)
+            outra.cancelar(
+                "x" * (TAMANHO_MAXIMO_MOTIVO + 1), OM.ATENDIMENTO, ator=ATOR_ATENDENTE
+            )
 
     def test_historico_nao_expoe_motivo_no_repr(self) -> None:
         ordem = ordem_em(S.RECEBIDA)
-        ordem.cancelar("cpf 12345678900 do cliente", OM.ATENDIMENTO)
+        ordem.cancelar(
+            "cpf 12345678900 do cliente", OM.ATENDIMENTO, ator=ATOR_ATENDENTE
+        )
         assert "12345678900" not in repr(ordem.historico[-1])
 
 

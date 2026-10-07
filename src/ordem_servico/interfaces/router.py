@@ -93,6 +93,7 @@ def abrir_ordem(
             cliente_id=body.cliente_id,
             veiculo_id=body.veiculo_id,
             descricao_problema=body.descricao_problema,
+            ator=ator_de(usuario),
         )
     )
     return OrdemDeServicoResponse.model_validate(resultado)
@@ -161,8 +162,9 @@ def cancelar_ordem(
     ordem_id: UUID, body: CancelarOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
     """Cancela com motivo; 409 depois do inicio da execucao ou se encerrada."""
-    resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo)
-    _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator_de(usuario))
+    ator = ator_de(usuario)
+    resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
+    _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator)
     return OrdemDeServicoResponse.model_validate(resultado)
 
 
@@ -176,7 +178,7 @@ def registrar_entrega(
 ) -> OrdemDeServicoResponse:
     """Entrega ao cliente; 409 se a ordem nao estiver FINALIZADA."""
     return OrdemDeServicoResponse.model_validate(
-        obter_registrar_entrega(session).executar(ordem_id)
+        obter_registrar_entrega(session).executar(ordem_id, ator=ator_de(usuario))
     )
 
 

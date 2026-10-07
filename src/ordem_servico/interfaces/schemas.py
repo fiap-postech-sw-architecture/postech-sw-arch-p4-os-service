@@ -146,6 +146,12 @@ class MudancaDeStatusResponse(BaseModel):
     para: str
     origem: str = Field(description="atendimento, execucao, billing ou saga.")
     motivo: str | None
+    ator: str | None = Field(
+        description=(
+            "Quem provocou a mudanca: o sub do JWT do usuario ou o processo "
+            "(consumidor, prazos)."
+        )
+    )
     ocorrido_em: datetime
 
 

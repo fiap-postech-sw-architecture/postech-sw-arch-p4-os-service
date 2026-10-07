@@ -23,6 +23,8 @@ class AbrirOrdemDTO:
     veiculo_id: UUID
     # Texto livre: fora do repr (pode conter PII).
     descricao_problema: str = field(repr=False)
+    # sub do JWT de quem abre (vai para o historico).
+    ator: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +36,7 @@ class MudancaDeStatusDTO:
     para: str
     origem: str
     motivo: str | None = field(repr=False)
+    ator: str | None
     ocorrido_em: datetime
 
 

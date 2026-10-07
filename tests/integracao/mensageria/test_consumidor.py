@@ -448,7 +448,7 @@ class _Saga:
         ordens = OrdemDeServicoSQLAlchemyRepository(session=transacao.session)
         ordem = ordens.obter_por_id(mensagem.correlation_id)
         assert ordem is not None
-        ordem.registrar_diagnostico_iniciado()
+        ordem.registrar_diagnostico_iniciado(ator="consumidor")
         ordens.salvar(ordem)
         transacao.publicar_comando(
             Comando.GERAR_ORCAMENTO,

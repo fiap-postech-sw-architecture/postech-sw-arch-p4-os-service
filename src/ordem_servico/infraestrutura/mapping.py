@@ -125,6 +125,8 @@ historico_status_ordem_table = Table(
     Column("para", _enum(StatusOrdem, "status_ordem"), nullable=False),
     Column("origem", _enum(OrigemMudanca, "origem_mudanca"), nullable=False),
     Column("motivo", String(TAMANHO_MAXIMO_MOTIVO), nullable=True),
+    # sub do JWT (UUID) ou o processo; nulo so nas linhas anteriores a coluna.
+    Column("ator", String(64), nullable=True),
     Column("ocorrido_em", DateTime(timezone=True), nullable=False),
     # Uma linha por posicao: a UNIQUE tambem e o indice do load por ordem_id
     # e barra duas transicoes gravando a mesma posicao.
@@ -256,6 +258,7 @@ def iniciar_mapeamentos() -> None:
             "_para": historico_status_ordem_table.c.para,
             "_origem": historico_status_ordem_table.c.origem,
             "_motivo": historico_status_ordem_table.c.motivo,
+            "_ator": historico_status_ordem_table.c.ator,
             "_ocorrido_em": historico_status_ordem_table.c.ocorrido_em,
         },
     )

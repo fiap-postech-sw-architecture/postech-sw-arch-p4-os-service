@@ -57,6 +57,7 @@ def _abrir(session: Session, cliente: Cliente | None = None) -> OrdemDeServico:
         cliente_id=cliente.id,
         veiculo_id=cliente.veiculos[0].id,
         descricao_problema="Vazamento de oleo",
+        ator="atendente-teste",
     )
     OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
     return ordem
@@ -98,11 +99,25 @@ class TestMapping:
         assert pagamento.valor == Dinheiro(Decimal("350.00"), "BRL")
         assert pagamento.checkout_url == CHECKOUT_URL
         assert pagamento.expira_em == EXPIRA_EM
-        assert [(m.sequencia, m.de, m.para, m.origem) for m in lida.historico] == [
-            (1, None, S.RECEBIDA, OrigemMudanca.ATENDIMENTO),
-            (2, S.RECEBIDA, S.EM_DIAGNOSTICO, OrigemMudanca.EXECUCAO),
-            (3, S.EM_DIAGNOSTICO, S.AGUARDANDO_APROVACAO, OrigemMudanca.BILLING),
-            (4, S.AGUARDANDO_APROVACAO, S.AGUARDANDO_PAGAMENTO, OrigemMudanca.BILLING),
+        assert [
+            (m.sequencia, m.de, m.para, m.origem, m.ator) for m in lida.historico
+        ] == [
+            (1, None, S.RECEBIDA, OrigemMudanca.ATENDIMENTO, "atendente-teste"),
+            (2, S.RECEBIDA, S.EM_DIAGNOSTICO, OrigemMudanca.EXECUCAO, "consumidor"),
+            (
+                3,
+                S.EM_DIAGNOSTICO,
+                S.AGUARDANDO_APROVACAO,
+                OrigemMudanca.BILLING,
+                "consumidor",
+            ),
+            (
+                4,
+                S.AGUARDANDO_APROVACAO,
+                S.AGUARDANDO_PAGAMENTO,
+                OrigemMudanca.EXECUCAO,
+                "consumidor",
+            ),
         ]
         assert lida.historico[0].ocorrido_em.utcoffset() is not None
 
@@ -139,7 +154,7 @@ class TestMapping:
 
     def test_cancelada_persiste_motivo(self, session: Session) -> None:
         ordem = _abrir(session)
-        ordem.cancelar("cliente desistiu", OrigemMudanca.SAGA)
+        ordem.cancelar("cliente desistiu", OrigemMudanca.SAGA, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         lida = _recarregar(session, ordem)
@@ -208,7 +223,7 @@ class TestMapping:
         ordem = _abrir(session)
         lida = _recarregar(session, ordem)
 
-        lida.registrar_diagnostico_iniciado()
+        lida.registrar_diagnostico_iniciado(ator="consumidor")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(lida)
 
         assert len(lida.coletar_eventos()) == 1
@@ -279,7 +294,7 @@ class TestConsultaAcompanhamento:
         self, session: Session, cliente: Cliente
     ) -> None:
         ordem = _abrir(session, cliente)
-        ordem.cancelar("encerrada", OrigemMudanca.ATENDIMENTO)
+        ordem.cancelar("encerrada", OrigemMudanca.ATENDIMENTO, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
         ClienteSQLAlchemyRepository(session).anonimizar_dados(cliente.id)
         session.flush()
@@ -324,7 +339,7 @@ class TestAdaptersEntreContextos:
 
     def test_cancelada_nao_conta_como_ativa(self, session: Session) -> None:
         ordem = _abrir(session)
-        ordem.cancelar("x", OrigemMudanca.ATENDIMENTO)
+        ordem.cancelar("x", OrigemMudanca.ATENDIMENTO, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         adapter = OrdemDeServicoSQLAlchemyAdapter(session)
@@ -362,7 +377,7 @@ class TestMetricasDeNegocio:
         assert criadas == [1]
         assert duracoes == []
 
-        ordem.registrar_diagnostico_iniciado()
+        ordem.registrar_diagnostico_iniciado(ator="consumidor")
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         assert criadas == [1]

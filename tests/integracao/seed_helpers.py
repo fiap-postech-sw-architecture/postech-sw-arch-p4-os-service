@@ -97,6 +97,7 @@ def criar_ordem_recebida(
         cliente_id=cliente_id,
         veiculo_id=veiculo_id,
         descricao_problema="Barulho na suspensao dianteira",
+        ator="atendente-teste",
     )
     if limpar_eventos:
         ordem.limpar_eventos()

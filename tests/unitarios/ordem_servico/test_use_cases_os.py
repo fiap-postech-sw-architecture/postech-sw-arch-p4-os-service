@@ -32,6 +32,7 @@ from src.ordem_servico.dominio.exceptions import (
 )
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import (
+    ATOR_ATENDENTE,
     CHECKOUT_URL,
     EXPIRA_EM,
     LINK_DECISAO,
@@ -48,7 +49,10 @@ from tests.unitarios.fakes import (
 
 def _dto() -> AbrirOrdemDTO:
     return AbrirOrdemDTO(
-        cliente_id=uuid4(), veiculo_id=uuid4(), descricao_problema="Freio rangendo"
+        cliente_id=uuid4(),
+        veiculo_id=uuid4(),
+        descricao_problema="Freio rangendo",
+        ator=ATOR_ATENDENTE,
     )
 
 
@@ -72,10 +76,11 @@ class TestAbrirOrdem:
         assert resultado.pagamento is None
         assert resultado.versao == 1
         (abertura,) = resultado.historico
-        assert (abertura.de, abertura.para, abertura.origem) == (
+        assert (abertura.de, abertura.para, abertura.origem, abertura.ator) == (
             None,
             "recebida",
             "atendimento",
+            ATOR_ATENDENTE,
         )
 
     def test_cliente_inexistente_ou_inativo_levanta_sem_persistir(self) -> None:
@@ -100,7 +105,10 @@ class TestAbrirOrdem:
 
     def test_descricao_invalida_levanta_valor_invalido(self) -> None:
         dto = AbrirOrdemDTO(
-            cliente_id=uuid4(), veiculo_id=uuid4(), descricao_problema="   "
+            cliente_id=uuid4(),
+            veiculo_id=uuid4(),
+            descricao_problema="   ",
+            ator=ATOR_ATENDENTE,
         )
         with pytest.raises(ValorInvalidoException, match="descricao do problema"):
             AbrirOrdem(RepoEmMemoria(), FakeUnitOfWork(), ClientePortFake()).executar(
@@ -135,7 +143,7 @@ class TestObterOrdem:
             "atendimento",
             "execucao",
             "billing",
-            "billing",
+            "execucao",
         ]
 
     def test_inexistente_levanta_404(self) -> None:
@@ -148,7 +156,9 @@ class TestCancelarOrdem:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_APROVACAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = CancelarOrdem(repo, uow).executar(ordem.id, "cliente desistiu")
+        dto = CancelarOrdem(repo, uow).executar(
+            ordem.id, "cliente desistiu", ator=ATOR_ATENDENTE
+        )
 
         assert uow.committed
         assert repo.salvas == [ordem]
@@ -156,13 +166,14 @@ class TestCancelarOrdem:
         assert dto.motivo_cancelamento == "cliente desistiu"
         assert dto.historico[-1].origem == "atendimento"
         assert dto.historico[-1].motivo == "cliente desistiu"
+        assert dto.historico[-1].ator == ATOR_ATENDENTE
 
     def test_depois_da_execucao_levanta_409_sem_persistir(self) -> None:
         ordem = ordem_em(StatusOrdem.EM_EXECUCAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            CancelarOrdem(repo, uow).executar(ordem.id, "tarde")
+            CancelarOrdem(repo, uow).executar(ordem.id, "tarde", ator=ATOR_ATENDENTE)
 
         assert repo.salvas == []
         assert not uow.committed
@@ -173,14 +184,16 @@ class TestCancelarOrdem:
         repo, uow = RepoEmMemoria(ordem, conflito=True), FakeUnitOfWork()
 
         with pytest.raises(ConflitoDeConcorrenciaException):
-            CancelarOrdem(repo, uow).executar(ordem.id, "x")
+            CancelarOrdem(repo, uow).executar(ordem.id, "x", ator=ATOR_ATENDENTE)
 
         assert not uow.committed
         assert uow.rolled_back
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork()).executar(uuid4(), "x")
+            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork()).executar(
+                uuid4(), "x", ator=ATOR_ATENDENTE
+            )
 
 
 class TestRegistrarEntrega:
@@ -188,11 +201,14 @@ class TestRegistrarEntrega:
         ordem = ordem_em(StatusOrdem.FINALIZADA)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = RegistrarEntrega(repo, uow).executar(ordem.id)
+        dto = RegistrarEntrega(repo, uow).executar(ordem.id, ator=ATOR_ATENDENTE)
 
         assert uow.committed
         assert dto.status == "entregue"
-        assert dto.historico[-1].origem == "atendimento"
+        assert (dto.historico[-1].origem, dto.historico[-1].ator) == (
+            "atendimento",
+            ATOR_ATENDENTE,
+        )
 
     @pytest.mark.parametrize(
         "estado",
@@ -203,7 +219,7 @@ class TestRegistrarEntrega:
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            RegistrarEntrega(repo, uow).executar(ordem.id)
+            RegistrarEntrega(repo, uow).executar(ordem.id, ator=ATOR_ATENDENTE)
 
         assert repo.salvas == []
         assert not uow.committed

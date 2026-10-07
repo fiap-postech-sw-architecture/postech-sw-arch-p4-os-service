@@ -29,6 +29,7 @@ def _ordem_commitada(session_factory: sessionmaker[Session]) -> UUID:
             cliente_id=cliente.id,
             veiculo_id=cliente.veiculos[0].id,
             descricao_problema="Direcao pesada",
+            ator="atendente-teste",
         )
         OrdemDeServicoSQLAlchemyRepository(sess).salvar(ordem)
         sess.commit()
@@ -50,13 +51,15 @@ def test_segunda_escrita_sobre_versao_lida_vira_conflito(
         assert ordem_b is not None
         assert ordem_a.versao == ordem_b.versao == 1
 
-        ordem_a.cancelar("cliente desistiu", OrigemMudanca.ATENDIMENTO)
+        ordem_a.cancelar(
+            "cliente desistiu", OrigemMudanca.ATENDIMENTO, ator="atendente-teste"
+        )
         repo_a.salvar(ordem_a)
         sessao_a.commit()
         assert ordem_a.versao == 2
 
         # B decidiu sobre um estado que nao existe mais (RECEBIDA).
-        ordem_b.registrar_diagnostico_iniciado()
+        ordem_b.registrar_diagnostico_iniciado(ator="consumidor")
         with pytest.raises(ConflitoDeConcorrenciaException) as exc:
             repo_b.salvar(ordem_b)
         assert str(ordem_id) in exc.value.mensagem
@@ -84,11 +87,11 @@ def test_releitura_apos_conflito_decide_sobre_o_estado_novo(
         ordem_b = repo_b.obter_por_id(ordem_id)
         assert ordem_a is not None
         assert ordem_b is not None
-        ordem_a.registrar_diagnostico_iniciado()
+        ordem_a.registrar_diagnostico_iniciado(ator="consumidor")
         repo_a.salvar(ordem_a)
         sessao_a.commit()
 
-        ordem_b.registrar_diagnostico_iniciado()
+        ordem_b.registrar_diagnostico_iniciado(ator="consumidor")
         with pytest.raises(ConflitoDeConcorrenciaException):
             repo_b.salvar(ordem_b)
         sessao_b.rollback()
@@ -99,7 +102,7 @@ def test_releitura_apos_conflito_decide_sobre_o_estado_novo(
         assert relida is not None
         assert relida.status is StatusOrdem.EM_DIAGNOSTICO
         assert relida.versao == 2
-        relida.cancelar("desistiu", OrigemMudanca.ATENDIMENTO)
+        relida.cancelar("desistiu", OrigemMudanca.ATENDIMENTO, ator="atendente-teste")
         OrdemDeServicoSQLAlchemyRepository(sess).salvar(relida)
         sess.commit()
         assert relida.versao == 3
@@ -118,9 +121,13 @@ def test_cancelamentos_concorrentes_pela_uow_real_um_vence_e_o_historico_so_tem_
     assert lida_por_b is not None
     assert lida_por_b.versao == 1
 
-    obter_cancelar_ordem(session_factory()).executar(ordem_id, "cliente desistiu")
+    obter_cancelar_ordem(session_factory()).executar(
+        ordem_id, "cliente desistiu", ator="atendente-teste"
+    )
     with pytest.raises(ConflitoDeConcorrenciaException):
-        obter_cancelar_ordem(sessao_b).executar(ordem_id, "outro motivo")
+        obter_cancelar_ordem(sessao_b).executar(
+            ordem_id, "outro motivo", ator="atendente-teste"
+        )
 
     with session_factory() as sess:
         final = OrdemDeServicoSQLAlchemyRepository(sess).obter_por_id(ordem_id)
