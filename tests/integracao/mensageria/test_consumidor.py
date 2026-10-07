@@ -903,7 +903,7 @@ def test_apaga_as_mensagens_processadas_ha_mais_de_30_dias(
     assert _processadas(engine) == [recente]
 
 
-def test_encerramento_conclui_a_mensagem_em_curso_e_devolve_as_pre_buscadas(
+def test_encerramento_conclui_a_mensagem_em_curso_e_as_demais_seguem_na_fila(
     engine: Engine, broker: Broker, consumidor: Callable[..., Consumidor]
 ) -> None:
     em_curso = threading.Event()

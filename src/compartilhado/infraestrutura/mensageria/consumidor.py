@@ -106,8 +106,9 @@ _SQL_LIMPEZA: Final = text(
 )
 _TIPO_DESCONHECIDO: Final = "desconhecido"
 # Uma mensagem por vez: o volume de os.eventos e baixo, e uma mensagem que o
-# pika nao decodifica (header ilegivel) derruba a conexao sozinha, sem levar
-# junto as vizinhas pre-buscadas. Ela volta a fila a cada queda e sai pelo
+# pika nao decodifica (header ilegivel) derruba a conexao sozinha (com prefetch
+# maior, as vizinhas ja entregues voltariam a fila a cada queda e gastariam o
+# delivery-limit junto com ela). Ela volta a fila a cada queda e sai pelo
 # delivery-limit da fila (5, na policy do platform) para a DLQ.
 _PREFETCH: Final = 1
 # Teto do corpo antes do parse: o maior evento do contrato tem poucos KB (um
@@ -223,9 +224,9 @@ class Consumidor:
         """Laco principal; queda do broker nao derruba o processo.
 
         Encerramento gracioso: com o ``parar`` sinalizado, conclui a mensagem em
-        curso e fecha a conexao; o broker devolve a fila as pre-buscadas sem
-        ack. Conexao perdida e consumo cancelado pelo broker reconectam com o
-        backoff da ``ConexaoDoProcesso``.
+        curso e fecha a conexao; as demais seguem na fila. Conexao perdida e
+        consumo cancelado pelo broker reconectam com o backoff da
+        ``ConexaoDoProcesso``.
         """
         _log.info("consumer started", fila=FILA, prefetch=_PREFETCH)
         try:
@@ -273,8 +274,7 @@ class Consumidor:
                 self._tratar(metodo, propriedades, corpo)
             self._limpar_se_devido()
             if parar.is_set():
-                # Conclui a mensagem em curso e para; ao fechar a conexao o
-                # broker devolve a fila as pre-buscadas sem ack.
+                # Conclui a mensagem em curso e para; as demais seguem na fila.
                 return
 
     def _tratar(self, metodo: Any, propriedades: Any, corpo: bytes) -> None:  # noqa: ANN401  # tipos do pika
@@ -572,11 +572,13 @@ def _recusar_commit(sessao: Session) -> None:
     O SQLAlchemy dispara o ``before_commit`` tambem ao liberar um savepoint
     (``begin_nested``), que continua dentro da transacao da mensagem e segue
     permitido; so o commit dela e recusado, inclusive o ``session.commit()``
-    chamado dentro de um savepoint. O evento nao diz qual transacao comita: o
+    chamado dentro de um savepoint. O que passa por baixo da ``session`` grava o
+    efeito antes do consumidor. O evento nao diz qual transacao comita: o
     ``commit()`` direto na transacao raiz com um savepoint aberto escapa desta
     guarda (a conferencia da transacao depois do handler manda a mensagem para
-    a DLQ, com o efeito ja gravado), e o commit da conexao
-    (``session.connection().commit()``) nao passa por nenhuma das duas.
+    a DLQ). O commit da conexao (``session.connection().commit()``) nao passa
+    por nenhuma das duas: o commit do consumidor falha e a mensagem volta pela
+    retry como duplicada. E o ``COMMIT`` em SQL literal o SQLAlchemy nem ve.
     """
     if sessao.in_nested_transaction():
         return
