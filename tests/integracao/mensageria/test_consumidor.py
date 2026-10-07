@@ -442,6 +442,37 @@ def test_efeito_comando_e_registro_da_mensagem_entram_num_commit_so_do_consumido
     assert comando["causation_id"] == envelope["id"]
 
 
+def _consulta_num_savepoint(transacao: TransacaoDaMensagem) -> Desfecho:
+    with transacao.session.begin_nested():
+        transacao.session.execute(text("SELECT 1"))
+    return Desfecho.PROCESSADA
+
+
+def test_savepoint_do_handler_fica_na_transacao_da_mensagem(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+) -> None:
+    # Liberar o savepoint dispara o before_commit da sessao, e nao e o commit
+    # que o consumidor recusa.
+    ordem_id = _ordem_recebida(session_factory)
+    saga = _Saga(depois=_consulta_num_savepoint)
+    envelope = envelope_de_evento("DiagnosticoIniciado", correlation_id=ordem_id)
+
+    with EmSegundoPlano(consumidor(saga)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _gravado(engine, ordem_id).processadas == 1)
+
+    gravado = _gravado(engine, ordem_id)
+    assert (gravado.status, gravado.comandos, broker.contar(_DLQ)) == (
+        "em_diagnostico",
+        1,
+        0,
+    )
+    assert gravado.xmin_os == gravado.xmin_comando == gravado.xmin_processada
+
+
 @pytest.fixture
 def commit_que_falha_uma_vez(engine: Engine) -> Iterator[None]:
     """O banco recusa o primeiro commit que leva uma linha da outbox.

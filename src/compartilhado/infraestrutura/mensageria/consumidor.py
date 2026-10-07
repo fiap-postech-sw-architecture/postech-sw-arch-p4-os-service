@@ -517,8 +517,15 @@ class Consumidor:
             _log.info("old processed messages deleted", linhas=apagadas)
 
 
-def _recusar_commit(_sessao: Session) -> None:
-    """Commit pedido pelo handler: o consumidor comita, junto com o registro."""
+def _recusar_commit(sessao: Session) -> None:
+    """Commit pedido pelo handler: o consumidor comita, junto com o registro.
+
+    O SQLAlchemy dispara o ``before_commit`` tambem ao liberar um savepoint
+    (``begin_nested``), que continua dentro da transacao da mensagem e segue
+    permitido; so o commit dela e recusado.
+    """
+    if sessao.in_nested_transaction():
+        return
     msg = "o handler nao comita: o consumidor comita com mensagens_processadas"
     raise RuntimeError(msg)
 
