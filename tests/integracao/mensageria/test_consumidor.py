@@ -19,6 +19,7 @@ import pytest
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
+from pika.exceptions import NackError
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 from structlog.testing import capture_logs
@@ -42,6 +43,7 @@ from src.ordem_servico.infraestrutura.repository import (
 )
 from tests.integracao.broker import (
     SENHAS,
+    TTL_DE_RETRY_MS,
     EmSegundoPlano,
     envelope_de_evento,
     esperar_ate,
@@ -328,6 +330,75 @@ def test_copia_de_retry_sem_rota_manda_a_original_para_a_dlq(
     assert broker.contar("os.eventos.retry.1s") == 0
     assert _consumidas("PecasReservadas", "dlq") == antes + 1
     assert _retries() == retries
+
+
+@pytest.fixture
+def retry_1s_cheia(broker: Broker) -> Iterator[None]:
+    """os.eventos.retry.1s cheia: teto de 1 mensagem e ``reject-publish``.
+
+    A fila e redeclarada com TTL de 10 min (com o de 100 ms do broker de teste
+    ela esvaziaria entre uma publicacao e outra) e recebe mensagens ate o broker
+    recusar (a fila quorum aceita uma alem do teto). O teardown a recria como no
+    definitions de teste.
+    """
+    fila = "os.eventos.retry.1s"
+    definicoes = json.loads((CONTRATOS / "rabbitmq/definitions.json").read_text())
+    (original,) = [f for f in definicoes["queues"] if f["name"] == fila]
+
+    def recriar(argumentos: dict[str, Any]) -> None:
+        with broker.canal() as canal:
+            canal.queue_delete(fila)
+            canal.queue_declare(fila, durable=True, arguments=argumentos)
+            canal.queue_bind(fila, "pytstop.retry", fila)
+
+    recriar(
+        {
+            **original["arguments"],
+            "x-message-ttl": 600_000,
+            "x-max-length": 1,
+            "x-overflow": "reject-publish",
+        }
+    )
+    try:
+        with broker.canal() as canal:
+            for _ in range(5):
+                try:
+                    canal.basic_publish("pytstop.retry", fila, b"{}", mandatory=True)
+                except NackError:
+                    break
+            else:
+                pytest.fail("a fila de retry nao encheu")
+        yield
+    finally:
+        recriar({**original["arguments"], "x-message-ttl": TTL_DE_RETRY_MS})
+
+
+@pytest.mark.usefixtures("retry_1s_cheia")
+def test_copia_de_retry_recusada_pela_fila_cheia_manda_a_original_para_a_dlq(
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A fila de retry cheia recusa a copia (nack): a original nao recebe ack e
+    # vai para a DLQ, nunca some.
+    espiao = Espiao(FalhaTransitoriaError("dependencia fora"))
+    envelope = envelope_de_evento("PecasReservadas")
+    antes = _consumidas("PecasReservadas", "dlq")
+    retries = _retries()
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+
+    with capture_logs() as logs, EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope)
+        propriedades, _ = esperar_ate(lambda: broker.pegar(_DLQ))
+
+    assert propriedades.message_id == envelope["id"]
+    assert len(espiao.recebidas) == 1
+    assert broker.contar("os.eventos") == 0
+    assert _consumidas("PecasReservadas", "dlq") == antes + 1
+    assert _retries() == retries
+    assert [
+        (log["event"], log.get("erro")) for log in logs if "dlq" in log["event"]
+    ] == [("retry copy refused by the broker; rejected to dlq", "NackError")]
 
 
 def test_falha_transitoria_volta_da_retry_e_e_processada_uma_vez(

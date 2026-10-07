@@ -1,13 +1,12 @@
 """Falhas que o RabbitMQ de teste nao produz sob demanda, com um canal AMQP falso.
 
 Queda da conexao no meio de um lote ou no heartbeat ocioso, canal que nao
-reabre, consumo cancelado, nack da fila de retry (o TTL de 100 ms a esvazia
-antes de ela encher), sequencias exatas de backoff e a corrida entre replicas
-num ponto exato: o relay e o consumidor falam com um canal falso, programado
-falha a falha, e o banco continua o Postgres real. O que o broker produz (nack
-da fila de trabalho, devolucao sem rota, canal fechado por permissao ou
-exchange inexistente, alarme de memoria) e testado contra ele, em
-``test_relay.py`` e ``test_consumidor.py``.
+reabre, consumo cancelado, sequencias exatas de backoff e a corrida entre
+replicas num ponto exato: o relay e o consumidor falam com um canal falso,
+programado falha a falha, e o banco continua o Postgres real. O que o broker
+produz (nack da fila de trabalho e da fila de retry cheias, devolucao sem rota,
+canal fechado por permissao ou exchange inexistente, alarme de memoria) e
+testado contra ele, em ``test_relay.py`` e ``test_consumidor.py``.
 """
 
 from __future__ import annotations
@@ -1003,36 +1002,6 @@ def _consumidor(
         tracer=rastreador.tracer,
         config=ConfigConsumidor(inatividade_s=0.05, diretorio_de_saude=tmp_path),
     )
-
-
-def _falha_transitoria(*_: object) -> Desfecho:
-    raise FalhaTransitoriaError("dependencia fora")
-
-
-def test_copia_de_retry_recusada_com_nack_manda_a_original_para_a_dlq(
-    session_factory: sessionmaker[Session],
-    conexoes: list[Any],
-    rastreador: Rastreador,
-    tmp_path: Path,
-) -> None:
-    # O nack da fila de retry nao se provoca no broker de teste: com o TTL de
-    # 100 ms ela esvazia antes de encher (sem rota: ver test_consumidor).
-    envelope = envelope_de_evento("PecasReservadas")
-    canal = CanalFalso(NackError([]), entregas=[_entrega(envelope, 7)])
-    conexoes.append((ConexaoFalsa(), canal))
-    consumidor = _consumidor(
-        session_factory,
-        rastreador,
-        tmp_path,
-        {"PecasReservadas": _falha_transitoria},
-    )
-
-    with EmSegundoPlano(consumidor):
-        esperar_ate(lambda: canal.rejeitadas)
-
-    assert canal.rejeitadas == [7]
-    assert canal.confirmadas == []
-    assert canal.mandatory == [True]
 
 
 def test_evento_sem_handler_vai_para_a_dlq(
