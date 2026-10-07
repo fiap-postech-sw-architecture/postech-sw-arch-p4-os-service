@@ -81,7 +81,11 @@ def usuario(params: pika.ConnectionParameters) -> str:
 
 
 def conectar(params: pika.ConnectionParameters) -> tuple[Any, Any]:
-    """Abre a conexao e um canal com publisher confirms."""
+    """Abre a conexao e um canal com publisher confirms.
+
+    Devolve ``(BlockingConnection, BlockingChannel)`` como ``Any``: o pika nao
+    publica anotacoes de tipo.
+    """
     conexao = pika.BlockingConnection(params)
     try:
         canal = conexao.channel()
@@ -138,7 +142,7 @@ class ConexaoDoProcesso:
         *,
         processo: str,
         sinal: Sinalizador,
-        declarar: Callable[[Any], None],
+        declarar: Callable[[Any], None],  # recebe o BlockingChannel
     ) -> None:
         self._parametros = parametros
         self._processo = processo

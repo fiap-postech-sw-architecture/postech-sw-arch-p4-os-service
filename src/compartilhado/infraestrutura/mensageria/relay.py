@@ -178,7 +178,7 @@ class Relay:
             lote=self._config.lote,
             lease_s=self._config.lease.total_seconds(),
         )
-        escuta: Any = None
+        escuta: Any = None  # conexao psycopg2 do LISTEN (sem tipos)
         try:
             while not parar.is_set():
                 self._sinal.bater()
