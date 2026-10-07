@@ -37,3 +37,7 @@ kubeconfig*
 .idea/
 .vscode/
 .DS_Store
+
+# Overlay que o implantar-servicos.sh do platform gera e apaga a cada
+# implantacao; com ele no repositorio, o script recusa implantar.
+k8s/overlays/execucao/

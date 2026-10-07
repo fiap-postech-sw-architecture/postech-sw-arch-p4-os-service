@@ -1,8 +1,9 @@
 # Gates do OS Service, os mesmos comandos do CI. `make check` espelha os jobs
 # lint, type-check, security e test: uv.lock em dia, lint, formato, contratos
 # de camada, tipos, seguranca e testes (unitarios + integracao com
-# testcontainers) com gate de cobertura (.coveragerc). `make smoke` e o job
-# build e `make audit` e o pip-audit do workflow Security.
+# testcontainers) com gate de cobertura (.coveragerc). `make manifests` e
+# `make smoke` sao o job build e `make audit` e o pip-audit do workflow
+# Security. `make kind-deploy` implanta o servico no kind do platform.
 PY := uv run
 PY_PATHS := src/ scripts/ migrations/
 PY_PATHS_COM_TESTS := $(PY_PATHS) tests/
@@ -12,7 +13,7 @@ GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch typecheck security test check audit \
-	smoke compose-up compose-down
+	smoke compose-up compose-down manifests kind-deploy
 
 lock-check:
 	uv lock --check
@@ -150,6 +151,44 @@ smoke:
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
 	exit $$status
+
+# Manifests Kubernetes (k8s/): os tres overlays pelo kubeconform, contra os
+# schemas da versao do no do kind do platform (Secret reprova: senha nao entra
+# nos manifests), e pelo trivy config, sem achado HIGH nem CRITICAL (o que ele
+# ignora, com o motivo, esta em k8s/trivy-ignore.rego). Mesmas imagens e opcoes
+# do `make manifests` do platform.
+KUBERNETES_VERSION := 1.35.0
+KUBECONFORM_IMAGE := ghcr.io/yannh/kubeconform:v0.8.0
+TRIVY_IMAGE := aquasec/trivy:0.72.0
+KUBECONFORM := docker run --rm -i $(KUBECONFORM_IMAGE) -strict -summary \
+	-output text -kubernetes-version $(KUBERNETES_VERSION) -reject Secret
+TRIVY_CONFIG := docker run --rm -i \
+	-v "$(CURDIR)/k8s/trivy-ignore.rego:/trivy-ignore.rego:ro" \
+	--entrypoint sh $(TRIVY_IMAGE) -c \
+	'cat > /tmp/manifests.yaml && trivy config --quiet --severity HIGH,CRITICAL \
+	--exit-code 1 --ignore-policy /trivy-ignore.rego /tmp/manifests.yaml'
+
+# O render vai para uma variavel antes: num pipe, o sh sem pipefail esconderia
+# a falha do kustomize atras do kubeconform satisfeito com a entrada vazia.
+manifests:
+	@set -e; for overlay in kind kind-ci k3s; do \
+		echo ">> kubeconform e trivy: k8s/overlays/$$overlay"; \
+		manifestos="$$(kubectl kustomize "k8s/overlays/$$overlay")"; \
+		printf '%s\n' "$$manifestos" | $(KUBECONFORM) -; \
+		printf '%s\n' "$$manifestos" | $(TRIVY_CONFIG); \
+	done
+
+# Implantacao no kind do platform (README, "Implantacao"), com a plataforma
+# de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do
+# servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
+# carrega no kind, aplica o overlay kind de uma vez e espera o banco, o Job de
+# migracao e os Deployments, nessa ordem. PLATFORM e o clone do platform, por
+# padrao o vizinho deste; o script entra no platform com o contrato de
+# implantacao dos servicos (README do platform, "Contrato com os servicos").
+PLATFORM ?= ../postech-sw-arch-p4-platform
+
+kind-deploy:
+	$(PLATFORM)/scripts/ci/implantar-servicos.sh --overlay kind os-service=$(CURDIR)
 
 # Stack local do servico: API, relay e consumidor + PostgreSQL 16 e RabbitMQ
 # (migracoes e admin seed no boot).

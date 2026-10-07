@@ -1,0 +1,143 @@
+# Relay da outbox (python -m src.relay), na mesma imagem da API. Sem HTTP de
+# negocio: a saude e por arquivo em /tmp (README, "Observabilidade, saude e
+# encerramento"). O heartbeat e tocado a cada volta do laco, inclusive com o
+# broker fora; o pronto so existe com a conexao ao broker de pe.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: os-service-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: os-service-relay
+  template:
+    metadata:
+      labels:
+        app: os-service-relay
+        processo: relay
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      # Cobre o publish em curso, que espera o confirm do broker.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # O mesmo da API (api.yaml): espera a migracao desta versao.
+        - name: aguarda-migracao
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              while :; do
+                saida=$(alembic current 2>&1)
+                printf '%s\n' "$saida" | grep -q -e '(head)' -e "Can't locate revision" && break
+                motivo=$(printf '%s\n' "$saida" | grep -E -e 'Error: ' -e '^[0-9a-z_]+$' | tail -n 1)
+                echo "waiting for the migration Job: ${motivo:-no revision yet}" >&2
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: relay
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, src.relay]
+          ports:
+            - name: metrics
+              containerPort: 9100
+          envFrom:
+            - configMapRef:
+                name: os-service
+          env:
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+            # O platform grava a URL do usuario os no Secret rabbitmq.
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq
+                  key: RABBITMQ_URL
+          # Sondas por comando direto, em Python (a imagem slim nao tem curl). A
+          # de vida tolera 90 s sem heartbeat (um publish preso no broker mudo
+          # dura ate cerca de 70 s); a de startup e a mesma, com 1 min para o
+          # boot, e nao o arquivo de pronto: broker fora no boot nao reinicia o
+          # pod, so o deixa fora de pronto.
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import os,sys,time;sys.exit(time.time()-os.path.getmtime('/tmp/relay-heartbeat')>90)
+            periodSeconds: 2
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import os,sys,time;sys.exit(time.time()-os.path.getmtime('/tmp/relay-heartbeat')>90)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Broker fora tira o relay de pronto sem reinicia-lo.
+          readinessProbe:
+            exec:
+              command: [test, -f, /tmp/relay-pronto]
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

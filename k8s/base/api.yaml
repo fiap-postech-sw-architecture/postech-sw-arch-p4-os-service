@@ -1,0 +1,148 @@
+# API do OS Service (FastAPI na porta 8000, que tambem serve o /metrics).
+# Sem replicas: o HPA da API (hpa.yaml) e dono do numero de pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: os-service-api
+spec:
+  selector:
+    matchLabels:
+      app: os-service-api
+  template:
+    metadata:
+      labels:
+        app: os-service-api
+        processo: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Espera o Job de migracao da mesma versao: o alembic current marca
+        # "(head)" com o banco na ultima revisao desta imagem. Num rollback
+        # (rollout undo, sem descer migracao: ADR-042) o banco esta adiante, e
+        # a revisao que esta imagem nao conhece tambem libera o pod. Enquanto
+        # espera, o log do container diz por que: a revisao anterior, nenhuma
+        # ou o erro de conexao com o banco.
+        - name: aguarda-migracao
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              while :; do
+                saida=$(alembic current 2>&1)
+                printf '%s\n' "$saida" | grep -q -e '(head)' -e "Can't locate revision" && break
+                motivo=$(printf '%s\n' "$saida" | grep -E -e 'Error: ' -e '^[0-9a-z_]+$' | tail -n 1)
+                echo "waiting for the migration Job: ${motivo:-no revision yet}" >&2
+                sleep 2
+              done
+          env:
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: api
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: os-service
+          env:
+            # A URL se monta no pod: a senha (48 hexadecimais) entra crua, e o
+            # describe do pod mostra o molde, nao o valor.
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+            - name: JWT_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: os-jwt
+                  key: JWT_PRIVATE_KEY
+            - name: JWT_PREVIOUS_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: os-jwt
+                  key: JWT_PREVIOUS_PUBLIC_KEY
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: os-cripto
+                  key: ENCRYPTION_KEY
+          startupProbe:
+            httpGet:
+              path: /api/v1/saude
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 30
+          # Liveness sem dependencias; a readiness tira o pod do Service com o
+          # banco fora, sem reinicia-lo.
+          livenessProbe:
+            httpGet:
+              path: /api/v1/saude
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/saude/pronto
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

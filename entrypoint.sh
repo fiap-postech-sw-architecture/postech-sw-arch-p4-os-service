@@ -26,5 +26,8 @@ fi
 # TRUSTED_PROXIES (ProxyHeadersMiddleware proprio); a flag desliga a camada
 # implicita do uvicorn, que confiaria no XFF de peers loopback.
 # --no-server-header: sem `server: uvicorn` (nao anuncia a stack).
+# --root-path: no cluster a API responde atras do Kong sob o prefixo do servico
+# (ROOT_PATH=/os no ConfigMap, ADR-038): o Swagger em /os/docs busca o
+# /os/openapi.json, e o OpenAPI declara o prefixo em `servers`. Vazio fora dele.
 exec uvicorn src.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers \
-  --no-server-header
+  --no-server-header --root-path "${ROOT_PATH:-}"

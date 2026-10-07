@@ -282,6 +282,11 @@ class EmSegundoPlano:
         except BaseException as exc:
             self._erro = exc
 
+    @property
+    def vivo(self) -> bool:
+        """O laco ainda roda (False depois de parar ou de cair)."""
+        return self._thread.is_alive()
+
     def __enter__(self) -> Self:
         self._thread.start()
         return self

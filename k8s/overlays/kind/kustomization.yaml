@@ -1,0 +1,22 @@
+# Kind local, com a plataforma do platform (make kind-deploy). A tag dev e a de
+# quem aplica o overlay a mao; o implantar-servicos.sh do platform a troca pela
+# imagem que ele constroi do commit.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+images:
+  - name: pytstop-os-service
+    newTag: dev
+
+configMapGenerator:
+  # CIDR de pods do kind: o X-Forwarded-For do Kong vale como IP do cliente no
+  # limite de login e registro. Vale tambem o de quem mais a NetworkPolicy deixa
+  # chegar a API (o Prometheus e as APIs de Billing e Execucao, que leem o
+  # JWKS): pods da plataforma e dos servicos, nao clientes.
+  - name: os-service
+    behavior: merge
+    literals:
+      - TRUSTED_PROXIES=10.244.0.0/16

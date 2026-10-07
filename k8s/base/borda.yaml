@@ -1,0 +1,256 @@
+# Exemplo de borda de um servico (o OS Service, prefixo /os), para o
+# repositorio do servico copiar para o k8s/ dele, no proprio namespace. O
+# make smoke aplica este arquivo no kind, sem mudar nada, com um servidor de
+# eco no lugar da API.
+#
+# So sai pela borda o que o ADR-038 permite: /api/v1/*, /docs, /openapi.json
+# e o JWKS. /api/v1/admin/* e /metrics casam o Ingress fora-da-borda (o
+# caminho mais longo vence) e respondem 404. Caminho com %2F ou %5C responde
+# 404 pelo plugin global bloqueia-barra-codificada, antes de qualquer rota: o
+# Kong casa por segmento e nao trata %2F como /, entao sem ele
+# /os/api/v1/admin%2Foutbox passaria por /os/api/v1. O Billing tem o seu
+# exemplo em borda-billing-service.yaml (webhook e simulador do checkout).
+#
+# strip-path tira do caminho tudo o que a regra casou: /os/api/v1/x chega ao
+# upstream como <konghq.com/path do Service> + /x. Por isso cada prefixo tem
+# um Service proprio, todos com os mesmos pods, com o konghq.com/path que
+# devolve o prefixo. O Service interno do servico (o do JWKS_URL e do
+# BILLING_URL) fica sem anotacao.
+#
+# Rate limiting: o global (60/min por IP) vale para toda rota sem anotacao;
+# login, autenticacao, publico e JWKS anotam o plugin da classe.
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-api
+  annotations:
+    konghq.com/path: /api/v1
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-docs
+  annotations:
+    konghq.com/path: /docs
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-openapi
+  annotations:
+    konghq.com/path: /openapi.json
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-autenticacao
+  annotations:
+    konghq.com/path: /api/v1/autenticacao
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-login
+  annotations:
+    konghq.com/path: /api/v1/autenticacao/login
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-publico
+  annotations:
+    konghq.com/path: /api/v1/publico
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service-borda-jwks
+  annotations:
+    konghq.com/path: /.well-known/jwks.json
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# API, Swagger e OpenAPI, com o rate limiting global.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: os-service-borda
+  annotations:
+    konghq.com/strip-path: "true"
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /os/api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: os-service-borda-api
+                port:
+                  number: 8000
+          - path: /os/docs
+            pathType: Prefix
+            backend:
+              service:
+                name: os-service-borda-docs
+                port:
+                  number: 8000
+          - path: /os/openapi.json
+            pathType: Exact
+            backend:
+              service:
+                name: os-service-borda-openapi
+                port:
+                  number: 8000
+---
+# refresh, logout e registrar: 10/min por IP.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: os-service-borda-autenticacao
+  annotations:
+    konghq.com/strip-path: "true"
+    konghq.com/plugins: rate-limiting-sessao
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /os/api/v1/autenticacao
+            pathType: Prefix
+            backend:
+              service:
+                name: os-service-borda-autenticacao
+                port:
+                  number: 8000
+---
+# login: 5/min por IP.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: os-service-borda-login
+  annotations:
+    konghq.com/strip-path: "true"
+    konghq.com/plugins: rate-limiting-login
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /os/api/v1/autenticacao/login
+            pathType: Exact
+            backend:
+              service:
+                name: os-service-borda-login
+                port:
+                  number: 8000
+---
+# Rotas sem JWT (acompanhamento): 10/min por IP.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: os-service-borda-publico
+  annotations:
+    konghq.com/strip-path: "true"
+    konghq.com/plugins: rate-limiting-publico
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /os/api/v1/publico
+            pathType: Prefix
+            backend:
+              service:
+                name: os-service-borda-publico
+                port:
+                  number: 8000
+---
+# Chaves publicas do JWT: 60/min por IP, em balde proprio.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: os-service-borda-jwks
+  annotations:
+    konghq.com/strip-path: "true"
+    konghq.com/plugins: rate-limiting-jwks
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /os/.well-known/jwks.json
+            pathType: Exact
+            backend:
+              service:
+                name: os-service-borda-jwks
+                port:
+                  number: 8000
+---
+# Bloqueio: o Kong responde 404 sem chamar o servico.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: os-service-fora-da-borda
+  annotations:
+    konghq.com/plugins: fora-da-borda
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /os/api/v1/admin
+            pathType: Prefix
+            backend:
+              service:
+                name: os-service-borda-api
+                port:
+                  number: 8000
+          - path: /os/metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: os-service-borda-api
+                port:
+                  number: 8000

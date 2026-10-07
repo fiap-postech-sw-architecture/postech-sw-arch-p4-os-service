@@ -1,0 +1,102 @@
+# So entrada (ADR-042): nega tudo no namespace e libera o previsto. A sonda do
+# kubelet, o port-forward e o exec nao passam por NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nega-entrada
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# API: o Kong (a borda), o Prometheus (/metrics na porta http) e as APIs do
+# Billing e da Execucao, que buscam o JWKS para validar o token (ADR-039).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api
+spec:
+  podSelector:
+    matchLabels:
+      app: os-service-api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-plataforma
+          podSelector:
+            matchLabels:
+              app: kong
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-plataforma
+          podSelector:
+            matchLabels:
+              app: prometheus
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-billing
+          podSelector:
+            matchLabels:
+              app: billing-service-api
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-execucao
+          podSelector:
+            matchLabels:
+              app: execution-service-api
+      ports:
+        - port: 8000
+          protocol: TCP
+---
+# Relay e consumidor: so o Prometheus, no /metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metricas-dos-processos
+spec:
+  podSelector:
+    matchExpressions:
+      - key: processo
+        operator: In
+        values: [relay, consumidor]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-plataforma
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 9100
+          protocol: TCP
+---
+# Banco: so os pods do proprio namespace chegam ao PostgreSQL; o Prometheus,
+# so ao exporter.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: banco
+spec:
+  podSelector:
+    matchLabels:
+      app: os-postgres
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 5432
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-plataforma
+          podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - port: 9187
+          protocol: TCP

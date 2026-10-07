@@ -81,7 +81,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         # A rota que define o proprio cache (o JWKS publico) o mantem.
         response.headers.setdefault("Cache-Control", "no-store")
-        if not _caminho_de_docs(request.url.path):
+        # Com o --root-path do entrypoint (o prefixo da borda), o path chega com
+        # o prefixo (/os/docs): a excecao do CSP compara o caminho da rota.
+        caminho = request.url.path.removeprefix(request.scope.get("root_path", ""))
+        if not _caminho_de_docs(caminho):
             response.headers["Content-Security-Policy"] = _CSP_DEFAULT
         response.headers["X-Request-ID"] = request_id
         return response
