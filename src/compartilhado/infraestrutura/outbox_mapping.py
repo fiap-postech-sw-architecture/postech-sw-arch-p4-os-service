@@ -18,7 +18,7 @@ chega quando o COMMIT conclui.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
 
 from sqlalchemy import (
@@ -44,11 +44,16 @@ from src.compartilhado.infraestrutura.mensageria.telemetria import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
+    from contextlib import AbstractContextManager
 
+    from sqlalchemy import Connection, CursorResult, TextClause
     from sqlalchemy.orm import Session
 
 CANAL_NOTIFY = "outbox_novo"
+# Linhas por DELETE das limpezas, com um commit cada: sem lock longo nem uma
+# transacao enorme na primeira limpeza depois de uma parada.
+LOTE_DE_LIMPEZA: Final = 1000
 # Tamanho que a W3C recomenda suportar no tracestate; maior que isso, o
 # contexto segue so pelo traceparent (descartar o tracestate e permitido).
 _TRACESTATE_MAXIMO = 512
@@ -88,6 +93,8 @@ outbox_table = Table(
 )
 
 Index("ix_outbox_claim", outbox_table.c.status, outbox_table.c.proxima_tentativa_em)
+# Limpeza das entregues ha mais de 7 dias.
+Index("ix_outbox_entregues", outbox_table.c.status, outbox_table.c.entregue_em)
 
 # Claim com ordem por OS (head-of-line): `NOT EXISTS (... WHERE
 # p.correlation_id = o.correlation_id AND p.id < o.id AND p.status = 'pendente')`.
@@ -111,6 +118,38 @@ mensagens_processadas_table = Table(
         server_default=func.now(),
     ),
 )
+# Limpeza das processadas ha mais de 30 dias.
+Index(
+    "ix_mensagens_processadas_processada_em",
+    mensagens_processadas_table.c.processada_em,
+)
+
+
+def apagar_em_lotes(
+    transacao: Callable[[], AbstractContextManager[Connection | Session]],
+    sql: TextClause,
+    *,
+    entre_lotes: Callable[[], None],
+) -> int:
+    """Roda o DELETE ``sql`` (com ``LIMIT :lote``) ate ele apagar menos que um lote.
+
+    Cada lote e uma transacao de ``transacao()`` (``engine.begin`` ou
+    ``sessionmaker.begin``), e ``entre_lotes`` roda entre um e outro: o processo
+    atende o heartbeat do broker no meio de uma limpeza longa.
+
+    Returns:
+        Quantas linhas foram apagadas.
+    """
+    total = 0
+    while True:
+        with transacao() as conexao:
+            resultado = cast(
+                "CursorResult[Any]", conexao.execute(sql, {"lote": LOTE_DE_LIMPEZA})
+            )
+        total += resultado.rowcount
+        if resultado.rowcount < LOTE_DE_LIMPEZA:
+            return total
+        entre_lotes()
 
 
 def gravar_comando(

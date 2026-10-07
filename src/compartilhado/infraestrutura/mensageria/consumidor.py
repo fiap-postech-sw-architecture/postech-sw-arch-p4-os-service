@@ -21,7 +21,7 @@ devolve a copia a ``os.eventos`` pelo dead letter. Uma fila por atraso, e nao um
 da fila: uma copia de 300 s seguraria as de 1 s. Esgotadas as cinco, ou erro
 permanente (tipo, origem, JSON ou contrato invalidos, ou qualquer outra
 excecao): ``reject`` sem requeue, e a fila manda a mensagem para a
-``os.eventos.dlq``. Uma vez por hora apaga as linhas de
+``os.eventos.dlq``. Uma vez por hora apaga, em lotes, as linhas de
 ``mensagens_processadas`` com mais de 30 dias.
 """
 
@@ -30,15 +30,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import pika
 import structlog
 from opentelemetry.trace import SpanKind, StatusCode
 from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter
-from sqlalchemy import delete, func
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.compartilhado.aplicacao.mensageria import (
@@ -52,6 +51,8 @@ from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import FILA, catalogo
 from src.compartilhado.infraestrutura.mensageria.processo import (
     DIRETORIO_DE_SAUDE,
+    INTERVALO_DE_LIMPEZA_S,
+    Agenda,
     Sinalizador,
     inteiro_do_ambiente,
     onde,
@@ -61,7 +62,7 @@ from src.compartilhado.infraestrutura.mensageria.telemetria import (
     contexto_dos_cabecalhos,
 )
 from src.compartilhado.infraestrutura.outbox_mapping import (
-    mensagens_processadas_table,
+    apagar_em_lotes,
     registrar_processada,
 )
 
@@ -70,7 +71,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from opentelemetry.trace import Tracer
-    from sqlalchemy import CursorResult
     from sqlalchemy.orm import Session, sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -90,8 +90,12 @@ type Handler = Callable[[MensagemRecebida, Session], Desfecho]
 # definitions.json do platform); depois da quinta, DLQ.
 NIVEIS_DE_RETRY: Final = ("1s", "5s", "15s", "60s", "300s")
 _EXCHANGE_DE_RETRY: Final = "pytstop.retry"
-_RETENCAO: Final = timedelta(days=30)
-_INTERVALO_DE_LIMPEZA: Final = timedelta(hours=1)
+# Retencao de 30 dias (RFC-004 secao 5.4), em lotes.
+_SQL_LIMPEZA: Final = text(
+    "DELETE FROM mensagens_processadas WHERE mensagem_id IN ("
+    "SELECT mensagem_id FROM mensagens_processadas "
+    "WHERE processada_em < now() - interval '30 days' LIMIT :lote)"
+)
 _TIPO_DESCONHECIDO: Final = "desconhecido"
 # Banco (fora do ar, deadlock, timeout, conflito de escrita) e dependencia
 # fora: a mesma mensagem tende a passar numa nova tentativa.
@@ -153,7 +157,7 @@ class Consumidor:
             declarar=self._declarar,
         )
         self._catalogo = catalogo()
-        self._proxima_limpeza = datetime.now(UTC)
+        self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
 
     def executar(self, parar: threading.Event) -> None:
         """Laco principal; queda do broker nao derruba o processo.
@@ -397,22 +401,14 @@ class Consumidor:
         return "retry"
 
     def _limpar_se_devido(self) -> None:
-        agora = datetime.now(UTC)
-        if agora < self._proxima_limpeza:
+        if not self._limpeza.devida():
             return
-        # Avanca antes: com o banco fora, a proxima tentativa e daqui a uma
-        # hora, nao a cada mensagem.
-        self._proxima_limpeza = agora + _INTERVALO_DE_LIMPEZA
         try:
-            with self._session_factory() as sessao:
-                resultado = sessao.execute(
-                    delete(mensagens_processadas_table).where(
-                        mensagens_processadas_table.c.processada_em
-                        < func.now() - _RETENCAO
-                    )
-                )
-                sessao.commit()
-            apagadas = cast("CursorResult[Any]", resultado).rowcount
+            apagadas = apagar_em_lotes(
+                self._session_factory.begin,
+                _SQL_LIMPEZA,
+                entre_lotes=self._broker.atender,
+            )
         except SQLAlchemyError as exc:
             _log.warning("processed messages cleanup failed", erro=type(exc).__name__)
             return

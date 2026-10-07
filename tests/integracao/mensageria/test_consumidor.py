@@ -374,8 +374,8 @@ def test_apaga_as_mensagens_processadas_ha_mais_de_30_dias(
         conexao.execute(
             text(
                 "INSERT INTO mensagens_processadas (mensagem_id, processada_em) VALUES "
-                "(:antiga, now() - interval '31 days'), "
-                "(:recente, now() - interval '29 days')"
+                "(:antiga, now() - interval '30 days 1 minute'), "
+                "(:recente, now() - interval '29 days 23 hours 59 minutes')"
             ),
             {"antiga": antiga, "recente": recente},
         )

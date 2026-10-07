@@ -25,6 +25,7 @@ from sqlalchemy.orm import sessionmaker
 
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaError
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura import outbox_mapping
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria import relay as modulo_relay
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
@@ -460,6 +461,81 @@ def test_falha_ao_liberar_o_lote_interrompido_deixa_as_linhas_para_depois_do_lea
 
     assert [_linha(engine, m).tentativas for m in mensagens] == [0, 0]
     assert len(seguinte.publicadas) == 2
+
+
+class _ConexaoQueConta(ConexaoFalsa):
+    """Anota, a cada vez que o processo atende o broker, quantas linhas sobram."""
+
+    def __init__(self, contar: Any) -> None:
+        super().__init__()
+        self._contar = contar
+        self.restantes: list[int] = []
+
+    def process_data_events(self, time_limit: float) -> None:
+        self.restantes.append(self._contar())
+
+
+def _quantas(engine: Engine, sql: str) -> int:
+    with engine.connect() as conexao:
+        total: int = conexao.execute(text(sql)).scalar_one()
+    return total
+
+
+def test_limpeza_do_relay_atende_o_broker_entre_os_lotes(
+    engine: Engine,
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+) -> None:
+    monkeypatch.setattr(outbox_mapping, "LOTE_DE_LIMPEZA", 2)
+    for _ in range(5):
+        _gravar(session_factory)
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "UPDATE outbox SET status = 'entregue', "
+                "entregue_em = now() - interval '8 days'"
+            )
+        )
+    conexao_falsa = _ConexaoQueConta(
+        lambda: _quantas(engine, "SELECT count(*) FROM outbox")
+    )
+    conexoes.append((conexao_falsa, CanalFalso()))
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
+        esperar_ate(lambda: len(conexao_falsa.restantes) >= 3)
+
+    assert conexao_falsa.restantes[:3] == [3, 1, 0]
+
+
+def test_limpeza_do_consumidor_atende_o_broker_entre_os_lotes(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(outbox_mapping, "LOTE_DE_LIMPEZA", 2)
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "INSERT INTO mensagens_processadas (mensagem_id, processada_em) "
+                "SELECT gen_random_uuid(), now() - interval '31 days' "
+                "FROM generate_series(1, 5)"
+            )
+        )
+    conexao_falsa = _ConexaoQueConta(
+        lambda: _quantas(engine, "SELECT count(*) FROM mensagens_processadas")
+    )
+    conexoes.append((conexao_falsa, CanalFalso()))
+
+    with EmSegundoPlano(_consumidor(session_factory, rastreador, tmp_path, {})):
+        esperar_ate(lambda: len(conexao_falsa.restantes) >= 2)
+
+    assert conexao_falsa.restantes[:2] == [3, 1]
 
 
 def test_linha_que_outra_replica_ja_finalizou_e_pulada(

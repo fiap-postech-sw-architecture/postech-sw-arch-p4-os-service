@@ -14,6 +14,7 @@ import math
 import os
 import signal
 import tempfile
+import time
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -41,6 +42,8 @@ _log = structlog.get_logger(__name__)
 # Temporario do container (/tmp): as probes do Kubernetes leem daqui.
 DIRETORIO_DE_SAUDE: Final = Path(tempfile.gettempdir())
 _PORTA_DE_METRICAS: Final = 9100
+# Limpezas da outbox e de `mensagens_processadas`: uma vez por hora.
+INTERVALO_DE_LIMPEZA_S: Final = 3600.0
 # Senha de demonstracao do usuario `os` (compose e .env.example): proibida fora
 # de development/test, como os demais segredos de demonstracao.
 _SENHA_DO_BROKER_DEMO: Final = "pytstop-os-demo-2026"  # gitleaks:allow
@@ -61,6 +64,26 @@ class Sinalizador:
 
     def marcar_nao_pronto(self) -> None:
         self.pronto.unlink(missing_ok=True)
+
+
+class Agenda:
+    """Libera uma tarefa no maximo uma vez por ``intervalo_s`` (relogio monotonico).
+
+    A primeira chamada ja libera; o proximo horario avanca antes da tarefa
+    rodar: com o banco fora, ela tenta de novo no proximo intervalo, nao a cada
+    volta do laco.
+    """
+
+    def __init__(self, intervalo_s: float) -> None:
+        self._intervalo_s = intervalo_s
+        self._proxima = time.monotonic()
+
+    def devida(self) -> bool:
+        agora = time.monotonic()
+        if agora < self._proxima:
+            return False
+        self._proxima = agora + self._intervalo_s
+        return True
 
 
 def inteiro_do_ambiente(nome: str, padrao: int, *, minimo: int) -> int:

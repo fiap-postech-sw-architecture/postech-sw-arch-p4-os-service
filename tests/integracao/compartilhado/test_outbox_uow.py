@@ -10,11 +10,15 @@ import pytest
 from sqlalchemy import inspect, text
 
 from src.compartilhado.aplicacao.mensageria import ContratoInvalidoError
+from src.compartilhado.infraestrutura import outbox_mapping
 from src.compartilhado.infraestrutura.mensageria.contratos import (
     CONTRATOS,
     catalogo,
 )
-from src.compartilhado.infraestrutura.outbox_mapping import registrar_processada
+from src.compartilhado.infraestrutura.outbox_mapping import (
+    apagar_em_lotes,
+    registrar_processada,
+)
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.infraestrutura.repository import (
@@ -26,6 +30,7 @@ from tests.rastreamento import traceparent
 if TYPE_CHECKING:
     from typing import Any
 
+    from sqlalchemy import Engine
     from sqlalchemy.orm import Session
 
     from tests.rastreamento import Rastreador
@@ -192,6 +197,48 @@ def test_mensagem_processada_so_e_registrada_uma_vez(session: Session) -> None:
         {"id": mensagem_id},
     ).scalar_one()
     assert total == 1
+
+
+def _processadas_antigas(engine: Engine) -> int:
+    with engine.connect() as conexao:
+        total: int = conexao.execute(
+            text(
+                "SELECT count(*) FROM mensagens_processadas "
+                "WHERE processada_em < now() - interval '30 days'"
+            )
+        ).scalar_one()
+    return total
+
+
+@pytest.mark.usefixtures("session_factory")
+def test_limpeza_apaga_em_lotes_e_atende_o_broker_entre_eles(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(outbox_mapping, "LOTE_DE_LIMPEZA", 2)
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "INSERT INTO mensagens_processadas (mensagem_id, processada_em) "
+                "SELECT gen_random_uuid(), now() - interval '31 days' "
+                "FROM generate_series(1, 5)"
+            )
+        )
+    restantes: list[int] = []
+    limpeza = text(
+        "DELETE FROM mensagens_processadas WHERE mensagem_id IN ("
+        "SELECT mensagem_id FROM mensagens_processadas "
+        "WHERE processada_em < now() - interval '30 days' LIMIT :lote)"
+    )
+
+    apagadas = apagar_em_lotes(
+        engine.begin,
+        limpeza,
+        entre_lotes=lambda: restantes.append(_processadas_antigas(engine)),
+    )
+
+    # Tres lotes (2, 2 e 1), um commit cada, e o broker atendido entre eles.
+    assert apagadas == 5
+    assert restantes == [3, 1]
 
 
 def test_tracestate_acima_de_512_caracteres_fica_fora_da_outbox(

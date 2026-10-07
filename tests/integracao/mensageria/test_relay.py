@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -509,19 +509,46 @@ def test_excecao_inesperada_na_publicacao_conta_tentativa_e_nao_derruba_o_relay(
 
 
 @pytest.mark.usefixtures("session_factory")
-def test_apaga_as_linhas_entregues_ha_mais_de_7_dias(
+def test_apaga_entregues_com_mais_de_7_dias_e_dead_com_mais_de_30_e_nunca_pendente(
     engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
 ) -> None:
-    agora = datetime.now(UTC)
-    antiga = _inserir(engine, status="entregue", entregue_em=agora - timedelta(days=8))
-    recente = _inserir(engine, status="entregue", entregue_em=agora - timedelta(days=6))
-    morta = _inserir(engine, status="dead")
+    entregue_antiga = _inserir(engine, status="entregue")
+    _envelhecer(engine, entregue_antiga, "entregue_em", "7 days 1 minute")
+    entregue_recente = _inserir(engine, status="entregue")
+    _envelhecer(engine, entregue_recente, "entregue_em", "6 days 23 hours 59 minutes")
+    dead_antiga = _inserir(engine, status="dead")
+    _envelhecer(engine, dead_antiga, "criado_em", "30 days 1 minute")
+    dead_recente = _inserir(engine, status="dead")
+    _envelhecer(engine, dead_recente, "criado_em", "29 days 23 hours 59 minutes")
+    # Pendente criada ha 40 dias (e so elegivel amanha): nunca expira.
+    pendente = _inserir(engine)
+    _envelhecer(engine, pendente, "criado_em", "40 days")
+    _envelhecer(engine, pendente, "proxima_tentativa_em", "-1 day")
     relay = _relay(engine, broker, rastreador, tmp_path)
 
     with EmSegundoPlano(relay):
-        esperar_ate(lambda: _status(engine, antiga) is None)
+        esperar_ate(
+            lambda: (
+                _status(engine, entregue_antiga) is None
+                and _status(engine, dead_antiga) is None
+            )
+        )
 
-    assert _status(engine, recente) == "entregue"
-    assert _status(engine, morta) == "dead"
+    assert _status(engine, entregue_recente) == "entregue"
+    assert _status(engine, dead_recente) == "dead"
+    assert _status(engine, pendente) == "pendente"
     # O laco ocioso e a limpeza nao abrem span.
     assert rastreador.spans() == []
+
+
+def _envelhecer(engine: Engine, linha_id: int, coluna: str, idade: str) -> None:
+    """Recua a ``coluna`` da linha pelo relogio do banco (o mesmo da limpeza)."""
+    assert coluna in {"entregue_em", "criado_em", "proxima_tentativa_em"}
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                f"UPDATE outbox SET {coluna} = now() - CAST(:idade AS interval) "  # noqa: S608  # coluna da lista acima
+                "WHERE id = :id"
+            ),
+            {"id": linha_id, "idade": idade},
+        )

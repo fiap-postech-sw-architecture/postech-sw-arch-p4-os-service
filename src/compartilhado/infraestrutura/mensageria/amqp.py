@@ -196,6 +196,10 @@ class ConexaoDoProcesso:
         parar.wait(_sortear(self._atraso))
         self._atraso = min(self._atraso * 2, RECONEXAO_TETO_S)
 
+    def atender(self) -> None:
+        """Atende o broker (heartbeat, Connection.Blocked) sem esperar."""
+        self.conexao.process_data_events(time_limit=0)
+
     def sucesso(self) -> None:
         """A conexao fez trabalho: a proxima queda recomeca do minimo."""
         self._atraso = RECONEXAO_BASE_S

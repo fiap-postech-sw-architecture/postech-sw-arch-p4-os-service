@@ -36,8 +36,10 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.compartilhado.infraestrutura.outbox_mapping import apagar_em_lotes
+
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from uuid import UUID
 
     from sqlalchemy import Engine, TextClause
@@ -45,7 +47,6 @@ if TYPE_CHECKING:
 # Politica do relay do p3: um atraso depois de cada falha da propria mensagem;
 # a falha seguinte a ultima da tabela (a quinta) leva a linha a `dead`.
 ATRASOS_S: Final[tuple[float, ...]] = (1, 4, 16, 64)
-_RETENCAO: Final = timedelta(days=7)
 
 _SQL_CLAIM: Final = text(
     "SELECT o.id, o.mensagem_id, o.correlation_id, o.exchange, o.routing_key, "
@@ -86,8 +87,17 @@ _SQL_LIBERAR: Final = text(
     "UPDATE outbox SET proxima_tentativa_em = now() "
     "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate"
 )
-_SQL_LIMPEZA: Final = text(
-    "DELETE FROM outbox WHERE status = 'entregue' AND entregue_em < now() - :retencao"
+# Retencao: entregue por 7 dias (RFC-004 secao 5.4) e dead por 30, a janela de
+# operacao para o redrive; pendente nunca expira.
+_SQL_LIMPEZA_ENTREGUES: Final = text(
+    "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status = 'entregue' "
+    "AND entregue_em < now() - interval '7 days' LIMIT :lote)"
+)
+# A linha morre minutos depois de criada (a quinta falha vem em menos de 2 min;
+# broker fora nao gasta tentativa), entao `criado_em` marca o inicio da janela.
+_SQL_LIMPEZA_DEAD: Final = text(
+    "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status = 'dead' "
+    "AND criado_em < now() - interval '30 days' LIMIT :lote)"
 )
 _SQL_CONTAGEM: Final = text("SELECT count(*) FROM outbox WHERE status = :status")
 
@@ -199,13 +209,12 @@ class Outbox:
                 [{"id": linha.id, "lease_ate": linha.lease_ate} for linha in linhas],
             )
 
-    def limpar(self) -> int:
-        """Apaga as linhas entregues ha mais de 7 dias; devolve quantas."""
-        with self._engine.begin() as conexao:
-            apagadas: int = conexao.execute(
-                _SQL_LIMPEZA, {"retencao": _RETENCAO}
-            ).rowcount
-        return apagadas
+    def limpar(self, *, entre_lotes: Callable[[], None]) -> int:
+        """Apaga, em lotes, as entregues ha mais de 7 dias e as dead ha mais de 30."""
+        return sum(
+            apagar_em_lotes(self._engine.begin, sql, entre_lotes=entre_lotes)
+            for sql in (_SQL_LIMPEZA_ENTREGUES, _SQL_LIMPEZA_DEAD)
+        )
 
     def contar(self, status: str) -> float:
         """Linhas com o ``status`` (gauge do /metrics); NaN com o banco fora."""

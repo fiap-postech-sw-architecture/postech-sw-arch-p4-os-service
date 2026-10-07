@@ -14,7 +14,8 @@ A publicacao usa publisher confirms e ``mandatory``: a linha so vira
 recusada (nack) ou com o canal fechado pelo broker, a linha conta tentativa,
 com os atrasos do relay do p3, ate ``dead`` na quinta falha. Entre lotes o
 relay espera o ``NOTIFY outbox_novo`` com poll de seguranca e, uma vez por hora,
-apaga as linhas entregues ha mais de 7 dias (RFC-004 secao 5.4).
+apaga em lotes as linhas entregues ha mais de 7 dias (RFC-004 secao 5.4) e as
+``dead`` ha mais de 30.
 
 Trace (ADR-043): cada publicacao abre um span PRODUCER filho do contexto
 gravado na linha e leva o contexto desse span nos headers; o laco ocioso nao
@@ -27,7 +28,7 @@ import contextlib
 import json
 import select
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
@@ -47,6 +48,8 @@ from src.compartilhado.infraestrutura.mensageria.outbox import (
 )
 from src.compartilhado.infraestrutura.mensageria.processo import (
     DIRETORIO_DE_SAUDE,
+    INTERVALO_DE_LIMPEZA_S,
+    Agenda,
     Sinalizador,
     inteiro_do_ambiente,
     numero_do_ambiente,
@@ -83,7 +86,6 @@ OUTBOX_DEAD: Final = Gauge(
     "outbox_dead", "Linhas da outbox que esgotaram as tentativas (status dead)."
 )
 
-_INTERVALO_DE_LIMPEZA: Final = timedelta(hours=1)
 # Keepalives TCP da conexao dedicada de LISTEN: um peer que sumiu em silencio
 # e detectado em cerca de 60 s, em vez de deixar o relay surdo ao NOTIFY.
 _KEEPALIVES: Final = {
@@ -154,7 +156,7 @@ class Relay:
                 for tipo in self._catalogo.publicados
             }
         )
-        self._proxima_limpeza = datetime.now(UTC)
+        self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
         OUTBOX_PENDENTES.set_function(lambda: self._outbox.contar("pendente"))
         OUTBOX_DEAD.set_function(lambda: self._outbox.contar("dead"))
 
@@ -383,15 +385,11 @@ class Relay:
             _log.exception("outbox rows not released; they return after the lease")
 
     def _limpar_se_devido(self) -> None:
-        agora = datetime.now(UTC)
-        if agora < self._proxima_limpeza:
+        if not self._limpeza.devida():
             return
-        # Avanca antes: com o banco fora, a proxima tentativa e daqui a uma
-        # hora, nao a cada volta do laco.
-        self._proxima_limpeza = agora + _INTERVALO_DE_LIMPEZA
-        apagadas = self._outbox.limpar()
+        apagadas = self._outbox.limpar(entre_lotes=self._broker.atender)
         if apagadas:
-            _log.info("delivered outbox rows deleted", linhas=apagadas)
+            _log.info("old outbox rows deleted", linhas=apagadas)
 
     def _esperar(self, escuta: Any, parar: threading.Event) -> Any:  # noqa: ANN401  # conexao psycopg2
         """Espera um NOTIFY ou o poll de seguranca e atende o heartbeat AMQP."""
@@ -413,7 +411,7 @@ class Relay:
         if self._broker.conexao is not None:
             try:
                 # Sem isso o broker derruba a conexao ociosa por heartbeat.
-                self._broker.conexao.process_data_events(time_limit=0)
+                self._broker.atender()
             except amqp.ERROS_DE_CONEXAO:
                 # Inclui o timeout do bloqueio por alarme de recursos.
                 _log.warning("broker connection lost while idle; reconnecting")
