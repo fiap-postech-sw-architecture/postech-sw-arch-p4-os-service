@@ -22,6 +22,20 @@ x-mensageria: &mensageria
   RABBITMQ_URL: amqp://os:pytstop-os-demo-2026@rabbitmq:5672/%2F  # gitleaks:allow (senha de demo)
   OTEL_ENABLED: ${OTEL_ENABLED:-false}
 
+# Relay e consumidor: sistema de arquivos so leitura (o /tmp dos arquivos de
+# saude e um tmpfs), sem capabilities nem escalada de privilegio e com teto de
+# memoria, CPU e processos. Cada um usa ate 4 conexoes com o banco.
+x-processo-endurecido: &processo-endurecido
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 256m
+  cpus: 0.5
+  pids_limit: 128
+
 services:
   api:
     build:
@@ -66,7 +80,9 @@ services:
   # Relay da outbox (python -m src.relay) e consumidor de os.eventos (python -m
   # src.consumidor): a imagem da API, sem HTTP de negocio. Sobem depois da API
   # pronta (migracoes aplicadas) e dos usuarios do RabbitMQ criados. Saudavel =
-  # conectado ao broker (arquivo de pronto) e laco vivo (heartbeat de ate 60 s).
+  # conectado ao broker (arquivo de pronto) e laco vivo: heartbeat do processo
+  # com ate 90 s, porque com o broker mudo um publish fica ate cerca de 70 s
+  # preso antes de o heartbeat AMQP derrubar a conexao.
   relay:
     image: ${APP_IMAGE:-pytstop-os-service:dev}
     # Imagem construida pelo servico api; nunca baixada de registry.
@@ -74,6 +90,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "src.relay"]
     environment: *mensageria
+    <<: *processo-endurecido
     depends_on:
       api:
         condition: service_healthy
@@ -84,7 +101,7 @@ services:
         - CMD
         - python
         - -c
-        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/relay-pronto') and time.time() - os.path.getmtime('/tmp/relay-heartbeat') < 60 else 1)"
+        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/relay-pronto') and time.time() - os.path.getmtime('/tmp/relay-heartbeat') < 90 else 1)"
       interval: 5s
       timeout: 3s
       retries: 12
@@ -96,6 +113,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "src.consumidor"]
     environment: *mensageria
+    <<: *processo-endurecido
     depends_on:
       api:
         condition: service_healthy
@@ -106,7 +124,7 @@ services:
         - CMD
         - python
         - -c
-        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/consumidor-pronto') and time.time() - os.path.getmtime('/tmp/consumidor-heartbeat') < 60 else 1)"
+        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/consumidor-pronto') and time.time() - os.path.getmtime('/tmp/consumidor-heartbeat') < 90 else 1)"
       interval: 5s
       timeout: 3s
       retries: 12

@@ -63,8 +63,11 @@ audit:
 # Relay e consumidor sobem da mesma imagem com o RabbitMQ do compose (a
 # topologia do platform e o usuario `os`) e tem de ficar saudaveis (healthcheck
 # conferido no `docker inspect`, nao so o `up --wait`): conectados ao broker
-# depois da declaracao passiva do que usam e com o heartbeat em dia. O /metrics
-# de cada um responde na porta 9100.
+# depois da declaracao passiva do que usam e com o heartbeat em dia. O consumidor
+# tem de aparecer no `rabbitmqctl list_consumers` de os.eventos, com prefetch 1
+# (numa fila quorum o `list_queues` mostra 0 consumidores mesmo com um ativo), e
+# o `outbox_pendentes` do /metrics do relay tem de ser um numero: NaN e o banco
+# fora do alcance dele.
 #
 # O access token do login passa pelo validador independente
 # (scripts/validar_token.py, so PyJWT): JWKS buscado por HTTP, RS256, iss, aud,
@@ -129,8 +132,11 @@ smoke:
 		|| { echo "smoke: o relay nao ficou pronto" >&2; false; }; } \
 	&& { [ "$$(docker inspect -f '{{.State.Health.Status}}' "$$($(SMOKE_COMPOSE) ps -q consumidor)")" = healthy ] \
 		|| { echo "smoke: o consumidor nao ficou pronto" >&2; false; }; } \
-	&& { $(SMOKE_COMPOSE) exec -T relay $(SMOKE_METRICAS) | grep -q '^outbox_pendentes ' \
-		|| { echo "smoke: o /metrics do relay nao traz outbox_pendentes" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T relay $(SMOKE_METRICAS) | grep -Eq '^outbox_pendentes [0-9]' \
+		|| { echo "smoke: o /metrics do relay nao traz outbox_pendentes (ou o banco esta fora: NaN)" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T rabbitmq rabbitmqctl -q list_consumers queue_name prefetch_count \
+			| grep -Eq '^os\.eventos[[:space:]]+1$$' \
+		|| { echo "smoke: o consumidor nao esta inscrito em os.eventos com prefetch 1" >&2; false; }; } \
 	&& { $(SMOKE_COMPOSE) exec -T consumidor $(SMOKE_METRICAS) \
 			| grep -q '^# TYPE pytstop_mensagens_consumidas_total counter' \
 		|| { echo "smoke: o /metrics do consumidor nao traz as mensagens consumidas" >&2; false; }; } \
