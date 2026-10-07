@@ -241,12 +241,24 @@ def envelope_de_evento(
     return exemplo
 
 
+class EsperasRegistradas(threading.Event):
+    """``parar`` que anota cada espera (o timeout pedido) e quase nao dorme."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.esperas: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.esperas.append(timeout)
+        return super().wait(0.001)
+
+
 class EmSegundoPlano:
     """Roda ``processo.executar(parar)`` (relay ou consumidor) numa thread."""
 
-    def __init__(self, processo: Any) -> None:
+    def __init__(self, processo: Any, parar: threading.Event | None = None) -> None:
         self._processo = processo
-        self.parar = threading.Event()
+        self.parar = parar or threading.Event()
         self._erro: BaseException | None = None
         self._thread = threading.Thread(target=self._rodar, daemon=True)
 

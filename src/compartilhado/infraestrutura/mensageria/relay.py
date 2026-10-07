@@ -83,8 +83,6 @@ OUTBOX_DEAD: Final = Gauge(
 # quinta falha leva a linha a `dead`.
 ATRASOS_S: Final = (1, 4, 16, 64)
 MAX_TENTATIVAS: Final = 5
-_RECONEXAO_BASE_S: Final = 1.0
-_RECONEXAO_TETO_S: Final = 30.0
 _RETENCAO: Final = timedelta(days=7)
 _INTERVALO_DE_LIMPEZA: Final = timedelta(hours=1)
 # Keepalives TCP da conexao dedicada de LISTEN: um peer que sumiu em silencio
@@ -191,17 +189,17 @@ class Relay:
         config: ConfigRelay | None = None,
     ) -> None:
         self._engine = engine
-        self._parametros = parametros
         self._usuario = amqp.usuario(parametros)
         self._tracer = tracer
         self._config = config or ConfigRelay()
         self._sinal = Sinalizador("relay", self._config.diretorio_de_saude)
+        self._broker = amqp.ConexaoDoProcesso(
+            parametros, processo="relay", sinal=self._sinal, declarar=self._declarar
+        )
         contratos = catalogo()
         self._exchanges = sorted(
             {contratos.destino(tipo).exchange for tipo in contratos.publicados}
         )
-        self._conexao: Any = None
-        self._canal: Any = None
         self._proxima_limpeza = _agora()
         OUTBOX_PENDENTES.set_function(lambda: self._contar("pendente"))
         OUTBOX_DEAD.set_function(lambda: self._contar("dead"))
@@ -215,23 +213,19 @@ class Relay:
             lease_s=self._config.lease.total_seconds(),
         )
         escuta: Any = None
-        atraso = _RECONEXAO_BASE_S
         try:
             while not parar.is_set():
                 self._sinal.bater()
-                if self._canal is None and not self._conectar():
-                    self._sinal.marcar_nao_pronto()
-                    parar.wait(atraso)
-                    atraso = min(atraso * 2, _RECONEXAO_TETO_S)
+                if self._broker.canal is None and not self._broker.conectar():
+                    self._broker.esperar(parar)
                     continue
-                atraso = _RECONEXAO_BASE_S
-                self._sinal.marcar_pronto()
                 try:
                     self._drenar(parar)
                     self._limpar_se_devido()
                 except _BrokerIndisponivelError:
                     _log.warning("broker connection lost; reconnecting")
-                    self._desconectar()
+                    self._broker.desconectar()
+                    self._broker.esperar(parar)
                     continue
                 except SQLAlchemyError:
                     # Banco fora (failover, blip do pool): as linhas voltam no
@@ -240,33 +234,14 @@ class Relay:
                 escuta = self._esperar(escuta, parar)
         finally:
             _fechar_escuta(escuta)
-            self._desconectar()
+            self._broker.desconectar()
             _log.info("relay stopped")
 
-    def _conectar(self) -> bool:
-        try:
-            self._conexao, self._canal = amqp.conectar(self._parametros)
-            # Declaracao passiva so do que o usuario `os` alcanca: confere a
-            # topologia do platform sem redeclarar nada.
-            for exchange in self._exchanges:
-                self._canal.exchange_declare(exchange, passive=True)
-        except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
-            _log.warning(
-                "broker unavailable",
-                erro=type(exc).__name__,
-                codigo=getattr(exc, "reply_code", None),
-            )
-            self._desconectar()
-            return False
-        _log.info("broker connected", exchanges=self._exchanges)
-        return True
-
-    def _desconectar(self) -> None:
-        if self._conexao is not None:
-            amqp.fechar(self._conexao)
-        self._conexao = None
-        self._canal = None
-        self._sinal.marcar_nao_pronto()
+    def _declarar(self, canal: Any) -> None:  # noqa: ANN401  # BlockingChannel (pika sem tipos)
+        # Declaracao passiva so do que o usuario `os` alcanca: confere a
+        # topologia do platform sem redeclarar nada.
+        for exchange in self._exchanges:
+            canal.exchange_declare(exchange, passive=True)
 
     def _drenar(self, parar: threading.Event) -> None:
         """Reivindica e entrega lotes ate nao sobrar linha elegivel."""
@@ -315,7 +290,7 @@ class Relay:
         return linhas
 
     def _entregar(self, linha: _Linha) -> None:
-        if not self._canal.is_open:
+        if not self._broker.canal.is_open:
             self._reabrir_canal()
         with self._engine.begin() as conexao:
             if conexao.execute(_SQL_FENCING, {"id": linha.id}).first() is None:
@@ -359,7 +334,7 @@ class Relay:
         )
         corpo = json.dumps(linha.envelope, ensure_ascii=False).encode()
         try:
-            self._canal.basic_publish(
+            self._broker.canal.basic_publish(
                 linha.exchange, linha.routing_key, corpo, propriedades, mandatory=True
             )
         except UnroutableError:
@@ -387,6 +362,8 @@ class Relay:
             conexao.execute(_SQL_ENTREGUE, {"id": linha.id, "agora": _agora()})
             MENSAGENS_PUBLICADAS.labels(tipo=tipo).inc()
             _log.info("message published", **contexto_de_log)
+            # O broker confirmou: a proxima queda recomeca o backoff do minimo.
+            self._broker.sucesso()
             return
         tentativas = linha.tentativas + 1
         parametros = {"id": linha.id, "tentativas": tentativas, "erro": falha}
@@ -413,9 +390,8 @@ class Relay:
     def _reabrir_canal(self) -> None:
         """Canal novo na mesma conexao, depois de o broker fechar o anterior."""
         try:
-            self._canal = self._conexao.channel()
-            self._canal.confirm_delivery()
-        except amqp.ERROS_DE_CONEXAO as exc:
+            self._broker.reabrir_canal()
+        except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
             raise _BrokerIndisponivelError from exc
 
     def _liberar(self, ids: Sequence[int]) -> None:
@@ -456,13 +432,13 @@ class Relay:
                 _log.warning("listen connection lost; polling until it is back")
                 _fechar_escuta(escuta)
                 escuta = None
-        if self._conexao is not None:
+        if self._broker.conexao is not None:
             try:
                 # Sem isso o broker derruba a conexao ociosa por heartbeat.
-                self._conexao.process_data_events(time_limit=0)
+                self._broker.conexao.process_data_events(time_limit=0)
             except amqp.ERROS_DE_CONEXAO:
                 _log.warning("broker connection lost while idle; reconnecting")
-                self._desconectar()
+                self._broker.desconectar()
         return escuta
 
     def _abrir_escuta(self) -> Any:  # noqa: ANN401  # conexao psycopg2

@@ -90,8 +90,6 @@ type Handler = Callable[[MensagemRecebida, Session], Desfecho]
 # definitions.json do platform); depois da quinta, DLQ.
 NIVEIS_DE_RETRY: Final = ("1s", "5s", "15s", "60s", "300s")
 _EXCHANGE_DE_RETRY: Final = "pytstop.retry"
-_RECONEXAO_BASE_S: Final = 1.0
-_RECONEXAO_TETO_S: Final = 30.0
 _RETENCAO: Final = timedelta(days=30)
 _INTERVALO_DE_LIMPEZA: Final = timedelta(hours=1)
 _TIPO_DESCONHECIDO: Final = "desconhecido"
@@ -143,40 +141,43 @@ class Consumidor:
         config: ConfigConsumidor | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._parametros = parametros
         self._usuario = amqp.usuario(parametros)
         self._despachante = despachante
         self._tracer = tracer
         self._config = config or ConfigConsumidor()
         self._sinal = Sinalizador("consumidor", self._config.diretorio_de_saude)
+        self._broker = amqp.ConexaoDoProcesso(
+            parametros,
+            processo="consumidor",
+            sinal=self._sinal,
+            declarar=self._declarar,
+        )
         self._catalogo = catalogo()
-        self._conexao: Any = None
-        self._canal: Any = None
         self._proxima_limpeza = datetime.now(UTC)
-        # Backoff de reconexao. So volta ao minimo depois de uma mensagem
-        # tratada: um canal que o broker fecha a cada mensagem (rota de retry
-        # sem permissao, por exemplo) nao vira um laco de reconexao.
-        self._atraso = _RECONEXAO_BASE_S
 
     def executar(self, parar: threading.Event) -> None:
         """Laco principal; queda do broker nao derruba o processo.
 
         Encerramento gracioso: com o ``parar`` sinalizado, conclui a mensagem em
         curso e fecha a conexao; o broker devolve a fila as pre-buscadas sem
-        ack.
+        ack. Conexao perdida e consumo cancelado pelo broker reconectam com o
+        backoff da ``ConexaoDoProcesso``.
         """
         _log.info("consumer started", fila=FILA, prefetch=self._config.prefetch)
         try:
             while not parar.is_set():
                 self._sinal.bater()
-                if not self._conectar():
-                    self._esperar(parar)
+                if not self._broker.conectar():
+                    self._broker.esperar(parar)
                     continue
-                self._sinal.marcar_pronto()
                 try:
-                    # Volta normalmente no `parar` ou quando o broker cancela o
-                    # consumo (o gerador do pika so termina): reconecta.
                     self._consumir(parar)
+                    if not parar.is_set():
+                        # O gerador do pika so termina quando o broker cancela o
+                        # consumo (fila apagada, por exemplo).
+                        _log.warning(
+                            "consumption cancelled by the broker; reconnecting"
+                        )
                 except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
                     # A mensagem sem ack volta para a fila quando a conexao fecha.
                     _log.warning(
@@ -184,46 +185,23 @@ class Consumidor:
                         erro=type(exc).__name__,
                         codigo=getattr(exc, "reply_code", None),
                     )
-                    self._desconectar()
-                    self._esperar(parar)
                 finally:
-                    self._desconectar()
+                    self._broker.desconectar()
+                if not parar.is_set():
+                    self._broker.esperar(parar)
         finally:
-            self._desconectar()
+            self._broker.desconectar()
             _log.info("consumer stopped")
 
-    def _conectar(self) -> bool:
-        try:
-            self._conexao, self._canal = amqp.conectar(self._parametros)
-            # Declaracao passiva so do que o usuario `os` alcanca: a fila que
-            # ele le e o exchange de retry em que escreve.
-            self._canal.queue_declare(FILA, passive=True)
-            self._canal.exchange_declare(_EXCHANGE_DE_RETRY, passive=True)
-            self._canal.basic_qos(prefetch_count=self._config.prefetch)
-        except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
-            _log.warning(
-                "broker unavailable",
-                erro=type(exc).__name__,
-                codigo=getattr(exc, "reply_code", None),
-            )
-            self._desconectar()
-            return False
-        _log.info("broker connected", fila=FILA)
-        return True
-
-    def _esperar(self, parar: threading.Event) -> None:
-        parar.wait(self._atraso)
-        self._atraso = min(self._atraso * 2, _RECONEXAO_TETO_S)
-
-    def _desconectar(self) -> None:
-        if self._conexao is not None:
-            amqp.fechar(self._conexao)
-        self._conexao = None
-        self._canal = None
-        self._sinal.marcar_nao_pronto()
+    def _declarar(self, canal: Any) -> None:  # noqa: ANN401  # BlockingChannel (pika sem tipos)
+        # Declaracao passiva so do que o usuario `os` alcanca: a fila que ele le
+        # e o exchange de retry em que escreve.
+        canal.queue_declare(FILA, passive=True)
+        canal.exchange_declare(_EXCHANGE_DE_RETRY, passive=True)
+        canal.basic_qos(prefetch_count=self._config.prefetch)
 
     def _consumir(self, parar: threading.Event) -> None:
-        for metodo, propriedades, corpo in self._canal.consume(
+        for metodo, propriedades, corpo in self._broker.canal.consume(
             FILA, inactivity_timeout=self._config.inatividade_s
         ):
             self._sinal.bater()
@@ -270,7 +248,7 @@ class Consumidor:
                     "message rejected to dlq", motivo=exc.motivo, **exc.contexto
                 )
                 span.set_status(StatusCode.ERROR, exc.motivo)
-                self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+                self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
                 resultado = "dlq"
             except _TRANSITORIOS as exc:
                 span.set_status(StatusCode.ERROR, type(exc).__name__)
@@ -284,14 +262,14 @@ class Consumidor:
                     onde=_onde(exc),
                 )
                 span.set_status(StatusCode.ERROR, type(exc).__name__)
-                self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+                self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
                 resultado = "dlq"
             else:
-                self._canal.basic_ack(metodo.delivery_tag)
+                self._broker.canal.basic_ack(metodo.delivery_tag)
             MENSAGENS_CONSUMIDAS.labels(tipo=rotulo, resultado=resultado).inc()
-            # A conexao responde: o proximo problema de broker recomeca o
-            # backoff do minimo.
-            self._atraso = _RECONEXAO_BASE_S
+            # A mensagem foi resolvida: a proxima queda recomeca o backoff do
+            # minimo.
+            self._broker.sucesso()
 
     def _tentativa(self, cabecalhos: Mapping[str, Any]) -> int:
         """``x-tentativa`` da mensagem: 0 na primeira entrega, ate 5 na copia."""
@@ -371,7 +349,7 @@ class Consumidor:
                 tentativas=tentativa,
                 erro=type(erro).__name__,
             )
-            self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+            self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
             return "dlq"
         copia = pika.BasicProperties(
             message_id=propriedades.message_id,
@@ -387,7 +365,7 @@ class Consumidor:
         )
         fila_de_retry = f"{FILA}.retry.{NIVEIS_DE_RETRY[tentativa]}"
         try:
-            self._canal.basic_publish(
+            self._broker.canal.basic_publish(
                 _EXCHANGE_DE_RETRY, fila_de_retry, corpo, copia, mandatory=True
             )
         except (UnroutableError, NackError) as exc:
@@ -397,7 +375,7 @@ class Consumidor:
                 fila=fila_de_retry,
                 erro=type(exc).__name__,
             )
-            self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+            self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
             return "dlq"
         except ChannelClosedByBroker as exc:
             # Permissao de topico ou fila de retry ausente na topologia: o
@@ -409,7 +387,7 @@ class Consumidor:
                 codigo=exc.reply_code,
             )
             raise
-        self._canal.basic_ack(metodo.delivery_tag)
+        self._broker.canal.basic_ack(metodo.delivery_tag)
         _log.warning(
             "message processing failed; retry scheduled",
             tentativa=tentativa + 1,

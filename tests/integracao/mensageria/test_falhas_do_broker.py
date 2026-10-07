@@ -26,7 +26,6 @@ from sqlalchemy.orm import sessionmaker
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaError
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
 from src.compartilhado.infraestrutura.mensageria import amqp
-from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
 from src.compartilhado.infraestrutura.mensageria import relay as modulo_relay
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
@@ -35,7 +34,12 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
-from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
+from tests.integracao.broker import (
+    EmSegundoPlano,
+    EsperasRegistradas,
+    envelope_de_evento,
+    esperar_ate,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -144,8 +148,7 @@ def conexoes(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
         return resultado
 
     monkeypatch.setattr(amqp, "conectar", conectar)
-    monkeypatch.setattr(modulo_relay, "_RECONEXAO_BASE_S", 0.05)
-    monkeypatch.setattr(modulo_consumidor, "_RECONEXAO_BASE_S", 0.05)
+    monkeypatch.setattr(amqp, "RECONEXAO_BASE_S", 0.05)
     return fila
 
 
@@ -542,6 +545,7 @@ class _CanalCancelado(CanalFalso):
         yield from ()
 
 
+@pytest.mark.usefixtures("backoff_sem_jitter")
 def test_consumo_cancelado_pelo_broker_reconecta_e_segue(
     session_factory: sessionmaker[Session],
     conexoes: list[Any],
@@ -560,11 +564,14 @@ def test_consumo_cancelado_pelo_broker_reconecta_e_segue(
     consumidor = _consumidor(
         session_factory, rastreador, tmp_path, {"ExecucaoCancelada": registrar}
     )
-    with EmSegundoPlano(consumidor):
+    parar = EsperasRegistradas()
+    with EmSegundoPlano(consumidor, parar):
         esperar_ate(lambda: canal.confirmadas)
 
     assert recebidas == [UUID(envelope["id"])]
     assert canal.confirmadas == [9]
+    # O cancelamento reconecta com backoff, sem laco quente.
+    assert parar.esperas[:1] == [0.05]
 
 
 @pytest.mark.parametrize(
@@ -668,32 +675,88 @@ def test_falha_inesperada_vai_para_a_dlq_sem_derrubar_o_consumidor(
     assert canal.confirmadas == [2]
 
 
-def test_rota_de_retry_recusada_pelo_broker_reconecta_com_backoff(
+@pytest.fixture
+def backoff_sem_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Espera = teto do sorteio, com teto de 0,4 s: a sequencia fica conferivel."""
+    monkeypatch.setattr(amqp, "_sortear", lambda teto: teto)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.4)
+
+
+@pytest.mark.usefixtures("backoff_sem_jitter")
+def test_canal_fechado_a_cada_mensagem_reconecta_com_backoff_ate_mensagem_tratada(
     session_factory: sessionmaker[Session],
     conexoes: list[Any],
     rastreador: Rastreador,
     tmp_path: Path,
 ) -> None:
-    # Sem a permissao de topico da fila de retry, o broker fecha o canal (403):
-    # a original fica sem ack (volta para a fila) e o consumidor reconecta.
-    envelope = envelope_de_evento("ReservaDePecasFalhou")
-    recusado = CanalFalso(
-        ChannelClosedByBroker(403, "ACCESS_REFUSED"), entregas=[_entrega(envelope, 8)]
+    # Sem a permissao de topico da fila de retry, o broker fecha o canal (403) a
+    # cada copia: a original fica sem ack (volta para a fila) e o consumidor
+    # reconecta esperando cada vez mais, ate o teto. So uma mensagem tratada
+    # volta a espera ao minimo.
+    recusadas = [envelope_de_evento("ReservaDePecasFalhou") for _ in range(6)]
+    tratada = envelope_de_evento("ReservaDePecasFalhou")
+    canais = [
+        CanalFalso(
+            ChannelClosedByBroker(403, "ACCESS_REFUSED"), entregas=[_entrega(e, i)]
+        )
+        for i, e in enumerate(recusadas)
+    ]
+    canais.append(
+        CanalFalso(
+            ChannelClosedByBroker(403, "ACCESS_REFUSED"),
+            entregas=[_entrega(tratada, 10), _entrega(recusadas[0], 11)],
+        )
     )
-    seguinte = CanalFalso()
-    conexoes.extend([(ConexaoFalsa(), recusado), (ConexaoFalsa(), seguinte)])
+    conexoes.extend((ConexaoFalsa(), canal) for canal in canais)
+
+    def tratar(mensagem: Any, _transacao: Any) -> Desfecho:
+        if mensagem.id != UUID(tratada["id"]):
+            raise FalhaTransitoriaError("dependencia fora")
+        return Desfecho.PROCESSADA
+
     consumidor = _consumidor(
-        session_factory,
-        rastreador,
-        tmp_path,
-        {"ReservaDePecasFalhou": _falha_transitoria},
+        session_factory, rastreador, tmp_path, {"ReservaDePecasFalhou": tratar}
     )
+    parar = EsperasRegistradas()
 
-    with EmSegundoPlano(consumidor):
-        esperar_ate(lambda: not conexoes)
+    with EmSegundoPlano(consumidor, parar):
+        esperar_ate(lambda: len(parar.esperas) >= 7)
 
-    assert recusado.confirmadas == []
-    assert recusado.rejeitadas == []
+    assert parar.esperas[:7] == [0.05, 0.1, 0.2, 0.4, 0.4, 0.4, 0.05]
+    assert all(canal.rejeitadas == [] for canal in canais)
+    assert [canal.confirmadas for canal in canais] == [[]] * 6 + [[10]]
+
+
+@pytest.mark.usefixtures("backoff_sem_jitter")
+def test_relay_reconecta_com_backoff_que_so_zera_com_mensagem_entregue(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    # Tres tentativas de conexao recusadas: 0,05, 0,1 e 0,2 s. Conectado, a
+    # primeira linha sai (o broker confirma) e a conexao cai na segunda: a
+    # espera volta ao minimo.
+    conexoes.extend(
+        [
+            StreamLostError("recusada"),
+            StreamLostError("recusada"),
+            StreamLostError("recusada"),
+            (ConexaoFalsa(), CanalFalso(None, StreamLostError("caiu"))),
+            (ConexaoFalsa(), CanalFalso()),
+        ]
+    )
+    mensagens = [_gravar(session_factory), _gravar(session_factory)]
+    parar = EsperasRegistradas()
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path), parar):
+        esperar_ate(
+            lambda: all(_linha(engine, m).status == "entregue" for m in mensagens)
+        )
+
+    assert parar.esperas[:4] == [0.05, 0.1, 0.2, 0.05]
+    assert [_linha(engine, m).tentativas for m in mensagens] == [0, 0]
 
 
 class _LogEspiao:

@@ -12,7 +12,7 @@ from opentelemetry.trace import SpanKind
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 
-from src.compartilhado.infraestrutura.mensageria import relay as modulo_relay
+from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
@@ -174,7 +174,7 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
 
 @pytest.fixture
 def reconexao_rapida(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(modulo_relay, "_RECONEXAO_TETO_S", 0.5)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.5)
 
 
 @pytest.fixture

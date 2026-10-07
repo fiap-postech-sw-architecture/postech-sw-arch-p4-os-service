@@ -24,7 +24,6 @@ from src.compartilhado.aplicacao.mensageria import (
     MensagemRecebida,
 )
 from src.compartilhado.infraestrutura.mensageria import amqp
-from src.compartilhado.infraestrutura.mensageria import consumidor as modulo
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
     Consumidor,
@@ -429,7 +428,7 @@ def test_sobe_sem_broker_fica_fora_de_pronto_e_consome_quando_ele_volta(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(modulo, "_RECONEXAO_TETO_S", 0.5)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.5)
     espiao = Espiao()
     envelope = envelope_de_evento("PagamentoConfirmado")
 
@@ -450,7 +449,7 @@ def test_conexao_derrubada_pelo_broker_reconecta_e_segue_consumindo(
     consumidor: Callable[..., Consumidor],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(modulo, "_RECONEXAO_TETO_S", 0.5)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.5)
     espiao = Espiao()
     primeiro = envelope_de_evento("DiagnosticoConcluido")
     segundo = envelope_de_evento("DiagnosticoConcluido")
