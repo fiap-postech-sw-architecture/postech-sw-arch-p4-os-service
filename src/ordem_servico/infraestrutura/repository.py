@@ -14,6 +14,7 @@ from src.compartilhado.infraestrutura.mensageria.telemetria import (
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.infraestrutura import metricas_da_saga
 from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
 
 if TYPE_CHECKING:
@@ -107,6 +108,7 @@ class SagaSQLAlchemyRepository:
         O ``traceparent`` do span em curso (a requisicao da abertura, o
         consumo do evento) vira o da saga (ADR-043); fora de um span, fica o
         anterior. Versao divergente vira ``ConflitoDeConcorrenciaException``.
+        Os fatos da saga vao para a sessao e viram metrica no commit.
         """
         ordem_id = saga.ordem_id
         saga.traceparent = cabecalhos_do_contexto_atual().get(
@@ -119,3 +121,6 @@ class SagaSQLAlchemyRepository:
             raise ConflitoDeConcorrenciaException(
                 mensagem=f"Saga {ordem_id} alterada por outra operacao; releia"
             ) from None
+        # Metricas so depois do commit: rollback ou conflito descartam os fatos.
+        metricas_da_saga.anotar(self._session, saga.coletar_eventos())
+        saga.limpar_eventos()

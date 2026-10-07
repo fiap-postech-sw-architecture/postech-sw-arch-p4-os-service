@@ -147,11 +147,17 @@ def criar_app() -> FastAPI:
     from src.compartilhado.infraestrutura.metrics import configurar_metricas_api
 
     if configurar_metricas_api(application):
+        from src.compartilhado.interfaces.dependencies import abrir_session
+        from src.ordem_servico.infraestrutura.metricas_da_saga import (
+            registrar_coletor,
+        )
         from src.ordem_servico.infraestrutura.metrics import (
             instrumentar_metricas_de_ordens,
         )
 
         instrumentar_metricas_de_ordens()
+        # Gauges da saga por consulta: so a API os calcula (RFC-004 secao 9).
+        registrar_coletor(abrir_session)
 
     return application
 
