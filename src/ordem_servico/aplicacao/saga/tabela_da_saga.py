@@ -160,13 +160,14 @@ class Classificacao(StrEnum):
 def classificar(etapa: EtapaSaga, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
     """Classifica o evento ``tipo`` ANTES de tocar no dominio (RFC-004 secao 4.5).
 
-    Saga encerrada: ignorado. OS encerrada com a saga viva: recusado. Etapa ja
-    passada e saga em compensacao: ignorado. Etapa a frente: adiantado. Na
-    mesma etapa, os marcos da OS desempatam: ``DiagnosticoConcluido`` antes do
-    diagnostico iniciado e ``PagamentoConfirmado``, ``Recusado`` ou
-    ``Expirado`` antes do checkout aberto sao adiantados;
-    ``DiagnosticoIniciado`` com o diagnostico ja iniciado e
-    ``PagamentoSolicitado`` com o checkout ja aberto, repetidos.
+    Saga encerrada: ignorado. OS encerrada com a saga viva: recusado. Resposta
+    de compensacao: processada em compensando e ignorada fora dela. Evento do
+    fluxo normal com a saga em compensacao (ou na falha dela) ou de etapa ja
+    passada: ignorado; de etapa a frente: adiantado. Na mesma etapa, os marcos
+    da OS desempatam: ``DiagnosticoConcluido`` antes do diagnostico iniciado e
+    ``PagamentoConfirmado``, ``Recusado`` ou ``Expirado`` antes do checkout
+    aberto sao adiantados; ``DiagnosticoIniciado`` com o diagnostico ja
+    iniciado e ``PagamentoSolicitado`` com o checkout ja aberto, repetidos.
     """
     esperada = ETAPA_ESPERADA[tipo]
     if etapa in ETAPAS_FINAIS:
