@@ -28,6 +28,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     ETAPA_ESPERADA,
     ETAPA_SEGUINTE,
+    ETAPAS_FINAIS,
     GATILHO_ABERTURA,
     PASSO_CONCLUIDO,
     classificar,
@@ -110,6 +111,11 @@ class Saga(AggregateRoot):
     @property
     def etapa(self) -> EtapaSaga:
         return self._etapa
+
+    @property
+    def encerrada(self) -> bool:
+        """Concluida ou compensada: nenhum evento muda mais a saga."""
+        return self._etapa in ETAPAS_FINAIS
 
     @property
     def motivo(self) -> str | None:

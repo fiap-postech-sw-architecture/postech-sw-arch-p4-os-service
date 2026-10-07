@@ -24,6 +24,7 @@ from src.ordem_servico.aplicacao.dtos import (
 )
 from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.use_cases import (
+    CANCELAMENTO_INDISPONIVEL,
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
@@ -309,6 +310,51 @@ class TestCancelarOrdem:
             CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()).executar(
                 uuid4(), "x", ator=ATOR_ATENDENTE
             )
+
+    @pytest.mark.parametrize(
+        "etapa",
+        [
+            "aguardando_diagnostico",
+            "aguardando_orcamento",
+            "aguardando_decisao",
+            "aguardando_reserva",
+            "aguardando_pagamento",
+            "aguardando_agendamento",
+            "aguardando_inicio",
+            "em_execucao",
+            "compensando",
+            "falha_na_compensacao",
+        ],
+    )
+    def test_com_a_saga_em_andamento_levanta_409_sem_mudar_nada(
+        self, etapa: str
+    ) -> None:
+        cenario = CenarioDaSaga.em(etapa)
+        status, historico = cenario.ordem.status, cenario.ordem.historico
+        uow = FakeUnitOfWork()
+
+        with pytest.raises(TransicaoStatusInvalidaException) as exc:
+            CancelarOrdem(cenario.ordens, uow, cenario.sagas).executar(
+                cenario.ordem_id, "cliente desistiu", ator=ATOR_ATENDENTE
+            )
+
+        # A OS nunca fica cancelada com a saga viva: o cancelamento passa pela
+        # saga quando as compensacoes chegarem (RFC-004 secao 4.4).
+        assert exc.value.mensagem == CANCELAMENTO_INDISPONIVEL
+        assert (cenario.ordem.status, cenario.ordem.historico) == (status, historico)
+        assert cenario.saga.etapa.value == etapa
+        assert not uow.committed
+        assert uow.rolled_back
+
+    def test_com_a_saga_concluida_vale_a_maquina_de_status(self) -> None:
+        cenario = CenarioDaSaga.em("concluida")
+
+        with pytest.raises(TransicaoStatusInvalidaException) as exc:
+            CancelarOrdem(cenario.ordens, FakeUnitOfWork(), cenario.sagas).executar(
+                cenario.ordem_id, "tarde", ator=ATOR_ATENDENTE
+            )
+
+        assert "finalizada para cancelada" in exc.value.mensagem
 
 
 class TestRegistrarEntrega:

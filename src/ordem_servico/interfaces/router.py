@@ -176,7 +176,9 @@ def obter_historico(
 def cancelar_ordem(
     ordem_id: UUID, body: CancelarOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Cancela com motivo; 409 depois do inicio da execucao ou se encerrada."""
+    """Cancela com motivo; 409 com a saga em andamento, depois do inicio da
+    execucao ou se encerrada (o cancelamento pela saga vem com as compensacoes).
+    """
     ator = ator_de(usuario)
     resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
     _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator)

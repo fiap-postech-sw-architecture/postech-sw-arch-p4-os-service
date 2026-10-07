@@ -23,6 +23,7 @@ from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
 from src.ordem_servico.aplicacao.saga.modelo import Envio
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
+    CANCELAMENTO_INDISPONIVEL,
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
@@ -360,6 +361,25 @@ class TestCancelamento:
 
         assert resp.status_code == 409
         assert resp.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
+
+    def test_com_a_saga_em_andamento_409_sem_cancelar(
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
+    ) -> None:
+        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
+        repo.ordens[ordem.id] = ordem
+        sagas.sagas[ordem.id] = Saga.iniciar(
+            ordem.id,
+            envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=uuid4()),
+            ator=ATOR_ATENDENTE,
+            agora=ordem.criado_em,
+        )
+
+        resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"})
+
+        assert resp.status_code == 409
+        assert resp.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
+        assert resp.json()["erro"]["mensagem"] == CANCELAMENTO_INDISPONIVEL
+        assert ordem.status is StatusOrdem.EM_DIAGNOSTICO
 
     def test_conflito_de_versao_409(
         self, client: TestClient, repo: RepoEmMemoria

@@ -27,10 +27,12 @@ from sqlalchemy.orm import Session
 
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaDaSagaAlteradaEvent,
-    EtapaSaga,
     SagaIniciadaEvent,
 )
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPAS_NAO_FINAIS
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    ETAPAS_FINAIS,
+    ETAPAS_NAO_FINAIS,
+)
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 
 if TYPE_CHECKING:
@@ -58,8 +60,7 @@ DURACAO_DA_ETAPA: Final = Histogram(
     # De segundos (resposta automatica) a 7 dias (espera humana).
     buckets=(5, 30, 120, 600, 3600, 14400, 86400, 259200, 604800),
 )
-_FINAIS: Final = (EtapaSaga.CONCLUIDA, EtapaSaga.COMPENSADA)
-for _etapa in _FINAIS:
+for _etapa in ETAPAS_FINAIS:
     SAGAS_FINALIZADAS.labels(resultado=_etapa.value)
 for _etapa in ETAPAS_NAO_FINAIS:
     DURACAO_DA_ETAPA.labels(etapa=_etapa.value)
@@ -102,7 +103,7 @@ def _observar(fato: DomainEvent) -> None:
         DURACAO_DA_ETAPA.labels(etapa=fato.etapa_anterior.value).observe(
             fato.permanencia.total_seconds()
         )
-        if fato.etapa_nova in _FINAIS:
+        if fato.etapa_nova in ETAPAS_FINAIS:
             SAGAS_FINALIZADAS.labels(resultado=fato.etapa_nova.value).inc()
 
 
@@ -129,7 +130,7 @@ class ColetorDaSaga:
                 func.count(),
                 func.extract("epoch", func.now() - func.min(t.c.etapa_desde)),
             )
-            .where(t.c.etapa.not_in(_FINAIS))
+            .where(t.c.etapa.not_in(ETAPAS_FINAIS))
             .group_by(t.c.etapa)
         )
         try:

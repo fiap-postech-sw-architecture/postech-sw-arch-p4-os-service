@@ -9,11 +9,15 @@ do comando que o habilita, como no sistema real. O adiantado volta como a
 copia da fila de retry, depois do atraso do nivel (1, 5, 15, 60 e 300 s), e a
 falha seguinte a quinta copia seria a DLQ (RFC-004 secao 5.1).
 
+Em pontos aleatorios o atendente tenta cancelar ou entregar a OS: o
+cancelamento e sempre recusado (a saga esta em andamento, ou a OS ja passou do
+pivot) e a entrega so passa com a OS finalizada.
+
 A cada entrega: so ``FalhaTransitoriaError`` escapa do handler; o par (etapa,
 status da OS) esta na tabela da RFC-004 secao 4.1; ha prazo se e so se ha
 comando com prazo em voo; o fato ja aplicado nao muda nada; nenhum comando sai
-depois do estado final. No fim: DLQ vazia, saga concluida e cada comando uma
-vez, na ordem.
+depois do estado final; a OS nunca fica encerrada (cancelada ou entregue) com a
+saga viva. No fim: DLQ vazia, saga concluida e cada comando uma vez, na ordem.
 """
 
 from __future__ import annotations
@@ -27,9 +31,13 @@ from typing import TYPE_CHECKING, Final
 import pytest
 
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaError
+from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaException
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
-from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.aplicacao.use_cases import CancelarOrdem, RegistrarEntrega
+from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
+from tests.fabricas import ATOR_ATENDENTE
+from tests.unitarios.fakes import FakeUnitOfWork
 from tests.unitarios.ordem_servico.cenario_da_saga import FLUXO_FELIZ, CenarioDaSaga
 
 if TYPE_CHECKING:
@@ -55,6 +63,8 @@ JANELA_S: Final = 2.0
 CHANCE_DE_REPETIR: Final = 0.3
 CHANCE_DE_ATRASAR: Final = 0.1
 ATRASO_LONGO_S: Final = 30.0
+# Chance de o atendente tentar cancelar ou entregar a OS antes de uma entrega.
+CHANCE_DE_ENCERRAR: Final = 0.1
 # Status da OS em cada etapa do fluxo normal (tabela da RFC-004 secao 4.1).
 PARES: Final = {
     EtapaSaga.AGUARDANDO_DIAGNOSTICO: {S.RECEBIDA, S.EM_DIAGNOSTICO},
@@ -65,7 +75,7 @@ PARES: Final = {
     EtapaSaga.AGUARDANDO_AGENDAMENTO: {S.AGUARDANDO_EXECUCAO},
     EtapaSaga.AGUARDANDO_INICIO: {S.AGUARDANDO_EXECUCAO},
     EtapaSaga.EM_EXECUCAO: {S.EM_EXECUCAO},
-    EtapaSaga.CONCLUIDA: {S.FINALIZADA},
+    EtapaSaga.CONCLUIDA: {S.FINALIZADA, S.ENTREGUE},
 }
 
 type _Entrega = tuple[float, int, str, "MensagemRecebida | None", int]
@@ -82,6 +92,8 @@ class Simulacao:
     entregas: list[str] = field(default_factory=list)
     adiantados: int = 0
     dlq: list[str] = field(default_factory=list)
+    # (acao, etapa da saga na tentativa, se passou)
+    encerramentos: list[tuple[str, EtapaSaga, bool]] = field(default_factory=list)
 
     def agendar(
         self, instante: float, tipo: str, mensagem: MensagemRecebida | None, copias: int
@@ -103,6 +115,27 @@ class Simulacao:
                 repetido = entrega + self.rnd.uniform(0, ATRASO_LONGO_S)
                 self.agendar(repetido, tipo, None, 0)
 
+    def tentar_encerrar(self) -> None:
+        """O atendente pede o cancelamento ou registra a entrega da OS."""
+        cenario = self.cenario
+        acao = self.rnd.choice(("cancelar", "entregar"))
+        antes, etapa = _foto(cenario), cenario.saga.etapa
+        try:
+            if acao == "cancelar":
+                CancelarOrdem(cenario.ordens, FakeUnitOfWork(), cenario.sagas).executar(
+                    cenario.ordem_id, "cliente desistiu", ator=ATOR_ATENDENTE
+                )
+            else:
+                RegistrarEntrega(
+                    cenario.ordens, FakeUnitOfWork(), cenario.sagas
+                ).executar(cenario.ordem_id, ator=ATOR_ATENDENTE)
+        except TransicaoStatusInvalidaException:
+            assert _foto(cenario) == antes
+            self.encerramentos.append((acao, etapa, False))
+        else:
+            self.encerramentos.append((acao, etapa, True))
+        _conferir_estado(cenario)
+
     def rodar(self) -> None:
         cenario = self.cenario
         self.responder("SolicitarDiagnostico", 0.0)
@@ -110,6 +143,8 @@ class Simulacao:
         aplicados: set[str] = set()
         comandos_ao_concluir: int | None = None
         while self.agenda:
+            if self.rnd.random() < CHANCE_DE_ENCERRAR:
+                self.tentar_encerrar()
             instante, _, tipo, mensagem, copias = heapq.heappop(self.agenda)
             mensagem = mensagem or cenario.evento(tipo)
             self.entregas.append(tipo)
@@ -166,8 +201,10 @@ def _conferir_estado(cenario: CenarioDaSaga) -> None:
     em_voo = saga.comando_em_voo
     assert (saga.prazo_resposta_em is None) is (em_voo is None)
     assert em_voo is None or em_voo["tipo"] in COMANDOS_COM_PRAZO
-    # OS cancelada se e so se saga compensada (nenhuma das duas no caminho feliz).
+    # OS cancelada se e so se saga compensada (nenhuma das duas no caminho feliz)
+    # e OS encerrada so com a saga encerrada.
     assert (ordem.status is S.CANCELADA) is (saga.etapa is EtapaSaga.COMPENSADA)
+    assert ordem.status not in ESTADOS_TERMINAIS or saga.encerrada
 
 
 def _simular(semente: int) -> Simulacao:
@@ -183,10 +220,11 @@ def test_fora_de_ordem_nao_quebra_a_saga_nem_vai_para_a_dlq(semente: int) -> Non
     cenario = simulacao.cenario
 
     assert simulacao.dlq == [], simulacao.entregas
-    assert (cenario.saga.etapa, cenario.ordem.status) == (
-        EtapaSaga.CONCLUIDA,
-        S.FINALIZADA,
-    )
+    assert cenario.saga.etapa is EtapaSaga.CONCLUIDA
+    assert cenario.ordem.status in {S.FINALIZADA, S.ENTREGUE}
+    # Nenhum cancelamento passa, e a entrega so passa com a saga concluida.
+    passaram = [(acao, etapa) for acao, etapa, ok in simulacao.encerramentos if ok]
+    assert passaram in ([], [("entregar", EtapaSaga.CONCLUIDA)])
     assert [p["gatilho"] for p in cenario.saga.passos] == ["abertura", *FLUXO_FELIZ]
     assert [c[0] for c in cenario.publicador.comandos] == [
         "SolicitarDiagnostico",
@@ -203,6 +241,14 @@ def test_simulacao_produz_fora_de_ordem_repetidos_e_retry() -> None:
     fora_de_ordem = sum(1 for s in simulacoes if s.entregas[:10] != list(FLUXO_FELIZ))
     repetidos = sum(1 for s in simulacoes if len(set(s.entregas)) < len(s.entregas))
     com_retry = sum(1 for s in simulacoes if s.adiantados)
+    # Tentativas de encerrar a OS com a saga em andamento, todas recusadas.
+    cancelamentos_com_saga_viva = sum(
+        1
+        for s in simulacoes
+        for acao, etapa, _ in s.encerramentos
+        if acao == "cancelar" and etapa is not EtapaSaga.CONCLUIDA
+    )
     assert fora_de_ordem > 150
     assert repetidos > 150
     assert com_retry > 100
+    assert cancelamentos_com_saga_viva > 100

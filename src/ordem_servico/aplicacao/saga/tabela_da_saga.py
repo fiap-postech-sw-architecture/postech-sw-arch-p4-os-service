@@ -35,10 +35,10 @@ FLUXO_DA_SAGA: Final = (
     _E.EM_EXECUCAO,
     _E.CONCLUIDA,
 )
-# Etapas de onde a saga ainda sai: os labels de etapa das metricas.
-ETAPAS_NAO_FINAIS: Final = tuple(
-    e for e in EtapaSaga if e not in {_E.CONCLUIDA, _E.COMPENSADA}
-)
+# Etapas de onde a saga nao sai mais, e as de onde ainda sai (os labels de
+# etapa das metricas).
+ETAPAS_FINAIS: Final = (_E.CONCLUIDA, _E.COMPENSADA)
+ETAPAS_NAO_FINAIS: Final = tuple(e for e in EtapaSaga if e not in ETAPAS_FINAIS)
 
 # Etapa em que cada evento consumido e esperado (tabela da RFC-004 secao 4.1;
 # as falhas de negocio esperam a etapa do passo que falha, e as respostas de

@@ -16,7 +16,7 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 - Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, e o consumidor conduz o caminho feliz até `FINALIZADA`, com a etapa visível na OS e na rota de operação ([seção abaixo](#saga)).
 - API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento`, `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
 - Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
-- Ainda não: as compensações (falhas de negócio e respostas de compensação vão para a DLQ com o motivo `sem_tratador_nesta_versao`, para o redrive na versão que as trata, e o cancelamento ainda leva a OS direto a `CANCELADA`, sem passar pela saga), o processo `prazos`, o e-mail ao cliente e os manifestos Kubernetes, desenhados na RFC-004.
+- Ainda não: as compensações (falhas de negócio e respostas de compensação vão para a DLQ com o motivo `sem_tratador_nesta_versao`, para o redrive na versão que as trata, e o cancelamento de OS com a saga em andamento responde 409 até passar pela saga), o processo `prazos`, o e-mail ao cliente e os manifestos Kubernetes, desenhados na RFC-004.
 
 ## Autenticação
 
@@ -309,6 +309,10 @@ O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa an
 | Fato que a OS ou a saga recusam | | DLQ com o motivo `transicao_invalida` |
 
 Nenhum evento fora de ordem vai para a DLQ: o adiantado espera a saga nas cinco cópias de retry (1 a 300 s), bem mais que o atraso entre eventos do mesmo passo. Falhas de negócio (`GeracaoDeOrcamentoFalhou`, `OrcamentoRecusado`, `OrcamentoExpirado`, `ReservaDePecasFalhou`, `PagamentoRecusado`, `PagamentoExpirado`) e respostas de compensação passam pela mesma classificação; nesta versão, a que chega na etapa em que caberia tratá-la vai para a DLQ, onde o alerta a mostra, em vez de ser consumida sem efeito: o `id` dela não entra em `mensagens_processadas`, e o redrive na versão com as compensações a processa. O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
+
+### Cancelamento nesta versão
+
+O `POST /api/v1/ordens-de-servico/{id}/cancelamento` de OS com a saga em andamento responde 409 (`TRANSICAO_STATUS_INVALIDA`, "Cancelamento de OS com atendimento em andamento ainda nao disponivel") sem mudar a OS: o cancelamento passa pela saga, que dispara as compensações (RFC-004 seção 4.4), e esta versão ainda não as tem. Assim a OS nunca fica cancelada com a saga viva, que seguiria emitindo comandos para uma OS encerrada. OS sem saga (anterior a ela) é cancelada direto, como antes, e a entrega só passa com a OS finalizada, que só chega lá pela saga concluída.
 
 ### Consulta e operação
 

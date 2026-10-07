@@ -17,6 +17,7 @@ from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.cnpj import CNPJ
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.documento import normalizar_cnpj
+from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaException
 from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.aplicacao.dtos import (
     AcompanhamentoDTO,
@@ -259,11 +260,19 @@ class ObterSaga:
         )
 
 
+# Ate o cancelamento passar pela saga (compensacoes, RFC-004 secao 4.4).
+CANCELAMENTO_INDISPONIVEL: Final = (
+    "Cancelamento de OS com atendimento em andamento ainda nao disponivel"
+)
+
+
 class CancelarOrdem:
     """Cancelamento pelo atendimento antes do inicio da execucao.
 
-    Enquanto a saga nao existe, a OS vai direto para CANCELADA; com ela, o
-    cancelamento dispara as compensacoes antes (RFC-004 secao 4.4).
+    Sem saga, a OS vai direto para CANCELADA. Com a saga em andamento, o
+    cancelamento passa pelas compensacoes (RFC-004 secao 4.4), que esta versao
+    ainda nao tem: responde 409 sem mudar nada, para a OS nunca ficar cancelada
+    com a saga viva (os eventos seguintes emitiriam comandos para uma OS morta).
     """
 
     def __init__(
@@ -280,8 +289,8 @@ class CancelarOrdem:
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
-            TransicaoStatusInvalidaException: execucao ja iniciada ou ordem
-                encerrada (409).
+            TransicaoStatusInvalidaException: saga em andamento, execucao ja
+                iniciada ou ordem encerrada (409).
             ConflitoDeConcorrenciaException: escrita concorrente (409).
             ValorInvalidoException: motivo vazio, longo demais ou com
                 caractere de controle (422).
@@ -290,6 +299,10 @@ class CancelarOrdem:
             ordem = _obter_ordem(self._repo, ordem_id)
             # Lida na mesma transacao: nada fica aberto depois do commit.
             saga = self._sagas.obter(ordem_id)
+            if saga is not None and not saga.encerrada:
+                raise TransicaoStatusInvalidaException(
+                    mensagem=CANCELAMENTO_INDISPONIVEL
+                )
             ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
