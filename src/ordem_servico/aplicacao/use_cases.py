@@ -291,10 +291,12 @@ class CancelarOrdem:
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
+            # Lida na mesma transacao: nada fica aberto depois do commit.
+            saga = self._sagas.obter(ordem_id)
             ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
-        return _ordem_dto(ordem, self._sagas.obter(ordem_id))
+        return _ordem_dto(ordem, saga)
 
 
 class RegistrarEntrega:
@@ -317,10 +319,11 @@ class RegistrarEntrega:
         """
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
+            saga = self._sagas.obter(ordem_id)
             ordem.registrar_entrega(ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
-        return _ordem_dto(ordem, self._sagas.obter(ordem_id))
+        return _ordem_dto(ordem, saga)
 
 
 _TAMANHO_CNPJ: Final = 14
