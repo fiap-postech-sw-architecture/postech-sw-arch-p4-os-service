@@ -477,6 +477,40 @@ def test_limpeza_do_relay_atende_o_broker_entre_os_lotes(
     assert conexao_falsa.restantes[:3] == [3, 1, 0]
 
 
+class _ConexaoQueCaiNaLimpeza(ConexaoFalsa):
+    def process_data_events(self, time_limit: float) -> None:
+        self.is_open = False
+        raise StreamLostError("caiu entre dois lotes da limpeza")
+
+
+def test_conexao_que_cai_entre_lotes_da_limpeza_reconecta_sem_derrubar_o_relay(
+    engine: Engine,
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: sessionmaker[Session],
+) -> None:
+    monkeypatch.setattr(outbox_mapping, "LOTE_DE_LIMPEZA", 2)
+    for _ in range(5):
+        _gravar(session_factory)
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "UPDATE outbox SET status = 'entregue', "
+                "entregue_em = now() - interval '8 days'"
+            )
+        )
+    conexoes.extend(
+        [(_ConexaoQueCaiNaLimpeza(), CanalFalso()), (ConexaoFalsa(), CanalFalso())]
+    )
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
+        esperar_ate(lambda: not conexoes)
+        mensagem_id = _gravar(session_factory)
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+
+
 def test_limpeza_do_consumidor_atende_o_broker_entre_os_lotes(
     engine: Engine,
     session_factory: sessionmaker[Session],

@@ -397,9 +397,16 @@ class Relay:
     def _limpar_se_devido(self) -> None:
         if not self._limpeza.devida():
             return
-        apagadas = self._outbox.limpar(entre_lotes=self._broker.atender)
+        apagadas = self._outbox.limpar(entre_lotes=self._atender_o_broker)
         if apagadas:
             _log.info("old outbox rows deleted", linhas=apagadas)
+
+    def _atender_o_broker(self) -> None:
+        """Heartbeat AMQP entre lotes da limpeza; a conexao caida e queda do broker."""
+        try:
+            self._broker.atender()
+        except amqp.ERROS_DE_CONEXAO as exc:
+            raise _BrokerIndisponivelError from exc
 
     def _esperar(self, escuta: Any, parar: threading.Event) -> Any:  # noqa: ANN401  # conexao psycopg2
         """Espera um NOTIFY ou o poll de seguranca e atende o heartbeat AMQP."""
