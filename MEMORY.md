@@ -58,6 +58,7 @@ Consolidado em 2026-10-06: as 92 entradas anteriores estao em `MEMORY.archive.md
 
 ## Gotchas
 
+- 2026-10-07 - RabbitMQ 4: `queue.declare` passivo exige permissao de configuracao ou de leitura na fila (sem as duas, 403 `ACCESS_REFUSED`), e `exchange.declare` passivo nao exige nenhuma - PR #4
 - 2026-10-07 - RabbitMQ em alarme de memoria nao le o fechamento de uma conexao bloqueada: a mensagem sem ack fica presa na conexao antiga ate o alarme passar, e so entao volta a fila (nada se perde, mas atrasa) - PR #4
 - 2026-10-07 - O pika loga em WARNING a mensagem devolvida com os 255 primeiros bytes do corpo (o `configurar_logging` deixa o logger `pika` em ERROR); nao codifica `float` em header (`Decimal` sim); e um header de timestamp fora do intervalo (epoch em ms) derruba a conexao no decoder, antes do codigo do servico - PR #4
 - 2026-10-07 - Fila quorum: `max-length` e teto mole (aceita uma mensagem alem) e, com o TTL de 100 ms das filas de retry do broker de teste, a fila de retry esvazia antes de encher: o nack da copia de retry nao se provoca no teste. O tracestate W3C limita o valor de cada membro a 256 caracteres (acima disso o SDK descarta o tracestate inteiro) - PR #4
@@ -103,6 +104,8 @@ Consolidado em 2026-10-06: as 92 entradas anteriores estao em `MEMORY.archive.md
 
 ## Review lessons
 
+- 2026-10-07 - Estado que aparece e some na mesma volta do laco (pronto marcado e desfeito em milissegundos) escapa da conferencia pelo disco: o teste registra cada `marcar_pronto` e afirma a lista vazia enquanto falta topologia - PR #4
+- 2026-10-07 - Callback que fala com o broker entre os lotes de uma limpeza traduz a queda da conexao para o erro que o laco ja trata; sem isso, a conexao que caia entre dois lotes derrubava o relay - PR #4
 - 2026-10-07 - Transacao do banco aberta durante I/O do broker vira refem do alarme de recursos (o publish espera ate o timeout do bloqueio e o `idle_in_transaction_session_timeout` mata a transacao): claim e marcacao em transacoes curtas, com o lease como token - PR #4
 - 2026-10-07 - Mutante que sobrevive com o canal falso se mata no broker real, onde ele produz a falha: o `mandatory` da copia de retry so tinha teste com um fake que devolvia a mensagem de qualquer jeito - PR #4
 - 2026-10-07 - Teste de PII em log confere tambem o log do cliente AMQP, com o dado sensivel no comeco do corpo (o pika imprime so os 255 primeiros bytes); e teste de concorrencia prova a sobreposicao (uma sessao esperando lock no `pg_stat_activity`), nao so o resultado - PR #4
