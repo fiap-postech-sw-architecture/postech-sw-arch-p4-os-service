@@ -163,10 +163,10 @@ class MudancaDeStatusResponse(BaseModel):
 
 
 class PassoDaSagaResponse(BaseModel):
-    """Um passo da saga: o gatilho, a etapa antes e depois e o comando enviado."""
+    """Um registro da linha do tempo da saga: gatilho, etapas e comando enviado."""
 
-    seq: int
-    em: datetime
+    seq: int = Field(description="Ordem do registro na saga (1 na abertura).")
+    em: datetime = Field(description="Instante em que a saga aplicou o gatilho.")
     de: str | None = Field(description="Etapa anterior (None na abertura).")
     para: str = Field(description="Etapa depois do passo.")
     gatilho: str = Field(description="Tipo do evento recebido ou abertura.")
@@ -183,11 +183,18 @@ class PassoDaSagaResponse(BaseModel):
 
 
 class HistoricoResponse(BaseModel):
-    """Linha do tempo da ordem: mudancas de status e passos da saga."""
+    """Linha do tempo da ordem: mudancas de status e registros da saga."""
 
     ordem_id: UUID
-    mudancas: list[MudancaDeStatusResponse]
-    passos: list[PassoDaSagaResponse]
+    mudancas: list[MudancaDeStatusResponse] = Field(
+        description="Mudancas de status da OS, na ordem da sequencia."
+    )
+    passos: list[PassoDaSagaResponse] = Field(
+        description=(
+            "Registros da saga, na ordem do seq: cada evento aplicado e a "
+            "abertura, com o comando que enviaram (lista vazia sem saga)."
+        )
+    )
 
 
 class ComandoEmVooResponse(BaseModel):
@@ -205,7 +212,12 @@ class SagaResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     ordem_id: UUID
-    etapa: str
+    etapa: str = Field(
+        description=(
+            "Etapa atual (RFC-004 secao 4.1): aguardando_diagnostico, ..., "
+            "concluida, compensando, compensada ou falha_na_compensacao."
+        )
+    )
     motivo: str | None = Field(description="Codigo da compensacao em curso.")
     falha: str | None = Field(
         description="reenvios_esgotados ou estorno_recusado (falha_na_compensacao)."
@@ -213,12 +225,19 @@ class SagaResponse(BaseModel):
     plano_compensacao: list[str] = Field(
         description="Compensacoes restantes; a primeira e a pendente."
     )
-    comando_em_voo: ComandoEmVooResponse | None
-    reenvios: int
+    comando_em_voo: ComandoEmVooResponse | None = Field(
+        description=(
+            "Comando com resposta automatica a espera dela (tipo e envio); "
+            "None nas esperas humanas e depois da resposta."
+        )
+    )
+    reenvios: int = Field(description="Reenvios do comando em voo (0 no envio).")
     prazo_resposta_em: datetime | None = Field(
         description="Prazo tecnico do comando em voo (None sem resposta automatica)."
     )
-    passos: list[PassoDaSagaResponse]
+    passos: list[PassoDaSagaResponse] = Field(
+        description="Registros da saga, na ordem do seq."
+    )
 
 
 class AcompanhamentoRequest(BaseModel):

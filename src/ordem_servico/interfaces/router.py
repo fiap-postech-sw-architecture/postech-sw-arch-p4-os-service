@@ -95,13 +95,17 @@ _Sessao = Annotated[Session, Depends(obter_session)]
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    summary="Abre uma ordem de servico em RECEBIDA",
+    summary="Abre uma ordem de servico em RECEBIDA e inicia a saga",
     responses={404: {"description": "Cliente inativo/inexistente ou veiculo alheio."}},
 )
 def abrir_ordem(
     body: AbrirOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Abre a OS para um cliente ativo e um veiculo dele (atendente ou admin)."""
+    """Abre a OS para um cliente ativo e um veiculo dele (atendente ou admin).
+
+    No mesmo commit, a saga de atendimento nasce em ``aguardando_diagnostico``
+    e o ``SolicitarDiagnostico`` vai para a outbox, rumo a Execucao.
+    """
     resultado = obter_abrir_ordem(session).executar(
         AbrirOrdemDTO(
             cliente_id=body.cliente_id,
@@ -145,7 +149,10 @@ def listar_ordens(
 def obter_ordem(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Status, resumo do orcamento e do pagamento e timestamps da ordem."""
+    """Status, etapa da saga, resumo do orcamento e do pagamento e timestamps.
+
+    O status e a etapa saem da mesma leitura: nunca divergem.
+    """
     return OrdemDeServicoResponse.model_validate(
         obter_obter_ordem(session).executar(ordem_id)
     )
@@ -159,7 +166,12 @@ def obter_ordem(
 def obter_historico(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> HistoricoResponse:
-    """Mudancas de status (de, para, origem, ator, motivo) e passos da saga."""
+    """Mudancas de status (de, para, origem, ator, motivo) e registros da saga.
+
+    Duas listas, cada uma na sua ordem: o instante da mudanca da OS e o do
+    registro da saga vem de leituras de relogio diferentes, e intercala-las
+    poderia mostrar o efeito antes da causa.
+    """
     ordem = obter_obter_ordem(session).executar(ordem_id)
     return HistoricoResponse(
         ordem_id=ordem.id,
