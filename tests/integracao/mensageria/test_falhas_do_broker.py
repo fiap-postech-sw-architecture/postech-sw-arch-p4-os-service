@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import socket
 import threading
 import time
 from datetime import timedelta
@@ -21,11 +22,13 @@ from uuid import UUID, uuid4
 
 import pika
 import pytest
+import structlog
 from pika.exceptions import ChannelClosedByBroker, NackError, StreamLostError
 from prometheus_client import REGISTRY
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
+from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaError
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
@@ -1305,6 +1308,132 @@ def test_relay_reconecta_com_backoff_que_so_zera_com_mensagem_entregue(
 
     assert parar.esperas[:4] == [0.05, 0.1, 0.2, 0.05]
     assert [_linha(engine, m).tentativas for m in mensagens] == [0, 0]
+
+
+# Sem pod pronto, o Service headless do RabbitMQ some do DNS (no boot ou depois
+# de uma queda) e o pika levanta socket.gaierror, um OSError que ele nao embrulha
+# em AMQPError: e broker fora, e nao queda do processo.
+def _sem_dns() -> socket.gaierror:
+    return socket.gaierror(8, "nodename nor servname provided, or not known")
+
+
+@pytest.fixture
+def prontos(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Cada vez que um processo se marca pronto (o arquivo dura pouco no disco)."""
+    marcados: list[Path] = []
+    marcar_pronto = Sinalizador.marcar_pronto
+
+    def marcar(sinal: Sinalizador) -> None:
+        marcados.append(sinal.pronto)
+        marcar_pronto(sinal)
+
+    monkeypatch.setattr(Sinalizador, "marcar_pronto", marcar)
+    return marcados
+
+
+@pytest.mark.usefixtures("backoff_sem_jitter")
+@pytest.mark.parametrize("processo", ["relay", "consumidor"])
+def test_nome_do_broker_sem_resolucao_no_boot_espera_fora_de_pronto(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    prontos: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    processo: str,
+) -> None:
+    # O pika de verdade, sem canal falso: `broker.invalido` nao resolve.
+    monkeypatch.setattr(amqp, "_log", structlog.get_logger())
+    em_execucao = (
+        _relay(engine, rastreador, tmp_path)
+        if processo == "relay"
+        else _consumidor(session_factory, rastreador, tmp_path, {})
+    )
+    parar = EsperasRegistradas()
+
+    with capture_logs() as logs, EmSegundoPlano(em_execucao, parar):
+        esperar_ate(lambda: len(parar.esperas) >= 3)
+
+    assert prontos == []
+    recusas = [log["erro"] for log in logs if log["event"] == "broker unavailable"]
+    assert len(recusas) >= 3
+    assert set(recusas) == {"gaierror"}
+
+
+@pytest.mark.usefixtures("backoff_sem_jitter")
+def test_relay_com_o_nome_do_broker_sem_resolucao_depois_de_uma_queda_volta(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conexoes.extend(
+        [
+            _sem_dns(),
+            (ConexaoFalsa(), CanalFalso(None, StreamLostError("caiu"))),
+            _sem_dns(),
+            (ConexaoFalsa(), CanalFalso()),
+        ]
+    )
+    pronto_ao_conectar: list[bool] = []
+    conectar = amqp.conectar
+
+    def conectar_olhando_o_pronto(params: Any) -> tuple[Any, Any]:
+        pronto_ao_conectar.append((tmp_path / "relay-pronto").exists())
+        return conectar(params)
+
+    monkeypatch.setattr(amqp, "conectar", conectar_olhando_o_pronto)
+    mensagens = [_gravar(session_factory), _gravar(session_factory)]
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path), EsperasRegistradas()):
+        esperar_ate(
+            lambda: all(_linha(engine, m).status == "entregue" for m in mensagens)
+        )
+
+    assert conexoes == []
+    assert pronto_ao_conectar == [False] * 4
+    assert [_linha(engine, m).tentativas for m in mensagens] == [0, 0]
+
+
+@pytest.mark.usefixtures("backoff_sem_jitter")
+def test_consumidor_com_o_nome_do_broker_sem_resolucao_depois_de_uma_queda_volta(
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    envelope = envelope_de_evento("ExecucaoIniciada")
+    canal = CanalFalso(entregas=[_entrega(envelope, 5)])
+    conexoes.extend(
+        [
+            _sem_dns(),
+            (ConexaoFalsa(), _CanalCancelado()),
+            _sem_dns(),
+            (ConexaoFalsa(), canal),
+        ]
+    )
+    pronto_ao_conectar: list[bool] = []
+    conectar = amqp.conectar
+
+    def conectar_olhando_o_pronto(params: Any) -> tuple[Any, Any]:
+        pronto_ao_conectar.append((tmp_path / "consumidor-pronto").exists())
+        return conectar(params)
+
+    monkeypatch.setattr(amqp, "conectar", conectar_olhando_o_pronto)
+    despachante = {"ExecucaoIniciada": lambda *_: Desfecho.PROCESSADA}
+
+    with EmSegundoPlano(
+        _consumidor(session_factory, rastreador, tmp_path, despachante),
+        EsperasRegistradas(),
+    ):
+        esperar_ate(lambda: canal.confirmadas)
+
+    assert conexoes == []
+    assert pronto_ao_conectar == [False] * 4
+    assert canal.confirmadas == [5]
 
 
 class _LogEspiao:
