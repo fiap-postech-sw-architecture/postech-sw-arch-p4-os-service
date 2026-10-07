@@ -36,6 +36,7 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
     Consumidor,
 )
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
+from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
@@ -971,15 +972,35 @@ def os_sem_leitura_da_fila(broker: Broker) -> Iterator[Callable[[], None]]:
         restaurar()
 
 
+@pytest.fixture
+def prontos(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Cada vez que um processo se marca pronto.
+
+    Um pronto marcado e desfeito na mesma volta do laco dura milissegundos no
+    disco; a lista o registra mesmo assim.
+    """
+    marcados: list[Path] = []
+    original = Sinalizador.marcar_pronto
+
+    def marcar(sinal: Sinalizador) -> None:
+        marcados.append(sinal.pronto)
+        original(sinal)
+
+    monkeypatch.setattr(Sinalizador, "marcar_pronto", marcar)
+    return marcados
+
+
 def test_fila_sem_permissao_no_boot_espera_e_consome_quando_ela_volta(
     broker: Broker,
     consumidor: Callable[..., Consumidor],
     os_sem_leitura_da_fila: Callable[[], None],
+    prontos: list[Path],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # A declaracao passiva de os.eventos recusada (403) deixa o consumidor fora
-    # de pronto, tentando de novo com backoff, sem derrubar o processo.
+    # A declaracao passiva de os.eventos recusada (403: sem leitura nem
+    # configuracao da fila) deixa o consumidor fora de pronto, tentando de novo
+    # com backoff, sem derrubar o processo.
     monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
     espiao = Espiao()
     envelope = envelope_de_evento("ReservaLiberada")
@@ -987,12 +1008,66 @@ def test_fila_sem_permissao_no_boot_espera_e_consome_quando_ela_volta(
 
     with EmSegundoPlano(consumidor(espiao)):
         esperar_ate(lambda: _reconexoes() >= antes + 2)
-        assert not (tmp_path / "consumidor-pronto").exists()
+        assert prontos == []
         os_sem_leitura_da_fila()
         broker.publicar_evento(envelope)
         esperar_ate(lambda: espiao.recebidas, prazo_s=30)
 
     assert [m.id for m in espiao.recebidas] == [UUID(envelope["id"])]
+    assert prontos == [tmp_path / "consumidor-pronto"]
+
+
+@pytest.fixture
+def sem_exchange_de_retry(broker: Broker) -> Iterator[Callable[[], None]]:
+    """Apaga o pytstop.retry; devolve quem o recria com as ligacoes do contrato."""
+    definicoes = json.loads((CONTRATOS / "rabbitmq/definitions.json").read_text())
+    (exchange,) = [e for e in definicoes["exchanges"] if e["name"] == "pytstop.retry"]
+    ligacoes = [b for b in definicoes["bindings"] if b["source"] == exchange["name"]]
+
+    def recriar() -> None:
+        with broker.canal() as canal:
+            canal.exchange_declare(
+                exchange["name"],
+                exchange_type=exchange["type"],
+                durable=exchange["durable"],
+            )
+            for ligacao in ligacoes:
+                canal.queue_bind(
+                    ligacao["destination"], exchange["name"], ligacao["routing_key"]
+                )
+
+    with broker.canal() as canal:
+        canal.exchange_delete(exchange["name"])
+    try:
+        yield recriar
+    finally:
+        recriar()
+
+
+def test_exchange_de_retry_ausente_no_boot_espera_e_consome_quando_ele_volta(
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    sem_exchange_de_retry: Callable[[], None],
+    prontos: list[Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Sem o pytstop.retry a copia de retry nao teria destino: a declaracao
+    # passiva recusada (404) deixa o consumidor fora de pronto e sem consumir.
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
+    espiao = Espiao()
+    envelope = envelope_de_evento("ReservaLiberada")
+    antes = _reconexoes()
+
+    with EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _reconexoes() >= antes + 2)
+        assert (prontos, espiao.recebidas) == ([], [])
+        sem_exchange_de_retry()
+        esperar_ate(lambda: espiao.recebidas, prazo_s=30)
+
+    assert [m.id for m in espiao.recebidas] == [UUID(envelope["id"])]
+    assert prontos == [tmp_path / "consumidor-pronto"]
 
 
 def test_handler_mais_lento_que_o_heartbeat_tem_efeito_uma_vez_e_nada_se_perde(
