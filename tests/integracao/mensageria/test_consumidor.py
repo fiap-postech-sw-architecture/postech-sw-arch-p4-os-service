@@ -220,6 +220,7 @@ def test_erro_transitorio_passa_pelas_cinco_filas_de_retry_e_a_sexta_falha_e_dlq
     broker: Broker,
     consumidor: Callable[..., Consumidor],
     publicacoes: list[tuple[str, str, Any]],
+    rastreador: Rastreador,
 ) -> None:
     espiao = Espiao(*[FalhaTransitoriaError("banco fora")] * 6)
     envelope = envelope_de_evento("OrcamentoGerado")
@@ -228,9 +229,11 @@ def test_erro_transitorio_passa_pelas_cinco_filas_de_retry_e_a_sexta_falha_e_dlq
         _consumidas("OrcamentoGerado", "dlq"),
     )
     retries = _retries()
+    with rastreador.tracer.start_as_current_span("publish OrcamentoGerado") as origem:
+        cabecalhos = {"traceparent": traceparent(origem), "tracestate": "billing=t61"}
 
     with EmSegundoPlano(consumidor(espiao)):
-        broker.publicar_evento(envelope)
+        broker.publicar_evento(envelope, cabecalhos=cabecalhos)
         morta = esperar_ate(lambda: broker.pegar(_DLQ))
 
     assert len(espiao.recebidas) == 6
@@ -239,13 +242,31 @@ def test_erro_transitorio_passa_pelas_cinco_filas_de_retry_e_a_sexta_falha_e_dlq
     assert [(e, r) for e, r, _ in publicacoes] == [
         ("pytstop.retry", f"os.eventos.retry.{nivel}") for nivel in niveis
     ]
+    passadas = sorted(
+        rastreador.spans("process OrcamentoGerado"), key=lambda s: s.start_time or 0
+    )
+    assert len(passadas) == 6
     for tentativa, (_, _, copia) in enumerate(publicacoes, start=1):
         assert copia.headers["x-tentativa"] == tentativa
         # O atraso e o TTL da fila do nivel: a copia nao leva expiration.
         assert copia.expiration is None
         assert copia.user_id == "os"
+        # O resto e o da original.
         assert copia.message_id == envelope["id"]
+        assert copia.correlation_id == envelope["correlation_id"]
         assert copia.type == "OrcamentoGerado"
+        assert copia.content_type == "application/json"
+        assert copia.delivery_mode == 2
+        # Mesmo trace: a copia leva o contexto do consumo que a gerou, e a
+        # passada seguinte e filha dele.
+        assert copia.headers["traceparent"] == traceparent(passadas[tentativa - 1])
+        assert copia.headers["tracestate"] == "billing=t61"
+        seguinte = passadas[tentativa]
+        assert seguinte.parent is not None
+        assert seguinte.parent.span_id == passadas[tentativa - 1].context.span_id
+    assert {p.context.trace_id for p in passadas} == {
+        origem.get_span_context().trace_id
+    }
     propriedades, corpo = morta
     assert json.loads(corpo) == envelope
     assert propriedades.headers["x-tentativa"] == 5
@@ -256,6 +277,45 @@ def test_erro_transitorio_passa_pelas_cinco_filas_de_retry_e_a_sexta_falha_e_dlq
     assert _consumidas("OrcamentoGerado", "retry") == antes[0] + 5
     assert _retries() == retries + 5
     assert _consumidas("OrcamentoGerado", "dlq") == antes[1] + 1
+
+
+@pytest.fixture
+def retry_1s_sem_rota(broker: Broker) -> Iterator[None]:
+    with broker.canal() as canal:
+        canal.queue_unbind(
+            "os.eventos.retry.1s", "pytstop.retry", "os.eventos.retry.1s"
+        )
+    try:
+        yield
+    finally:
+        with broker.canal() as canal:
+            canal.queue_bind(
+                "os.eventos.retry.1s", "pytstop.retry", "os.eventos.retry.1s"
+            )
+
+
+@pytest.mark.usefixtures("retry_1s_sem_rota")
+def test_copia_de_retry_sem_rota_manda_a_original_para_a_dlq(
+    broker: Broker, consumidor: Callable[..., Consumidor]
+) -> None:
+    # Sem fila para a routing key, a copia com mandatory volta: a original nao
+    # recebe ack e vai para a DLQ, nunca some (sem mandatory o broker
+    # confirmaria a copia e a descartaria).
+    espiao = Espiao(FalhaTransitoriaError("dependencia fora"))
+    envelope = envelope_de_evento("PecasReservadas")
+    antes = _consumidas("PecasReservadas", "dlq")
+    retries = _retries()
+
+    with EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope)
+        propriedades, _ = esperar_ate(lambda: broker.pegar(_DLQ))
+
+    assert propriedades.message_id == envelope["id"]
+    assert len(espiao.recebidas) == 1
+    assert broker.contar("os.eventos") == 0
+    assert broker.contar("os.eventos.retry.1s") == 0
+    assert _consumidas("PecasReservadas", "dlq") == antes + 1
+    assert _retries() == retries
 
 
 def test_falha_transitoria_volta_da_retry_e_e_processada_uma_vez(

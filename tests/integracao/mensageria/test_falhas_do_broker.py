@@ -67,6 +67,7 @@ class CanalFalso:
         self.na_declaracao = na_declaracao
         self.entregas = list(entregas or [])
         self.publicadas: list[tuple[str, str, Any]] = []
+        self.mandatory: list[bool] = []
         self.confirmadas: list[int] = []
         self.rejeitadas: list[int] = []
         self.is_open = True
@@ -92,6 +93,7 @@ class CanalFalso:
         properties: Any = None,
         mandatory: bool = False,
     ) -> None:
+        self.mandatory.append(mandatory)
         falha = self.falhas.pop(0) if self.falhas else None
         if isinstance(falha, ChannelClosedByBroker):
             self.is_open = False
@@ -643,7 +645,7 @@ def _entrega(envelope: dict[str, Any], tag: int) -> tuple[Any, Any, bytes]:
         headers={},
     )
     return (
-        SimpleNamespace(delivery_tag=tag),
+        pika.spec.Basic.Deliver(delivery_tag=tag),
         propriedades,
         json.dumps(envelope).encode(),
     )
@@ -668,18 +670,16 @@ def _falha_transitoria(*_: object) -> Desfecho:
     raise FalhaTransitoriaError("dependencia fora")
 
 
-@pytest.mark.parametrize(
-    "falha", [pika.exceptions.UnroutableError([]), NackError([])], ids=str
-)
-def test_copia_de_retry_recusada_pelo_broker_vai_para_a_dlq(
+def test_copia_de_retry_recusada_com_nack_manda_a_original_para_a_dlq(
     session_factory: sessionmaker[Session],
     conexoes: list[Any],
     rastreador: Rastreador,
     tmp_path: Path,
-    falha: BaseException,
 ) -> None:
+    # O nack da fila de retry nao se provoca no broker de teste: com o TTL de
+    # 100 ms ela esvazia antes de encher (sem rota: ver test_consumidor).
     envelope = envelope_de_evento("PecasReservadas")
-    canal = CanalFalso(falha, entregas=[_entrega(envelope, 7)])
+    canal = CanalFalso(NackError([]), entregas=[_entrega(envelope, 7)])
     conexoes.append((ConexaoFalsa(), canal))
     consumidor = _consumidor(
         session_factory,
@@ -693,6 +693,7 @@ def test_copia_de_retry_recusada_pelo_broker_vai_para_a_dlq(
 
     assert canal.rejeitadas == [7]
     assert canal.confirmadas == []
+    assert canal.mandatory == [True]
 
 
 def test_evento_sem_handler_vai_para_a_dlq(
@@ -796,6 +797,7 @@ def test_falha_transitoria_do_handler_vai_para_a_primeira_fila_de_retry(
     ((exchange, routing_key, copia),) = canal.publicadas
     assert (exchange, routing_key) == ("pytstop.retry", "os.eventos.retry.1s")
     assert copia.headers["x-tentativa"] == 1
+    assert canal.mandatory == [True]
     assert canal.confirmadas == [4]
     assert canal.rejeitadas == []
 

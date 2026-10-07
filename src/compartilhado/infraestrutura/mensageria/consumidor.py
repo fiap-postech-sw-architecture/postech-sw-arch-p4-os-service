@@ -111,6 +111,17 @@ _TRANSITORIOS: Final[tuple[type[Exception], ...]] = (
 )
 
 
+def fila_de_retry_da_copia(tentativa: int) -> str | None:
+    """Fila de retry da copia que sai da entrega ``tentativa`` (0 e a primeira).
+
+    A copia da primeira entrega vai para ``.retry.1s``, a da quinta para
+    ``.retry.300s``; depois da quinta copia (``x-tentativa`` 5), None: DLQ.
+    """
+    if tentativa >= len(NIVEIS_DE_RETRY):
+        return None
+    return f"{FILA}.retry.{NIVEIS_DE_RETRY[tentativa]}"
+
+
 class _MensagemRejeitadaError(Exception):
     """Erro permanente: a mensagem vai para a DLQ sem nova tentativa."""
 
@@ -359,14 +370,20 @@ class Consumidor:
 
     def _repetir(
         self,
-        metodo: Any,  # noqa: ANN401
-        propriedades: Any,  # noqa: ANN401
+        metodo: Any,  # noqa: ANN401  # Basic.Deliver (pika sem tipos)
+        propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
         corpo: bytes,
         tentativa: int,
         erro: Exception,
     ) -> str:
-        """Copia na fila de retry do nivel e ack da original; esgotada, DLQ."""
-        if tentativa >= len(NIVEIS_DE_RETRY):
+        """Copia na fila de retry do nivel e ack da original; esgotada, DLQ.
+
+        A copia sai com ``mandatory`` e confirm: devolvida (sem fila para a
+        routing key) ou recusada (nack), a original nao recebe ack e vai para a
+        DLQ, nunca some.
+        """
+        fila_de_retry = fila_de_retry_da_copia(tentativa)
+        if fila_de_retry is None:
             _log.warning(
                 "message retries exhausted; rejected to dlq",
                 tentativas=tentativa,
@@ -374,19 +391,19 @@ class Consumidor:
             )
             self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
             return "dlq"
+        # A copia e a original: mesmas propriedades do contrato, o contexto de
+        # trace do span deste consumo (mesmo trace; o tracestate recebido segue
+        # nele) e so o `x-tentativa` incrementado.
         copia = pika.BasicProperties(
             message_id=propriedades.message_id,
             correlation_id=propriedades.correlation_id,
             type=propriedades.type,
             content_type=propriedades.content_type,
-            delivery_mode=pika.DeliveryMode.Persistent,
+            delivery_mode=propriedades.delivery_mode,
             # O broker so aceita o usuario da propria conexao (406 se outro).
             user_id=self._usuario,
-            # Contexto do span deste consumo: a proxima passada vira filha dele
-            # no mesmo trace.
             headers={**cabecalhos_do_contexto_atual(), "x-tentativa": tentativa + 1},
         )
-        fila_de_retry = f"{FILA}.retry.{NIVEIS_DE_RETRY[tentativa]}"
         try:
             self._broker.canal.basic_publish(
                 _EXCHANGE_DE_RETRY, fila_de_retry, corpo, copia, mandatory=True
