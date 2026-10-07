@@ -373,17 +373,79 @@ def test_adiantado_e_falha_transitoria_e_passa_quando_a_saga_alcanca() -> None:
     assert cenario.saga.etapa is E.EM_EXECUCAO
 
 
-def test_relogio_atrasado_de_outra_replica_nao_recua_o_registro() -> None:
-    # A replica que trata o DiagnosticoConcluido le um relogio 5 ms atras do
-    # que gravou o DiagnosticoIniciado: o evento passa no instante do anterior.
+def _relogio_atras_do_ultimo_registro(
+    cenario: CenarioDaSaga, atras: timedelta
+) -> datetime:
+    """A proxima leitura do relogio sai ``atras`` do ultimo registro da saga."""
+    anterior = cenario.saga.atualizada_em
+    # O relogio do cenario anda 1 s a cada leitura.
+    cenario.relogio.agora = anterior - atras - timedelta(seconds=1)
+    return anterior
+
+
+@pytest.mark.parametrize(
+    ("atras", "avisa"),
+    [
+        pytest.param(timedelta(milliseconds=5), False, id="5-ms"),
+        pytest.param(timedelta(seconds=1), False, id="1-s"),
+        pytest.param(timedelta(seconds=1, milliseconds=1), True, id="1-s-e-1-ms"),
+        pytest.param(timedelta(seconds=60), True, id="60-s"),
+    ],
+)
+def test_relogio_atras_do_ultimo_registro_nao_recua_o_registro(
+    monkeypatch: pytest.MonkeyPatch, atras: timedelta, avisa: bool
+) -> None:
+    # A replica que trata o DiagnosticoConcluido le um relogio atras do que
+    # gravou o DiagnosticoIniciado: o evento passa no instante do anterior, e
+    # passando de 1 s o log mostra a defasagem.
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
     cenario = CenarioDaSaga()
     cenario.receber("DiagnosticoIniciado")
-    anterior = cenario.saga.atualizada_em
-    cenario.relogio.agora = anterior - timedelta(seconds=1, milliseconds=5)
+    anterior = _relogio_atras_do_ultimo_registro(cenario, atras)
 
-    assert cenario.receber("DiagnosticoConcluido").desfecho is Desfecho.PROCESSADA
+    with capture_logs() as logs:
+        tratamento = cenario.receber("DiagnosticoConcluido")
+
+    assert tratamento.desfecho is Desfecho.PROCESSADA
     assert cenario.saga.passos[-1]["em"] == anterior.isoformat()
     assert cenario.saga.prazo_resposta_em == anterior + PRAZO
+    avisos = [log for log in logs if log["event"] == "saga clock behind last record"]
+    assert avisos == (
+        [
+            {
+                "event": "saga clock behind last record",
+                "log_level": "warning",
+                "etapa": "aguardando_diagnostico",
+                "defasagem_segundos": atras.total_seconds(),
+                "correlation_id": str(cenario.ordem_id),
+                "tipo": "DiagnosticoConcluido",
+            }
+        ]
+        if avisa
+        else []
+    )
+
+
+def test_relogio_mais_de_60_s_atras_do_ultimo_registro_vai_para_a_dlq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Nao e jitter entre replicas: relogio fora de hora gravaria `em` e prazos
+    # no futuro. Nada e gravado, e o log diz de quanto era a defasagem.
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    cenario = CenarioDaSaga()
+    cenario.receber("DiagnosticoIniciado")
+    _relogio_atras_do_ultimo_registro(cenario, timedelta(seconds=60, milliseconds=1))
+    antes = _foto(cenario)
+
+    with capture_logs() as logs, pytest.raises(EventoRecusadoError) as exc:
+        cenario.receber("DiagnosticoConcluido")
+
+    assert (exc.value.motivo, exc.value.etapa) == (
+        "relogio_defasado",
+        E.AGUARDANDO_DIAGNOSTICO,
+    )
+    assert _foto(cenario) == antes
+    assert [log["defasagem_segundos"] for log in logs] == [60.001]
 
 
 def test_resposta_repetida_com_id_novo_nao_muda_nada() -> None:

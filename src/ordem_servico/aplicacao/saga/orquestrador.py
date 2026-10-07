@@ -10,16 +10,17 @@ Evento de etapa ja passada, repetido ou com a saga fora do fluxo e ignorado com
 log; o adiantado volta pela fila de retry (``EventoAdiantadoError``). O que
 nenhuma tentativa resolve vai para a DLQ com o motivo em codigo
 (``EventoRecusadoError``): OS sem saga, ``ordem_id`` divergente, OS encerrada
-com a saga viva, fato que a OS ou a saga recusam e, enquanto as compensacoes
-nao chegam ao orquestrador, a falha de negocio e a resposta de compensacao na
-etapa em que caberia trata-las (``sem_tratador_nesta_versao``, para o redrive
-na versao que as trata).
+com a saga viva, fato que a OS ou a saga recusam, relogio desta replica muito
+atras do ultimo registro da saga e, enquanto as compensacoes nao chegam ao
+orquestrador, a falha de negocio e a resposta de compensacao na etapa em que
+caberia trata-las (``sem_tratador_nesta_versao``, para o redrive na versao que
+as trata).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
@@ -54,7 +55,6 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from datetime import timedelta
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
@@ -68,6 +68,11 @@ _log = structlog.get_logger(__name__)
 
 # Ator dos fatos que o consumidor aplica (historico da OS e passos da saga).
 ATOR_CONSUMIDOR: Final = "consumidor"
+# Quanto o relogio desta replica pode estar atras do ultimo registro da saga
+# (de outra replica ou da API): ate 1 s e jitter e passa sem aviso; acima, o
+# aviso mostra a defasagem; acima de 60 s nao e jitter, e o evento vai para a DLQ.
+_DEFASAGEM_SEM_AVISO: Final = timedelta(seconds=1)
+_DEFASAGEM_MAXIMA: Final = timedelta(seconds=60)
 # O que a OS ou a saga recusam ao aplicar o fato: estado incompativel com o
 # evento, que nenhuma nova tentativa muda.
 _RECUSAS_DO_DOMINIO: Final = (
@@ -150,8 +155,10 @@ class OrquestradorDaSaga:
                 ``correlation_id``), ``saga_inexistente`` (OS sem saga, ou saga
                 sem OS), ``ordem_encerrada`` (OS cancelada ou entregue com a
                 saga viva), ``sem_tratador_nesta_versao`` (falha de negocio ou
-                resposta de compensacao na etapa em que caberia trata-la) e
-                ``transicao_invalida`` (a OS ou a saga recusam o fato).
+                resposta de compensacao na etapa em que caberia trata-la),
+                ``relogio_defasado`` (o relogio desta replica esta mais de 60 s
+                atras do ultimo registro da saga) e ``transicao_invalida`` (a OS
+                ou a saga recusam o fato).
         """
         saga, ordem = self._ler(evento)
         etapa = saga.etapa
@@ -211,16 +218,39 @@ class OrquestradorDaSaga:
             # trata-la: consumida agora, ela se perderia; na DLQ, espera o redrive
             # da versao com as compensacoes.
             raise EventoRecusadoError("sem_tratador_nesta_versao", saga.etapa)
-        # O registro anterior pode vir de outra replica (ou da API), com o
-        # relogio uns milissegundos a frente: o novo nunca fica antes dele, que
-        # a saga recusaria como instante que volta.
-        agora = max(self._relogio(), saga.atualizada_em)
+        agora = self._instante_do_passo(evento, saga)
         try:
             pedido = aplicar(evento, saga, ordem)
             envio = self._enviar(pedido, evento, agora) if pedido else None
             saga.avancar(evento, marcos, agora=agora, ator=_ator(evento), envio=envio)
         except _RECUSAS_DO_DOMINIO as exc:
             raise EventoRecusadoError("transicao_invalida", saga.etapa) from exc
+
+    def _instante_do_passo(self, evento: MensagemRecebida, saga: Saga) -> datetime:
+        """O relogio, sem ficar antes do ultimo registro da saga.
+
+        O registro anterior pode vir de outra replica (ou da API) com o relogio
+        uns milissegundos a frente, e a saga recusaria o novo como instante que
+        volta: ele fica no instante do anterior. Passando de 1 s o aviso mostra a
+        defasagem, e passando de 60 s o evento vai para a DLQ: relogio fora de
+        hora gravaria ``em`` e prazos no futuro.
+
+        Raises:
+            EventoRecusadoError: ``relogio_defasado``.
+        """
+        agora = self._relogio()
+        defasagem = saga.atualizada_em - agora
+        if defasagem > _DEFASAGEM_SEM_AVISO:
+            _log.warning(
+                "saga clock behind last record",
+                etapa=saga.etapa.value,
+                defasagem_segundos=defasagem.total_seconds(),
+                correlation_id=str(saga.ordem_id),
+                tipo=evento.tipo,
+            )
+        if defasagem > _DEFASAGEM_MAXIMA:
+            raise EventoRecusadoError("relogio_defasado", saga.etapa)
+        return max(agora, saga.atualizada_em)
 
     def _enviar(
         self,
