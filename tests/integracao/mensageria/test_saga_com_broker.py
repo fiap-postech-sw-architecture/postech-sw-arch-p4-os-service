@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
+    from opentelemetry.sdk.trace import ReadableSpan
     from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
@@ -67,6 +68,24 @@ _FILA = {
 }
 
 
+# O evento cujo consumo grava cada comando seguinte na outbox.
+_CAUSA = {
+    "GerarOrcamento": "DiagnosticoConcluido",
+    "ReservarPecas": "OrcamentoAprovado",
+    "SolicitarPagamento": "PecasReservadas",
+    "AgendarExecucao": "PagamentoConfirmado",
+}
+
+
+def _pai(span: ReadableSpan) -> int | None:
+    return span.parent.span_id if span.parent is not None else None
+
+
+def _id(rastreador: Rastreador, nome: str) -> int:
+    (span,) = rastreador.spans(nome)
+    return span.get_span_context().span_id
+
+
 def _retries() -> float:
     return sum(
         amostra.value
@@ -79,6 +98,12 @@ def _retries() -> float:
 
 def _amostra(nome: str, **labels: str) -> float:
     return REGISTRY.get_sample_value(nome, labels) or 0.0
+
+
+def _consumidas(tipo: str, resultado: str) -> float:
+    return _amostra(
+        "pytstop_mensagens_consumidas_total", tipo=tipo, resultado=resultado
+    )
 
 
 class Atendimento:
@@ -291,14 +316,22 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
         == concluidas + 1
     )
 
-    # Um trace da abertura aos comandos e respostas (RFC-004 secao 9).
+    # Um trace da abertura aos comandos e respostas (RFC-004 secao 9). O span
+    # do ultimo consumo termina depois do ack: espera por ele antes de ler.
+    esperar_ate(lambda: rastreador.spans("process ExecucaoFinalizada"))
     (raiz,) = rastreador.spans("POST /api/v1/ordens-de-servico")
     trace_id = raiz.get_span_context().trace_id
     spans = rastreador.spans()
     assert {s.get_span_context().trace_id for s in spans} == {trace_id}
-    nomes = {s.name for s in spans}
-    assert {f"publish {c}" for c in _FILA} <= nomes
-    assert {f"process {t}" for t in atendimento.gatilhos()[1:]} <= nomes
+    # E uma arvore: o publish de cada comando e filho de quem o gravou na
+    # outbox (a requisicao ou o consumo do evento que o causou), e o consumo
+    # de cada evento, do participante que o publicou.
+    pais = {s.name: _pai(s) for s in spans}
+    assert pais["publish SolicitarDiagnostico"] == raiz.get_span_context().span_id
+    for comando, causa in _CAUSA.items():
+        assert pais[f"publish {comando}"] == _id(rastreador, f"process {causa}")
+    for tipo in atendimento.gatilhos()[1:]:
+        assert pais[f"process {tipo}"] == _id(rastreador, f"participante {tipo}")
     (consumo,) = rastreador.spans("process PecasReservadas")
     assert consumo.attributes is not None
     assert {
@@ -308,6 +341,39 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
         "pytstop.saga.etapa_nova": "aguardando_pagamento",
         "pytstop.saga.desfecho": "processada",
     }
+
+
+def test_mesmo_evento_entregue_duas_vezes_gera_um_comando_so(
+    atendimento: Atendimento, engine: Engine, broker: Broker
+) -> None:
+    # RN-028: a reentrega do mesmo id (o broker devolve a mensagem sem ack, o
+    # participante republica o mesmo envelope) nao repete o efeito.
+    atendimento.abrir()
+    atendimento.receber("SolicitarDiagnostico")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
+    atendimento.esperar_passo("DiagnosticoIniciado")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
+    atendimento.receber("GerarOrcamento")
+    atendimento.responder("GerarOrcamento", "OrcamentoGerado")
+    atendimento.esperar_passo("OrcamentoGerado")
+    atendimento.responder("GerarOrcamento", "OrcamentoAprovado")
+    atendimento.receber("ReservarPecas")
+    duplicadas = _consumidas("PecasReservadas", "duplicada")
+
+    reservadas = atendimento.responder("ReservarPecas", "PecasReservadas")
+    broker.publicar_evento(reservadas)
+    esperar_ate(lambda: _consumidas("PecasReservadas", "duplicada") > duplicadas)
+
+    with engine.connect() as conexao:
+        pedidos = conexao.execute(
+            text(
+                "SELECT count(*) FROM outbox "
+                "WHERE envelope ->> 'tipo' = 'SolicitarPagamento'"
+            )
+        ).scalar_one()
+    assert pedidos == 1
+    assert atendimento.gatilhos().count("PecasReservadas") == 1
+    assert broker.contar(_DLQ) == 0
 
 
 def test_placa_e_descricao_so_no_comando_da_execucao(
