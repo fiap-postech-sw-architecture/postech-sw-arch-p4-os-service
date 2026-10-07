@@ -69,6 +69,7 @@ Consolidado em 2026-10-06: as 92 entradas anteriores estao em `MEMORY.archive.md
 
 ## Tech debt / TODO
 
+- 2026-10-06 - MEDIUM - O envelope do `SolicitarDiagnostico` leva placa e `descricao_problema` e fica na outbox (entregue por 7 dias; `dead` sem prazo), e o erasure LGPD do cliente nao toca a outbox. Quando a saga passar a gravar o comando, o erasure limpa os envelopes das OS do cliente e as linhas `dead` ganham retencao - PR #4
 - 2026-10-06 - RESOLVIDO - `mensagens_processadas` com consumidor e com as colunas do ER (`mensagem_id`, `processada_em`), pela migracao 002 - PR #4
 - 2026-10-06 - LOW - `contratos/ORIGEM` aponta para o commit da branch do platform com a fila de retry por atraso; depois do merge la, trocar pelo SHA da `main` (conteudo igual) - PR #4
 - 2026-10-06 - LOW - O README e o compose do platform chamam a URL do broker de `AMQP_URL`; os servicos leem `RABBITMQ_URL`. Alinhar no platform - PR #4
@@ -84,6 +85,10 @@ Consolidado em 2026-10-06: as 92 entradas anteriores estao em `MEMORY.archive.md
 
 ## Review lessons
 
+- 2026-10-06 - Teste de "vai direto para a DLQ" prova o "direto": metrica de retry inalterada e `x-death` com um so reject da fila de trabalho. Com o TTL curto das filas de retry do broker de teste, um desvio pelas cinco tentativas tambem chegava a DLQ no prazo e o teste passava - PR #4
+- 2026-10-06 - O span cobre a operacao inteira, logs inclusos: o log de "publicada"/"nova tentativa" saia depois do span fechado, sem `trace_id`. E o log de falha de handler leva so o tipo e o `arquivo:linha` da excecao, nunca a mensagem dela, que pode trazer placa ou texto livre - PR #4
+- 2026-10-06 - Laco de consumo: o que nao e permanente nem transitorio conhecido vai para a DLQ (uma mensagem venenosa derrubava o processo e voltava primeiro a cada reinicio), e o backoff de reconexao so zera depois de uma mensagem tratada (zerar a cada conexao virava laco quente com o broker fechando o canal na copia de retry) - PR #4
+- 2026-10-06 - Conexao e comportamento de biblioteca fora do caminho principal se conferem na fonte: a conexao de LISTEN, aberta fora do engine, nao herdava o `connect_timeout` dele; o `consume()` do pika termina o gerador quando o broker cancela, sem a `ConsumerCancelled` que o teste com fake simulava - PR #4
 - 2026-10-06 - Regex de PII ou de segredo se testa pelos dois lados e com dados do proprio servico: 10 mil UUID v4 intactos (o de telefone mascarava cerca de 1,4%), cada formato que o VO aceita (o CNPJ alfanumerico escapou), o que a regex antiga aceitava quando ela da lugar a um helper de biblioteca (espaco, quebra de linha), o caso que a correcao deixou de pegar (telefone colado a hifen) e o resultado exato (o teto de 200 caracteres do `redigir_pii_erro` escondia a falta de mascara) - PR #2 e PR #3
 - 2026-10-06 - Regra de ADR com lista de casos se confere caso a caso e pela rota real: a matriz papel x rota do ADR-039 (o mecanico lia OS e historico), o 401 para papel ausente ou desconhecido (os testes fixavam o 403) e o formato de erro do gate (a dependency saia fora do envelope) - PR #2
 - 2026-10-06 - Afirmacao em comentario, docstring ou divida precisa de evidencia: teste ("toda resposta leva os headers", e o 500 saia sem), contagem com `git grep @limiter.limit` e uma rota de `include_router` de verdade (alcance do limite padrao), leitura da versao que vai entrar (conteudo de ADR de outro repositorio) - PR #2 e PR #3
