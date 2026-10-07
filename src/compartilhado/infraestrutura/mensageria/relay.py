@@ -144,7 +144,12 @@ class ConfigRelay:
 
 
 class Relay:
-    """Publica a outbox no RabbitMQ ate o ``parar`` (SIGTERM) ser sinalizado."""
+    """Publica a outbox no RabbitMQ ate o ``parar`` (SIGTERM) ser sinalizado.
+
+    O laco junta as pecas: ``ConexaoDoProcesso`` (o broker), ``Outbox`` (o SQL
+    de cada passo), ``EscutaDaOutbox`` (o ``NOTIFY``) e ``DesfechoDaLinha`` (o
+    que a linha vira depois do publish, com o log).
+    """
 
     def __init__(
         self,
@@ -159,6 +164,8 @@ class Relay:
         self._tracer = tracer
         self._config = config or ConfigRelay()
         self._outbox = Outbox(engine, self._config.atrasos_s)
+        self._desfecho = DesfechoDaLinha(self._outbox)
+        self._escuta = EscutaDaOutbox(engine)
         self._sinal = Sinalizador("relay", self._config.diretorio_de_saude)
         self._broker = amqp.ConexaoDoProcesso(
             parametros, processo="relay", sinal=self._sinal, declarar=self._declarar
@@ -182,7 +189,6 @@ class Relay:
             lote=self._config.lote,
             lease_s=self._config.lease.total_seconds(),
         )
-        escuta: Any = None  # conexao psycopg2 do LISTEN (sem tipos)
         try:
             while not parar.is_set():
                 self._sinal.bater()
@@ -192,7 +198,7 @@ class Relay:
                 if self._broker.bloqueada:
                     # Alarme de recursos no broker: nada de reivindicar linhas
                     # ate o Connection.Unblocked, que o _esperar recebe.
-                    escuta = self._esperar(escuta, parar)
+                    self._esperar(parar)
                     continue
                 try:
                     self._drenar(parar)
@@ -206,9 +212,9 @@ class Relay:
                     # Banco fora (failover, blip do pool): as linhas voltam no
                     # proximo ciclo; derrubar o processo so reiniciaria o pod.
                     _log.exception("outbox cycle failed")
-                escuta = self._esperar(escuta, parar)
+                self._esperar(parar)
         finally:
-            _fechar_escuta(escuta)
+            self._escuta.fechar()
             self._broker.desconectar()
             _log.info("relay stopped")
 
@@ -241,7 +247,7 @@ class Relay:
                     self._liberar(linhas[indice:])
                     raise
                 except Exception as exc:  # noqa: BLE001  # a linha falha, o relay segue
-                    self._contar_falha(linha, exc)
+                    self._desfecho.falhou(linha, exc)
 
     def _entregar(self, reivindicada: LinhaDaOutbox) -> None:
         if not self._broker.canal.is_open:
@@ -259,7 +265,7 @@ class Relay:
             self._liberar([linha])
             raise
         except Exception as exc:  # noqa: BLE001  # a linha falha, o relay segue
-            self._contar_falha(linha, exc)
+            self._desfecho.falhou(linha, exc)
 
     def _validar_e_publicar(self, linha: LinhaDaOutbox) -> None:
         try:
@@ -276,7 +282,219 @@ class Relay:
             return
         self._publicar_no_span(linha)
 
-    def _contar_falha(self, linha: LinhaDaOutbox, exc: Exception) -> None:
+    def _publicar_no_span(self, linha: LinhaDaOutbox) -> None:
+        tipo = linha.envelope["tipo"]
+        # O span cobre publicacao, marcacao da linha e logs: as linhas de log
+        # saem com o trace_id e o span_id da publicacao.
+        with span_de_mensagem(
+            self._tracer,
+            f"publish {tipo}",
+            contexto=contexto_dos_cabecalhos(
+                {"traceparent": linha.traceparent, "tracestate": linha.tracestate}
+            ),
+            tipo=SpanKind.PRODUCER,
+            atributos={
+                "messaging.system": "rabbitmq",
+                "messaging.operation.type": "send",
+                "messaging.destination.name": linha.exchange,
+                "messaging.rabbitmq.destination.routing_key": linha.routing_key,
+                "messaging.message.id": str(linha.mensagem_id),
+                "messaging.message.conversation_id": str(linha.correlation_id),
+                "correlation_id": str(linha.correlation_id),
+            },
+        ) as span:
+            falha = self._publicar(linha)
+            if falha is None:
+                MENSAGENS_PUBLICADAS.labels(tipo=tipo).inc()
+                # O broker confirmou: a proxima queda recomeca o backoff do minimo.
+                self._broker.sucesso()
+                self._desfecho.entregue(linha)
+            else:
+                span.set_status(StatusCode.ERROR, falha)
+                self._desfecho.recusada(linha, falha)
+
+    def _publicar(self, linha: LinhaDaOutbox) -> str | None:
+        """Publica com confirm; devolve a falha da mensagem, ou None se confirmada.
+
+        Raises:
+            _BrokerIndisponivelError: a conexao caiu (nao conta tentativa).
+        """
+        propriedades = amqp.propriedades(
+            linha.envelope,
+            usuario=self._usuario,
+            cabecalhos=cabecalhos_do_contexto_atual(),
+        )
+        corpo = json.dumps(linha.envelope, ensure_ascii=False).encode()
+        try:
+            self._broker.canal.basic_publish(
+                linha.exchange, linha.routing_key, corpo, propriedades, mandatory=True
+            )
+        except UnroutableError:
+            return "devolvida pelo broker: nenhuma fila para a routing key"
+        except NackError:
+            return "recusada pelo broker (nack)"
+        except ChannelClosedByBroker as exc:
+            return f"canal fechado pelo broker ({exc.reply_code})"
+        except amqp.ERROS_DE_CONEXAO as exc:
+            raise _BrokerIndisponivelError from exc
+        return None
+
+    def _reabrir_canal(self) -> None:
+        """Canal novo na mesma conexao, depois de o broker fechar o anterior."""
+        try:
+            self._broker.reabrir_canal()
+        except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
+            raise _BrokerIndisponivelError from exc
+
+    def _liberar(self, linhas: list[LinhaDaOutbox]) -> None:
+        try:
+            self._outbox.liberar(linhas)
+        except SQLAlchemyError:
+            _log.exception("outbox rows not released; they return after the lease")
+
+    def _limpar_se_devido(self) -> None:
+        if not self._limpeza.devida():
+            return
+        apagadas = self._outbox.limpar(entre_lotes=self._atender_o_broker)
+        if apagadas:
+            _log.info("old outbox rows deleted", linhas=apagadas)
+
+    def _atender_o_broker(self) -> None:
+        """Heartbeat AMQP entre lotes da limpeza; a conexao caida e queda do broker."""
+        try:
+            self._broker.atender()
+        except amqp.ERROS_DE_CONEXAO as exc:
+            raise _BrokerIndisponivelError from exc
+
+    def _esperar(self, parar: threading.Event) -> None:
+        """Espera um NOTIFY ou o poll de seguranca e atende o heartbeat AMQP."""
+        self._escuta.esperar(parar, self._config.poll_s)
+        if self._broker.conexao is not None:
+            try:
+                # Sem isso o broker derruba a conexao ociosa por heartbeat.
+                self._broker.atender()
+            except amqp.ERROS_DE_CONEXAO:
+                # Inclui o timeout do bloqueio por alarme de recursos.
+                _log.warning("broker connection lost while idle; reconnecting")
+                self._broker.desconectar()
+                self._broker.esperar(parar)
+
+
+class EscutaDaOutbox:
+    """Conexao dedicada de ``LISTEN`` do canal da outbox, fora do pool do engine.
+
+    O ``NOTIFY`` da gravacao acorda o relay na hora; o poll de seguranca cobre
+    o que se perder. Com o banco fora ou a conexao caida, o relay segue pelo
+    poll e a conexao e reaberta na espera seguinte.
+    """
+
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+        self._conexao: Any = None  # conexao psycopg2 (sem tipos)
+
+    def esperar(self, parar: threading.Event, poll_s: float) -> None:
+        """Espera um ``NOTIFY`` ou o poll de seguranca."""
+        if self._conexao is None:
+            self._conexao = self._abrir()
+        if self._conexao is None:
+            parar.wait(poll_s)
+            return
+        try:
+            prontos, _, _ = select.select([self._conexao], [], [], poll_s)
+            if prontos:
+                self._conexao.poll()
+                # Um drain cobre todas as notificacoes acumuladas.
+                self._conexao.notifies.clear()
+        except (self._engine.dialect.loaded_dbapi.Error, OSError):
+            _log.warning("listen connection lost; polling until it is back")
+            self.fechar()
+
+    def fechar(self) -> None:
+        """Fecha a conexao; best-effort, ela pode ja estar morta."""
+        if self._conexao is not None:
+            with contextlib.suppress(Exception):
+                self._conexao.close()
+        self._conexao = None
+
+    def _abrir(self) -> Any:  # noqa: ANN401  # conexao psycopg2
+        """Conexao de ``LISTEN`` com keepalives, ou None se o banco falhar."""
+        try:
+            argumentos, parametros = self._engine.dialect.create_connect_args(
+                self._engine.url
+            )
+            parametros.update(_KEEPALIVES)
+            # Sem o connect_timeout do engine, um banco inalcancavel prenderia o
+            # laco no timeout de TCP do sistema e o heartbeat venceria.
+            parametros.setdefault("connect_timeout", tempo_de_conexao())
+            escuta = self._engine.dialect.loaded_dbapi.connect(
+                *argumentos, **parametros
+            )
+            escuta.autocommit = True
+            with escuta.cursor() as cursor:
+                cursor.execute(f"LISTEN {CANAL_NOTIFY}")
+        except (self._engine.dialect.loaded_dbapi.Error, OSError):
+            _log.warning("listen connection unavailable; polling")
+            return None
+        return escuta
+
+
+class DesfechoDaLinha:
+    """Grava o desfecho de cada linha (com o fencing da ``Outbox``) e o registra no log.
+
+    Entregue, nova tentativa ou ``dead``; quando a linha deixou de ser desta
+    replica (o lease venceu e outra a reivindicou), nada e gravado e o log diz.
+    """
+
+    def __init__(self, outbox: Outbox) -> None:
+        self._outbox = outbox
+
+    def entregue(self, linha: LinhaDaOutbox) -> None:
+        """Confirmada pelo broker: a linha vira ``entregue``."""
+        contexto_de_log = _contexto_de_log(linha)
+        try:
+            entregue = self._outbox.marcar_entregue(linha)
+        except SQLAlchemyError:
+            # Publicada e sem a marca (banco fora): nao e falha da mensagem e
+            # nao gasta tentativa. A linha volta quando o lease vencer e sai de
+            # novo; o consumidor descarta a copia pelo id.
+            _log.warning(
+                "message published but not marked; it returns after the lease",
+                **contexto_de_log,
+            )
+            return
+        if entregue:
+            _log.info("message published", **contexto_de_log)
+        else:
+            # O publish passou do lease e outra replica pegou a linha: a
+            # mensagem pode sair de novo, e o consumidor descarta pelo id.
+            _log.warning("message published after losing the lease", **contexto_de_log)
+
+    def recusada(self, linha: LinhaDaOutbox, falha: str) -> None:
+        """Devolvida, recusada (nack) ou com o canal fechado: conta tentativa."""
+        contexto_de_log = _contexto_de_log(linha)
+        desfecho = self._outbox.registrar_falha(linha, falha)
+        if desfecho == "perdida":
+            _log.warning(
+                "message publish failed after losing the lease", **contexto_de_log
+            )
+            return
+        tentativas = linha.tentativas + 1
+        if desfecho == "dead":
+            _log.error(
+                "message publish failed; outbox row dead",
+                tentativas=tentativas,
+                motivo=falha,
+                **contexto_de_log,
+            )
+        else:
+            _log.warning(
+                "message publish failed; retry scheduled",
+                tentativas=tentativas,
+                motivo=falha,
+                **contexto_de_log,
+            )
+
+    def falhou(self, linha: LinhaDaOutbox, exc: Exception) -> None:
         """Falha inesperada no caminho da linha: conta tentativa, como uma recusa.
 
         Se nem a contagem gravar (banco fora), a linha volta quando o lease
@@ -310,192 +528,12 @@ class Relay:
                 tentativas=linha.tentativas + 1,
             )
 
-    def _publicar_no_span(self, linha: LinhaDaOutbox) -> None:
-        tipo = linha.envelope["tipo"]
-        # O span cobre publicacao, marcacao da linha e logs: as linhas de log
-        # saem com o trace_id e o span_id da publicacao.
-        with span_de_mensagem(
-            self._tracer,
-            f"publish {tipo}",
-            contexto=contexto_dos_cabecalhos(
-                {"traceparent": linha.traceparent, "tracestate": linha.tracestate}
-            ),
-            tipo=SpanKind.PRODUCER,
-            atributos={
-                "messaging.system": "rabbitmq",
-                "messaging.operation.type": "send",
-                "messaging.destination.name": linha.exchange,
-                "messaging.rabbitmq.destination.routing_key": linha.routing_key,
-                "messaging.message.id": str(linha.mensagem_id),
-                "messaging.message.conversation_id": str(linha.correlation_id),
-                "correlation_id": str(linha.correlation_id),
-            },
-        ) as span:
-            falha = self._publicar(linha)
-            if falha is not None:
-                span.set_status(StatusCode.ERROR, falha)
-            self._registrar_desfecho(linha, falha)
 
-    def _publicar(self, linha: LinhaDaOutbox) -> str | None:
-        """Publica com confirm; devolve a falha da mensagem, ou None se confirmada.
-
-        Raises:
-            _BrokerIndisponivelError: a conexao caiu (nao conta tentativa).
-        """
-        propriedades = amqp.propriedades(
-            linha.envelope,
-            usuario=self._usuario,
-            cabecalhos=cabecalhos_do_contexto_atual(),
-        )
-        corpo = json.dumps(linha.envelope, ensure_ascii=False).encode()
-        try:
-            self._broker.canal.basic_publish(
-                linha.exchange, linha.routing_key, corpo, propriedades, mandatory=True
-            )
-        except UnroutableError:
-            return "devolvida pelo broker: nenhuma fila para a routing key"
-        except NackError:
-            return "recusada pelo broker (nack)"
-        except ChannelClosedByBroker as exc:
-            return f"canal fechado pelo broker ({exc.reply_code})"
-        except amqp.ERROS_DE_CONEXAO as exc:
-            raise _BrokerIndisponivelError from exc
-        return None
-
-    def _registrar_desfecho(self, linha: LinhaDaOutbox, falha: str | None) -> None:
-        """Marca a linha: entregue, nova tentativa com atraso ou `dead`."""
-        tipo = linha.envelope["tipo"]
-        contexto_de_log = {
-            "outbox_id": linha.id,
-            "tipo": tipo,
-            "message_id": str(linha.mensagem_id),
-            "correlation_id": str(linha.correlation_id),
-        }
-        if falha is None:
-            MENSAGENS_PUBLICADAS.labels(tipo=tipo).inc()
-            # O broker confirmou: a proxima queda recomeca o backoff do minimo.
-            self._broker.sucesso()
-            try:
-                entregue = self._outbox.marcar_entregue(linha)
-            except SQLAlchemyError:
-                # Publicada e sem a marca (banco fora): nao e falha da mensagem
-                # e nao gasta tentativa. A linha volta quando o lease vencer e
-                # sai de novo; o consumidor descarta a copia pelo id.
-                _log.warning(
-                    "message published but not marked; it returns after the lease",
-                    **contexto_de_log,
-                )
-                return
-            if entregue:
-                _log.info("message published", **contexto_de_log)
-            else:
-                # O publish passou do lease e outra replica pegou a linha: a
-                # mensagem pode sair de novo, e o consumidor descarta pelo id.
-                _log.warning(
-                    "message published after losing the lease", **contexto_de_log
-                )
-            return
-        desfecho = self._outbox.registrar_falha(linha, falha)
-        if desfecho == "perdida":
-            _log.warning(
-                "message publish failed after losing the lease", **contexto_de_log
-            )
-            return
-        tentativas = linha.tentativas + 1
-        if desfecho == "dead":
-            _log.error(
-                "message publish failed; outbox row dead",
-                tentativas=tentativas,
-                motivo=falha,
-                **contexto_de_log,
-            )
-        else:
-            _log.warning(
-                "message publish failed; retry scheduled",
-                tentativas=tentativas,
-                motivo=falha,
-                **contexto_de_log,
-            )
-
-    def _reabrir_canal(self) -> None:
-        """Canal novo na mesma conexao, depois de o broker fechar o anterior."""
-        try:
-            self._broker.reabrir_canal()
-        except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
-            raise _BrokerIndisponivelError from exc
-
-    def _liberar(self, linhas: list[LinhaDaOutbox]) -> None:
-        try:
-            self._outbox.liberar(linhas)
-        except SQLAlchemyError:
-            _log.exception("outbox rows not released; they return after the lease")
-
-    def _limpar_se_devido(self) -> None:
-        if not self._limpeza.devida():
-            return
-        apagadas = self._outbox.limpar(entre_lotes=self._atender_o_broker)
-        if apagadas:
-            _log.info("old outbox rows deleted", linhas=apagadas)
-
-    def _atender_o_broker(self) -> None:
-        """Heartbeat AMQP entre lotes da limpeza; a conexao caida e queda do broker."""
-        try:
-            self._broker.atender()
-        except amqp.ERROS_DE_CONEXAO as exc:
-            raise _BrokerIndisponivelError from exc
-
-    def _esperar(self, escuta: Any, parar: threading.Event) -> Any:  # noqa: ANN401  # conexao psycopg2
-        """Espera um NOTIFY ou o poll de seguranca e atende o heartbeat AMQP."""
-        if escuta is None:
-            escuta = self._abrir_escuta()
-        if escuta is None:
-            parar.wait(self._config.poll_s)
-        else:
-            try:
-                prontos, _, _ = select.select([escuta], [], [], self._config.poll_s)
-                if prontos:
-                    escuta.poll()
-                    # Um drain cobre todas as notificacoes acumuladas.
-                    escuta.notifies.clear()
-            except (self._engine.dialect.loaded_dbapi.Error, OSError):
-                _log.warning("listen connection lost; polling until it is back")
-                _fechar_escuta(escuta)
-                escuta = None
-        if self._broker.conexao is not None:
-            try:
-                # Sem isso o broker derruba a conexao ociosa por heartbeat.
-                self._broker.atender()
-            except amqp.ERROS_DE_CONEXAO:
-                # Inclui o timeout do bloqueio por alarme de recursos.
-                _log.warning("broker connection lost while idle; reconnecting")
-                self._broker.desconectar()
-                self._broker.esperar(parar)
-        return escuta
-
-    def _abrir_escuta(self) -> Any:  # noqa: ANN401  # conexao psycopg2
-        """Conexao dedicada de ``LISTEN`` (fora do pool), ou None se o banco falhar."""
-        try:
-            argumentos, parametros = self._engine.dialect.create_connect_args(
-                self._engine.url
-            )
-            parametros.update(_KEEPALIVES)
-            # Sem o connect_timeout do engine, um banco inalcancavel prenderia o
-            # laco no timeout de TCP do sistema e o heartbeat venceria.
-            parametros.setdefault("connect_timeout", tempo_de_conexao())
-            escuta = self._engine.dialect.loaded_dbapi.connect(
-                *argumentos, **parametros
-            )
-            escuta.autocommit = True
-            with escuta.cursor() as cursor:
-                cursor.execute(f"LISTEN {CANAL_NOTIFY}")
-        except (self._engine.dialect.loaded_dbapi.Error, OSError):
-            _log.warning("listen connection unavailable; polling")
-            return None
-        return escuta
-
-
-def _fechar_escuta(escuta: Any) -> None:  # noqa: ANN401  # conexao psycopg2
-    if escuta is not None:
-        # Best-effort: a conexao de LISTEN pode ja estar morta.
-        with contextlib.suppress(Exception):
-            escuta.close()
+def _contexto_de_log(linha: LinhaDaOutbox) -> dict[str, object]:
+    """Ids e tipo da linha para o log (nunca o envelope: placa, texto livre)."""
+    return {
+        "outbox_id": linha.id,
+        "tipo": linha.envelope["tipo"],
+        "message_id": str(linha.mensagem_id),
+        "correlation_id": str(linha.correlation_id),
+    }
