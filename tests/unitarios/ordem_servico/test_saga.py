@@ -1,8 +1,8 @@
 """Instancia da saga: abertura, passos do fluxo normal e classificacao dos eventos.
 
-A matriz etapa x tipo (12 x 23) e gerada da tabela da RFC-004 secao 4.1,
-escrita aqui de novo (e nao importada do modulo testado), mais as excecoes
-da secao 4.5 dentro da mesma etapa.
+A matriz etapa x tipo (12 x 23) e gerada da tabela da RFC-004 secao 4.1, escrita
+de novo no ``cenario_da_saga`` (e nao importada do modulo testado), mais as
+excecoes da secao 4.5 dentro da mesma etapa.
 """
 
 from __future__ import annotations
@@ -25,87 +25,15 @@ from src.ordem_servico.aplicacao.saga.saga import (
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
 from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
+from tests.unitarios.ordem_servico.cenario_da_saga import (
+    ESPERADA,
+    STATUS_DE_ENTRADA,
+    esperado,
+)
 
 AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
 C = Classificacao
 S = StatusOrdem
-
-# Ordem linear das etapas e etapa esperada de cada tipo (RFC-004 secao 4.1).
-LINEAR = [
-    "aguardando_diagnostico",
-    "aguardando_orcamento",
-    "aguardando_decisao",
-    "aguardando_reserva",
-    "aguardando_pagamento",
-    "aguardando_agendamento",
-    "aguardando_inicio",
-    "em_execucao",
-    "concluida",
-]
-ESPERADA = {
-    "DiagnosticoIniciado": "aguardando_diagnostico",
-    "DiagnosticoConcluido": "aguardando_diagnostico",
-    "OrcamentoGerado": "aguardando_orcamento",
-    "GeracaoDeOrcamentoFalhou": "aguardando_orcamento",
-    "OrcamentoAprovado": "aguardando_decisao",
-    "OrcamentoRecusado": "aguardando_decisao",
-    "OrcamentoExpirado": "aguardando_decisao",
-    "PecasReservadas": "aguardando_reserva",
-    "ReservaDePecasFalhou": "aguardando_reserva",
-    "PagamentoSolicitado": "aguardando_pagamento",
-    "PagamentoConfirmado": "aguardando_pagamento",
-    "PagamentoRecusado": "aguardando_pagamento",
-    "PagamentoExpirado": "aguardando_pagamento",
-    "ExecucaoAgendada": "aguardando_agendamento",
-    "ExecucaoIniciada": "aguardando_inicio",
-    "ExecucaoFinalizada": "em_execucao",
-    "DiagnosticoDescartado": "compensando",
-    "OrcamentoCancelado": "compensando",
-    "ReservaLiberada": "compensando",
-    "PagamentoCancelado": "compensando",
-    "PagamentoEstornado": "compensando",
-    "EstornoDePagamentoFalhou": "compensando",
-    "ExecucaoCancelada": "compensando",
-}
-# Status com que a OS entra em cada etapa (o checkout ainda fechado em
-# aguardando_pagamento); nas etapas da compensacao, um status anterior ao pivot.
-STATUS_DE_ENTRADA = {
-    "aguardando_diagnostico": S.RECEBIDA,
-    "aguardando_orcamento": S.EM_DIAGNOSTICO,
-    "aguardando_decisao": S.AGUARDANDO_APROVACAO,
-    "aguardando_reserva": S.AGUARDANDO_APROVACAO,
-    "aguardando_pagamento": S.AGUARDANDO_PAGAMENTO,
-    "aguardando_agendamento": S.AGUARDANDO_EXECUCAO,
-    "aguardando_inicio": S.AGUARDANDO_EXECUCAO,
-    "em_execucao": S.EM_EXECUCAO,
-    "concluida": S.FINALIZADA,
-    "compensando": S.AGUARDANDO_APROVACAO,
-    "compensada": S.CANCELADA,
-    "falha_na_compensacao": S.AGUARDANDO_EXECUCAO,
-}
-
-
-def esperado(etapa: str, tipo: str) -> Classificacao:
-    """A regra da RFC-004 secao 4.5 para a OS no status de entrada da etapa."""
-    alvo = ESPERADA[tipo]
-    if alvo == "compensando":
-        return C.PROCESSAR if etapa == "compensando" else C.FORA_DA_COMPENSACAO
-    if etapa not in LINEAR[:-1]:
-        return C.FORA_DO_FLUXO
-    if LINEAR.index(alvo) < LINEAR.index(etapa):
-        return C.OBSOLETO
-    if LINEAR.index(alvo) > LINEAR.index(etapa):
-        return C.ADIANTADO
-    # Mesma etapa, OS no status de entrada: so o DiagnosticoConcluido (OS
-    # ainda recebida) e os desfechos do pagamento (checkout fechado) esperam.
-    if tipo in {
-        "DiagnosticoConcluido",
-        "PagamentoConfirmado",
-        "PagamentoRecusado",
-        "PagamentoExpirado",
-    }:
-        return C.ADIANTADO
-    return C.PROCESSAR
 
 
 def saga_em(etapa: EtapaSaga | str, **campos: object) -> Saga:

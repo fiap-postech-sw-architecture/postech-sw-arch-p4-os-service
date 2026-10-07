@@ -1,19 +1,21 @@
 """Processo consumidor da fila ``os.eventos``: ``python -m src.consumidor``.
 
-Roda na mesma imagem da API, com outro comando. O ``DESPACHANTE`` liga cada
-evento que o OS consome (operacao de recebimento da fila ``os.eventos`` no
-AsyncAPI) ao seu handler. Os handlers da saga entram com o orquestrador; ate
-la, cada tipo so registra o recebimento.
+Roda na mesma imagem da API, com outro comando. O despachante liga cada evento
+que o OS consome (operacao de recebimento da fila ``os.eventos`` no AsyncAPI) ao
+orquestrador da saga, montado sobre a transacao da mensagem: o consumidor comita
+efeito, comandos e ``mensagens_processadas`` juntos (ADR-036).
 """
 
 from __future__ import annotations
 
 import threading
+from datetime import timedelta
+from functools import partial
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
-import structlog
+from opentelemetry import trace
 
-from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
 from src.compartilhado.infraestrutura.database import criar_session_factory
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     Consumidor,
@@ -21,58 +23,73 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
 )
 from src.compartilhado.infraestrutura.mensageria.processo import (
     instalar_sinais,
+    inteiro_do_ambiente,
     preparar,
     subir_metricas,
 )
 from src.compartilhado.infraestrutura.observability import criar_tracer
+from src.ordem_servico.aplicacao.saga.orquestrador import (
+    EventoAdiantadoError,
+    OrquestradorDaSaga,
+)
+from src.ordem_servico.aplicacao.saga.saga import ETAPA_ESPERADA
+from src.ordem_servico.infraestrutura.repository import (
+    OrdemDeServicoSQLAlchemyRepository,
+    SagaSQLAlchemyRepository,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
     from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 
-_log = structlog.get_logger(__name__)
+# Espera por resposta a comando, gravada pela saga no envio (RFC-004 secao 10.3).
+_PRAZO_RESPOSTA_PADRAO_S: Final = 120
 
 
-def registrar_recebimento(
-    mensagem: MensagemRecebida, _transacao: TransacaoDaMensagem
+def tratar_evento_da_saga(
+    mensagem: MensagemRecebida,
+    transacao: TransacaoDaMensagem,
+    *,
+    prazo_resposta: timedelta,
 ) -> Desfecho:
-    """Handler provisorio: so registra o recebimento (sem texto livre nem PII)."""
-    _log.info(
-        "event received",
-        tipo=mensagem.tipo,
-        message_id=str(mensagem.id),
-        correlation_id=str(mensagem.correlation_id),
-        causation_id=str(mensagem.causation_id) if mensagem.causation_id else None,
+    """Orquestrador da saga sobre a transacao da mensagem (sem commit aqui).
+
+    O span ``process <tipo>`` do consumo ganha a etapa antes e depois do evento
+    e o desfecho (processada, ignorada ou adiantada), ADR-043.
+    """
+    span = trace.get_current_span()
+    orquestrador = OrquestradorDaSaga(
+        ordens=OrdemDeServicoSQLAlchemyRepository(session=transacao.session),
+        sagas=SagaSQLAlchemyRepository(session=transacao.session),
+        publicador=transacao,
+        prazo_resposta=prazo_resposta,
     )
-    return Desfecho.PROCESSADA
+    try:
+        tratamento = orquestrador.tratar(mensagem)
+    except EventoAdiantadoError as exc:
+        span.set_attributes(
+            {
+                "pytstop.saga.etapa": exc.etapa.value,
+                "pytstop.saga.desfecho": "adiantada",
+            }
+        )
+        raise
+    span.set_attributes(
+        {
+            "pytstop.saga.etapa": tratamento.etapa.value,
+            "pytstop.saga.etapa_nova": tratamento.etapa_nova.value,
+            "pytstop.saga.desfecho": tratamento.desfecho.value,
+        }
+    )
+    return tratamento.desfecho
 
 
-DESPACHANTE: Final[Mapping[str, Handler]] = {
-    "DiagnosticoIniciado": registrar_recebimento,
-    "DiagnosticoConcluido": registrar_recebimento,
-    "DiagnosticoDescartado": registrar_recebimento,
-    "OrcamentoGerado": registrar_recebimento,
-    "GeracaoDeOrcamentoFalhou": registrar_recebimento,
-    "OrcamentoAprovado": registrar_recebimento,
-    "OrcamentoRecusado": registrar_recebimento,
-    "OrcamentoExpirado": registrar_recebimento,
-    "OrcamentoCancelado": registrar_recebimento,
-    "PecasReservadas": registrar_recebimento,
-    "ReservaDePecasFalhou": registrar_recebimento,
-    "ReservaLiberada": registrar_recebimento,
-    "PagamentoSolicitado": registrar_recebimento,
-    "PagamentoConfirmado": registrar_recebimento,
-    "PagamentoRecusado": registrar_recebimento,
-    "PagamentoExpirado": registrar_recebimento,
-    "PagamentoEstornado": registrar_recebimento,
-    "EstornoDePagamentoFalhou": registrar_recebimento,
-    "PagamentoCancelado": registrar_recebimento,
-    "ExecucaoAgendada": registrar_recebimento,
-    "ExecucaoCancelada": registrar_recebimento,
-    "ExecucaoIniciada": registrar_recebimento,
-    "ExecucaoFinalizada": registrar_recebimento,
-}
+def montar_despachante(prazo_resposta: timedelta) -> Mapping[str, Handler]:
+    """Os 23 eventos que o OS consome, todos para o orquestrador da saga."""
+    tratar = partial(tratar_evento_da_saga, prazo_resposta=prazo_resposta)
+    return MappingProxyType(dict.fromkeys(ETAPA_ESPERADA, tratar))
 
 
 def main() -> None:
@@ -81,10 +98,15 @@ def main() -> None:
     instalar_sinais(parar)
     engine, parametros = preparar("consumidor")
     try:
+        prazo_resposta = timedelta(
+            seconds=inteiro_do_ambiente(
+                "SAGA_PRAZO_RESPOSTA_SEGUNDOS", _PRAZO_RESPOSTA_PADRAO_S, minimo=1
+            )
+        )
         consumidor = Consumidor(
             session_factory=criar_session_factory(engine),
             parametros=parametros,
-            despachante=DESPACHANTE,
+            despachante=montar_despachante(prazo_resposta),
             tracer=criar_tracer("consumidor"),
         )
         subir_metricas()

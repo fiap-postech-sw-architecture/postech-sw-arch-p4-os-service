@@ -36,11 +36,14 @@ def envelope_de_evento(
 
 
 def evento(
-    tipo: str, ordem_id: Any, *, causation_id: Any = None, **dados: Any
+    tipo: str, correlation_id: Any, *, causation_id: Any = None, **dados: Any
 ) -> MensagemRecebida:
-    """``MensagemRecebida`` como o consumidor a entrega: validada pelo contrato."""
+    """``MensagemRecebida`` como o consumidor a entrega: validada pelo contrato.
+
+    ``correlation_id`` e o id da OS, que tambem vai em ``dados.ordem_id``.
+    """
     envelope = envelope_de_evento(
-        tipo, correlation_id=ordem_id, causation_id=causation_id, **dados
+        tipo, correlation_id=correlation_id, causation_id=causation_id, **dados
     )
     catalogo().validar(envelope)
     return MensagemRecebida.do_envelope(envelope)
