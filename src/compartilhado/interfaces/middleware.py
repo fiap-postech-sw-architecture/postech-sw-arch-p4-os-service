@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 import structlog
@@ -16,7 +15,11 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from src.compartilhado.infraestrutura.database import AMBIENTES_DEV
+from src.compartilhado.infraestrutura.database import (
+    AMBIENTES_DEV,
+    SENHA_DO_BANCO_DEMO,
+    url_com_senha,
+)
 from src.compartilhado.interfaces.error_handler import resposta_erro_interno
 
 _CSP_DEFAULT = "default-src 'none'"
@@ -96,7 +99,7 @@ _SEGREDOS_DEMO_PROIBIDOS = frozenset(
     }
 )
 # Senha do Postgres de demonstracao (compose), comparada com a da DATABASE_URL.
-_SENHA_DO_BANCO_DEMO = "pytstop"  # gitleaks:allow - senha do compose local
+_SENHA_DO_BANCO_DEMO = SENHA_DO_BANCO_DEMO
 
 
 def validar_segredos_no_startup() -> None:
@@ -142,7 +145,7 @@ def validar_segredos_no_startup() -> None:
             raise RuntimeError(msg)
 
     url_do_banco = os.environ.get("DATABASE_URL", "")
-    if url_do_banco and urlsplit(url_do_banco).password == _SENHA_DO_BANCO_DEMO:
+    if url_do_banco and url_com_senha(url_do_banco, _SENHA_DO_BANCO_DEMO):
         msg = (
             "DATABASE_URL usa a senha do Postgres de demonstracao -- proibido em "
             "producao. Injete a credencial real via Secret."

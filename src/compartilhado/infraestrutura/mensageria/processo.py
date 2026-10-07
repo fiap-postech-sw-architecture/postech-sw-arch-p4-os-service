@@ -17,15 +17,16 @@ import time
 import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
-from urllib.parse import urlsplit
 
 import structlog
 from prometheus_client import start_http_server
 
 from src.compartilhado.infraestrutura.database import (
     AMBIENTES_DEV,
+    SENHA_DO_BANCO_DEMO,
     criar_engine,
     resolver_database_url,
+    url_com_senha,
 )
 from src.compartilhado.infraestrutura.logging import configurar_logging
 from src.compartilhado.infraestrutura.mensageria import amqp
@@ -43,6 +44,13 @@ DIRETORIO_DE_SAUDE: Final = Path(tempfile.gettempdir())
 _PORTA_DE_METRICAS: Final = 9100
 # Limpezas da outbox e de `mensagens_processadas`: uma vez por hora.
 INTERVALO_DE_LIMPEZA_S: Final = 3600.0
+# Relay e consumidor: no maximo 4 conexoes do pool cada, e nenhum comando nem
+# espera por lock passa de segundos. O laco e unico (um comando preso para o
+# processo inteiro) e o handler roda na thread da conexao AMQP: o banco devolve
+# o erro antes de o heartbeat do broker vencer, e a mensagem segue a escada de
+# retry.
+_POOL_DOS_PROCESSOS: Final = 2
+_OPCOES_DO_BANCO: Final = "-c statement_timeout=15000 -c lock_timeout=10000"
 # Senha de demonstracao do usuario `os` (compose e .env.example): proibida fora
 # de development/test, como os demais segredos de demonstracao.
 _SENHA_DO_BROKER_DEMO: Final = "pytstop-os-demo-2026"  # gitleaks:allow
@@ -129,8 +137,9 @@ def preparar(processo: str) -> tuple[Engine, pika.URLParameters]:
     """Boot comum: log JSON, guarda de segredo, mapeamentos, banco e broker.
 
     Raises:
-        RuntimeError: ``RABBITMQ_URL`` ausente ou com a senha de demonstracao
-            fora de development/test, ou banco sem configuracao.
+        RuntimeError: ``RABBITMQ_URL`` ausente, ``RABBITMQ_URL`` ou
+            ``DATABASE_URL`` com a senha de demonstracao fora de
+            development/test, ou banco sem configuracao.
     """
     configurar_logging()
     git_sha = os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12]
@@ -143,21 +152,29 @@ def preparar(processo: str) -> tuple[Engine, pika.URLParameters]:
     if not url:
         msg = "RABBITMQ_URL obrigatoria (amqp://os:<senha>@<host>:5672/%2F)."
         raise RuntimeError(msg)
-    ambiente = os.environ.get("ENVIRONMENT", "development").lower()
-    if (
-        ambiente not in AMBIENTES_DEV
-        and urlsplit(url).password == _SENHA_DO_BROKER_DEMO
-    ):
-        msg = (
-            "RABBITMQ_URL usa a senha de demonstracao do RabbitMQ -- proibido em "
-            "producao. Injete a credencial real via Secret."
-        )
-        raise RuntimeError(msg)
+    url_do_banco = resolver_database_url()
+    if os.environ.get("ENVIRONMENT", "development").lower() not in AMBIENTES_DEV:
+        for nome, url_de_conexao, senha in (
+            ("RABBITMQ_URL", url, _SENHA_DO_BROKER_DEMO),
+            ("DATABASE_URL", url_do_banco, SENHA_DO_BANCO_DEMO),
+        ):
+            if url_com_senha(url_de_conexao, senha):
+                msg = (
+                    f"{nome} usa a senha de demonstracao -- proibido em producao. "
+                    "Injete a credencial real via Secret."
+                )
+                raise RuntimeError(msg)
 
     from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
 
     iniciar_todos_mapeamentos()
-    return criar_engine(resolver_database_url()), amqp.parametros(url, processo)
+    engine = criar_engine(
+        url_do_banco,
+        pool_size=_POOL_DOS_PROCESSOS,
+        max_overflow=_POOL_DOS_PROCESSOS,
+        opcoes=_OPCOES_DO_BANCO,
+    )
+    return engine, amqp.parametros(url, processo)
 
 
 def onde(exc: BaseException) -> str:

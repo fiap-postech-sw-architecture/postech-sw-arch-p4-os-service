@@ -58,6 +58,31 @@ class TestDimensionamentoDoPool:
         assert engine.pool._max_overflow == 3
         engine.dispose()
 
+    def test_pool_e_opcoes_explicitos_valem_sobre_o_ambiente(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Relay e consumidor: pool proprio e opcoes de sessao do libpq.
+        monkeypatch.setenv("DB_POOL_SIZE", "7")
+        capturados: dict[str, object] = {}
+        criar = database.create_engine
+
+        def espiao(url: str, **kwargs: object) -> object:
+            capturados.update(kwargs)
+            return criar(url, **kwargs)
+
+        monkeypatch.setattr(database, "create_engine", espiao)
+        engine = criar_engine(
+            _URL_PG, pool_size=2, max_overflow=0, opcoes="-c statement_timeout=1"
+        )
+
+        assert engine.pool.size() == 2
+        assert engine.pool._max_overflow == 0
+        assert capturados["connect_args"] == {
+            "connect_timeout": 5,
+            "options": "-c statement_timeout=1",
+        }
+        engine.dispose()
+
     def test_postgres_ativa_pre_ping(self) -> None:
         engine = criar_engine(_URL_PG)
         assert engine.pool._pre_ping is True

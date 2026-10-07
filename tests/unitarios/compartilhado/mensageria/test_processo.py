@@ -123,6 +123,25 @@ def test_preparar_monta_o_banco_e_os_parametros_do_broker(
         engine.dispose()
 
 
+def test_preparar_da_aos_processos_pool_pequeno_e_timeouts_no_banco(
+    ambiente_de_boot: pytest.MonkeyPatch,
+) -> None:
+    chamadas: list[dict[str, object]] = []
+    ambiente_de_boot.setattr(
+        processo, "criar_engine", lambda url, **kwargs: chamadas.append(kwargs)
+    )
+
+    processo.preparar("consumidor")
+
+    assert chamadas == [
+        {
+            "pool_size": 2,
+            "max_overflow": 2,
+            "opcoes": "-c statement_timeout=15000 -c lock_timeout=10000",
+        }
+    ]
+
+
 def test_preparar_sem_rabbitmq_url_aborta(
     ambiente_de_boot: pytest.MonkeyPatch,
 ) -> None:
@@ -139,6 +158,32 @@ def test_preparar_recusa_a_senha_de_demonstracao_em_producao(
 
     with pytest.raises(RuntimeError, match="senha de demonstracao"):
         processo.preparar("consumidor")
+
+
+@pytest.mark.parametrize(
+    ("variavel", "url"),
+    [
+        pytest.param(
+            "RABBITMQ_URL",
+            "amqp://os:pytstop%2Dos%2Ddemo%2D2026@rabbitmq:5672/%2F",  # gitleaks:allow
+            id="broker-com-a-senha-codificada",
+        ),
+        pytest.param(
+            "DATABASE_URL",
+            "postgresql://pytstop:pytstop@postgres:5432/os",  # gitleaks:allow
+            id="banco-de-demonstracao",
+        ),
+    ],
+)
+def test_preparar_recusa_senha_de_demonstracao_do_banco_ou_codificada(
+    ambiente_de_boot: pytest.MonkeyPatch, variavel: str, url: str
+) -> None:
+    ambiente_de_boot.setenv("ENVIRONMENT", "production")
+    ambiente_de_boot.setenv("RABBITMQ_URL", "amqp://os:outra-senha@rabbitmq:5672/%2F")
+    ambiente_de_boot.setenv(variavel, url)
+
+    with pytest.raises(RuntimeError, match=f"{variavel} usa a senha de demonstracao"):
+        processo.preparar("relay")
 
 
 def test_preparar_aceita_senha_real_em_producao(
