@@ -3,6 +3,8 @@ matriz etapa x tipo pelo handler (processada, ignorada ou adiantada)."""
 
 from __future__ import annotations
 
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,6 +16,7 @@ from src.compartilhado.aplicacao.mensageria import (
     Desfecho,
     FalhaPermanenteError,
     FalhaTransitoriaError,
+    MensagemRecebida,
 )
 from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
@@ -163,11 +166,14 @@ def test_cada_linha_da_tabela_grava_status_passo_comando_e_prazo(
         str(recebido.id),
         len(saga.passos),
     )
-    assert (passo["de"], passo["para"], passo["em"]) == (
+    assert (passo["de"], passo["para"], passo["em"], passo["ator"]) == (
         antes.value,
         nova.value,
         agora.isoformat(),
+        "consumidor",
     )
+    # O resumo que a OS guarda sai campo a campo do evento do Billing.
+    assert _resumos(cenario.ordem) == _resumos_esperados(cenario, recebido)
     novos = cenario.publicador.comandos[enviados:]
     if comando is None:
         assert novos == []
@@ -193,6 +199,57 @@ def test_cada_linha_da_tabela_grava_status_passo_comando_e_prazo(
         "enviado_em": agora.isoformat(),
     }
     assert (saga.prazo_resposta_em, saga.reenvios) == (agora + PRAZO, 0)
+
+
+def _resumos(ordem: OrdemDeServico) -> tuple[object, ...]:
+    orcamento, pagamento = ordem.resumo_orcamento, ordem.resumo_pagamento
+    return (
+        orcamento
+        and (
+            str(orcamento.orcamento_id),
+            orcamento.total.valor,
+            orcamento.total.moeda,
+            orcamento.link_decisao,
+            orcamento.valido_ate,
+        ),
+        pagamento
+        and (
+            str(pagamento.pagamento_id),
+            pagamento.status.value,
+            pagamento.valor.valor,
+            pagamento.valor.moeda,
+            pagamento.checkout_url,
+            pagamento.expira_em,
+        ),
+    )
+
+
+def _resumos_esperados(
+    cenario: CenarioDaSaga, recebido: MensagemRecebida
+) -> tuple[object, ...]:
+    """Os resumos pelos eventos do Billing ja tratados (este inclusive)."""
+    eventos = {**cenario.billing, recebido.tipo: recebido.dados}
+    orcamento = eventos.get("OrcamentoGerado")
+    pagamento = eventos.get("PagamentoSolicitado")
+    return (
+        orcamento
+        and (
+            orcamento["orcamento_id"],
+            Decimal(orcamento["total"]),
+            orcamento["moeda"],
+            orcamento["link_decisao"],
+            datetime.fromisoformat(orcamento["valido_ate"]),
+        ),
+        pagamento
+        and (
+            pagamento["pagamento_id"],
+            "confirmado" if "PagamentoConfirmado" in eventos else "solicitado",
+            Decimal(pagamento["valor"]),
+            pagamento["moeda"],
+            pagamento["checkout_url"],
+            datetime.fromisoformat(pagamento["expira_em"]),
+        ),
+    )
 
 
 def test_caminho_feliz_inteiro_conclui_a_saga_com_os_passos_concluidos() -> None:

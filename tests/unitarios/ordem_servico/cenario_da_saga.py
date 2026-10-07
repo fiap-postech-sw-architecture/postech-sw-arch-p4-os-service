@@ -204,6 +204,8 @@ class CenarioDaSaga:
             )
         )
         self.ordem_id: UUID = aberta.id
+        # Dados dos eventos do Billing ja tratados, por tipo.
+        self.billing: dict[str, Any] = {}
         self.relogio = Relogio(aberta.criado_em)
         self.orquestrador = OrquestradorDaSaga(
             ordens=self.ordens,
@@ -269,7 +271,11 @@ class CenarioDaSaga:
         return evento(tipo, self.ordem_id, causation_id=causa, **dados)
 
     def receber(self, tipo: str, **dados: Any) -> Tratamento:
-        return self.orquestrador.tratar(self.evento(tipo, **dados))
+        recebido = self.evento(tipo, **dados)
+        tratamento = self.orquestrador.tratar(recebido)
+        if recebido.origem == "billing-service":
+            self.billing[tipo] = recebido.dados
+        return tratamento
 
     def levar_ate(self, etapa: EtapaSaga | str) -> None:
         """Caminho feliz ate a saga entrar na ``etapa`` (OS no status de entrada)."""
