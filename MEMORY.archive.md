@@ -120,8 +120,8 @@ seguinte; as secoes acima ficam como estavam.
 
 ## Consolidacao de 2026-10-07
 
-Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (86 das 119), na
-ordem e nas secoes originais. As outras 33 seguem inteiras no `MEMORY.md`, e o que o
+Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (89 das 119), na
+ordem e nas secoes originais. As outras 30 seguem inteiras no `MEMORY.md`, e o que o
 README, os ADR e a RFC-004 do platform ou os comentarios do codigo ja registram virou
 linhas de la que apontam para essas fontes. O texto exato das 119 esta no historico
 do git (`git show 0ccdca8:MEMORY.md`); aqui ele so mudou onde citava um documento ou um
@@ -232,4 +232,7 @@ fechadas e a linha `CORRIGIDO (conferencia ...)`, uma entrada que a conferencia 
 - 2026-10-07 - Teste de PII em log confere tambem o log do cliente AMQP, com o dado sensivel no comeco do corpo (o pika imprime so os 255 primeiros bytes); e teste de concorrencia prova a sobreposicao (uma sessao esperando lock no `pg_stat_activity`), nao so o resultado - PR #4
 - 2026-10-07 - Borda de retencao se testa a um minuto de cada lado e pelo relogio do banco; com 31 e 29 dias, a retencao trocada por 31 passava - PR #4
 - 2026-10-06 - Teste de "vai direto para a DLQ" prova o "direto": metrica de retry inalterada e `x-death` com um so reject da fila de trabalho. Com o TTL curto das filas de retry do broker de teste, um desvio pelas cinco tentativas tambem chegava a DLQ no prazo e o teste passava - PR #4
+- 2026-10-06 - Regra de ADR com lista de casos se confere caso a caso e pela rota real: a matriz papel x rota do ADR-039 (o mecanico lia OS e historico), o 401 para papel ausente ou desconhecido (os testes fixavam o 403) e o formato de erro do gate (a dependency saia fora do envelope) - PR #2
+- 2026-10-06 - Afirmacao em comentario, docstring ou divida precisa de evidencia: teste ("toda resposta leva os headers", e o 500 saia sem), contagem com `git grep @limiter.limit` e uma rota de `include_router` de verdade (alcance do limite padrao), leitura da versao que vai entrar (conteudo de ADR de outro repositorio) - PR #2 e PR #3
 - 2026-10-06 - Teste de tolerancia de relogio (leeway) congela o relogio e afirma os dois lados da borda (9 s vale, 10 s nao): com o relogio real e folgas largas, leeways de 6 a 14 s passavam - PR #3
+- 2026-10-06 - Recorte de outro repositorio se confere contra a main atual da origem, nao so contra o commit de corte: a correcao ASCII do p3 #32 entrou depois do `08dcffe` e ficou de fora - PR #2
