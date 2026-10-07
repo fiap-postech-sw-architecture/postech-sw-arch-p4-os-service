@@ -155,6 +155,16 @@ class Broker:
             metodo, props, corpo = canal.basic_get(fila, auto_ack=True)
         return None if metodo is None else (props, corpo)
 
+    def pegar_todas(self, fila: str) -> list[tuple[Any, bytes]]:
+        """Esvazia a fila (como admin) numa conexao so, na ordem da fila."""
+        mensagens: list[tuple[Any, bytes]] = []
+        with self.canal() as canal:
+            while True:
+                metodo, props, corpo = canal.basic_get(fila, auto_ack=True)
+                if metodo is None:
+                    return mensagens
+                mensagens.append((props, corpo))
+
     def contar(self, fila: str) -> int:
         with self.canal() as canal:
             total: int = canal.queue_declare(fila, passive=True).method.message_count

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -30,6 +30,6 @@ def test_dados_sao_so_leitura_e_a_mensagem_tem_hash() -> None:
     mensagem = _mensagem()
 
     with pytest.raises(TypeError):
-        mensagem.dados["total"] = "0.00"  # type: ignore[index]  # o teste e o erro
+        cast("dict[str, Any]", mensagem.dados)["total"] = "0.00"
     assert hash(mensagem) == hash(_mensagem())
     assert mensagem == _mensagem()

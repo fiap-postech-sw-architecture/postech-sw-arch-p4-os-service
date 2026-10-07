@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, tzinfo
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 from uuid import UUID, uuid4
 
+import psycopg2
 import pytest
 from opentelemetry.trace import SpanKind
 from prometheus_client import REGISTRY
@@ -17,8 +18,11 @@ from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
 from src.compartilhado.infraestrutura.mensageria.outbox import LinhaDaOutbox, Outbox
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
+from src.compartilhado.infraestrutura.mensageria.telemetria import (
+    contexto_dos_cabecalhos,
+)
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
-from tests.integracao.broker import EmSegundoPlano, esperar_ate, subir_broker
+from tests.integracao.broker import EmSegundoPlano, esperar_ate
 from tests.rastreamento import traceparent
 
 if TYPE_CHECKING:
@@ -95,7 +99,16 @@ def test_publica_solicitar_diagnostico_de_ponta_a_ponta(
     # A requisicao HTTP que abre a OS e o span da API; a outbox guarda o contexto
     # dele e o relay publica como filho.
     ordem_id = uuid4()
-    with rastreador.tracer.start_as_current_span("POST /api/v1/ordens-de-servico"):
+    # O contexto da requisicao traz um tracestate, que segue ate o header.
+    recebido = contexto_dos_cabecalhos(
+        {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "kong=t61",
+        }
+    )
+    with rastreador.tracer.start_as_current_span(
+        "POST /api/v1/ordens-de-servico", context=recebido
+    ):
         mensagem_id = _publicar(session_factory, ordem_id)
     antes = _publicadas("SolicitarDiagnostico")
     relay = _relay(engine, broker, rastreador, tmp_path)
@@ -125,6 +138,8 @@ def test_publica_solicitar_diagnostico_de_ponta_a_ponta(
     assert producer.parent.span_id == api.get_span_context().span_id
     assert producer.get_span_context().trace_id == api.get_span_context().trace_id
     assert propriedades.headers["traceparent"] == traceparent(producer)
+    assert propriedades.headers["tracestate"] == "kong=t61"
+    assert _linha(engine, mensagem_id).entregue_em is not None
     assert producer.attributes is not None
     assert producer.attributes["correlation_id"] == str(ordem_id)
     assert _publicadas("SolicitarDiagnostico") == antes + 1
@@ -199,8 +214,8 @@ class _RelogioAdiantado(datetime):
     """``datetime`` do processo uma hora a frente do banco."""
 
     @classmethod
-    def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
-        return datetime.now(tz) + timedelta(hours=1)
+    def now(cls, tz: tzinfo | None = None) -> Self:
+        return super().now(tz) + timedelta(hours=1)
 
 
 def _escutando(engine: Engine) -> bool:
@@ -250,16 +265,6 @@ def _reler(engine: Engine, linha_id: int) -> LinhaDaOutbox:
             {"id": linha_id},
         ).one()
     return LinhaDaOutbox(**row._mapping)
-
-
-@pytest.fixture
-def broker_avulso() -> Iterator[Broker]:
-    """RabbitMQ so deste teste: o alarme de memoria nao alcanca os outros."""
-    container, broker = subir_broker()
-    try:
-        yield broker
-    finally:
-        container.stop()
 
 
 def _transacoes_paradas(engine: Engine) -> int:
@@ -552,3 +557,115 @@ def _envelhecer(engine: Engine, linha_id: int, coluna: str, idade: str) -> None:
             ),
             {"id": linha_id, "idade": idade},
         )
+
+
+@pytest.fixture
+def execucao_cheia(broker: Broker) -> Iterator[None]:
+    """execucao.comandos com teto de 1 mensagem e reject-publish: o broker da nack."""
+    broker.rabbitmqctl(
+        "set_policy",
+        "--apply-to",
+        "queues",
+        "--priority",
+        "10",
+        "teste-execucao-cheia",
+        "^execucao\\.comandos$",
+        '{"max-length": 1, "overflow": "reject-publish"}',
+    )
+    try:
+        esperar_ate(
+            lambda: (
+                "teste-execucao-cheia"
+                in broker.rabbitmqctl("-q", "list_queues", "name", "policy")
+            )
+        )
+        yield
+    finally:
+        broker.rabbitmqctl("clear_policy", "teste-execucao-cheia")
+
+
+@pytest.mark.usefixtures("session_factory", "execucao_cheia")
+def test_nack_do_broker_conta_tentativa_e_a_linha_espera_o_atraso(
+    engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
+) -> None:
+    # A fila cheia recusa a publicacao (nack): a linha conta tentativa e fica
+    # pendente ate o atraso (longo aqui), sem virar entregue.
+    linhas = [_inserir(engine) for _ in range(4)]
+    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(60,) * 4)
+
+    with EmSegundoPlano(relay):
+        recusada = esperar_ate(
+            lambda: next(
+                (li for li in linhas if _detalhes(engine, li).tentativas == 1), None
+            )
+        )
+
+    detalhes = _detalhes(engine, recusada)
+    assert (detalhes.status, detalhes.ultimo_erro) == (
+        "pendente",
+        "recusada pelo broker (nack)",
+    )
+
+
+@pytest.mark.usefixtures("session_factory")
+def test_relay_para_no_sinal_sem_esvaziar_a_outbox(
+    engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
+) -> None:
+    # Com lote de 1, o sinal de parada vale entre um lote e o seguinte: o
+    # encerramento nao espera a outbox inteira.
+    for _ in range(100):
+        _inserir(engine)
+    fundo = EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path, lote=1))
+
+    with fundo:
+        esperar_ate(lambda: _contagem(engine, "entregue") >= 1)
+        fundo.parar.set()
+
+    assert _contagem(engine, "pendente") > 0
+
+
+def _contagem(engine: Engine, status: str) -> int:
+    with engine.connect() as conexao:
+        total: int = conexao.execute(
+            text("SELECT count(*) FROM outbox WHERE status = :status"),
+            {"status": status},
+        ).scalar_one()
+    return total
+
+
+def test_conexao_de_listen_tem_keepalives_e_timeout_de_conexao(
+    engine: Engine,
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chamadas: list[dict[str, Any]] = []
+    conectar = psycopg2.connect
+
+    def espiao(*args: Any, **kwargs: Any) -> Any:
+        chamadas.append(kwargs)
+        return conectar(*args, **kwargs)
+
+    monkeypatch.setattr(psycopg2, "connect", espiao)
+
+    with EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path)):
+        esperar_ate(lambda: _escutando(engine))
+
+    (escuta,) = [kwargs for kwargs in chamadas if "keepalives" in kwargs]
+    assert {chave: escuta[chave] for chave in _OPCOES_DE_LISTEN} == {
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 3,
+        "connect_timeout": 5,
+    }
+
+
+_OPCOES_DE_LISTEN = (
+    "keepalives",
+    "keepalives_idle",
+    "keepalives_interval",
+    "keepalives_count",
+    "connect_timeout",
+)

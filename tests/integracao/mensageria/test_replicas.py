@@ -1,0 +1,200 @@
+"""Duas replicas ao mesmo tempo, com Postgres e RabbitMQ reais.
+
+Relay: o claim com ``SKIP LOCKED`` e o lease repartem as linhas sem repetir
+nenhuma nem furar a ordem de cada OS, e a linha reivindicada por quem caiu so
+volta depois do lease. Consumidor: a mesma mensagem em dois consumidores ao
+mesmo tempo tem efeito uma vez, decidido pela restricao unica de
+``mensagens_processadas``, sem passar pela fila de retry.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from datetime import timedelta
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
+
+from prometheus_client import REGISTRY
+from sqlalchemy import text
+
+from src.compartilhado.aplicacao.mensageria import (
+    Comando,
+    Desfecho,
+    MensagemRecebida,
+)
+from src.compartilhado.infraestrutura.mensageria.consumidor import (
+    ConfigConsumidor,
+    Consumidor,
+)
+from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
+from src.compartilhado.infraestrutura.mensageria.outbox import Outbox
+from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
+from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
+from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from sqlalchemy import Engine
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
+    from tests.integracao.broker import Broker
+    from tests.rastreamento import Rastreador
+
+_FILA = "execucao.comandos"
+
+
+def _gravar(session_factory: sessionmaker[Session], ordem_id: UUID) -> UUID:
+    exemplo = json.loads((CONTRATOS / "exemplos/SolicitarDiagnostico.json").read_text())
+    with SQLAlchemyUnitOfWork(session_factory) as uow:
+        mensagem_id = uow.publicar_comando(
+            Comando.SOLICITAR_DIAGNOSTICO,
+            {**exemplo["dados"], "ordem_id": ordem_id},
+            correlation_id=ordem_id,
+        )
+        uow.commit()
+    return mensagem_id
+
+
+def _relay(
+    engine: Engine, broker: Broker, rastreador: Rastreador, saude: Path, **config: Any
+) -> Relay:
+    return Relay(
+        engine=engine,
+        parametros=broker.parametros("os"),
+        tracer=rastreador.tracer,
+        config=ConfigRelay(poll_s=0.1, diretorio_de_saude=saude, **config),
+    )
+
+
+def _pendentes(engine: Engine) -> int:
+    with engine.connect() as conexao:
+        total: int = conexao.execute(
+            text("SELECT count(*) FROM outbox WHERE status <> 'entregue'")
+        ).scalar_one()
+    return total
+
+
+def test_dois_relays_publicam_cada_linha_uma_vez_e_na_ordem_de_cada_os(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    ordens = [uuid4() for _ in range(10)]
+    esperado: dict[str, list[str]] = {str(o): [] for o in ordens}
+    for _ in range(10):
+        for ordem in ordens:
+            esperado[str(ordem)].append(str(_gravar(session_factory, ordem)))
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+
+    with (
+        EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path / "a", lote=3)),
+        EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path / "b", lote=3)),
+    ):
+        esperar_ate(lambda: _pendentes(engine) == 0, prazo_s=60)
+
+    publicadas = broker.pegar_todas(_FILA)
+    ids = [propriedades.message_id for propriedades, _ in publicadas]
+    assert len(ids) == len(set(ids)) == 100
+    por_os: dict[str, list[str]] = {str(o): [] for o in ordens}
+    for propriedades, _ in publicadas:
+        por_os[propriedades.correlation_id].append(propriedades.message_id)
+    assert por_os == esperado
+
+
+def test_linha_reivindicada_por_relay_que_caiu_so_volta_depois_do_lease(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    mensagem_id = _gravar(session_factory, uuid4())
+    outbox = Outbox(engine)
+
+    # Uma replica reivindica e cai antes de publicar.
+    (reivindicada,) = outbox.reivindicar(10, timedelta(seconds=1))
+    assert reivindicada.mensagem_id == mensagem_id
+    assert outbox.reivindicar(10, timedelta(seconds=30)) == []
+
+    (de_novo,) = esperar_ate(
+        lambda: outbox.reivindicar(10, timedelta(seconds=30)), prazo_s=10
+    )
+    assert de_novo.mensagem_id == mensagem_id
+    assert de_novo.lease_ate - reivindicada.lease_ate >= timedelta(seconds=29)
+
+
+def _consumidas(tipo: str, resultado: str) -> float:
+    valor = REGISTRY.get_sample_value(
+        "pytstop_mensagens_consumidas_total", {"tipo": tipo, "resultado": resultado}
+    )
+    return valor or 0.0
+
+
+def _alguem_espera_lock(engine: Engine) -> bool:
+    with engine.connect() as conexao:
+        total: int = conexao.execute(
+            text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND datname = current_database()"
+            )
+        ).scalar_one()
+    return total > 0
+
+
+def test_mesma_mensagem_em_dois_consumidores_ao_mesmo_tempo_tem_efeito_uma_vez(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    # O primeiro segura a transacao ate o segundo estar esperando o lock da
+    # chave em mensagens_processadas: a restricao unica decide, e o segundo vira
+    # `duplicada` (nada de retry, nada de efeito repetido).
+    chamadas: list[UUID] = []
+    trava = threading.Lock()
+
+    def handler(mensagem: MensagemRecebida, _t: TransacaoDaMensagem) -> Desfecho:
+        with trava:
+            chamadas.append(mensagem.id)
+        esperar_ate(lambda: _alguem_espera_lock(engine), prazo_s=15)
+        return Desfecho.PROCESSADA
+
+    envelope = envelope_de_evento("OrcamentoAprovado")
+    antes = {r: _consumidas("OrcamentoAprovado", r) for r in ("duplicada", "retry")}
+    consumidores = []
+    for nome in ("a", "b"):
+        (tmp_path / nome).mkdir()
+        consumidores.append(
+            Consumidor(
+                session_factory=session_factory,
+                parametros=broker.parametros("os"),
+                despachante=dict.fromkeys(catalogo().consumidos, handler),
+                tracer=rastreador.tracer,
+                config=ConfigConsumidor(
+                    inatividade_s=0.1, diretorio_de_saude=tmp_path / nome
+                ),
+            )
+        )
+
+    with EmSegundoPlano(consumidores[0]), EmSegundoPlano(consumidores[1]):
+        esperar_ate(lambda: (tmp_path / "a/consumidor-pronto").exists())
+        esperar_ate(lambda: (tmp_path / "b/consumidor-pronto").exists())
+        broker.publicar_evento(envelope)
+        broker.publicar_evento(envelope)
+        esperar_ate(
+            lambda: (
+                _consumidas("OrcamentoAprovado", "duplicada") == antes["duplicada"] + 1
+            ),
+            prazo_s=30,
+        )
+
+    assert chamadas == [UUID(envelope["id"])]
+    assert _consumidas("OrcamentoAprovado", "retry") == antes["retry"]
+    with engine.connect() as conexao:
+        registradas = conexao.execute(
+            text("SELECT count(*) FROM mensagens_processadas")
+        ).scalar_one()
+    assert registradas == 1

@@ -16,6 +16,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 _URL_DEMO = "amqp://os:pytstop-os-demo-2026@rabbitmq:5672/%2F"  # gitleaks:allow
@@ -47,7 +48,15 @@ def test_numeros_do_ambiente_usam_o_padrao_e_aceitam_valor_valido(
     assert numero_do_ambiente("OUTBOX_POLL_SEGUNDOS", 5.0, minimo=0.1) == 0.5
 
 
-@pytest.mark.parametrize("valor", ["abc", "0", "-3", "1.5"])
+@pytest.mark.parametrize(
+    "valor",
+    [
+        pytest.param("abc", id="texto"),
+        pytest.param("0", id="zero"),
+        pytest.param("-3", id="negativo"),
+        pytest.param("1.5", id="decimal"),
+    ],
+)
 def test_inteiro_invalido_aborta_o_boot(
     monkeypatch: pytest.MonkeyPatch, valor: str
 ) -> None:
@@ -57,7 +66,14 @@ def test_inteiro_invalido_aborta_o_boot(
         inteiro_do_ambiente("OUTBOX_LOTE", 10, minimo=1)
 
 
-@pytest.mark.parametrize("valor", ["abc", "0.05", "nan"])
+@pytest.mark.parametrize(
+    "valor",
+    [
+        pytest.param("abc", id="texto"),
+        pytest.param("0.05", id="abaixo-do-minimo"),
+        pytest.param("nan", id="nan"),
+    ],
+)
 def test_numero_invalido_aborta_o_boot(
     monkeypatch: pytest.MonkeyPatch, valor: str
 ) -> None:
@@ -68,14 +84,14 @@ def test_numero_invalido_aborta_o_boot(
 
 
 def test_sigterm_e_sigint_pedem_o_encerramento(monkeypatch: pytest.MonkeyPatch) -> None:
-    instalados: dict[int, object] = {}
+    instalados: dict[int, Callable[..., object]] = {}
     monkeypatch.setattr(
         signal, "signal", lambda sinal, handler: instalados.update({sinal: handler})
     )
     parar = threading.Event()
 
     processo.instalar_sinais(parar)
-    instalados[signal.SIGTERM](signal.SIGTERM, None)  # type: ignore[operator]
+    instalados[signal.SIGTERM](signal.SIGTERM, None)
 
     assert parar.is_set()
     assert set(instalados) == {signal.SIGTERM, signal.SIGINT}

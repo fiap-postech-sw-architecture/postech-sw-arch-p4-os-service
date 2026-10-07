@@ -207,3 +207,27 @@ def broker(_broker_da_sessao: Broker) -> Iterator[Broker]:
     _broker_da_sessao.esvaziar()
     yield _broker_da_sessao
     _broker_da_sessao.esvaziar()
+
+
+@pytest.fixture(scope="session")
+def _broker_avulso_da_sessao() -> Iterator[Broker]:
+    container, broker = subir_broker()
+    try:
+        yield broker
+    finally:
+        container.stop()
+
+
+@pytest.fixture
+def broker_avulso(_broker_avulso_da_sessao: Broker) -> Iterator[Broker]:
+    """Um segundo RabbitMQ, para os testes que o poem em alarme de memoria.
+
+    O alarme bloqueia todo publicador do broker: num broker so deles, ele nao
+    alcanca os outros testes. O teardown tira o alarme e esvazia as filas.
+    """
+    _broker_avulso_da_sessao.esvaziar()
+    try:
+        yield _broker_avulso_da_sessao
+    finally:
+        _broker_avulso_da_sessao.rabbitmqctl("set_vm_memory_high_watermark", "0.4")
+        _broker_avulso_da_sessao.esvaziar()

@@ -1031,3 +1031,138 @@ def test_handler_mais_lento_que_o_heartbeat_tem_efeito_uma_vez_e_nada_se_perde(
 def _resolvidas(tipo: str) -> float:
     """Mensagens do tipo com ack: processadas ou duplicadas."""
     return _consumidas(tipo, "processada") + _consumidas(tipo, "duplicada")
+
+
+@pytest.fixture
+def retry_sem_permissao(broker: Broker) -> Iterator[Callable[[], None]]:
+    """Tira do usuario `os` a escrita em pytstop.retry; devolve quem a restaura."""
+    permissoes = json.loads((CONTRATOS / "rabbitmq/permissoes.json").read_text())
+    (topico,) = [
+        p
+        for p in permissoes["topic_permissions"]
+        if (p["user"], p["exchange"]) == ("os", "pytstop.retry")
+    ]
+
+    def restaurar() -> None:
+        broker.rabbitmqctl(
+            "set_topic_permissions",
+            "-p",
+            "/",
+            "os",
+            "pytstop.retry",
+            topico["write"],
+            topico["read"],
+        )
+
+    broker.rabbitmqctl(
+        "set_topic_permissions", "-p", "/", "os", "pytstop.retry", "^\\z", "^\\z"
+    )
+    try:
+        yield restaurar
+    finally:
+        restaurar()
+
+
+def test_rota_de_retry_sem_permissao_reconecta_e_a_mensagem_nao_se_perde(
+    engine: Engine,
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    retry_sem_permissao: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # O broker fecha o canal (403) na copia de retry: a original fica sem ack,
+    # volta para a fila e o consumidor reconecta com backoff. Com a permissao
+    # de volta, a falha seguinte vai para a retry e a mensagem e processada.
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
+    espiao = Espiao(FalhaTransitoriaError("x"), FalhaTransitoriaError("y"))
+    envelope = envelope_de_evento("OrcamentoRecusado")
+    antes = _reconexoes()
+
+    with EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _reconexoes() > antes)
+        retry_sem_permissao()
+        esperar_ate(lambda: _processadas(engine) == [UUID(envelope["id"])])
+
+    assert [m.id for m in espiao.recebidas] == [UUID(envelope["id"])] * 3
+    assert broker.contar(_DLQ) == 0
+
+
+def test_conexao_que_cai_entre_o_commit_e_o_ack_nao_perde_nem_repete_o_efeito(
+    engine: Engine,
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # O broker derruba a conexao enquanto o handler trabalha: o commit
+    # acontece, o ack nao. A mensagem volta e vira duplicada, com ack e sem
+    # efeito.
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.2)
+    chamadas: list[UUID] = []
+
+    def derruba_a_conexao(m: MensagemRecebida, _t: TransacaoDaMensagem) -> Desfecho:
+        chamadas.append(m.id)
+        broker.rabbitmqctl("close_all_connections", "teste de queda")
+        return Desfecho.PROCESSADA
+
+    envelope = envelope_de_evento("PagamentoEstornado")
+    antes = _consumidas("PagamentoEstornado", "duplicada")
+
+    with EmSegundoPlano(consumidor(derruba_a_conexao)):
+        broker.publicar_evento(envelope)
+        esperar_ate(
+            lambda: _consumidas("PagamentoEstornado", "duplicada") == antes + 1,
+            prazo_s=30,
+        )
+
+    assert chamadas == [UUID(envelope["id"])]
+    assert _processadas(engine) == [UUID(envelope["id"])]
+    assert (broker.contar("os.eventos"), broker.contar(_DLQ)) == (0, 0)
+
+
+def test_copia_de_retry_com_o_broker_em_alarme_nao_perde_a_mensagem(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker_avulso: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A copia de retry espera o broker em alarme ate o timeout do bloqueio (2 s
+    # aqui), que derruba a conexao. Bloqueado, o broker nem le o fechamento: a
+    # original fica sem ack na conexao antiga ate o alarme passar, volta para a
+    # fila e e processada na entrega seguinte. Nada se perde nem vai para a DLQ.
+    monkeypatch.setattr(amqp, "_BLOQUEIO_MAXIMO_S", 2)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.5)
+    chamadas: list[UUID] = []
+
+    def falha_e_poe_o_broker_em_alarme(
+        m: MensagemRecebida, _t: TransacaoDaMensagem
+    ) -> Desfecho:
+        chamadas.append(m.id)
+        if len(chamadas) == 1:
+            broker_avulso.rabbitmqctl("set_vm_memory_high_watermark", "0.0001")
+            raise FalhaTransitoriaError("dependencia fora")
+        return Desfecho.PROCESSADA
+
+    envelope = envelope_de_evento("ExecucaoCancelada")
+    consumidor = Consumidor(
+        session_factory=session_factory,
+        parametros=broker_avulso.parametros("os"),
+        despachante=dict.fromkeys(
+            catalogo().consumidos, falha_e_poe_o_broker_em_alarme
+        ),
+        tracer=rastreador.tracer,
+        config=ConfigConsumidor(inatividade_s=0.1, diretorio_de_saude=tmp_path),
+    )
+    antes = _reconexoes()
+
+    with EmSegundoPlano(consumidor):
+        broker_avulso.publicar_evento(envelope)
+        esperar_ate(lambda: _reconexoes() > antes, prazo_s=30)
+        assert _processadas(engine) == []
+        broker_avulso.rabbitmqctl("set_vm_memory_high_watermark", "0.4")
+        esperar_ate(lambda: _processadas(engine) == [UUID(envelope["id"])], prazo_s=60)
+
+    assert chamadas == [UUID(envelope["id"])] * 2
+    assert broker_avulso.contar(_DLQ) == 0

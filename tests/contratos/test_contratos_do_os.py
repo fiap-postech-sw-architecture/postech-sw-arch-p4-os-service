@@ -132,7 +132,15 @@ def test_placa_invalida_nao_aparece_no_erro() -> None:
     assert "ABC-1234" not in str(erro.value)
 
 
-@pytest.mark.parametrize("envelope", [None, [], "x", {"tipo": "Inexistente"}])
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        pytest.param(None, id="nulo"),
+        pytest.param([], id="lista"),
+        pytest.param("x", id="texto"),
+        pytest.param({"tipo": "Inexistente"}, id="tipo-fora-do-catalogo"),
+    ],
+)
 def test_tipo_desconhecido_reprova(envelope: object) -> None:
     contratos = catalogo()
 

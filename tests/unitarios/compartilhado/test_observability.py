@@ -390,7 +390,7 @@ class TestTracerDoRelayEDoConsumidor:
                 return True
 
         modulo = types.ModuleType("trace_exporter")
-        modulo.OTLPSpanExporter = ExportadorFalso  # type: ignore[attr-defined]
+        monkeypatch.setattr(modulo, "OTLPSpanExporter", ExportadorFalso, raising=False)
         monkeypatch.setitem(
             sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", modulo
         )

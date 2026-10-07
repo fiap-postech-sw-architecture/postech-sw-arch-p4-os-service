@@ -241,20 +241,31 @@ def test_limpeza_apaga_em_lotes_e_atende_o_broker_entre_eles(
     assert restantes == [3, 1]
 
 
-def test_tracestate_acima_de_512_caracteres_fica_fora_da_outbox(
-    session: Session, rastreador: Rastreador
+@pytest.mark.parametrize(
+    ("tracestate", "gravado"),
+    [
+        # Membros de ate 256 caracteres no valor (limite do W3C).
+        pytest.param("a1=" + "x" * 253 + ",a2=" + "x" * 252, True, id="512"),
+        pytest.param("a1=" + "x" * 253 + ",a2=" + "x" * 253, False, id="513"),
+        pytest.param(
+            ",".join(f"v{i}=" + "x" * 200 for i in range(10)), False, id="2040"
+        ),
+    ],
+)
+def test_tracestate_de_ate_512_caracteres_entra_na_outbox_e_o_maior_fica_fora(
+    session: Session, rastreador: Rastreador, tracestate: str, gravado: bool
 ) -> None:
-    # O propagador repassa o tracestate recebido como veio; o W3C deixa
-    # descartar, e o contexto segue pelo traceparent.
-    from src.compartilhado.infraestrutura.mensageria.telemetria import (
-        contexto_dos_cabecalhos,
+    # O contexto da requisicao HTTP vem do propagador do SDK, sem teto: acima
+    # de 512 o W3C deixa descartar o tracestate, e o contexto segue pelo
+    # traceparent.
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
     )
 
-    longo = ",".join(f"v{i}=" + "x" * 200 for i in range(10))
-    pai = contexto_dos_cabecalhos(
+    pai = TraceContextTextMapPropagator().extract(
         {
             "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-            "tracestate": longo,
+            "tracestate": tracestate,
         }
     )
     ordem_id = uuid4()
@@ -272,5 +283,4 @@ def test_tracestate_acima_de_512_caracteres_fica_fora_da_outbox(
 
     (linha,) = _linhas(session)
     assert linha.traceparent.split("-")[1] == "4bf92f3577b34da6a3ce929d0e0e4736"
-    assert linha.tracestate is None
-    assert len(longo) > 512
+    assert linha.tracestate == (tracestate if gravado else None)

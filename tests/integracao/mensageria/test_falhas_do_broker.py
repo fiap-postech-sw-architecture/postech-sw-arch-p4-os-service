@@ -1,14 +1,20 @@
-"""Falhas do broker que o RabbitMQ de teste nao produz sob demanda.
+"""Falhas que o RabbitMQ de teste nao produz sob demanda, com um canal AMQP falso.
 
-Nack, queda no meio de um lote, canal fechado pelo broker, conexao perdida no
-heartbeat: o relay e o consumidor falam com um canal AMQP falso (programado
-falha a falha), e o banco continua o Postgres real.
+Queda da conexao no meio de um lote ou no heartbeat ocioso, canal que nao
+reabre, consumo cancelado, nack da fila de retry (o TTL de 100 ms a esvazia
+antes de ela encher), sequencias exatas de backoff e a corrida entre replicas
+num ponto exato: o relay e o consumidor falam com um canal falso, programado
+falha a falha, e o banco continua o Postgres real. O que o broker produz (nack
+da fila de trabalho, devolucao sem rota, canal fechado por permissao ou
+exchange inexistente, alarme de memoria) e testado contra ele, em
+``test_relay.py`` e ``test_consumidor.py``.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from datetime import timedelta
 from types import SimpleNamespace
@@ -204,27 +210,6 @@ def _relay(
     )
 
 
-def test_nack_do_broker_conta_tentativa(
-    engine: Engine,
-    session_factory: sessionmaker[Session],
-    conexoes: list[Any],
-    rastreador: Rastreador,
-    tmp_path: Path,
-) -> None:
-    canal = CanalFalso(NackError([]))
-    conexoes.append((ConexaoFalsa(), canal))
-    mensagem_id = _gravar(session_factory)
-
-    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
-        linha = esperar_ate(
-            lambda: (atual := _linha(engine, mensagem_id)).tentativas == 1 and atual
-        )
-
-    assert linha.status == "pendente"
-    assert linha.ultimo_erro == "recusada pelo broker (nack)"
-    assert canal.publicadas == []
-
-
 def test_queda_no_meio_do_lote_devolve_as_linhas_sem_gastar_tentativa(
     engine: Engine,
     session_factory: sessionmaker[Session],
@@ -246,26 +231,6 @@ def test_queda_no_meio_do_lote_devolve_as_linhas_sem_gastar_tentativa(
     assert len(primeiro_canal.publicadas) == 1
     # O lease das que voltaram foi liberado: nao esperaram 60 s.
     assert len(segundo_canal.publicadas) == 2
-
-
-def test_canal_fechado_pelo_broker_conta_tentativa_e_o_relay_abre_outro(
-    engine: Engine,
-    session_factory: sessionmaker[Session],
-    conexoes: list[Any],
-    rastreador: Rastreador,
-    tmp_path: Path,
-) -> None:
-    novo_canal = CanalFalso()
-    canal = CanalFalso(ChannelClosedByBroker(403, "ACCESS_REFUSED"))
-    conexoes.append((ConexaoFalsa(novo_canal), canal))
-    mensagem_id = _gravar(session_factory)
-
-    with EmSegundoPlano(_relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)):
-        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
-
-    linha = _linha(engine, mensagem_id)
-    assert linha.tentativas == 1
-    assert len(novo_canal.publicadas) == 1
 
 
 def test_canal_que_nao_reabre_e_queda_do_broker(
@@ -551,23 +516,69 @@ def test_linha_que_outra_replica_ja_finalizou_e_pulada(
     canal = CanalFalso()
     conexoes.append((ConexaoFalsa(), canal))
     entregar = Relay._entregar
+    pulada = threading.Event()
 
     def outra_replica_entrega_antes(self: Relay, linha: Any) -> None:
         # Entre o claim (ja comitado) e a entrega desta replica.
         with engine.begin() as outra:
             outra.execute(text("UPDATE outbox SET status = 'entregue'"))
         entregar(self, linha)
+        pulada.set()
 
     monkeypatch.setattr(Relay, "_entregar", outra_replica_entrega_antes)
     mensagem_id = _gravar(session_factory)
-    relay = _relay(engine, rastreador, tmp_path)
 
-    with EmSegundoPlano(relay):
-        esperar_ate(lambda: (tmp_path / "relay-pronto").exists())
-        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
-        time.sleep(0.2)
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
+        esperar_ate(pulada.is_set)
 
+    assert _linha(engine, mensagem_id).status == "entregue"
     assert canal.publicadas == []
+
+
+class _CanalQueTrava(CanalFalso):
+    """O publish espera o teste liberar e entao e recusado (nack)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.publicando = threading.Event()
+        self.liberar = threading.Event()
+
+    def basic_publish(self, *args: Any, **kwargs: Any) -> None:
+        self.publicando.set()
+        self.liberar.wait(20)
+        raise NackError([])
+
+
+def test_replica_que_perdeu_o_lease_nao_grava_o_desfecho_por_cima_da_outra(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    # A publica e fica presa alem do lease; B reivindica a linha e a entrega.
+    # Quando o broker enfim recusa a publicacao de A, o desfecho de A (com o
+    # lease antigo como token) nao e gravado: a linha segue entregue, sem a
+    # tentativa que a levaria a dead.
+    mensagem_id = _gravar(session_factory)
+    with engine.begin() as conexao:
+        conexao.execute(text("UPDATE outbox SET tentativas = 4"))
+    presa, livre = _CanalQueTrava(), CanalFalso()
+    conexoes.extend([(ConexaoFalsa(), presa), (ConexaoFalsa(), livre)])
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    curto = timedelta(seconds=0.3)
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path / "a", lease=curto)):
+        esperar_ate(presa.publicando.is_set)
+        with EmSegundoPlano(_relay(engine, rastreador, tmp_path / "b", lease=curto)):
+            esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+        # O broker recusa a publicacao de A; o join de A espera o desfecho dela.
+        presa.liberar.set()
+
+    linha = _linha(engine, mensagem_id)
+    assert (linha.status, linha.tentativas) == ("entregue", 4)
+    assert len(livre.publicadas) == 1
 
 
 def test_sem_listen_nem_select_o_relay_segue_pelo_poll(
@@ -608,8 +619,13 @@ def test_sem_listen_nem_select_o_relay_segue_pelo_poll(
 
 
 def test_metricas_da_outbox_com_o_banco_fora_viram_nan(
-    rastreador: Rastreador, tmp_path: Path
+    rastreador: Rastreador, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Os gauges sao globais e seguem o ultimo Relay criado: o teardown os devolve
+    # ao de antes, senao cada leitura do registro nos testes seguintes esperaria
+    # o timeout deste banco inexistente.
+    for gauge in (modulo_relay.OUTBOX_PENDENTES, modulo_relay.OUTBOX_DEAD):
+        monkeypatch.setattr(gauge, "_child_samples", gauge._child_samples)
     fora = create_engine(
         "postgresql://u:p@127.0.0.1:1/x", connect_args={"connect_timeout": 1}
     )
