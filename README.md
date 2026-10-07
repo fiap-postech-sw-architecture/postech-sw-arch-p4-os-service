@@ -15,7 +15,8 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 - OS da fase 4: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
 - API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}`, `GET /{id}/historico`, `POST /{id}/cancelamento`, `POST /{id}/entrega`, clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
 - Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
-- Ainda não: os handlers da saga (hoje cada evento recebido só é registrado) e os manifestos Kubernetes, desenhados na RFC-004.
+- Manifestos Kubernetes em `k8s/`, com o PostgreSQL do serviço, o Job de migração e a borda no Kong ([Implantação](#implantação)).
+- Ainda não: os handlers da saga (hoje cada evento recebido só é registrado), desenhados na RFC-004.
 
 ## Autenticação
 
@@ -217,10 +218,69 @@ uv run python -m src.relay        # outro terminal, com o mesmo .env
 uv run python -m src.consumidor   # outro terminal (METRICS_PORT diferente do relay)
 ```
 
+## Implantação
+
+Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (local), `kind-ci` (o CD, com uma réplica só da API) e `k3s` (a VM na Azure). Tudo vai para o namespace `pytstop-os`, com Pod Security `restricted`. Nenhum Secret está nos manifestos: os do serviço nascem no `make deploy` do platform ([segredos gerados](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)) e entram por `secretKeyRef` ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)).
+
+| Objeto | O que é |
+|---|---|
+| Deployment e HPA `os-service-api` | A API na porta 8000, com o `/metrics` na mesma porta; o HPA, por CPU (70%), vai de 1 a 2 réplicas no `kind`, a 1 no `kind-ci` e a 3 no `k3s` |
+| Deployments `os-service-relay` e `os-service-consumidor` | Relay e consumidor, uma réplica cada, com o `/metrics` na 9100 |
+| StatefulSet e Service headless `os-postgres` | PostgreSQL 16.15 com volume de 1Gi (5Gi no `k3s`) e o `postgres_exporter` como sidecar, na 9187 |
+| Job `os-migracao` | `alembic upgrade head` e a semente do admin, antes dos Deployments |
+| Service `os-service` | O endereço interno da API, o do `JWKS_URL` de Billing e Execução |
+| `borda.yaml` | Os Services e Ingress do Kong, cópia do [exemplo do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/k8s/exemplos/borda-os-service.yaml): `/os/api/v1`, `/os/docs`, `/os/openapi.json` e o JWKS pela borda, e `/os/api/v1/admin` e `/os/metrics` respondendo 404 sem chegar ao serviço |
+| NetworkPolicy | Nega toda entrada no namespace e libera só a API para o Kong, o Prometheus e as APIs de Billing e Execução (que leem o JWKS), relay e consumidor para o Prometheus, o PostgreSQL para os pods do namespace e o exporter para o Prometheus |
+
+Todo pod roda sem root (uid 1001; 999 no banco e 65534 no exporter), sem escalar privilégio, sem capability, com seccomp `RuntimeDefault`, raiz somente leitura (`/tmp` em `emptyDir`) e sem token de ServiceAccount. O `make manifests` valida os três overlays com o kubeconform, contra os schemas do Kubernetes 1.35 e com `Secret` reprovado, e com o `trivy config`, sem achado HIGH nem CRITICAL; o job `build` do CI o roda em todo PR.
+
+### Implantar no kind
+
+Com o platform clonado ao lado deste repositório:
+
+```bash
+make -C ../postech-sw-arch-p4-platform kind-up deploy     # cluster, plataforma e os Secrets do serviço
+make kind-deploy                                            # imagem deste commit, Job de migração e rollouts
+../postech-sw-arch-p4-platform/scripts/ci/smoke-servicos.sh os-service
+```
+
+O `make kind-deploy` chama o `scripts/ci/implantar-servicos.sh` do platform, o mesmo do CD (`PLATFORM=<caminho>` aponta outro clone): ele constrói a imagem `pytstop-os-service` com o commit como tag, a carrega no kind, aplica o overlay `kind` com essa imagem e espera o banco, o Job e cada Deployment. O smoke confere pela borda a saúde em 200 e o `/metrics` em 404, o `up` de cada pod no Prometheus e a NetworkPolicy barrando o banco a quem vem de outro namespace. O Swagger fica em `https://localhost/os/docs` (com o certificado padrão do Kong).
+
+- **Configuração:** o ConfigMap `os-service` sai do `configMapGenerator` de `k8s/base/kustomization.yaml`, com `ENVIRONMENT=production` também no kind (as guardas de boot valem com os segredos gerados), `ROOT_PATH=/os` (o `entrypoint.sh` o passa ao uvicorn como `--root-path`, e o Swagger acha o `/os/openapi.json` atrás do Kong), a exportação OTLP para o Jaeger e `TRUSTED_PROXIES` com o CIDR de pods do overlay (`10.244.0.0/16` no kind, `10.42.0.0/16` no k3s): só o Kong chega à API pela borda, e o `X-Forwarded-For` dele vale como IP do cliente no limite de login. A `DATABASE_URL` se monta no pod com a senha do Secret (`postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres...`), e o `kubectl describe` mostra o molde, não a senha.
+- **Banco:** um papel por uso, criados pelo `k8s/base/papeis.sql` no primeiro init do volume: `postgres`, o superusuário, só inicializa; `os`, dono do banco e das tabelas (DDL), é o do Job; `os_app`, só DML nas tabelas do dono, é o da API, do relay e do consumidor; `os_exporter`, com `pg_monitor`, é o do exporter. O loopback e o socket também pedem senha (`POSTGRES_INITDB_ARGS` com `scram-sha-256`), e o exporter não entra como `postgres`. Para um `psql` no container, a senha vem do ambiente dele, não de argumento: `kubectl --context kind-pytstop-p4 -n pytstop-os exec -it os-postgres-0 -c postgres -- sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U postgres -d os'`. O `tests/integracao/test_banco_do_manifesto.py` sobe a imagem com o ambiente e o script do manifesto e confere os papéis, o loopback sem `trust`, a sonda, o comando do Job e o da espera da migração.
+- **Migração e rollout:** o Job roda com o papel `os`, e o script do platform só começa os rollouts depois de ele completar. Cada Deployment espera, no initContainer `aguarda-migracao`, o `alembic current` marcar `(head)`: no rolling update, os pods novos esperam a migração da versão deles enquanto os antigos seguem servindo. O rollback é `kubectl rollout undo`, sem descer migração (migrações em expandir e contrair, ADR-042): com o banco adiante da imagem, a revisão que ela não conhece também libera o pod.
+- **Sondas:** a API tem liveness em `/api/v1/saude` e readiness em `/api/v1/saude/pronto`; relay e consumidor, sem curl na imagem, têm liveness pela idade do heartbeat (até 90 s) e readiness pelo arquivo de pronto, os de `/tmp` (seção [Observabilidade, saúde e encerramento](#observabilidade-saúde-e-encerramento)). A sonda de startup dá 1 min ao boot de cada processo e 2 min ao primeiro init do banco.
+
+### Troca de senha e de chave
+
+Os comandos usam o contexto do kind; no k3s, troque o `--context`. O pod lê o Secret só no start, por isso cada troca termina num restart.
+
+1. Senha de um papel do PostgreSQL (o exemplo troca a do `os_app`; a chave do Secret de cada papel está na [tabela do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)). Grave a senha nova no Secret:
+
+   ```bash
+   senha=$(openssl rand -hex 24)
+   kubectl --context kind-pytstop-p4 -n pytstop-os get secret os-postgres -o json \
+     | SENHA="$senha" jq '.data.POSTGRES_APP_PASSWORD = (env.SENHA | @base64)' \
+     | kubectl --context kind-pytstop-p4 replace -f -
+   ```
+
+2. Aplique a mesma senha ao papel, como `postgres`. O `\password` do psql a lê da entrada padrão e a envia já cifrada: ela não passa por argumento nem pelo log do servidor.
+
+   ```bash
+   printf '%s\n%s\n' "$senha" "$senha" \
+     | kubectl --context kind-pytstop-p4 -n pytstop-os exec -i os-postgres-0 -c postgres -- \
+       sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U postgres -d os -c "\password os_app"'
+   ```
+
+3. Reinicie quem usa o papel: o `os_app`, os Deployments (`kubectl --context kind-pytstop-p4 -n pytstop-os rollout restart deployment`); o `os_exporter`, o StatefulSet do banco, de que o exporter é sidecar; o `os`, ninguém, porque o Job a relê na próxima implantação. Até o restart, conexão nova com a senha antiga é recusada.
+
+A chave RSA do JWT gira pelas etapas da [rotação da chave](#rotação-da-chave), com as chaves de cada etapa no Secret `os-jwt` e um `rollout restart deployment/os-service-api` a cada etapa; o JWKS pela borda fica em `https://localhost/os/.well-known/jwks.json`. A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ilegíveis os dados pessoais já cifrados. E a `ADMIN_PASSWORD` (Secret `os-admin`) não gira pelo Secret: a semente só cria o admin que ainda não existe.
+
 ## Qualidade
 
 ```bash
 make check   # uv.lock em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest
+make manifests  # kubeconform e trivy config dos três overlays de k8s/
 make audit   # pip-audit das dependências de runtime (com os extras da imagem)
 make smoke   # imagem pelo entrypoint real: readiness, login do admin semeado validado pelo JWKS
              # (e a assinatura adulterada recusada), log de boot em JSON, a imagem de produção
@@ -231,7 +291,7 @@ make smoke   # imagem pelo entrypoint real: readiness, login do admin semeado va
 
 `make test` (ou `uv run pytest`) roda os testes unitários, os de contrato e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic, e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
-No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks e trivy (imagem), em todo PR e toda segunda-feira.
+No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira.
 
 ## Repositórios da fase 4
 
