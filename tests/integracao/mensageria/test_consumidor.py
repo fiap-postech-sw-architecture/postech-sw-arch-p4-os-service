@@ -655,6 +655,67 @@ def test_handler_que_comita_encerra_a_transacao_ou_nao_devolve_desfecho_vai_para
     )
 
 
+def _comitar_a_raiz_com_savepoint_aberto(transacao: TransacaoDaMensagem) -> Desfecho:
+    raiz = transacao.session.get_transaction()
+    assert raiz is not None
+    transacao.session.begin_nested()
+    raiz.commit()
+    return Desfecho.PROCESSADA
+
+
+def _comitar_a_conexao(transacao: TransacaoDaMensagem) -> Desfecho:
+    transacao.session.connection().commit()
+    return Desfecho.PROCESSADA
+
+
+def _comitar_em_sql(transacao: TransacaoDaMensagem) -> Desfecho:
+    transacao.session.execute(text("COMMIT"))
+    return Desfecho.PROCESSADA
+
+
+@pytest.mark.parametrize(
+    ("depois", "resultado"),
+    [
+        pytest.param(
+            _comitar_a_raiz_com_savepoint_aberto,
+            "dlq",
+            id="commit-da-raiz-com-savepoint-aberto",
+        ),
+        pytest.param(_comitar_a_conexao, "duplicada", id="commit-da-conexao"),
+        pytest.param(_comitar_em_sql, "processada", id="commit-em-sql"),
+    ],
+)
+def test_commit_por_baixo_da_sessao_grava_o_efeito_antes_do_consumidor(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    depois: Callable[[TransacaoDaMensagem], Desfecho],
+    resultado: str,
+) -> None:
+    # Os limites da guarda: o commit que passa por baixo da `session` grava o
+    # efeito antes do consumidor. A raiz comitada com um savepoint aberto vai
+    # para a DLQ (o redrive vira duplicada); o commit da conexao faz o commit do
+    # consumidor falhar, e a mensagem volta pela retry como duplicada; o COMMIT
+    # em SQL passa sem a guarda ver.
+    ordem_id = _ordem_recebida(session_factory)
+    saga = _Saga(depois=depois)
+    envelope = envelope_de_evento("DiagnosticoIniciado", correlation_id=ordem_id)
+    antes = _consumidas("DiagnosticoIniciado", resultado)
+
+    with EmSegundoPlano(consumidor(saga)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _consumidas("DiagnosticoIniciado", resultado) == antes + 1)
+
+    gravado = _gravado(engine, ordem_id)
+    assert saga.chamadas == 1
+    assert (gravado.status, gravado.comandos, gravado.processadas) == (
+        "em_diagnostico",
+        1,
+        1,
+    )
+
+
 def _caso(
     id_: str, montar: Callable[[Broker, dict[str, Any]], None], motivo: str
 ) -> Any:
