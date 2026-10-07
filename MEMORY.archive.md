@@ -118,13 +118,14 @@ git (`git show 250c756:MEMORY.md`).
 
 ## Consolidacao de 2026-10-07
 
-Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (75 das 119), na
-ordem e nas secoes originais. As outras 44 seguem inteiras no `MEMORY.md`, e o que o
+Entradas que sairam do `MEMORY.md` na consolidacao de 2026-10-07 (76 das 119), na
+ordem e nas secoes originais. As outras 43 seguem inteiras no `MEMORY.md`, e o que o
 README, os ADR e a RFC-004 do platform ou os comentarios do codigo ja registram virou
 linhas de la que apontam para essas fontes. O texto exato das 119 esta no historico
 do git (`git show 0ccdca8:MEMORY.md`); aqui ele so mudou onde citava um documento
-interno (a "especificacao comum" da entrada de `RABBITMQ_URL`). As linhas
-`RESOLVIDO (conferencia ...)` registram duas dividas que a conferencia achou fechadas.
+interno (a "especificacao comum" da entrada de `RABBITMQ_URL`).
+As linhas `RESOLVIDO (conferencia ...)` registram duas dividas que a conferencia achou
+fechadas e a linha `CORRIGIDO (conferencia ...)`, uma entrada que a conferencia achou errada.
 
 ### Recent decisions
 
@@ -185,6 +186,8 @@ interno (a "especificacao comum" da entrada de `RABBITMQ_URL`). As linhas
 - 2026-10-07 - O pika loga em ERROR o motivo com que o broker fecha a conexao (`Unexpected connection close detected: ConnectionClosedByBroker: (320) 'CONNECTION_FORCED - <motivo>'`): o motivo e do broker ou do operador, nunca da mensagem; o log do servico leva so o tipo, e o teste de PII da queda confere so o log do servico - PR #4
 - 2026-10-07 - SQLAlchemy 2.0: o `before_commit` da sessao dispara tambem ao liberar um savepoint e nao diz qual transacao comita. O consumidor deixa passar quando ha savepoint aberto, entao o `commit()` direto na transacao raiz com savepoint aberto escapa da guarda (a conferencia depois do handler manda para a DLQ, com o efeito ja gravado) e o `session.connection().commit()` nao passa por nenhuma das duas; o `session.commit()` dentro do savepoint segue recusado - PR #4
 - 2026-10-07 - Substitui a entrada de 2026-10-06 sobre o pika em WARNING no boot do relay e do consumidor: o logger `pika` fica em ERROR no `configurar_logging`, em todos os processos (em WARNING ele imprime parte do corpo da mensagem devolvida) - PR #4
+- 2026-10-07 - CORRIGIDO (conferencia da consolidacao) - A entrada abaixo errava: no RabbitMQ 4.3.6 a declaracao passiva, de fila e de exchange, exige qualquer uma das tres permissoes (configure, write ou read) sobre o recurso; sem nenhuma o broker responde 403 `ACCESS_REFUSED` e, com permissao sobre um nome que nao existe, 404 `NOT_FOUND`. O `MEMORY.md` tem o texto certo
+- 2026-10-07 - RabbitMQ 4: `queue.declare` passivo exige permissao de configuracao ou de leitura na fila (sem as duas, 403 `ACCESS_REFUSED`), e `exchange.declare` passivo nao exige nenhuma - PR #4
 - 2026-10-07 - RabbitMQ em alarme de memoria nao le o fechamento de uma conexao bloqueada: a mensagem sem ack fica presa na conexao antiga ate o alarme passar, e so entao volta a fila (nada se perde, mas atrasa) - PR #4
 - 2026-10-07 - Fila quorum: `max-length` e teto mole (aceita uma mensagem alem) e, com o TTL de 100 ms das filas de retry do broker de teste, a fila de retry esvazia antes de encher: o nack da copia de retry nao se provoca no teste. O tracestate W3C limita o valor de cada membro a 256 caracteres (acima disso o SDK descarta o tracestate inteiro) - PR #4
 - 2026-10-07 - `Resource.create` do OpenTelemetry com `service.name` explicito vence o `OTEL_SERVICE_NAME` que o SDK le sozinho; e o `json.loads` do Python 3.14 so levanta `RecursionError` no estouro real da pilha (cerca de 100 mil niveis), entao abaixo de 64 KiB ele nao acontece - PR #4
