@@ -145,8 +145,10 @@ jobs:
           path: reports/sonarqube.json
           retention-days: 90
 
-  # Imagem de runtime e smoke do compose do servico: sobe api e banco pelo
-  # entrypoint real (migracao, seed, usuario 1001) e confere a readiness.
+  # Manifestos Kubernetes, imagem de runtime e smoke do compose do servico:
+  # os tres overlays de k8s/ pelo kubeconform e pelo trivy config; depois sobe
+  # api e banco pelo entrypoint real (migracao, seed, usuario 1001) e confere a
+  # readiness.
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -154,6 +156,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Manifestos Kubernetes (make manifests)
+        run: make manifests
       - name: Build da imagem
         run: docker build -t "${GITHUB_REPOSITORY#*/}:ci-${GITHUB_SHA}" .
       - name: Smoke do compose (make smoke)
