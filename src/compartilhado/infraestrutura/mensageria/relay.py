@@ -1,13 +1,11 @@
 """Relay da outbox para o RabbitMQ (ADR-036; o relay do p3 com destino AMQP).
 
-Sem conexao com o broker o relay nao reivindica linhas e reconecta com backoff
-de ate 30 s: a queda do broker nao conta tentativa de nenhuma linha. Conectado,
-drena a outbox em lotes. O claim (transacao curta) pega as linhas ``pendente``
-vencidas com ``FOR UPDATE SKIP LOCKED``, em ordem por OS (head-of-line por
-``correlation_id``; ``dead`` nao bloqueia), e estende ``proxima_tentativa_em``
-por um lease. Cada linha e entregue na propria transacao, que comeca pelo
-fencing (o relock ``SKIP LOCKED`` com status ``pendente``): duas replicas nunca
-publicam a mesma linha ao mesmo tempo.
+Sem conexao com o broker o relay nao reivindica linhas e reconecta com o
+backoff da ``ConexaoDoProcesso``: a queda do broker nao conta tentativa de
+nenhuma linha. Conectado, drena a outbox em lotes (o SQL de cada passo esta em
+``outbox.py``): o claim pega as linhas vencidas em ordem por OS e as segura por
+um lease, e cada linha e entregue na propria transacao, que comeca pelo fencing:
+duas replicas nunca publicam a mesma linha ao mesmo tempo.
 
 A publicacao usa publisher confirms e ``mandatory``: a linha so vira
 ``entregue`` depois do confirm. Devolvida (sem fila para a routing key),
@@ -26,7 +24,7 @@ from __future__ import annotations
 import contextlib
 import json
 import select
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final
 
@@ -34,12 +32,16 @@ import structlog
 from opentelemetry.trace import SpanKind, StatusCode
 from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter, Gauge
-from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.compartilhado.infraestrutura.database import tempo_de_conexao
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+from src.compartilhado.infraestrutura.mensageria.outbox import (
+    ATRASOS_S,
+    LinhaDaOutbox,
+    Outbox,
+)
 from src.compartilhado.infraestrutura.mensageria.processo import (
     DIRETORIO_DE_SAUDE,
     Sinalizador,
@@ -54,9 +56,7 @@ from src.compartilhado.infraestrutura.outbox_mapping import CANAL_NOTIFY
 
 if TYPE_CHECKING:
     import threading
-    from collections.abc import Sequence
     from pathlib import Path
-    from uuid import UUID
 
     import pika
     from opentelemetry.trace import Tracer
@@ -79,11 +79,6 @@ OUTBOX_DEAD: Final = Gauge(
     "outbox_dead", "Linhas da outbox que esgotaram as tentativas (status dead)."
 )
 
-# Politica do relay do p3: atraso depois de cada falha da propria mensagem, e a
-# quinta falha leva a linha a `dead`.
-ATRASOS_S: Final = (1, 4, 16, 64)
-MAX_TENTATIVAS: Final = 5
-_RETENCAO: Final = timedelta(days=7)
 _INTERVALO_DE_LIMPEZA: Final = timedelta(hours=1)
 # Keepalives TCP da conexao dedicada de LISTEN: um peer que sumiu em silencio
 # e detectado em cerca de 60 s, em vez de deixar o relay surdo ao NOTIFY.
@@ -93,42 +88,6 @@ _KEEPALIVES: Final = {
     "keepalives_interval": 10,
     "keepalives_count": 3,
 }
-
-_SQL_CLAIM: Final = text(
-    "SELECT o.id, o.mensagem_id, o.correlation_id, o.exchange, o.routing_key, "
-    "o.envelope, o.traceparent, o.tracestate, o.tentativas "
-    "FROM outbox o "
-    "WHERE o.status = 'pendente' AND o.proxima_tentativa_em <= :agora "
-    "AND NOT EXISTS (SELECT 1 FROM outbox p WHERE p.correlation_id = o.correlation_id "
-    "AND p.id < o.id AND p.status = 'pendente') "
-    "ORDER BY o.id FOR UPDATE OF o SKIP LOCKED LIMIT :limite"
-)
-_SQL_LEASE: Final = text(
-    "UPDATE outbox SET proxima_tentativa_em = :ate WHERE id = ANY(:ids)"
-)
-_SQL_FENCING: Final = text(
-    "SELECT 1 FROM outbox WHERE id = :id AND status = 'pendente' FOR UPDATE SKIP LOCKED"
-)
-_SQL_ENTREGUE: Final = text(
-    "UPDATE outbox SET status = 'entregue', entregue_em = :agora, "
-    "ultimo_erro = NULL WHERE id = :id"
-)
-_SQL_NOVA_TENTATIVA: Final = text(
-    "UPDATE outbox SET tentativas = :tentativas, proxima_tentativa_em = :proxima, "
-    "ultimo_erro = :erro WHERE id = :id"
-)
-_SQL_DEAD: Final = text(
-    "UPDATE outbox SET status = 'dead', tentativas = :tentativas, "
-    "ultimo_erro = :erro WHERE id = :id"
-)
-_SQL_LIBERAR: Final = text(
-    "UPDATE outbox SET proxima_tentativa_em = :agora "
-    "WHERE id = ANY(:ids) AND status = 'pendente'"
-)
-_SQL_LIMPEZA: Final = text(
-    "DELETE FROM outbox WHERE status = 'entregue' AND entregue_em < :limite"
-)
-_SQL_CONTAGEM: Final = text("SELECT count(*) FROM outbox WHERE status = :status")
 
 
 class _BrokerIndisponivelError(Exception):
@@ -164,19 +123,6 @@ class ConfigRelay:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class _Linha:
-    id: int
-    mensagem_id: UUID
-    correlation_id: UUID
-    exchange: str
-    routing_key: str
-    envelope: dict[str, Any] = field(repr=False)
-    traceparent: str | None
-    tracestate: str | None
-    tentativas: int
-
-
 class Relay:
     """Publica a outbox no RabbitMQ ate o ``parar`` (SIGTERM) ser sinalizado."""
 
@@ -192,6 +138,7 @@ class Relay:
         self._usuario = amqp.usuario(parametros)
         self._tracer = tracer
         self._config = config or ConfigRelay()
+        self._outbox = Outbox(engine, self._config.atrasos_s)
         self._sinal = Sinalizador("relay", self._config.diretorio_de_saude)
         self._broker = amqp.ConexaoDoProcesso(
             parametros, processo="relay", sinal=self._sinal, declarar=self._declarar
@@ -200,9 +147,9 @@ class Relay:
         self._exchanges = sorted(
             {contratos.destino(tipo).exchange for tipo in contratos.publicados}
         )
-        self._proxima_limpeza = _agora()
-        OUTBOX_PENDENTES.set_function(lambda: self._contar("pendente"))
-        OUTBOX_DEAD.set_function(lambda: self._contar("dead"))
+        self._proxima_limpeza = datetime.now(UTC)
+        OUTBOX_PENDENTES.set_function(lambda: self._outbox.contar("pendente"))
+        OUTBOX_DEAD.set_function(lambda: self._outbox.contar("dead"))
 
     def executar(self, parar: threading.Event) -> None:
         """Laco principal; queda do broker ou do banco nao derruba o processo."""
@@ -247,8 +194,7 @@ class Relay:
         """Reivindica e entrega lotes ate nao sobrar linha elegivel."""
         while not parar.is_set():
             self._sinal.bater()
-            with self._engine.begin() as conexao:
-                linhas = self._reivindicar(conexao)
+            linhas = self._outbox.reivindicar(self._config.lote, self._config.lease)
             if not linhas:
                 return
             for indice, linha in enumerate(linhas):
@@ -264,36 +210,11 @@ class Relay:
                     # quando o lease vencer.
                     _log.exception("outbox row failed", outbox_id=linha.id)
 
-    def _reivindicar(self, conexao: Connection) -> list[_Linha]:
-        agora = _agora()
-        linhas = [
-            _Linha(
-                id=row.id,
-                mensagem_id=row.mensagem_id,
-                correlation_id=row.correlation_id,
-                exchange=row.exchange,
-                routing_key=row.routing_key,
-                envelope=row.envelope,
-                traceparent=row.traceparent,
-                tracestate=row.tracestate,
-                tentativas=row.tentativas,
-            )
-            for row in conexao.execute(
-                _SQL_CLAIM, {"agora": agora, "limite": self._config.lote}
-            )
-        ]
-        if linhas:
-            conexao.execute(
-                _SQL_LEASE,
-                {"ate": agora + self._config.lease, "ids": [li.id for li in linhas]},
-            )
-        return linhas
-
-    def _entregar(self, linha: _Linha) -> None:
+    def _entregar(self, linha: LinhaDaOutbox) -> None:
         if not self._broker.canal.is_open:
             self._reabrir_canal()
-        with self._engine.begin() as conexao:
-            if conexao.execute(_SQL_FENCING, {"id": linha.id}).first() is None:
+        with self._outbox.travar(linha) as conexao:
+            if conexao is None:
                 _log.info("outbox row taken by another replica", outbox_id=linha.id)
                 return
             tipo = linha.envelope["tipo"]
@@ -321,7 +242,7 @@ class Relay:
                     span.set_status(StatusCode.ERROR, falha)
                 self._registrar_desfecho(conexao, linha, falha)
 
-    def _publicar(self, linha: _Linha) -> str | None:
+    def _publicar(self, linha: LinhaDaOutbox) -> str | None:
         """Publica com confirm; devolve a falha da mensagem, ou None se confirmada.
 
         Raises:
@@ -348,7 +269,7 @@ class Relay:
         return None
 
     def _registrar_desfecho(
-        self, conexao: Connection, linha: _Linha, falha: str | None
+        self, conexao: Connection, linha: LinhaDaOutbox, falha: str | None
     ) -> None:
         """Marca a linha: entregue, nova tentativa com atraso ou `dead`."""
         tipo = linha.envelope["tipo"]
@@ -359,30 +280,23 @@ class Relay:
             "correlation_id": str(linha.correlation_id),
         }
         if falha is None:
-            conexao.execute(_SQL_ENTREGUE, {"id": linha.id, "agora": _agora()})
+            self._outbox.marcar_entregue(conexao, linha)
             MENSAGENS_PUBLICADAS.labels(tipo=tipo).inc()
             _log.info("message published", **contexto_de_log)
             # O broker confirmou: a proxima queda recomeca o backoff do minimo.
             self._broker.sucesso()
             return
-        tentativas = linha.tentativas + 1
-        parametros = {"id": linha.id, "tentativas": tentativas, "erro": falha}
-        if tentativas >= MAX_TENTATIVAS:
-            conexao.execute(_SQL_DEAD, parametros)
+        if self._outbox.registrar_falha(conexao, linha, falha):
             _log.error(
                 "message publish failed; outbox row dead",
-                tentativas=tentativas,
+                tentativas=linha.tentativas + 1,
                 motivo=falha,
                 **contexto_de_log,
             )
             return
-        atraso = timedelta(seconds=self._config.atrasos_s[tentativas - 1])
-        conexao.execute(
-            _SQL_NOVA_TENTATIVA, {**parametros, "proxima": _agora() + atraso}
-        )
         _log.warning(
             "message publish failed; retry scheduled",
-            tentativas=tentativas,
+            tentativas=linha.tentativas + 1,
             motivo=falha,
             **contexto_de_log,
         )
@@ -394,24 +308,20 @@ class Relay:
         except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
             raise _BrokerIndisponivelError from exc
 
-    def _liberar(self, ids: Sequence[int]) -> None:
+    def _liberar(self, ids: list[int]) -> None:
         try:
-            with self._engine.begin() as conexao:
-                conexao.execute(_SQL_LIBERAR, {"agora": _agora(), "ids": list(ids)})
+            self._outbox.liberar(ids)
         except SQLAlchemyError:
             _log.exception("outbox rows not released; they return after the lease")
 
     def _limpar_se_devido(self) -> None:
-        agora = _agora()
+        agora = datetime.now(UTC)
         if agora < self._proxima_limpeza:
             return
         # Avanca antes: com o banco fora, a proxima tentativa e daqui a uma
         # hora, nao a cada volta do laco.
         self._proxima_limpeza = agora + _INTERVALO_DE_LIMPEZA
-        with self._engine.begin() as conexao:
-            apagadas = conexao.execute(
-                _SQL_LIMPEZA, {"limite": agora - _RETENCAO}
-            ).rowcount
+        apagadas = self._outbox.limpar()
         if apagadas:
             _log.info("delivered outbox rows deleted", linhas=apagadas)
 
@@ -461,18 +371,6 @@ class Relay:
             _log.warning("listen connection unavailable; polling")
             return None
         return escuta
-
-    def _contar(self, status: str) -> float:
-        try:
-            with self._engine.connect() as conexao:
-                total = conexao.execute(_SQL_CONTAGEM, {"status": status}).scalar_one()
-        except SQLAlchemyError:
-            return float("nan")
-        return float(total)
-
-
-def _agora() -> datetime:
-    return datetime.now(UTC)
 
 
 def _fechar_escuta(escuta: Any) -> None:  # noqa: ANN401  # conexao psycopg2

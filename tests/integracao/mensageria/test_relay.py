@@ -141,9 +141,7 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
     # confirma-la e descarta-la.
     with broker.canal() as canal:
         canal.queue_unbind(_FILA, "pytstop.comandos", "comando.execucao.#")
-    relay = _relay(
-        engine, broker, rastreador, tmp_path, atrasos_s=(0.5, 0.5, 0.5, 0.5, 0.5)
-    )
+    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(0.5,) * 4)
     try:
         with EmSegundoPlano(relay):
             primeira = esperar_ate(
@@ -272,9 +270,7 @@ def test_linha_em_falha_segura_as_seguintes_da_mesma_os_ate_morrer(
     )
     seguinte = _inserir(engine, correlation_id=ordem)
     outra_os = _inserir(engine)
-    relay = _relay(
-        engine, broker, rastreador, tmp_path, atrasos_s=(0.3, 0.3, 0.3, 0.3, 0.3)
-    )
+    relay = _relay(engine, broker, rastreador, tmp_path, atrasos_s=(0.3,) * 4)
 
     with EmSegundoPlano(relay):
         esperar_ate(lambda: _status(engine, outra_os) == "entregue")

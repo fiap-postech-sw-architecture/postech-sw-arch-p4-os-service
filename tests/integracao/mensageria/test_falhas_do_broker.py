@@ -32,6 +32,7 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
     Consumidor,
 )
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
+from src.compartilhado.infraestrutura.mensageria.outbox import Outbox
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from tests.integracao.broker import (
@@ -248,7 +249,7 @@ def test_canal_fechado_pelo_broker_conta_tentativa_e_o_relay_abre_outro(
     conexoes.append((ConexaoFalsa(novo_canal), canal))
     mensagem_id = _gravar(session_factory)
 
-    with EmSegundoPlano(_relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 5)):
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)):
         esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
 
     linha = _linha(engine, mensagem_id)
@@ -274,7 +275,7 @@ def test_canal_que_nao_reabre_e_queda_do_broker(
     primeira = _gravar(session_factory)
     segunda = _gravar(session_factory)
 
-    with EmSegundoPlano(_relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 5)):
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)):
         esperar_ate(
             lambda: (
                 {_linha(engine, m).status for m in (primeira, segunda)} == {"entregue"}
@@ -332,15 +333,15 @@ def test_banco_fora_no_ciclo_nao_derruba_o_relay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     conexoes.append((ConexaoFalsa(), CanalFalso()))
-    reivindicar = Relay._reivindicar
+    reivindicar = Outbox.reivindicar
     falhas = [OperationalError("SELECT", {}, Exception("banco fora"))]
 
-    def reivindicar_com_falha(self: Relay, conexao: Any) -> Any:
+    def reivindicar_com_falha(self: Outbox, *args: Any) -> Any:
         if falhas:
             raise falhas.pop()
-        return reivindicar(self, conexao)
+        return reivindicar(self, *args)
 
-    monkeypatch.setattr(Relay, "_reivindicar", reivindicar_com_falha)
+    monkeypatch.setattr(Outbox, "reivindicar", reivindicar_com_falha)
     mensagem_id = _gravar(session_factory)
 
     with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
