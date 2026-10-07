@@ -32,6 +32,7 @@ from sqlalchemy import (
     Table,
     Text,
     Uuid,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -71,10 +72,17 @@ outbox_table = Table(
     Column("tracestate", String(_TRACESTATE_MAXIMO), nullable=True),
     Column("status", String(20), nullable=False, default="pendente"),
     Column("tentativas", Integer, nullable=False, default=0),
+    # Tempos pelo relogio do banco, o mesmo com que o relay compara: o relogio
+    # do processo que grava (adiantado ou atrasado) nao adia a linha.
     Column(
-        "proxima_tentativa_em", DateTime(timezone=True), nullable=False, default=_agora
+        "proxima_tentativa_em",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
     ),
-    Column("criado_em", DateTime(timezone=True), nullable=False, default=_agora),
+    Column(
+        "criado_em", DateTime(timezone=True), nullable=False, server_default=func.now()
+    ),
     Column("entregue_em", DateTime(timezone=True), nullable=True),
     Column("ultimo_erro", Text, nullable=True),
 )
@@ -96,7 +104,12 @@ mensagens_processadas_table = Table(
     "mensagens_processadas",
     metadata,
     Column("mensagem_id", Uuid, primary_key=True),
-    Column("processada_em", DateTime(timezone=True), nullable=False, default=_agora),
+    Column(
+        "processada_em",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    ),
 )
 
 
@@ -153,7 +166,7 @@ def registrar_processada(session: Session, mensagem_id: UUID) -> bool:
     """
     inserida = session.execute(
         insert(mensagens_processadas_table)
-        .values(mensagem_id=mensagem_id, processada_em=_agora())
+        .values(mensagem_id=mensagem_id)
         .on_conflict_do_nothing(index_elements=["mensagem_id"])
         .returning(mensagens_processadas_table.c.mensagem_id)
     ).first()

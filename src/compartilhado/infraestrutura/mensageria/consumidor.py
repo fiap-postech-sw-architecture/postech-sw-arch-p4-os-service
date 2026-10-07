@@ -39,7 +39,7 @@ import structlog
 from opentelemetry.trace import SpanKind, StatusCode
 from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter
-from sqlalchemy import delete
+from sqlalchemy import delete, func
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.compartilhado.aplicacao.mensageria import (
@@ -407,7 +407,8 @@ class Consumidor:
             with self._session_factory() as sessao:
                 resultado = sessao.execute(
                     delete(mensagens_processadas_table).where(
-                        mensagens_processadas_table.c.processada_em < agora - _RETENCAO
+                        mensagens_processadas_table.c.processada_em
+                        < func.now() - _RETENCAO
                     )
                 )
                 sessao.commit()

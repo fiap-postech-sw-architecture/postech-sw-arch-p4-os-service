@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -12,8 +12,10 @@ from opentelemetry.trace import SpanKind
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 
+from src.compartilhado.infraestrutura import outbox_mapping
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
+from src.compartilhado.infraestrutura.mensageria.outbox import LinhaDaOutbox, Outbox
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
@@ -55,7 +57,7 @@ def _linha(engine: Engine, mensagem_id: UUID) -> Any:
         return conexao.execute(
             text(
                 "SELECT status, tentativas, ultimo_erro, proxima_tentativa_em, "
-                "entregue_em, envelope FROM outbox WHERE mensagem_id = :id"
+                "criado_em, entregue_em, envelope FROM outbox WHERE mensagem_id = :id"
             ),
             {"id": mensagem_id},
         ).one()
@@ -72,7 +74,7 @@ def _relay(
         engine=engine,
         parametros=broker.parametros("os"),
         tracer=rastreador.tracer,
-        config=ConfigRelay(poll_s=0.1, diretorio_de_saude=tmp_path, **config),
+        config=ConfigRelay(**{"poll_s": 0.1, **config}, diretorio_de_saude=tmp_path),
     )
 
 
@@ -150,7 +152,10 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
             assert primeira.status == "pendente"
             assert primeira.entregue_em is None
             assert "nenhuma fila" in primeira.ultimo_erro
-            assert primeira.proxima_tentativa_em > datetime.now(UTC)
+            # A falha veio depois da gravacao: o atraso conta a partir dela.
+            assert primeira.proxima_tentativa_em >= primeira.criado_em + timedelta(
+                seconds=0.5
+            )
             final = esperar_ate(
                 lambda: (
                     (linha := _linha(engine, mensagem_id)).status == "dead" and linha
@@ -168,6 +173,81 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
     assert falha.status.description is not None
     assert "nenhuma fila" in falha.status.description
     assert broker.contar(_FILA) == 0
+
+
+def test_linha_gravada_com_o_relogio_do_processo_adiantado_sai_pelo_notify(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # O processo que grava (a API) com o relogio uma hora adiantado: a linha
+    # leva os tempos do banco, entao o NOTIFY acorda o relay e ela sai na hora,
+    # sem esperar o poll de seguranca (10 s aqui).
+    monkeypatch.setattr(outbox_mapping, "datetime", _RelogioAdiantado)
+    relay = _relay(engine, broker, rastreador, tmp_path, poll_s=10)
+
+    with EmSegundoPlano(relay):
+        esperar_ate(lambda: _escutando(engine))
+        mensagem_id = _publicar(session_factory)
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue", prazo_s=5)
+
+
+class _RelogioAdiantado(datetime):
+    """``datetime`` do processo uma hora a frente do banco."""
+
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+        return datetime.now(tz) + timedelta(hours=1)
+
+
+def _escutando(engine: Engine) -> bool:
+    """O relay ja esta no LISTEN (antes disso o NOTIFY se perderia)."""
+    with engine.connect() as conexao:
+        total: int = conexao.execute(
+            text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE query = 'LISTEN outbox_novo'"
+            )
+        ).scalar_one()
+    return total > 0
+
+
+@pytest.mark.usefixtures("session_factory")
+def test_atrasos_entre_tentativas_sao_1_4_16_e_64_s_e_a_quinta_falha_e_dead(
+    engine: Engine,
+) -> None:
+    linha_id = _inserir(engine)
+    outbox = Outbox(engine)
+
+    for tentativas, atraso in enumerate([1, 4, 16, 64]):
+        with engine.begin() as conexao:
+            morta = outbox.registrar_falha(conexao, _reler(conexao, linha_id), "x")
+            folga = conexao.execute(
+                text(
+                    "SELECT extract(epoch FROM proxima_tentativa_em - "
+                    "clock_timestamp()) FROM outbox WHERE id = :id"
+                ),
+                {"id": linha_id},
+            ).scalar_one()
+        assert not morta, tentativas
+        assert atraso - 1 < folga <= atraso, (tentativas, folga)
+    with engine.begin() as conexao:
+        assert outbox.registrar_falha(conexao, _reler(conexao, linha_id), "x")
+    assert _status(engine, linha_id) == "dead"
+
+
+def _reler(conexao: Any, linha_id: int) -> LinhaDaOutbox:
+    row = conexao.execute(
+        text(
+            "SELECT id, mensagem_id, correlation_id, exchange, routing_key, envelope, "
+            "traceparent, tracestate, tentativas FROM outbox WHERE id = :id"
+        ),
+        {"id": linha_id},
+    ).one()
+    return LinhaDaOutbox(**row._mapping)
 
 
 @pytest.fixture
