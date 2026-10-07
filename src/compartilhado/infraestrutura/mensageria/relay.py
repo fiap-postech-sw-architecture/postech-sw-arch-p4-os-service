@@ -242,6 +242,18 @@ class Relay:
         if linha is None:
             _log.info("outbox row taken by another replica", outbox_id=reivindicada.id)
             return
+        # Daqui em diante o token do fencing e o lease renovado: a falha e
+        # contada nesta linha, e nao na reivindicada.
+        try:
+            self._validar_e_publicar(linha)
+        except _BrokerIndisponivelError:
+            # O lease renovado e o desta linha: o _drenar so libera as outras.
+            self._liberar([linha])
+            raise
+        except Exception as exc:  # noqa: BLE001  # a linha falha, o relay segue
+            self._contar_falha(linha, exc)
+
+    def _validar_e_publicar(self, linha: LinhaDaOutbox) -> None:
         try:
             self._catalogo.validar(linha.envelope)
         except ContratoInvalidoError:
@@ -254,14 +266,7 @@ class Relay:
                     correlation_id=str(linha.correlation_id),
                 )
             return
-        try:
-            self._publicar_no_span(linha)
-        except _BrokerIndisponivelError:
-            # O lease renovado e o desta linha: o _drenar so libera as outras.
-            self._liberar([linha])
-            raise
-        except Exception as exc:  # noqa: BLE001  # a linha falha, o relay segue
-            self._contar_falha(linha, exc)
+        self._publicar_no_span(linha)
 
     def _contar_falha(self, linha: LinhaDaOutbox, exc: Exception) -> None:
         """Falha inesperada no caminho da linha: conta tentativa, como uma recusa.
@@ -276,12 +281,18 @@ class Relay:
             onde=onde(exc),
         )
         try:
-            self._outbox.registrar_falha(
+            desfecho = self._outbox.registrar_falha(
                 linha, f"falha ao publicar ({type(exc).__name__})"
             )
         except SQLAlchemyError:
             _log.warning(
                 "outbox row failure not recorded; it returns after the lease",
+                outbox_id=linha.id,
+            )
+            return
+        if desfecho == "perdida":
+            _log.warning(
+                "outbox row failure not recorded; the lease was lost",
                 outbox_id=linha.id,
             )
 
@@ -350,7 +361,18 @@ class Relay:
             MENSAGENS_PUBLICADAS.labels(tipo=tipo).inc()
             # O broker confirmou: a proxima queda recomeca o backoff do minimo.
             self._broker.sucesso()
-            if self._outbox.marcar_entregue(linha):
+            try:
+                entregue = self._outbox.marcar_entregue(linha)
+            except SQLAlchemyError:
+                # Publicada e sem a marca (banco fora): nao e falha da mensagem
+                # e nao gasta tentativa. A linha volta quando o lease vencer e
+                # sai de novo; o consumidor descarta a copia pelo id.
+                _log.warning(
+                    "message published but not marked; it returns after the lease",
+                    **contexto_de_log,
+                )
+                return
+            if entregue:
                 _log.info("message published", **contexto_de_log)
             else:
                 # O publish passou do lease e outra replica pegou a linha: a

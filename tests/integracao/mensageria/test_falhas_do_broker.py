@@ -37,7 +37,11 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
     Consumidor,
 )
-from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
+from src.compartilhado.infraestrutura.mensageria.contratos import (
+    CONTRATOS,
+    Catalogo,
+    catalogo,
+)
 from src.compartilhado.infraestrutura.mensageria.outbox import Outbox
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
@@ -399,6 +403,108 @@ def test_erro_de_banco_numa_linha_do_lote_conta_tentativa_e_as_demais_saem(
     assert _linha(engine, primeira).tentativas == 1
     assert _linha(engine, segunda).tentativas == 0
     assert len(canal.publicadas) == 2
+
+
+def test_banco_fora_ao_marcar_a_publicada_nao_gasta_tentativa_e_ela_sai_de_novo(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = _LogEspiao()
+    monkeypatch.setattr(modulo_relay, "_log", log)
+    canal = CanalFalso()
+    conexoes.append((ConexaoFalsa(), canal))
+    mensagem_id = _gravar(session_factory)
+    falhas = [OperationalError("UPDATE", {}, Exception("banco fora"))]
+    marcar_entregue = Outbox.marcar_entregue
+
+    def marcar_com_falha(self: Outbox, linha: Any) -> bool:
+        if falhas:
+            raise falhas.pop()
+        return marcar_entregue(self, linha)
+
+    monkeypatch.setattr(Outbox, "marcar_entregue", marcar_com_falha)
+    relay = _relay(engine, rastreador, tmp_path, lease=timedelta(seconds=0.3))
+
+    with EmSegundoPlano(relay):
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+
+    # O broker confirmou as duas: a copia sai com o mesmo id e o consumidor a
+    # descarta; a linha nao chega perto de `dead`.
+    assert _linha(engine, mensagem_id).tentativas == 0
+    assert len(canal.publicadas) == 2
+    eventos = [evento for evento, _ in log.linhas]
+    assert "message published but not marked; it returns after the lease" in eventos
+
+
+def test_falha_depois_de_renovar_o_lease_conta_tentativa_na_linha_renovada(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canal = CanalFalso()
+    conexoes.append((ConexaoFalsa(), canal))
+    mensagem_id = _gravar(session_factory)
+    falhas = [KeyError("tipo")]
+    validar = Catalogo.validar
+
+    def validar_com_falha(self: Catalogo, envelope: object) -> None:
+        if falhas:
+            raise falhas.pop()
+        validar(self, envelope)
+
+    monkeypatch.setattr(Catalogo, "validar", validar_com_falha)
+    relay = _relay(engine, rastreador, tmp_path, atrasos_s=(0.1,) * 4)
+
+    with EmSegundoPlano(relay):
+        primeira = esperar_ate(
+            lambda: (linha := _linha(engine, mensagem_id)).tentativas == 1 and linha
+        )
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+
+    # Com o token da linha reivindicada, a falha nao gravaria (lease perdido)
+    # e a linha so voltaria depois do lease, sem contar tentativa.
+    assert primeira.ultimo_erro == "falha ao publicar (KeyError)"
+    assert _linha(engine, mensagem_id).tentativas == 1
+    assert len(canal.publicadas) == 1
+
+
+def test_renovacao_gravada_e_perdida_na_volta_nao_conta_tentativa_e_fica_no_log(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log = _LogEspiao()
+    monkeypatch.setattr(modulo_relay, "_log", log)
+    conexoes.append((ConexaoFalsa(), CanalFalso()))
+    mensagem_id = _gravar(session_factory)
+    falhas = [OperationalError("COMMIT", {}, Exception("conexao caiu na volta"))]
+    renovar = Outbox.renovar
+
+    def renovar_e_falhar(self: Outbox, linha: Any, lease: Any) -> Any:
+        renovada = renovar(self, linha, lease)
+        if falhas:
+            raise falhas.pop()
+        return renovada
+
+    monkeypatch.setattr(Outbox, "renovar", renovar_e_falhar)
+    relay = _relay(engine, rastreador, tmp_path, lease=timedelta(seconds=0.3))
+
+    with EmSegundoPlano(relay):
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+
+    assert _linha(engine, mensagem_id).tentativas == 0
+    eventos = [evento for evento, _ in log.linhas]
+    assert "outbox row failure not recorded; the lease was lost" in eventos
 
 
 def test_falha_ao_liberar_o_lote_interrompido_deixa_as_linhas_para_depois_do_lease(
