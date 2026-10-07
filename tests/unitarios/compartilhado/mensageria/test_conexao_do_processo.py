@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import socket
+import ssl
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
+from pika.adapters.utils.connection_workflow import AMQPConnectorStackTimeout
 from pika.exceptions import AMQPConnectionError, ChannelClosedByBroker
 from prometheus_client import REGISTRY
+from structlog.testing import capture_logs
 
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
@@ -176,6 +184,99 @@ def test_broker_que_recusa_a_conexao_ou_a_declaracao_deixa_fora_de_pronto(
     assert conexao.conectar() is False
     assert not aberta.is_open
     assert conexao.canal is None
+    assert not (tmp_path / "teste-pronto").exists()
+
+
+# O pika deixa sair crus, sem embrulhar em AMQPError, dois erros da abertura que
+# sao broker fora: o nome sem resolucao no DNS (o Service headless do broker sem
+# pod pronto) e o prazo da pilha vencido (o broker aceitou o TCP e nao respondeu
+# o AMQP).
+@pytest.mark.parametrize(
+    "falha",
+    [
+        pytest.param(
+            socket.gaierror(socket.EAI_NONAME, "Name or service not known"),
+            id="nome-sem-resolucao",
+        ),
+        pytest.param(AMQPConnectorStackTimeout("prazo da pilha"), id="broker-mudo"),
+    ],
+)
+def test_erro_cru_da_abertura_que_e_broker_fora_deixa_fora_de_pronto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, falha: BaseException
+) -> None:
+    conexao = _conexao(tmp_path, monkeypatch, falha)
+    (tmp_path / "teste-pronto").touch()
+
+    assert conexao.conectar() is False
+    assert not (tmp_path / "teste-pronto").exists()
+
+
+# Os outros OSError crus da abertura sao defeito de ambiente ou de configuracao:
+# reconectar em laco os esconderia; o processo cai e o Kubernetes o reinicia.
+@pytest.mark.parametrize(
+    "falha",
+    [
+        pytest.param(
+            OSError(errno.EMFILE, "Too many open files"), id="sem-descritores"
+        ),
+        pytest.param(
+            ssl.SSLCertVerificationError(1, "certificate verify failed"),
+            id="falha-de-tls",
+        ),
+    ],
+)
+def test_oserror_da_abertura_que_nao_e_do_nome_do_broker_sobe_cru(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, falha: OSError
+) -> None:
+    conexao = _conexao(tmp_path, monkeypatch, falha)
+
+    with pytest.raises(type(falha), match=str(falha.strerror)):
+        conexao.conectar()
+
+
+def test_abertura_lenta_que_falha_toca_o_heartbeat_de_novo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    heartbeat = tmp_path / "teste-heartbeat"
+    heartbeat.touch()
+
+    def conectar(_params: Any) -> Any:
+        # O pika nao poe prazo na resolucao do nome: o heartbeat, tocado antes
+        # da tentativa, envelhece enquanto ela dura.
+        antigo = time.time() - 120
+        os.utime(heartbeat, (antigo, antigo))
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    conexao = _conexao(tmp_path, monkeypatch)
+    monkeypatch.setattr(amqp, "conectar", conectar)
+
+    assert conexao.conectar() is False
+    assert time.time() - heartbeat.stat().st_mtime < 5
+
+
+def test_broker_que_aceita_o_tcp_e_nao_fala_amqp_fica_fora_de_pronto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # O pika de verdade contra um socket que aceita a conexao (fila do sistema,
+    # sem accept) e nunca responde: o prazo da pilha vence e sai cru.
+    monkeypatch.setattr(amqp, "_log", structlog.get_logger())
+    with socket.create_server(("127.0.0.1", 0)) as mudo:
+        porta = mudo.getsockname()[1]
+        url = f"amqp://os:segredo@127.0.0.1:{porta}/%2F"  # gitleaks:allow
+        parametros = amqp.parametros(url, "teste")
+        parametros.stack_timeout = 0.5
+        conexao = amqp.ConexaoDoProcesso(
+            parametros,
+            processo="teste",
+            sinal=Sinalizador("teste", tmp_path),
+            declarar=lambda _canal: None,
+        )
+
+        with capture_logs() as logs:
+            assert conexao.conectar() is False
+
+    erros = [log["erro"] for log in logs if log["event"] == "broker unavailable"]
+    assert erros == ["AMQPConnectorStackTimeout"]
     assert not (tmp_path / "teste-pronto").exists()
 
 

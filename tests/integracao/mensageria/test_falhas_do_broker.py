@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import socket
 import threading
 import time
@@ -1434,6 +1435,69 @@ def test_consumidor_com_o_nome_do_broker_sem_resolucao_depois_de_uma_queda_volta
     assert conexoes == []
     assert pronto_ao_conectar == [False] * 4
     assert canal.confirmadas == [5]
+
+
+# Com a conexao de pe, o pika embrulha o erro de socket em StreamLostError: um
+# OSError cru vem de outra origem, como o disco do arquivo de vida, e derruba o
+# processo para o Kubernetes reinicia-lo, sem passar por reconexao.
+def _reconexoes(logs: list[dict[str, Any]]) -> list[str]:
+    return [log["event"] for log in logs if "reconnecting" in log["event"]]
+
+
+def test_consumidor_com_erro_de_disco_no_heartbeat_cai_sem_reconectar(
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saude = tmp_path / "saude"
+    saude.mkdir()
+    conexoes.append((ConexaoFalsa(), CanalFalso()))
+    marcar_pronto = Sinalizador.marcar_pronto
+
+    def marcar_e_perder_o_disco(sinal: Sinalizador) -> None:
+        marcar_pronto(sinal)
+        shutil.rmtree(saude)
+
+    monkeypatch.setattr(Sinalizador, "marcar_pronto", marcar_e_perder_o_disco)
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+    processo = EmSegundoPlano(_consumidor(session_factory, rastreador, saude, {}))
+
+    with capture_logs() as logs, pytest.raises(FileNotFoundError), processo:
+        esperar_ate(lambda: not processo.vivo, prazo_s=5)
+
+    assert _reconexoes(logs) == []
+
+
+def test_relay_com_erro_de_disco_no_heartbeat_ocioso_cai_sem_reconectar(
+    engine: Engine,
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saude = tmp_path / "saude"
+    saude.mkdir()
+    conexoes.append((ConexaoFalsa(), CanalFalso()))
+    esperar = modulo_relay.EscutaDaOutbox.esperar
+
+    def esperar_e_perder_o_disco(
+        escuta: modulo_relay.EscutaDaOutbox, parar: threading.Event, poll_s: float
+    ) -> None:
+        esperar(escuta, parar, poll_s)
+        shutil.rmtree(saude, ignore_errors=True)
+
+    monkeypatch.setattr(
+        modulo_relay.EscutaDaOutbox, "esperar", esperar_e_perder_o_disco
+    )
+    monkeypatch.setattr(modulo_relay, "_log", structlog.get_logger())
+    processo = EmSegundoPlano(_relay(engine, rastreador, saude))
+
+    with capture_logs() as logs, pytest.raises(FileNotFoundError), processo:
+        esperar_ate(lambda: not processo.vivo, prazo_s=5)
+
+    assert _reconexoes(logs) == []
 
 
 class _LogEspiao:
