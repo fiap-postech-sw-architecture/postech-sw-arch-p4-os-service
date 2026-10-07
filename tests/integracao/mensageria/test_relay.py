@@ -18,7 +18,7 @@ from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, cat
 from src.compartilhado.infraestrutura.mensageria.outbox import LinhaDaOutbox, Outbox
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
-from tests.integracao.broker import EmSegundoPlano, esperar_ate
+from tests.integracao.broker import EmSegundoPlano, esperar_ate, subir_broker
 from tests.rastreamento import traceparent
 
 if TYPE_CHECKING:
@@ -223,8 +223,8 @@ def test_atrasos_entre_tentativas_sao_1_4_16_e_64_s_e_a_quinta_falha_e_dead(
     outbox = Outbox(engine)
 
     for tentativas, atraso in enumerate([1, 4, 16, 64]):
-        with engine.begin() as conexao:
-            morta = outbox.registrar_falha(conexao, _reler(conexao, linha_id), "x")
+        desfecho = outbox.registrar_falha(_reler(engine, linha_id), "x")
+        with engine.connect() as conexao:
             folga = conexao.execute(
                 text(
                     "SELECT extract(epoch FROM proxima_tentativa_em - "
@@ -232,22 +232,96 @@ def test_atrasos_entre_tentativas_sao_1_4_16_e_64_s_e_a_quinta_falha_e_dead(
                 ),
                 {"id": linha_id},
             ).scalar_one()
-        assert not morta, tentativas
+        assert desfecho == "nova_tentativa", tentativas
         assert atraso - 1 < folga <= atraso, (tentativas, folga)
-    with engine.begin() as conexao:
-        assert outbox.registrar_falha(conexao, _reler(conexao, linha_id), "x")
+    assert outbox.registrar_falha(_reler(engine, linha_id), "x") == "dead"
     assert _status(engine, linha_id) == "dead"
 
 
-def _reler(conexao: Any, linha_id: int) -> LinhaDaOutbox:
-    row = conexao.execute(
-        text(
-            "SELECT id, mensagem_id, correlation_id, exchange, routing_key, envelope, "
-            "traceparent, tracestate, tentativas FROM outbox WHERE id = :id"
-        ),
-        {"id": linha_id},
-    ).one()
+def _reler(engine: Engine, linha_id: int) -> LinhaDaOutbox:
+    """A linha como o claim a entregaria (o lease atual e o token)."""
+    with engine.connect() as conexao:
+        row = conexao.execute(
+            text(
+                "SELECT id, mensagem_id, correlation_id, exchange, routing_key, "
+                "envelope, traceparent, tracestate, tentativas, "
+                "proxima_tentativa_em AS lease_ate FROM outbox WHERE id = :id"
+            ),
+            {"id": linha_id},
+        ).one()
     return LinhaDaOutbox(**row._mapping)
+
+
+@pytest.fixture
+def broker_avulso() -> Iterator[Broker]:
+    """RabbitMQ so deste teste: o alarme de memoria nao alcanca os outros."""
+    container, broker = subir_broker()
+    try:
+        yield broker
+    finally:
+        container.stop()
+
+
+def _transacoes_paradas(engine: Engine) -> int:
+    """Sessoes com transacao aberta e parada ha mais de 1 s, esperando o cliente.
+
+    Transacao curta tambem fica ``idle in transaction`` entre dois comandos, mas
+    por milissegundos; a que espera um publish bloqueado fica segundos.
+    """
+    with engine.connect() as conexao:
+        total: int = conexao.execute(
+            text(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE state = 'idle in transaction' AND datname = current_database() "
+                "AND now() - state_change > interval '1 second'"
+            )
+        ).scalar_one()
+    return total
+
+
+def _reconexoes(processo: str) -> float:
+    valor = REGISTRY.get_sample_value(
+        "pytstop_reconexoes_ao_broker_total", {"processo": processo}
+    )
+    return valor or 0.0
+
+
+def test_alarme_de_memoria_do_broker_nao_gasta_tentativa_nem_segura_transacao(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker_avulso: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Com o alarme, o broker bloqueia a conexao de quem publica. O relay nao
+    # reivindica linha com a conexao bloqueada, o timeout do bloqueio (2 s
+    # aqui, 30 s em producao) derruba a conexao como uma queda, sem contar
+    # tentativa, e nenhuma transacao do banco fica aberta esperando o broker
+    # (o idle_in_transaction_session_timeout a mataria).
+    monkeypatch.setattr(amqp, "_BLOQUEIO_MAXIMO_S", 2)
+    monkeypatch.setattr(amqp, "RECONEXAO_TETO_S", 0.5)
+    mensagem_id = _publicar(session_factory)
+    broker_avulso.rabbitmqctl("set_vm_memory_high_watermark", "0.0001")
+    antes = _reconexoes("relay")
+    paradas: list[int] = []
+
+    def caiu_duas_vezes_sem_transacao_parada() -> bool:
+        paradas.append(_transacoes_paradas(engine))
+        return _reconexoes("relay") >= antes + 2
+
+    with EmSegundoPlano(_relay(engine, broker_avulso, rastreador, tmp_path)):
+        esperar_ate(caiu_duas_vezes_sem_transacao_parada, prazo_s=60)
+        bloqueada = _linha(engine, mensagem_id)
+        assert (bloqueada.status, bloqueada.tentativas) == ("pendente", 0)
+
+        broker_avulso.rabbitmqctl("set_vm_memory_high_watermark", "0.4")
+        esperar_ate(
+            lambda: _linha(engine, mensagem_id).status == "entregue", prazo_s=60
+        )
+
+    assert max(paradas) == 0
+    assert _linha(engine, mensagem_id).tentativas == 0
 
 
 @pytest.fixture

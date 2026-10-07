@@ -121,6 +121,14 @@ class ConexaoFalsa:
         self.canais_novos = list(canais_novos)
         self.no_heartbeat = no_heartbeat
         self.is_open = True
+        self.ao_bloquear: Any = None
+        self.ao_desbloquear: Any = None
+
+    def add_on_connection_blocked_callback(self, callback: Any) -> None:
+        self.ao_bloquear = callback
+
+    def add_on_connection_unblocked_callback(self, callback: Any) -> None:
+        self.ao_desbloquear = callback
 
     def channel(self) -> Any:
         canal = self.canais_novos.pop(0)
@@ -348,6 +356,48 @@ def test_banco_fora_no_ciclo_nao_derruba_o_relay(
         esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
 
     assert falhas == []
+
+
+def test_conexao_bloqueada_pelo_broker_para_os_claims_ate_o_desbloqueio(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    conexoes: list[Any],
+    rastreador: Rastreador,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conexao = ConexaoFalsa()
+    canal = CanalFalso()
+    conexoes.append((conexao, canal))
+    claims: list[int] = []
+    reivindicar = Outbox.reivindicar
+
+    def contar_claims(self: Outbox, *args: Any) -> Any:
+        claims.append(1)
+        return reivindicar(self, *args)
+
+    monkeypatch.setattr(Outbox, "reivindicar", contar_claims)
+    batidas = tmp_path / "relay-heartbeat"
+
+    with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
+        esperar_ate(lambda: (tmp_path / "relay-pronto").exists())
+        conexao.ao_bloquear(conexao, object())
+        antes = len(claims)
+        mensagem_id = _gravar(session_factory)
+        # Tres voltas do laco bloqueado: nenhum claim.
+        for _ in range(3):
+            batida = batidas.stat().st_mtime_ns
+            esperar_ate(lambda batida=batida: batidas.stat().st_mtime_ns > batida)
+        assert len(claims) == antes
+        assert (_linha(engine, mensagem_id).status, canal.publicadas) == (
+            "pendente",
+            [],
+        )
+
+        conexao.ao_desbloquear(conexao, object())
+        esperar_ate(lambda: _linha(engine, mensagem_id).status == "entregue")
+
+    assert _linha(engine, mensagem_id).tentativas == 0
 
 
 def test_linha_que_outra_replica_ja_finalizou_e_pulada(

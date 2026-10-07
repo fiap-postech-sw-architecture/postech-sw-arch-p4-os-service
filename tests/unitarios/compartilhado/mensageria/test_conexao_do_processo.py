@@ -64,6 +64,12 @@ class _Aberta:
     def close(self) -> None:
         self.is_open = False
 
+    def add_on_connection_blocked_callback(self, callback: Any) -> None:
+        self.ao_bloquear = callback
+
+    def add_on_connection_unblocked_callback(self, callback: Any) -> None:
+        self.ao_desbloquear = callback
+
 
 @pytest.mark.usefixtures("relogio")
 def test_espera_dobra_a_cada_falha_ate_o_teto(
@@ -165,6 +171,25 @@ def test_broker_que_recusa_a_conexao_ou_a_declaracao_deixa_fora_de_pronto(
     assert not aberta.is_open
     assert conexao.canal is None
     assert not (tmp_path / "teste-pronto").exists()
+
+
+def test_connection_blocked_e_unblocked_do_broker_viram_o_estado_bloqueada(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    aberta = _Aberta()
+    conexao = _conexao(tmp_path, monkeypatch, (aberta, object()), (_Aberta(), object()))
+    assert conexao.conectar()
+
+    aberta.ao_bloquear(aberta, object())
+    assert conexao.bloqueada
+    aberta.ao_desbloquear(aberta, object())
+    assert not conexao.bloqueada
+
+    # Conexao nova comeca desbloqueada.
+    aberta.ao_bloquear(aberta, object())
+    conexao.desconectar()
+    assert conexao.conectar()
+    assert not conexao.bloqueada
 
 
 @pytest.mark.usefixtures("relogio")

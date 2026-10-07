@@ -2,10 +2,12 @@
 
 Sem conexao com o broker o relay nao reivindica linhas e reconecta com o
 backoff da ``ConexaoDoProcesso``: a queda do broker nao conta tentativa de
-nenhuma linha. Conectado, drena a outbox em lotes (o SQL de cada passo esta em
-``outbox.py``): o claim pega as linhas vencidas em ordem por OS e as segura por
-um lease, e cada linha e entregue na propria transacao, que comeca pelo fencing:
-duas replicas nunca publicam a mesma linha ao mesmo tempo.
+nenhuma linha, e com a conexao bloqueada por alarme de recursos (o
+``Connection.Blocked``) ele para de reivindicar ate o desbloqueio; o timeout do
+bloqueio derruba a conexao, como uma queda. Conectado, drena a outbox em lotes
+de transacoes curtas, sem transacao aberta durante o publish (``outbox.py``):
+claim com lease, renovacao do lease antes de publicar e o desfecho gravado so
+se a linha ainda for desta replica.
 
 A publicacao usa publisher confirms e ``mandatory``: a linha so vira
 ``entregue`` depois do confirm. Devolvida (sem fila para a routing key),
@@ -60,7 +62,7 @@ if TYPE_CHECKING:
 
     import pika
     from opentelemetry.trace import Tracer
-    from sqlalchemy import Connection, Engine
+    from sqlalchemy import Engine
 
 _log = structlog.get_logger(__name__)
 
@@ -166,6 +168,11 @@ class Relay:
                 if self._broker.canal is None and not self._broker.conectar():
                     self._broker.esperar(parar)
                     continue
+                if self._broker.bloqueada:
+                    # Alarme de recursos no broker: nada de reivindicar linhas
+                    # ate o Connection.Unblocked, que o _esperar recebe.
+                    escuta = self._esperar(escuta, parar)
+                    continue
                 try:
                     self._drenar(parar)
                     self._limpar_se_devido()
@@ -198,49 +205,57 @@ class Relay:
             if not linhas:
                 return
             for indice, linha in enumerate(linhas):
+                if self._broker.bloqueada:
+                    self._liberar(linhas[indice:])
+                    return
                 try:
                     self._entregar(linha)
                 except _BrokerIndisponivelError:
                     # As linhas do lote voltam ja, sem esperar o lease: o broker
                     # caiu, nao foram elas que falharam.
-                    self._liberar([restante.id for restante in linhas[indice:]])
+                    self._liberar(linhas[indice:])
                     raise
                 except SQLAlchemyError:
                     # Erro de banco numa linha nao derruba o lote; ela volta
                     # quando o lease vencer.
                     _log.exception("outbox row failed", outbox_id=linha.id)
 
-    def _entregar(self, linha: LinhaDaOutbox) -> None:
+    def _entregar(self, reivindicada: LinhaDaOutbox) -> None:
         if not self._broker.canal.is_open:
             self._reabrir_canal()
-        with self._outbox.travar(linha) as conexao:
-            if conexao is None:
-                _log.info("outbox row taken by another replica", outbox_id=linha.id)
-                return
-            tipo = linha.envelope["tipo"]
-            # O span cobre publicacao, marcacao da linha e logs: as linhas de
-            # log saem com o trace_id e o span_id da publicacao.
-            with self._tracer.start_as_current_span(
-                f"publish {tipo}",
-                context=contexto_dos_cabecalhos(
-                    {"traceparent": linha.traceparent, "tracestate": linha.tracestate}
-                ),
-                kind=SpanKind.PRODUCER,
-                attributes={
-                    "messaging.system": "rabbitmq",
-                    "messaging.operation.type": "send",
-                    "messaging.destination.name": linha.exchange,
-                    "messaging.rabbitmq.destination.routing_key": linha.routing_key,
-                    "messaging.message.id": str(linha.mensagem_id),
-                    "messaging.message.conversation_id": str(linha.correlation_id),
-                    "correlation_id": str(linha.correlation_id),
-                },
-                record_exception=False,
-            ) as span:
+        linha = self._outbox.renovar(reivindicada, self._config.lease)
+        if linha is None:
+            _log.info("outbox row taken by another replica", outbox_id=reivindicada.id)
+            return
+        tipo = linha.envelope["tipo"]
+        # O span cobre publicacao, marcacao da linha e logs: as linhas de log
+        # saem com o trace_id e o span_id da publicacao.
+        with self._tracer.start_as_current_span(
+            f"publish {tipo}",
+            context=contexto_dos_cabecalhos(
+                {"traceparent": linha.traceparent, "tracestate": linha.tracestate}
+            ),
+            kind=SpanKind.PRODUCER,
+            attributes={
+                "messaging.system": "rabbitmq",
+                "messaging.operation.type": "send",
+                "messaging.destination.name": linha.exchange,
+                "messaging.rabbitmq.destination.routing_key": linha.routing_key,
+                "messaging.message.id": str(linha.mensagem_id),
+                "messaging.message.conversation_id": str(linha.correlation_id),
+                "correlation_id": str(linha.correlation_id),
+            },
+            record_exception=False,
+        ) as span:
+            try:
                 falha = self._publicar(linha)
-                if falha is not None:
-                    span.set_status(StatusCode.ERROR, falha)
-                self._registrar_desfecho(conexao, linha, falha)
+            except _BrokerIndisponivelError:
+                # O lease renovado e o desta linha: o _drenar so libera as outras.
+                self._liberar([linha])
+                raise
+            if falha is not None:
+                span.set_status(StatusCode.ERROR, falha)
+            self._registrar_desfecho(linha, falha)
 
     def _publicar(self, linha: LinhaDaOutbox) -> str | None:
         """Publica com confirm; devolve a falha da mensagem, ou None se confirmada.
@@ -268,9 +283,7 @@ class Relay:
             raise _BrokerIndisponivelError from exc
         return None
 
-    def _registrar_desfecho(
-        self, conexao: Connection, linha: LinhaDaOutbox, falha: str | None
-    ) -> None:
+    def _registrar_desfecho(self, linha: LinhaDaOutbox, falha: str | None) -> None:
         """Marca a linha: entregue, nova tentativa com atraso ou `dead`."""
         tipo = linha.envelope["tipo"]
         contexto_de_log = {
@@ -280,26 +293,39 @@ class Relay:
             "correlation_id": str(linha.correlation_id),
         }
         if falha is None:
-            self._outbox.marcar_entregue(conexao, linha)
             MENSAGENS_PUBLICADAS.labels(tipo=tipo).inc()
-            _log.info("message published", **contexto_de_log)
             # O broker confirmou: a proxima queda recomeca o backoff do minimo.
             self._broker.sucesso()
+            if self._outbox.marcar_entregue(linha):
+                _log.info("message published", **contexto_de_log)
+            else:
+                # O publish passou do lease e outra replica pegou a linha: a
+                # mensagem pode sair de novo, e o consumidor descarta pelo id.
+                _log.warning(
+                    "message published after losing the lease", **contexto_de_log
+                )
             return
-        if self._outbox.registrar_falha(conexao, linha, falha):
+        desfecho = self._outbox.registrar_falha(linha, falha)
+        if desfecho == "perdida":
+            _log.warning(
+                "message publish failed after losing the lease", **contexto_de_log
+            )
+            return
+        tentativas = linha.tentativas + 1
+        if desfecho == "dead":
             _log.error(
                 "message publish failed; outbox row dead",
-                tentativas=linha.tentativas + 1,
+                tentativas=tentativas,
                 motivo=falha,
                 **contexto_de_log,
             )
-            return
-        _log.warning(
-            "message publish failed; retry scheduled",
-            tentativas=linha.tentativas + 1,
-            motivo=falha,
-            **contexto_de_log,
-        )
+        else:
+            _log.warning(
+                "message publish failed; retry scheduled",
+                tentativas=tentativas,
+                motivo=falha,
+                **contexto_de_log,
+            )
 
     def _reabrir_canal(self) -> None:
         """Canal novo na mesma conexao, depois de o broker fechar o anterior."""
@@ -308,9 +334,9 @@ class Relay:
         except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
             raise _BrokerIndisponivelError from exc
 
-    def _liberar(self, ids: list[int]) -> None:
+    def _liberar(self, linhas: list[LinhaDaOutbox]) -> None:
         try:
-            self._outbox.liberar(ids)
+            self._outbox.liberar(linhas)
         except SQLAlchemyError:
             _log.exception("outbox rows not released; they return after the lease")
 
@@ -347,8 +373,10 @@ class Relay:
                 # Sem isso o broker derruba a conexao ociosa por heartbeat.
                 self._broker.conexao.process_data_events(time_limit=0)
             except amqp.ERROS_DE_CONEXAO:
+                # Inclui o timeout do bloqueio por alarme de recursos.
                 _log.warning("broker connection lost while idle; reconnecting")
                 self._broker.desconectar()
+                self._broker.esperar(parar)
         return escuta
 
     def _abrir_escuta(self) -> Any:  # noqa: ANN401  # conexao psycopg2

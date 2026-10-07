@@ -39,6 +39,7 @@ def test_limite_de_tentativas_sai_do_tamanho_da_tabela(
 
 
 def test_envelope_fica_fora_do_repr_da_linha() -> None:
+    from datetime import UTC, datetime
     from uuid import uuid4
 
     linha = LinhaDaOutbox(
@@ -51,6 +52,7 @@ def test_envelope_fica_fora_do_repr_da_linha() -> None:
         traceparent=None,
         tracestate=None,
         tentativas=0,
+        lease_ate=datetime.now(UTC),
     )
 
     assert "BRA2E19" not in repr(linha)

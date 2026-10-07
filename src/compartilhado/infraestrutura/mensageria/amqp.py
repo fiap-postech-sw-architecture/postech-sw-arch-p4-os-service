@@ -147,6 +147,9 @@ class ConexaoDoProcesso:
         # BlockingConnection e BlockingChannel (pika sem tipos).
         self.conexao: Any = None
         self.canal: Any = None
+        # Connection.Blocked (alarme de memoria ou disco do broker): quem publica
+        # para de reivindicar trabalho ate o Connection.Unblocked.
+        self.bloqueada = False
         self._atraso = RECONEXAO_BASE_S
         self._conectada_em: float | None = None
 
@@ -154,6 +157,9 @@ class ConexaoDoProcesso:
         """Conecta, declara e marca pronto; com o broker falhando, devolve False."""
         try:
             self.conexao, self.canal = conectar(self._parametros)
+            self.bloqueada = False
+            self.conexao.add_on_connection_blocked_callback(self._bloqueada)
+            self.conexao.add_on_connection_unblocked_callback(self._desbloqueada)
             self._declarar(self.canal)
         except (*ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
             _log.warning(
@@ -193,6 +199,16 @@ class ConexaoDoProcesso:
     def sucesso(self) -> None:
         """A conexao fez trabalho: a proxima queda recomeca do minimo."""
         self._atraso = RECONEXAO_BASE_S
+
+    def _bloqueada(self, _conexao: Any, _metodo: Any) -> None:  # noqa: ANN401  # pika sem tipos
+        self.bloqueada = True
+        _log.warning(
+            "broker blocked the connection (resource alarm)", processo=self._processo
+        )
+
+    def _desbloqueada(self, _conexao: Any, _metodo: Any) -> None:  # noqa: ANN401  # pika sem tipos
+        self.bloqueada = False
+        _log.info("broker unblocked the connection", processo=self._processo)
 
 
 def _sortear(teto: float) -> float:
