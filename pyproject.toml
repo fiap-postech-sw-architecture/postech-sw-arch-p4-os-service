@@ -284,6 +284,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 markers = [
     "integracao: testes de integracao (Postgres e RabbitMQ via testcontainers)",
+    "rede: precisa de internet (checksum dos contratos contra o platform); offline: -m 'not rede'",
 ]
 # `uv run pytest` e o gate completo: unitarios + integracao com cobertura e
 # fail_under do .coveragerc. Para rodar um subconjunto sem o gate, use --no-cov.
