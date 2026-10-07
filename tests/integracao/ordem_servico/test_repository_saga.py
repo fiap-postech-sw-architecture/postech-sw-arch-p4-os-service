@@ -75,38 +75,64 @@ def _ate_aguardando_orcamento(saga: Saga) -> None:
     )
 
 
-def test_round_trip_com_os_jsonb_e_os_instantes(session: Session) -> None:
-    saga = _iniciada(_ordem(session))
-    repo = SagaSQLAlchemyRepository(session)
-    repo.salvar(saga)
-    _ate_aguardando_orcamento(saga)
-    repo.salvar(saga)
-    session.expire_all()
+def test_round_trip_com_os_jsonb_e_os_instantes(
+    session_factory: sessionmaker[Session],
+) -> None:
+    with session_factory() as sess:
+        saga = _iniciada(_ordem(sess))
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        _ate_aguardando_orcamento(saga)
+        SagaSQLAlchemyRepository(sess).salvar(saga)
+        sess.commit()
+        ordem_id, em_voo, itens = saga.ordem_id, saga.comando_em_voo, saga.itens
 
-    lida = repo.obter(saga.ordem_id)
+    # Sessao nova: a saga vem do banco, nao da identity map de quem gravou.
+    with session_factory() as sess:
+        lida = SagaSQLAlchemyRepository(sess).obter(ordem_id)
+        assert lida is not None
+        assert lida.etapa is EtapaSaga.AGUARDANDO_ORCAMENTO
+        assert lida.versao == 2
+        assert [p["gatilho"] for p in lida.passos] == [
+            "abertura",
+            "DiagnosticoConcluido",
+        ]
+        assert (lida.comando_em_voo, lida.itens) == (em_voo, itens)
+        assert lida.prazo_resposta_em == AGORA + timedelta(minutes=3)
+        assert lida.iniciada_em == AGORA
+        assert lida.etapa_desde == lida.atualizada_em == AGORA + timedelta(minutes=1)
+        assert (lida.passos_concluidos, lida.plano_compensacao, lida.reenvios) == (
+            (),
+            (),
+            0,
+        )
+        # O OrcamentoGerado marca o T3 e limpa o comando em voo.
+        lida.avancar(
+            evento("OrcamentoGerado", ordem_id),
+            _MARCOS,
+            agora=AGORA + timedelta(minutes=2),
+            ator="consumidor",
+        )
+        SagaSQLAlchemyRepository(sess).salvar(lida)
+        sess.commit()
 
-    assert lida is not None
-    assert lida.etapa is EtapaSaga.AGUARDANDO_ORCAMENTO
-    assert lida.versao == 2
-    assert lida.passos == saga.passos
-    assert [p["gatilho"] for p in lida.passos] == ["abertura", "DiagnosticoConcluido"]
-    assert lida.itens == saga.itens
-    assert len(lida.itens) == 2
-    assert lida.comando_em_voo == saga.comando_em_voo
-    assert lida.prazo_resposta_em == AGORA + timedelta(minutes=3)
-    assert lida.iniciada_em == AGORA
-    assert lida.etapa_desde == lida.atualizada_em == AGORA + timedelta(minutes=1)
-    assert (lida.passos_concluidos, lida.plano_compensacao, lida.reenvios) == (
-        (),
-        (),
-        0,
-    )
-    # Releitura de verdade: os JSONB voltam do banco, nao da identidade em memoria.
-    linha = session.execute(
-        text("SELECT etapa, passos -> 1 ->> 'gatilho' FROM sagas WHERE ordem_id = :id"),
-        {"id": saga.ordem_id},
-    ).one()
-    assert tuple(linha) == ("aguardando_orcamento", "DiagnosticoConcluido")
+    # Cada JSONB conferido pelo SQL: mutacao no lugar nao chegaria ao banco.
+    with session_factory() as sess:
+        linha = sess.execute(
+            text(
+                "SELECT passos, passos_concluidos, comando_em_voo, itens, "
+                "plano_compensacao FROM sagas WHERE ordem_id = :id"
+            ),
+            {"id": ordem_id},
+        ).one()
+    passos, concluidos, comando, itens_gravados, plano = linha
+    assert [p["gatilho"] for p in passos] == [
+        "abertura",
+        "DiagnosticoConcluido",
+        "OrcamentoGerado",
+    ]
+    assert passos[1]["comando"] == "GerarOrcamento"
+    assert (concluidos, comando, plano) == (["T3"], None, [])
+    assert itens_gravados == list(itens)
 
 
 def test_obter_saga_inexistente_devolve_none(session: Session) -> None:
