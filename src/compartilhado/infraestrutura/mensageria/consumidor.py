@@ -1,0 +1,450 @@
+"""Consumidor da fila ``os.eventos`` (ADR-036, RFC-004 secoes 5.1 e 5.4).
+
+Para cada mensagem, na ordem:
+
+1. Origem: o ``user_id`` (que o broker confere contra a conexao de quem
+   publicou) tem de ser o produtor do ``tipo`` no catalogo. A copia que volta
+   da fila de retry chega com o ``user_id`` deste consumidor, que a republicou:
+   com ``x-tentativa`` de 1 em diante ele aceita o proprio usuario.
+2. Trace: o span CONSUMER e filho do contexto que veio nos headers.
+3. Contrato: envelope e ``dados`` validados pelo schema do ``tipo``; leitor
+   tolerante (campo extra passa), ``versao`` desconhecida reprova.
+4. Efeito: na mesma transacao, grava ``mensagens_processadas`` e chama o
+   handler do ``tipo``; ``id`` repetido recebe ack sem efeito.
+
+Erro transitorio (banco fora, ``FalhaTransitoriaError``, conflito de versao):
+copia em ``pytstop.retry``, com confirm, e so entao o ack da original. A
+routing key e a fila de retry do nivel da nova tentativa (``os.eventos.retry.1s``,
+``.5s``, ``.15s``, ``.60s`` e ``.300s``): o atraso e o TTL da propria fila, que
+devolve a copia a ``os.eventos`` pelo dead letter. Uma fila por atraso, e nao um
+``expiration`` por mensagem numa fila so, porque a mensagem so expira na cabeca
+da fila: uma copia de 300 s seguraria as de 1 s. Esgotadas as cinco, ou erro
+permanente (tipo, origem, JSON ou contrato invalidos, ou qualquer outra
+excecao): ``reject`` sem requeue, e a fila manda a mensagem para a
+``os.eventos.dlq``. Uma vez por hora apaga as linhas de
+``mensagens_processadas`` com mais de 30 dias.
+"""
+
+from __future__ import annotations
+
+import json
+import traceback
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, Final, cast
+
+import pika
+import structlog
+from opentelemetry.trace import SpanKind, StatusCode
+from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
+from prometheus_client import Counter
+from sqlalchemy import delete
+from sqlalchemy.exc import SQLAlchemyError
+
+from src.compartilhado.aplicacao.mensageria import (
+    ContratoInvalidoError,
+    Desfecho,
+    FalhaTransitoriaError,
+    MensagemRecebida,
+)
+from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura.mensageria import amqp
+from src.compartilhado.infraestrutura.mensageria.contratos import FILA, catalogo
+from src.compartilhado.infraestrutura.mensageria.processo import (
+    DIRETORIO_DE_SAUDE,
+    Sinalizador,
+    inteiro_do_ambiente,
+)
+from src.compartilhado.infraestrutura.mensageria.telemetria import (
+    cabecalhos_do_contexto_atual,
+    contexto_dos_cabecalhos,
+)
+from src.compartilhado.infraestrutura.outbox_mapping import (
+    mensagens_processadas_table,
+    registrar_processada,
+)
+
+if TYPE_CHECKING:
+    import threading
+    from pathlib import Path
+
+    from opentelemetry.trace import Tracer
+    from sqlalchemy import CursorResult
+    from sqlalchemy.orm import Session, sessionmaker
+
+_log = structlog.get_logger(__name__)
+
+# Metrica do consumidor (ADR-043), no registro padrao que o /metrics do processo
+# serve. So o consumidor importa este modulo.
+MENSAGENS_CONSUMIDAS: Final = Counter(
+    "pytstop_mensagens_consumidas_total",
+    "Mensagens tratadas pelo consumidor, por tipo e resultado "
+    "(processada, duplicada, ignorada, retry, dlq).",
+    ["tipo", "resultado"],
+)
+
+type Handler = Callable[[MensagemRecebida, Session], Desfecho]
+
+# Fila de retry de cada tentativa (`os.eventos.retry.<nivel>`, TTL no
+# definitions.json do platform); depois da quinta, DLQ.
+NIVEIS_DE_RETRY: Final = ("1s", "5s", "15s", "60s", "300s")
+_EXCHANGE_DE_RETRY: Final = "pytstop.retry"
+_RECONEXAO_BASE_S: Final = 1.0
+_RECONEXAO_TETO_S: Final = 30.0
+_RETENCAO: Final = timedelta(days=30)
+_INTERVALO_DE_LIMPEZA: Final = timedelta(hours=1)
+_TIPO_DESCONHECIDO: Final = "desconhecido"
+# Banco (fora do ar, deadlock, timeout, conflito de escrita) e dependencia
+# fora: a mesma mensagem tende a passar numa nova tentativa.
+_TRANSITORIOS: Final[tuple[type[Exception], ...]] = (
+    FalhaTransitoriaError,
+    ConflitoDeConcorrenciaException,
+    SQLAlchemyError,
+    TimeoutError,
+    ConnectionError,
+)
+
+
+class _MensagemRejeitadaError(Exception):
+    """Erro permanente: a mensagem vai para a DLQ sem nova tentativa."""
+
+    def __init__(self, motivo: str, **contexto: str) -> None:
+        super().__init__(motivo)
+        self.motivo = motivo
+        self.contexto = contexto
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigConsumidor:
+    # Prefetch pequeno: o que esta no buffer de um consumidor espera por ele.
+    prefetch: int = 5
+    # Intervalo maximo sem mensagem antes de bater o heartbeat e olhar o sinal
+    # de parada.
+    inatividade_s: float = 1.0
+    diretorio_de_saude: Path = DIRETORIO_DE_SAUDE
+
+    @classmethod
+    def do_ambiente(cls) -> ConfigConsumidor:
+        """Le ``CONSUMIDOR_PREFETCH``."""
+        return cls(prefetch=inteiro_do_ambiente("CONSUMIDOR_PREFETCH", 5, minimo=1))
+
+
+class Consumidor:
+    """Consome ``os.eventos`` ate o ``parar`` (SIGTERM) ser sinalizado."""
+
+    def __init__(
+        self,
+        *,
+        session_factory: sessionmaker[Session],
+        parametros: pika.ConnectionParameters,
+        despachante: Mapping[str, Handler],
+        tracer: Tracer,
+        config: ConfigConsumidor | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._parametros = parametros
+        self._usuario = amqp.usuario(parametros)
+        self._despachante = despachante
+        self._tracer = tracer
+        self._config = config or ConfigConsumidor()
+        self._sinal = Sinalizador("consumidor", self._config.diretorio_de_saude)
+        self._catalogo = catalogo()
+        self._conexao: Any = None
+        self._canal: Any = None
+        self._proxima_limpeza = datetime.now(UTC)
+        # Backoff de reconexao. So volta ao minimo depois de uma mensagem
+        # tratada: um canal que o broker fecha a cada mensagem (rota de retry
+        # sem permissao, por exemplo) nao vira um laco de reconexao.
+        self._atraso = _RECONEXAO_BASE_S
+
+    def executar(self, parar: threading.Event) -> None:
+        """Laco principal; queda do broker nao derruba o processo.
+
+        Encerramento gracioso: com o ``parar`` sinalizado, conclui a mensagem em
+        curso, cancela o consumo (as mensagens pre-buscadas voltam para a fila)
+        e fecha a conexao.
+        """
+        _log.info("consumer started", fila=FILA, prefetch=self._config.prefetch)
+        try:
+            while not parar.is_set():
+                self._sinal.bater()
+                if not self._conectar():
+                    self._esperar(parar)
+                    continue
+                self._sinal.marcar_pronto()
+                try:
+                    # Volta normalmente no `parar` ou quando o broker cancela o
+                    # consumo (o gerador do pika so termina): reconecta.
+                    self._consumir(parar)
+                except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
+                    # A mensagem sem ack volta para a fila quando a conexao fecha.
+                    _log.warning(
+                        "broker connection lost; reconnecting",
+                        erro=type(exc).__name__,
+                        codigo=getattr(exc, "reply_code", None),
+                    )
+                    self._desconectar()
+                    self._esperar(parar)
+                finally:
+                    self._desconectar()
+        finally:
+            self._desconectar()
+            _log.info("consumer stopped")
+
+    def _conectar(self) -> bool:
+        try:
+            self._conexao, self._canal = amqp.conectar(self._parametros)
+            # Declaracao passiva so do que o usuario `os` alcanca: a fila que
+            # ele le e o exchange de retry em que escreve.
+            self._canal.queue_declare(FILA, passive=True)
+            self._canal.exchange_declare(_EXCHANGE_DE_RETRY, passive=True)
+            self._canal.basic_qos(prefetch_count=self._config.prefetch)
+        except (*amqp.ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
+            _log.warning(
+                "broker unavailable",
+                erro=type(exc).__name__,
+                codigo=getattr(exc, "reply_code", None),
+            )
+            self._desconectar()
+            return False
+        _log.info("broker connected", fila=FILA)
+        return True
+
+    def _esperar(self, parar: threading.Event) -> None:
+        parar.wait(self._atraso)
+        self._atraso = min(self._atraso * 2, _RECONEXAO_TETO_S)
+
+    def _desconectar(self) -> None:
+        if self._conexao is not None:
+            amqp.fechar(self._conexao)
+        self._conexao = None
+        self._canal = None
+        self._sinal.marcar_nao_pronto()
+
+    def _consumir(self, parar: threading.Event) -> None:
+        for metodo, propriedades, corpo in self._canal.consume(
+            FILA, inactivity_timeout=self._config.inatividade_s
+        ):
+            self._sinal.bater()
+            if metodo is not None:
+                self._tratar(metodo, propriedades, corpo)
+            self._limpar_se_devido()
+            if parar.is_set():
+                # Conclui a mensagem em curso e para; ao fechar a conexao o
+                # broker devolve a fila as pre-buscadas sem ack.
+                return
+
+    def _tratar(self, metodo: Any, propriedades: Any, corpo: bytes) -> None:  # noqa: ANN401  # tipos do pika
+        tipo = propriedades.type if isinstance(propriedades.type, str) else ""
+        rotulo = tipo if tipo in self._catalogo.consumidos else _TIPO_DESCONHECIDO
+        cabecalhos = propriedades.headers or {}
+        with (
+            structlog.contextvars.bound_contextvars(
+                message_id=propriedades.message_id,
+                correlation_id=propriedades.correlation_id,
+                tipo=rotulo,
+            ),
+            self._tracer.start_as_current_span(
+                f"process {rotulo}",
+                context=contexto_dos_cabecalhos(cabecalhos),
+                kind=SpanKind.CONSUMER,
+                attributes={
+                    "messaging.system": "rabbitmq",
+                    "messaging.operation.type": "process",
+                    "messaging.destination.name": FILA,
+                    "messaging.message.id": str(propriedades.message_id),
+                    "messaging.message.conversation_id": str(
+                        propriedades.correlation_id
+                    ),
+                    "correlation_id": str(propriedades.correlation_id),
+                },
+                record_exception=False,
+            ) as span,
+        ):
+            try:
+                tentativa = self._tentativa(cabecalhos)
+                resultado = self._processar(propriedades, corpo, tipo, tentativa)
+            except _MensagemRejeitadaError as exc:
+                _log.warning(
+                    "message rejected to dlq", motivo=exc.motivo, **exc.contexto
+                )
+                span.set_status(StatusCode.ERROR, exc.motivo)
+                self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+                resultado = "dlq"
+            except _TRANSITORIOS as exc:
+                span.set_status(StatusCode.ERROR, type(exc).__name__)
+                resultado = self._repetir(metodo, propriedades, corpo, tentativa, exc)
+            except Exception as exc:  # noqa: BLE001  # mensagem venenosa vai para a DLQ
+                # Repetir nao muda o resultado, e derrubar o processo traria a
+                # mesma mensagem de volta primeiro, a cada reinicio.
+                _log.error(
+                    "message processing crashed; rejected to dlq",
+                    erro=type(exc).__name__,
+                    onde=_onde(exc),
+                )
+                span.set_status(StatusCode.ERROR, type(exc).__name__)
+                self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+                resultado = "dlq"
+            else:
+                self._canal.basic_ack(metodo.delivery_tag)
+            MENSAGENS_CONSUMIDAS.labels(tipo=rotulo, resultado=resultado).inc()
+            # A conexao responde: o proximo problema de broker recomeca o
+            # backoff do minimo.
+            self._atraso = _RECONEXAO_BASE_S
+
+    def _tentativa(self, cabecalhos: Mapping[str, Any]) -> int:
+        """``x-tentativa`` da mensagem: 0 na primeira entrega, ate 5 na copia."""
+        tentativa = cabecalhos.get("x-tentativa", 0)
+        if (
+            not isinstance(tentativa, int)
+            or isinstance(tentativa, bool)
+            or not 0 <= tentativa <= len(NIVEIS_DE_RETRY)
+        ):
+            raise _MensagemRejeitadaError("tentativa_invalida")
+        return tentativa
+
+    def _processar(
+        self,
+        propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
+        corpo: bytes,
+        tipo: str,
+        tentativa: int,
+    ) -> str:
+        """Confere e aplica a mensagem; devolve o ``resultado`` da metrica."""
+        produtor = (
+            self._catalogo.produtor(tipo) if tipo in self._catalogo.consumidos else None
+        )
+        if produtor is None:
+            raise _MensagemRejeitadaError("tipo_desconhecido")
+        usuario = propriedades.user_id
+        copia_de_retry = usuario == self._usuario and tentativa > 0
+        if usuario != produtor and not copia_de_retry:
+            raise _MensagemRejeitadaError(
+                "produtor_divergente", user_id=str(usuario), esperado=produtor
+            )
+        try:
+            envelope = json.loads(corpo)
+            self._catalogo.validar(envelope)
+        except ValueError as exc:  # JSON invalido (UnicodeDecodeError incluso)
+            raise _MensagemRejeitadaError("json_invalido") from exc
+        except ContratoInvalidoError as exc:
+            raise _MensagemRejeitadaError(
+                "contrato_invalido", caminho=exc.caminho, regra=exc.regra
+            ) from exc
+        if envelope["tipo"] != tipo or envelope["id"] != propriedades.message_id:
+            raise _MensagemRejeitadaError("propriedades_divergentes")
+        mensagem = MensagemRecebida.do_envelope(envelope)
+        handler = self._despachante.get(tipo)
+        if handler is None:
+            raise _MensagemRejeitadaError("sem_handler")
+        with self._session_factory() as sessao:
+            if not registrar_processada(sessao, mensagem.id):
+                _log.info("duplicate message acknowledged without effect")
+                return "duplicada"
+            try:
+                desfecho = handler(mensagem, sessao)
+            except _TRANSITORIOS:
+                raise
+            except Exception as exc:
+                # Bug ou regra violada: repetir nao muda o resultado. So o tipo
+                # e o lugar da excecao vao para o log: a mensagem dela pode
+                # trazer dado da mensagem (placa, texto livre).
+                raise _MensagemRejeitadaError(
+                    "erro_no_handler", erro=type(exc).__name__, onde=_onde(exc)
+                ) from exc
+            sessao.commit()
+        return desfecho.value
+
+    def _repetir(
+        self,
+        metodo: Any,  # noqa: ANN401
+        propriedades: Any,  # noqa: ANN401
+        corpo: bytes,
+        tentativa: int,
+        erro: Exception,
+    ) -> str:
+        """Copia na fila de retry do nivel e ack da original; esgotada, DLQ."""
+        if tentativa >= len(NIVEIS_DE_RETRY):
+            _log.warning(
+                "message retries exhausted; rejected to dlq",
+                tentativas=tentativa,
+                erro=type(erro).__name__,
+            )
+            self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+            return "dlq"
+        copia = pika.BasicProperties(
+            message_id=propriedades.message_id,
+            correlation_id=propriedades.correlation_id,
+            type=propriedades.type,
+            content_type=propriedades.content_type,
+            delivery_mode=pika.DeliveryMode.Persistent,
+            # O broker so aceita o usuario da propria conexao (406 se outro).
+            user_id=self._usuario,
+            # Contexto do span deste consumo: a proxima passada vira filha dele
+            # no mesmo trace.
+            headers={**cabecalhos_do_contexto_atual(), "x-tentativa": tentativa + 1},
+        )
+        fila_de_retry = f"{FILA}.retry.{NIVEIS_DE_RETRY[tentativa]}"
+        try:
+            self._canal.basic_publish(
+                _EXCHANGE_DE_RETRY, fila_de_retry, corpo, copia, mandatory=True
+            )
+        except (UnroutableError, NackError) as exc:
+            # Sem como reagendar: a DLQ guarda a mensagem para o redrive.
+            _log.error(
+                "retry copy refused by the broker; rejected to dlq",
+                fila=fila_de_retry,
+                erro=type(exc).__name__,
+            )
+            self._canal.basic_reject(metodo.delivery_tag, requeue=False)
+            return "dlq"
+        except ChannelClosedByBroker as exc:
+            # Permissao de topico ou fila de retry ausente na topologia: o
+            # broker fecha o canal, e a original volta para a fila quando a
+            # conexao fecha (a reconexao segue com backoff).
+            _log.error(
+                "retry copy refused by the broker; check the retry topology",
+                fila=fila_de_retry,
+                codigo=exc.reply_code,
+            )
+            raise
+        self._canal.basic_ack(metodo.delivery_tag)
+        _log.warning(
+            "message processing failed; retry scheduled",
+            tentativa=tentativa + 1,
+            fila=fila_de_retry,
+            erro=type(erro).__name__,
+        )
+        return "retry"
+
+    def _limpar_se_devido(self) -> None:
+        agora = datetime.now(UTC)
+        if agora < self._proxima_limpeza:
+            return
+        # Avanca antes: com o banco fora, a proxima tentativa e daqui a uma
+        # hora, nao a cada mensagem.
+        self._proxima_limpeza = agora + _INTERVALO_DE_LIMPEZA
+        try:
+            with self._session_factory() as sessao:
+                resultado = sessao.execute(
+                    delete(mensagens_processadas_table).where(
+                        mensagens_processadas_table.c.processada_em < agora - _RETENCAO
+                    )
+                )
+                sessao.commit()
+            apagadas = cast("CursorResult[Any]", resultado).rowcount
+        except SQLAlchemyError as exc:
+            _log.warning("processed messages cleanup failed", erro=type(exc).__name__)
+            return
+        if apagadas:
+            _log.info("old processed messages deleted", linhas=apagadas)
+
+
+def _onde(exc: BaseException) -> str:
+    """Arquivo e linha em que a excecao nasceu (sem a mensagem dela)."""
+    quadros = traceback.extract_tb(exc.__traceback__)
+    if not quadros:
+        return "desconhecido"
+    ultimo = quadros[-1]
+    return f"{ultimo.filename.rsplit('/', 1)[-1]}:{ultimo.lineno}"
