@@ -14,17 +14,20 @@ import structlog.testing
 from fastapi.testclient import TestClient
 
 from src.autenticacao.interfaces.middleware import obter_usuario_atual
+from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+from src.ordem_servico.aplicacao.saga.saga import Envio, Saga
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
     ListarOrdens,
     ObterOrdem,
+    ObterSaga,
     RegistrarEntrega,
 )
 from src.ordem_servico.dominio.ordem_de_servico import (
@@ -32,7 +35,7 @@ from src.ordem_servico.dominio.ordem_de_servico import (
     TAMANHO_MAXIMO_MOTIVO,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
-from tests.fabricas import ordem_em
+from tests.fabricas import ATOR_ATENDENTE, ordem_em
 from tests.unitarios.fakes import (
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
@@ -56,18 +59,24 @@ def consulta() -> ConsultaAcompanhamentoEspia:
 
 
 @pytest.fixture
+def sagas() -> SagasEmMemoria:
+    return SagasEmMemoria()
+
+
+@pytest.fixture
 def client_como(
-    repo: RepoEmMemoria, consulta: ConsultaAcompanhamentoEspia
+    repo: RepoEmMemoria, sagas: SagasEmMemoria, consulta: ConsultaAcompanhamentoEspia
 ) -> Iterator[Callable[[str], TestClient]]:
     """Fabrica de clientes com o papel pedido; os casos de uso usam os fakes."""
     fabricas = {
         "obter_abrir_ordem": AbrirOrdem(
-            repo, FakeUnitOfWork(), ClientePortFake(), SagasEmMemoria()
+            repo, FakeUnitOfWork(), ClientePortFake(), sagas
         ),
         "obter_listar_ordens": ListarOrdens(repo),
-        "obter_obter_ordem": ObterOrdem(repo),
-        "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork()),
-        "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork()),
+        "obter_obter_ordem": ObterOrdem(repo, sagas),
+        "obter_obter_saga": ObterSaga(sagas),
+        "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork(), sagas),
+        "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork(), sagas),
         "obter_consultar_acompanhamento": ConsultarAcompanhamento(consulta),
     }
 
@@ -113,7 +122,9 @@ class TestAbrir:
         assert corpo["orcamento"] is None
         assert corpo["pagamento"] is None
         assert corpo["versao"] == 1
+        assert corpo["etapa"] == "aguardando_diagnostico"
         assert "historico" not in corpo
+        assert "passos" not in corpo
 
     @pytest.mark.parametrize(
         "corpo",
@@ -266,12 +277,47 @@ class TestConsultas:
         corpo = resp.json()
         assert corpo["ordem_id"] == str(ordem.id)
         assert [
-            (m["sequencia"], m["de"], m["para"], m["origem"]) for m in corpo["mudancas"]
+            (m["sequencia"], m["de"], m["para"], m["origem"], m["ator"])
+            for m in corpo["mudancas"]
         ] == [
-            (1, None, "recebida", "atendimento"),
-            (2, "recebida", "cancelada", "atendimento"),
+            (1, None, "recebida", "atendimento", ATOR_ATENDENTE),
+            (2, "recebida", "cancelada", "atendimento", ATOR_ATENDENTE),
         ]
         assert corpo["mudancas"][1]["motivo"] == "cliente desistiu"
+        assert corpo["passos"] == []
+
+    def test_historico_e_obter_trazem_a_saga(
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
+    ) -> None:
+        ordem = ordem_em(StatusOrdem.RECEBIDA)
+        repo.ordens[ordem.id] = ordem
+        comando_id = uuid4()
+        sagas.sagas[ordem.id] = Saga.iniciar(
+            ordem.id,
+            envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=comando_id),
+            ator=ATOR_ATENDENTE,
+            agora=datetime(2026, 10, 7, 12, tzinfo=UTC),
+        )
+
+        historico = client.get(f"{_BASE}/{ordem.id}/historico").json()
+        detalhe = client.get(f"{_BASE}/{ordem.id}").json()
+
+        assert historico["passos"] == [
+            {
+                "seq": 1,
+                "em": "2026-10-07T12:00:00Z",
+                "de": None,
+                "para": "aguardando_diagnostico",
+                "gatilho": "abertura",
+                "mensagem_id": None,
+                "comando": "SolicitarDiagnostico",
+                "comando_id": str(comando_id),
+                "motivo": None,
+                "ator": ATOR_ATENDENTE,
+                "posicao_na_fila": None,
+            }
+        ]
+        assert detalhe["etapa"] == "aguardando_diagnostico"
 
 
 class TestCancelamento:
@@ -516,3 +562,53 @@ def test_openapi_documenta_401_403_e_404_das_rotas_de_os() -> None:
         caminhos["/api/v1/ordens-de-servico"]["get"]["responses"]
     )
     assert {"401", "403"} <= set(caminhos["/api/v1/clientes"]["post"]["responses"])
+
+
+class TestSaga:
+    """``GET /api/v1/sagas/{ordem_id}``: so o admin, para a operacao."""
+
+    def test_admin_consulta_o_estado(
+        self,
+        client_como: Callable[[str], TestClient],
+        sagas: SagasEmMemoria,
+    ) -> None:
+        ordem_id = uuid4()
+        sagas.sagas[ordem_id] = Saga.iniciar(
+            ordem_id,
+            envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=uuid4()),
+            ator=ATOR_ATENDENTE,
+            agora=datetime(2026, 10, 7, 12, tzinfo=UTC),
+        )
+
+        resp = client_como("admin").get(f"/api/v1/sagas/{ordem_id}")
+
+        assert resp.status_code == 200
+        corpo = resp.json()
+        assert {k: v for k, v in corpo.items() if k != "passos"} == {
+            "ordem_id": str(ordem_id),
+            "etapa": "aguardando_diagnostico",
+            "motivo": None,
+            "falha": None,
+            "plano_compensacao": [],
+            "comando_em_voo": None,
+            "reenvios": 0,
+            "prazo_resposta_em": None,
+        }
+        assert [p["gatilho"] for p in corpo["passos"]] == ["abertura"]
+
+    @pytest.mark.parametrize("papel", ["atendente", "mecanico"])
+    def test_outros_papeis_recebem_403(
+        self, client_como: Callable[[str], TestClient], papel: str
+    ) -> None:
+        resp = client_como(papel).get(f"/api/v1/sagas/{uuid4()}")
+
+        assert resp.status_code == 403
+        assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
+
+    def test_ordem_sem_saga_404_no_envelope(
+        self, client_como: Callable[[str], TestClient]
+    ) -> None:
+        resp = client_como("admin").get(f"/api/v1/sagas/{uuid4()}")
+
+        assert resp.status_code == 404
+        assert resp.json()["erro"]["codigo"] == "ENTIDADE_NAO_ENCONTRADA"

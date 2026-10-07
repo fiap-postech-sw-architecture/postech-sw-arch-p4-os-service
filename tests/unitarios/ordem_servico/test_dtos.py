@@ -73,6 +73,8 @@ def test_ordem_nao_expoe_texto_livre_nem_links() -> None:
         criado_em=_AGORA,
         atualizado_em=_AGORA,
         historico=(),
+        etapa="compensando",
+        passos=(),
     )
     texto = repr(dto)
     assert "Joao" not in texto

@@ -8,6 +8,7 @@ mesmo commit da OS; os passos seguintes sao do ``OrquestradorDaSaga``.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -19,13 +20,19 @@ from src.compartilhado.dominio.documento import normalizar_cnpj
 from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.aplicacao.dtos import (
     AcompanhamentoDTO,
+    ComandoEmVooDTO,
     MudancaDeStatusDTO,
     OrdemDeServicoDTO,
     OrdemResumoDTO,
     ResumoOrcamentoDTO,
     ResumoPagamentoDTO,
+    SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.saga import Envio, Saga
+from src.ordem_servico.aplicacao.saga.saga import (
+    Envio,
+    Saga,
+    SagaNaoEncontradaException,
+)
 from src.ordem_servico.dominio.exceptions import (
     ClienteNaoEncontradoException,
     OrdemNaoEncontradaException,
@@ -50,8 +57,8 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
-    """Projeta o agregado para ``OrdemDeServicoDTO`` (com o historico)."""
+def _ordem_dto(ordem: OrdemDeServico, saga: Saga | None) -> OrdemDeServicoDTO:
+    """Projeta a OS para ``OrdemDeServicoDTO``, com o historico e a etapa da saga."""
     orcamento = ordem.resumo_orcamento
     pagamento = ordem.resumo_pagamento
     return OrdemDeServicoDTO(
@@ -99,6 +106,8 @@ def _ordem_dto(ordem: OrdemDeServico) -> OrdemDeServicoDTO:
             )
             for m in ordem.historico
         ),
+        etapa=saga.etapa.value if saga is not None else None,
+        passos=saga.passos if saga is not None else (),
     )
 
 
@@ -176,7 +185,7 @@ class AbrirOrdem:
             self._sagas.salvar(saga)
             self._uow.commit()
         _log.info("saga started", correlation_id=str(ordem.id), etapa=saga.etapa.value)
-        return _ordem_dto(ordem)
+        return _ordem_dto(ordem, saga)
 
 
 class ListarOrdens:
@@ -209,14 +218,48 @@ class ListarOrdens:
 
 
 class ObterOrdem:
-    """Projecao completa de uma ordem, historico incluso."""
+    """Projecao completa de uma ordem: historico, etapa e passos da saga."""
 
-    def __init__(self, repo: OrdemDeServicoRepository) -> None:
+    def __init__(self, repo: OrdemDeServicoRepository, sagas: SagaRepository) -> None:
         self._repo = repo
+        self._sagas = sagas
 
     def executar(self, ordem_id: UUID) -> OrdemDeServicoDTO:
         """Projeta a ordem; ``OrdemNaoEncontradaException`` (404) se nao existe."""
-        return _ordem_dto(_obter_ordem(self._repo, ordem_id))
+        ordem = _obter_ordem(self._repo, ordem_id)
+        return _ordem_dto(ordem, self._sagas.obter(ordem_id))
+
+
+class ObterSaga:
+    """Estado da saga de uma ordem, para a operacao (RFC-004 secao 4.7)."""
+
+    def __init__(self, sagas: SagaRepository) -> None:
+        self._sagas = sagas
+
+    def executar(self, ordem_id: UUID) -> SagaDTO:
+        """Projeta a saga; ``SagaNaoEncontradaException`` (404) se nao existe."""
+        saga = self._sagas.obter(ordem_id)
+        if saga is None:
+            raise SagaNaoEncontradaException(ordem_id)
+        em_voo = saga.comando_em_voo
+        return SagaDTO(
+            ordem_id=saga.ordem_id,
+            etapa=saga.etapa.value,
+            motivo=saga.motivo,
+            falha=saga.falha,
+            plano_compensacao=saga.plano_compensacao,
+            comando_em_voo=(
+                ComandoEmVooDTO(
+                    tipo=em_voo["tipo"],
+                    enviado_em=datetime.fromisoformat(em_voo["enviado_em"]),
+                )
+                if em_voo is not None
+                else None
+            ),
+            reenvios=saga.reenvios,
+            prazo_resposta_em=saga.prazo_resposta_em,
+            passos=saga.passos,
+        )
 
 
 class CancelarOrdem:
@@ -226,9 +269,12 @@ class CancelarOrdem:
     cancelamento dispara as compensacoes antes (RFC-004 secao 4.4).
     """
 
-    def __init__(self, repo: OrdemDeServicoRepository, uow: UnitOfWork) -> None:
+    def __init__(
+        self, repo: OrdemDeServicoRepository, uow: UnitOfWork, sagas: SagaRepository
+    ) -> None:
         self._repo = repo
         self._uow = uow
+        self._sagas = sagas
 
     def executar(
         self, ordem_id: UUID, motivo: str, *, ator: str | None
@@ -248,15 +294,18 @@ class CancelarOrdem:
             ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
-        return _ordem_dto(ordem)
+        return _ordem_dto(ordem, self._sagas.obter(ordem_id))
 
 
 class RegistrarEntrega:
-    """Entrega do veiculo ao cliente: FINALIZADA -> ENTREGUE."""
+    """Entrega do veiculo ao cliente (T10, fora da saga): FINALIZADA -> ENTREGUE."""
 
-    def __init__(self, repo: OrdemDeServicoRepository, uow: UnitOfWork) -> None:
+    def __init__(
+        self, repo: OrdemDeServicoRepository, uow: UnitOfWork, sagas: SagaRepository
+    ) -> None:
         self._repo = repo
         self._uow = uow
+        self._sagas = sagas
 
     def executar(self, ordem_id: UUID, *, ator: str | None) -> OrdemDeServicoDTO:
         """Registra a entrega com origem ATENDIMENTO; ``ator`` e o sub do JWT.
@@ -271,7 +320,7 @@ class RegistrarEntrega:
             ordem.registrar_entrega(ator=ator)
             self._repo.salvar(ordem)
             self._uow.commit()
-        return _ordem_dto(ordem)
+        return _ordem_dto(ordem, self._sagas.obter(ordem_id))
 
 
 _TAMANHO_CNPJ: Final = 14

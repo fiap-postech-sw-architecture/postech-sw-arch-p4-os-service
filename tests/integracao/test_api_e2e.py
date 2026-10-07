@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import jwt
@@ -182,6 +182,39 @@ class TestCicloDaOrdem:
         ).json()
         assert [i["id"] for i in completa["items"]] == [ordem_id]
         assert completa["total"] == 1
+
+    def test_abertura_inicia_a_saga_visivel_na_os_no_historico_e_na_operacao(
+        self, api_client: TestClient, admin_user: Usuario
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="39053344705", placa="GHI7J89"
+        )
+
+        ordem = _abrir(api_client, headers, cliente_id, veiculo_id)
+        ordem_id = ordem["id"]
+
+        assert ordem["etapa"] == "aguardando_diagnostico"
+        detalhe = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
+        assert detalhe["etapa"] == "aguardando_diagnostico"
+        (passo,) = api_client.get(
+            f"{_OS}/{ordem_id}/historico", headers=headers
+        ).json()["passos"]
+        assert (passo["gatilho"], passo["comando"], passo["ator"]) == (
+            "abertura",
+            "SolicitarDiagnostico",
+            str(admin_user.id),
+        )
+        saga = api_client.get(f"/api/v1/sagas/{ordem_id}", headers=headers)
+        assert saga.status_code == 200
+        assert (saga.json()["etapa"], saga.json()["comando_em_voo"]) == (
+            "aguardando_diagnostico",
+            None,
+        )
+        assert (
+            api_client.get(f"/api/v1/sagas/{uuid4()}", headers=headers).status_code
+            == 404
+        )
 
     def test_fatos_da_saga_ate_a_entrega(
         self,

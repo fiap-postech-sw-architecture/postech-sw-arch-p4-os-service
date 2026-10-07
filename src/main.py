@@ -118,12 +118,14 @@ def criar_app() -> FastAPI:
     from src.ordem_servico.interfaces.router import (
         router_publico as os_router_publico,
     )
+    from src.ordem_servico.interfaces.router import router_sagas
 
     application.include_router(router_publico)
     application.include_router(auth_router)
     application.include_router(router_jwks)
     application.include_router(cliente_router)
     application.include_router(os_router)
+    application.include_router(router_sagas)
     application.include_router(os_router_publico)
 
     # Ordem dos middlewares (Starlette: o ultimo adicionado e o mais externo).

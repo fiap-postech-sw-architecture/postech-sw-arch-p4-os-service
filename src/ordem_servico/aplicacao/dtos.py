@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from decimal import Decimal
     from uuid import UUID
 
+    from src.ordem_servico.aplicacao.saga.saga import Passo
+
 
 @dataclass(frozen=True, slots=True)
 class AbrirOrdemDTO:
@@ -93,6 +95,9 @@ class OrdemDeServicoDTO:
     criado_em: datetime
     atualizado_em: datetime
     historico: tuple[MudancaDeStatusDTO, ...]
+    # Etapa da saga (``None`` so para OS sem saga) e os passos dela.
+    etapa: str | None
+    passos: tuple[Passo, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,3 +119,26 @@ class AcompanhamentoDTO:
     status: str
     criado_em: datetime
     atualizado_em: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ComandoEmVooDTO:
+    """Comando com prazo tecnico a espera de resposta: tipo e hora do envio."""
+
+    tipo: str
+    enviado_em: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SagaDTO:
+    """Estado da saga para a operacao (RFC-004 secoes 4.7 e 6.1): so codigos."""
+
+    ordem_id: UUID
+    etapa: str
+    motivo: str | None
+    falha: str | None
+    plano_compensacao: tuple[str, ...]
+    comando_em_voo: ComandoEmVooDTO | None
+    reenvios: int
+    prazo_resposta_em: datetime | None
+    passos: tuple[Passo, ...]

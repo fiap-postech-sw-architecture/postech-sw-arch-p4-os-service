@@ -113,6 +113,13 @@ class OrdemDeServicoResponse(_ComSituacao):
     versao: int = Field(description="Versao do lock otimista (muda a cada escrita).")
     criado_em: datetime
     atualizado_em: datetime
+    etapa: str | None = Field(
+        description=(
+            "Etapa da saga, o estado do orquestrador (nao e o status): "
+            "aguardando_diagnostico, ..., em_execucao, concluida, compensando, "
+            "compensada ou falha_na_compensacao."
+        )
+    )
 
 
 class OrdemResumoResponse(_ComSituacao):
@@ -155,11 +162,63 @@ class MudancaDeStatusResponse(BaseModel):
     ocorrido_em: datetime
 
 
+class PassoDaSagaResponse(BaseModel):
+    """Um passo da saga: o gatilho, a etapa antes e depois e o comando enviado."""
+
+    seq: int
+    em: datetime
+    de: str | None = Field(description="Etapa anterior (None na abertura).")
+    para: str = Field(description="Etapa depois do passo.")
+    gatilho: str = Field(description="Tipo do evento recebido ou abertura.")
+    mensagem_id: UUID | None = Field(description="Id do evento recebido.")
+    comando: str | None = Field(description="Comando enviado no passo.")
+    comando_id: UUID | None = Field(description="Id do envelope do comando.")
+    motivo: str | None = Field(description="Codigo da compensacao, quando houver.")
+    ator: str | None = Field(
+        description="sub do JWT de quem agiu ou o processo (consumidor, prazos)."
+    )
+    posicao_na_fila: int | None = Field(
+        default=None, description="So no ExecucaoAgendada: a posicao informada."
+    )
+
+
 class HistoricoResponse(BaseModel):
-    """Linha do tempo da ordem, da abertura ate a ultima mudanca de status."""
+    """Linha do tempo da ordem: mudancas de status e passos da saga."""
 
     ordem_id: UUID
     mudancas: list[MudancaDeStatusResponse]
+    passos: list[PassoDaSagaResponse]
+
+
+class ComandoEmVooResponse(BaseModel):
+    """Comando com prazo tecnico a espera de resposta."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tipo: str
+    enviado_em: datetime
+
+
+class SagaResponse(BaseModel):
+    """Estado da saga para a operacao (runbook da saga)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    ordem_id: UUID
+    etapa: str
+    motivo: str | None = Field(description="Codigo da compensacao em curso.")
+    falha: str | None = Field(
+        description="reenvios_esgotados ou estorno_recusado (falha_na_compensacao)."
+    )
+    plano_compensacao: list[str] = Field(
+        description="Compensacoes restantes; a primeira e a pendente."
+    )
+    comando_em_voo: ComandoEmVooResponse | None
+    reenvios: int
+    prazo_resposta_em: datetime | None = Field(
+        description="Prazo tecnico do comando em voo (None sem resposta automatica)."
+    )
+    passos: list[PassoDaSagaResponse]
 
 
 class AcompanhamentoRequest(BaseModel):

@@ -16,13 +16,20 @@ from src.compartilhado.dominio.exceptions import (
     ValorInvalidoException,
 )
 from src.compartilhado.dominio.placa import Placa
-from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, AcompanhamentoDTO
+from src.ordem_servico.aplicacao.dtos import (
+    AbrirOrdemDTO,
+    AcompanhamentoDTO,
+    ComandoEmVooDTO,
+    SagaDTO,
+)
+from src.ordem_servico.aplicacao.saga.saga import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
     ListarOrdens,
     ObterOrdem,
+    ObterSaga,
     RegistrarEntrega,
 )
 from src.ordem_servico.dominio.exceptions import (
@@ -47,6 +54,7 @@ from tests.unitarios.fakes import (
     RepoEmMemoria,
     SagasEmMemoria,
 )
+from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
 
 
 def _dto() -> AbrirOrdemDTO:
@@ -164,7 +172,7 @@ class TestObterOrdem:
     def test_projeta_resumos_e_historico(self) -> None:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_PAGAMENTO)
 
-        dto = ObterOrdem(RepoEmMemoria(ordem)).executar(ordem.id)
+        dto = ObterOrdem(RepoEmMemoria(ordem), SagasEmMemoria()).executar(ordem.id)
 
         assert dto.status == "aguardando_pagamento"
         assert dto.orcamento is not None
@@ -192,7 +200,66 @@ class TestObterOrdem:
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            ObterOrdem(RepoEmMemoria()).executar(uuid4())
+            ObterOrdem(RepoEmMemoria(), SagasEmMemoria()).executar(uuid4())
+
+    def test_projeta_a_etapa_e_os_passos_da_saga(self) -> None:
+        cenario = CenarioDaSaga()
+        cenario.receber("DiagnosticoIniciado")
+
+        dto = ObterOrdem(cenario.ordens, cenario.sagas).executar(cenario.ordem_id)
+
+        assert dto.etapa == "aguardando_diagnostico"
+        assert dto.passos == cenario.saga.passos
+        assert [p["gatilho"] for p in dto.passos] == [
+            "abertura",
+            "DiagnosticoIniciado",
+        ]
+
+    def test_ordem_sem_saga_sai_sem_etapa(self) -> None:
+        ordem = ordem_em(StatusOrdem.RECEBIDA)
+
+        dto = ObterOrdem(RepoEmMemoria(ordem), SagasEmMemoria()).executar(ordem.id)
+
+        assert (dto.etapa, dto.passos) == (None, ())
+
+
+class TestObterSaga:
+    def test_projeta_o_estado_da_saga_com_o_comando_em_voo(self) -> None:
+        cenario = CenarioDaSaga()
+        cenario.receber("DiagnosticoIniciado")
+        cenario.receber("DiagnosticoConcluido")
+        saga = cenario.saga
+
+        dto = ObterSaga(cenario.sagas).executar(cenario.ordem_id)
+
+        assert dto == SagaDTO(
+            ordem_id=cenario.ordem_id,
+            etapa="aguardando_orcamento",
+            motivo=None,
+            falha=None,
+            plano_compensacao=(),
+            comando_em_voo=ComandoEmVooDTO(
+                tipo="GerarOrcamento", enviado_em=cenario.relogio.agora
+            ),
+            reenvios=0,
+            prazo_resposta_em=saga.prazo_resposta_em,
+            passos=saga.passos,
+        )
+
+    def test_sem_comando_em_voo(self) -> None:
+        cenario = CenarioDaSaga()
+
+        dto = ObterSaga(cenario.sagas).executar(cenario.ordem_id)
+
+        assert (dto.etapa, dto.comando_em_voo, dto.prazo_resposta_em) == (
+            "aguardando_diagnostico",
+            None,
+            None,
+        )
+
+    def test_inexistente_levanta_404(self) -> None:
+        with pytest.raises(SagaNaoEncontradaException):
+            ObterSaga(SagasEmMemoria()).executar(uuid4())
 
 
 class TestCancelarOrdem:
@@ -200,7 +267,7 @@ class TestCancelarOrdem:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_APROVACAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = CancelarOrdem(repo, uow).executar(
+        dto = CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
             ordem.id, "cliente desistiu", ator=ATOR_ATENDENTE
         )
 
@@ -217,7 +284,9 @@ class TestCancelarOrdem:
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            CancelarOrdem(repo, uow).executar(ordem.id, "tarde", ator=ATOR_ATENDENTE)
+            CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+                ordem.id, "tarde", ator=ATOR_ATENDENTE
+            )
 
         assert repo.salvas == []
         assert not uow.committed
@@ -228,14 +297,16 @@ class TestCancelarOrdem:
         repo, uow = RepoEmMemoria(ordem, conflito=True), FakeUnitOfWork()
 
         with pytest.raises(ConflitoDeConcorrenciaException):
-            CancelarOrdem(repo, uow).executar(ordem.id, "x", ator=ATOR_ATENDENTE)
+            CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+                ordem.id, "x", ator=ATOR_ATENDENTE
+            )
 
         assert not uow.committed
         assert uow.rolled_back
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork()).executar(
+            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()).executar(
                 uuid4(), "x", ator=ATOR_ATENDENTE
             )
 
@@ -245,7 +316,9 @@ class TestRegistrarEntrega:
         ordem = ordem_em(StatusOrdem.FINALIZADA)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = RegistrarEntrega(repo, uow).executar(ordem.id, ator=ATOR_ATENDENTE)
+        dto = RegistrarEntrega(repo, uow, SagasEmMemoria()).executar(
+            ordem.id, ator=ATOR_ATENDENTE
+        )
 
         assert uow.committed
         assert dto.status == "entregue"
@@ -263,7 +336,9 @@ class TestRegistrarEntrega:
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            RegistrarEntrega(repo, uow).executar(ordem.id, ator=ATOR_ATENDENTE)
+            RegistrarEntrega(repo, uow, SagasEmMemoria()).executar(
+                ordem.id, ator=ATOR_ATENDENTE
+            )
 
         assert repo.salvas == []
         assert not uow.committed

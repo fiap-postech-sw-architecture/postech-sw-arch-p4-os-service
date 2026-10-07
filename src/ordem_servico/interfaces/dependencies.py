@@ -16,6 +16,7 @@ from src.ordem_servico.aplicacao.use_cases import (
     ConsultarAcompanhamento,
     ListarOrdens,
     ObterOrdem,
+    ObterSaga,
     RegistrarEntrega,
 )
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
@@ -29,11 +30,16 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
+    from src.ordem_servico.aplicacao.ports import SagaRepository
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 
 def _repo(session: Session) -> OrdemDeServicoRepository:
     return OrdemDeServicoSQLAlchemyRepository(session=session)
+
+
+def _sagas(session: Session) -> SagaRepository:
+    return SagaSQLAlchemyRepository(session=session)
 
 
 def _uow(session: Session) -> UnitOfWork:
@@ -45,7 +51,7 @@ def obter_abrir_ordem(session: Session) -> AbrirOrdem:
         repo=_repo(session),
         uow=_uow(session),
         cliente_port=ClienteSQLAlchemyAdapter(session=session),
-        sagas=SagaSQLAlchemyRepository(session=session),
+        sagas=_sagas(session),
     )
 
 
@@ -54,15 +60,21 @@ def obter_listar_ordens(session: Session) -> ListarOrdens:
 
 
 def obter_obter_ordem(session: Session) -> ObterOrdem:
-    return ObterOrdem(repo=_repo(session))
+    return ObterOrdem(repo=_repo(session), sagas=_sagas(session))
+
+
+def obter_obter_saga(session: Session) -> ObterSaga:
+    return ObterSaga(sagas=_sagas(session))
 
 
 def obter_cancelar_ordem(session: Session) -> CancelarOrdem:
-    return CancelarOrdem(repo=_repo(session), uow=_uow(session))
+    return CancelarOrdem(repo=_repo(session), uow=_uow(session), sagas=_sagas(session))
 
 
 def obter_registrar_entrega(session: Session) -> RegistrarEntrega:
-    return RegistrarEntrega(repo=_repo(session), uow=_uow(session))
+    return RegistrarEntrega(
+        repo=_repo(session), uow=_uow(session), sagas=_sagas(session)
+    )
 
 
 def obter_consultar_acompanhamento(session: Session) -> ConsultarAcompanhamento:
