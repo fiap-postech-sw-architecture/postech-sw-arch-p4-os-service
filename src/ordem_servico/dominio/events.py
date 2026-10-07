@@ -2,7 +2,10 @@
 
 Ficam dentro do servico: o OS so publica comandos no RabbitMQ (RFC-004 secao
 5.3), e quem os grava na outbox e o caso de uso, por
-``UnitOfWork.publicar_comando``.
+``PublicadorDeComandos.publicar_comando``. O agregado os registra a cada
+abertura e transicao; quem os vai ler e a notificacao do cliente por e-mail
+(ADR-036: a linha de e-mail entra na outbox na mesma transacao da mudanca de
+status), que chega com a saga. Ate la, so os testes os coletam.
 """
 
 from __future__ import annotations

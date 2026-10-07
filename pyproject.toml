@@ -155,6 +155,8 @@ known-first-party = ["src"]
 # (dominio e aplicacao -> infraestrutura) e coberto pelo contrato forbidden.
 [tool.importlinter]
 root_packages = ["src"]
+# Pacotes de terceiros entram no grafo para o contrato que os proibe no nucleo.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Camadas Clean por contexto (interfaces -> aplicacao -> dominio)"
@@ -185,6 +187,32 @@ forbidden_modules = [
     "src.ordem_servico.infraestrutura",
     "src.autenticacao.infraestrutura",
     "src.compartilhado.infraestrutura",
+]
+
+# Mensageria, contratos e telemetria sao detalhe de infraestrutura (ADR-036,
+# ADR-043): dominio e aplicacao enxergam so as portas (MensagemRecebida,
+# Desfecho, PublicadorDeComandos), nunca o cliente AMQP, o validador de schema,
+# o YAML do AsyncAPI, o OpenTelemetry ou o Prometheus.
+[[tool.importlinter.contracts]]
+name = "Dominio e aplicacao nao importam bibliotecas de mensageria e telemetria"
+type = "forbidden"
+source_modules = [
+    "src.cliente_veiculo.dominio",
+    "src.ordem_servico.dominio",
+    "src.autenticacao.dominio",
+    "src.compartilhado.dominio",
+    "src.cliente_veiculo.aplicacao",
+    "src.ordem_servico.aplicacao",
+    "src.autenticacao.aplicacao",
+    "src.compartilhado.aplicacao",
+]
+forbidden_modules = [
+    "pika",
+    "jsonschema",
+    "referencing",
+    "yaml",
+    "opentelemetry",
+    "prometheus_client",
 ]
 
 # A camada HTTP so e importada pelos composition roots (as proprias

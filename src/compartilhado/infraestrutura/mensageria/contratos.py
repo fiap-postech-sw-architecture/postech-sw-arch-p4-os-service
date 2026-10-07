@@ -44,6 +44,8 @@ VERSAO: Final = 1
 
 @dataclass(frozen=True, slots=True)
 class Destino:
+    """Para onde vai um comando do OS: exchange e routing key do canal no AsyncAPI."""
+
     exchange: str
     routing_key: str
 
@@ -65,7 +67,7 @@ class Catalogo:
                     routing_key=canal["address"],
                 )
             elif canal["address"] == FILA:
-                consumidos = [
+                consumidos += [
                     m["$ref"].rsplit("/", 1)[-1] for m in operacao["messages"]
                 ]
         self.consumidos: frozenset[str] = frozenset(consumidos)

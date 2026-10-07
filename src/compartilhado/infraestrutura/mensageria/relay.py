@@ -87,6 +87,9 @@ OUTBOX_DEAD: Final = Gauge(
     "outbox_dead", "Linhas da outbox que esgotaram as tentativas (status dead)."
 )
 
+_POLL_PADRAO_S: Final = 5.0
+_LOTE_PADRAO: Final = 10
+_LEASE_PADRAO_S: Final = 60
 # Keepalives TCP da conexao dedicada de LISTEN: um peer que sumiu em silencio
 # e detectado em cerca de 60 s, em vez de deixar o relay surdo ao NOTIFY.
 _KEEPALIVES: Final = {
@@ -103,11 +106,15 @@ class _BrokerIndisponivelError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ConfigRelay:
-    poll_s: float = 5.0
-    lote: int = 10
-    # Lease > tempo de pior caso de uma publicacao (confirm ou heartbeat
-    # vencido): so assim outra replica nao reivindica a linha em voo.
-    lease: timedelta = timedelta(seconds=60)
+    """Ajustes do relay; ``do_ambiente`` le os de producao das variaveis."""
+
+    poll_s: float = _POLL_PADRAO_S
+    lote: int = _LOTE_PADRAO
+    # Renovado antes de cada publicacao: cobre o publish bloqueado por alarme
+    # do broker (30 s). Passou dele (broker mudo, ate cerca de 70 s), outra
+    # replica pode publicar a linha de novo, e o consumidor descarta a copia
+    # pelo id; o fencing impede que as duas gravem o desfecho.
+    lease: timedelta = timedelta(seconds=_LEASE_PADRAO_S)
     # Um atraso para cada falha antes da que leva a `dead`.
     atrasos_s: tuple[float, ...] = ATRASOS_S
     diretorio_de_saude: Path = DIRETORIO_DE_SAUDE
@@ -121,11 +128,13 @@ class ConfigRelay:
         """
         return cls(
             poll_s=numero_do_ambiente(
-                "OUTBOX_POLL_SEGUNDOS", 5.0, minimo=0.1, maximo=15.0
+                "OUTBOX_POLL_SEGUNDOS", _POLL_PADRAO_S, minimo=0.1, maximo=15.0
             ),
-            lote=inteiro_do_ambiente("OUTBOX_LOTE", 10, minimo=1),
+            lote=inteiro_do_ambiente("OUTBOX_LOTE", _LOTE_PADRAO, minimo=1),
             lease=timedelta(
-                seconds=inteiro_do_ambiente("OUTBOX_LEASE_SEGUNDOS", 60, minimo=10)
+                seconds=inteiro_do_ambiente(
+                    "OUTBOX_LEASE_SEGUNDOS", _LEASE_PADRAO_S, minimo=10
+                )
             ),
         )
 

@@ -41,6 +41,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     iniciar_todos_mapeamentos()
 
+    # Contratos de mensageria lidos no boot, como no relay e no consumidor: a
+    # imagem sem `contratos/` falha aqui, e nao no primeiro comando publicado.
+    from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+
+    catalogo()
+
     # Configura a session factory global antes de aceitar requisicoes.
     # Sem isso, todo endpoint que depende de ``obter_session`` falha com
     # ``RuntimeError("Session factory nao configurada")``. O engine e

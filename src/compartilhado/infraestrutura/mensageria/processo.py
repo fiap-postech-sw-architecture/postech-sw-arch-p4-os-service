@@ -64,12 +64,15 @@ class Sinalizador:
         self.pronto = diretorio / f"{processo}-pronto"
 
     def bater(self) -> None:
+        """Laco vivo: a sonda de liveness olha a idade deste arquivo."""
         self.heartbeat.touch()
 
     def marcar_pronto(self) -> None:
+        """Conectado ao broker, com a topologia conferida: a readiness passa."""
         self.pronto.touch()
 
     def marcar_nao_pronto(self) -> None:
+        """Sem broker: a readiness falha, sem reiniciar o processo."""
         self.pronto.unlink(missing_ok=True)
 
 
