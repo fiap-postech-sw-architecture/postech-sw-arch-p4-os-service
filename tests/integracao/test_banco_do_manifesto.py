@@ -1,10 +1,11 @@
 """O PostgreSQL dos manifestos Kubernetes na imagem real, sem cluster.
 
-O banco sobe com a imagem, o ambiente e o ``papeis.sql`` do StatefulSet de
-``k8s/base`` (as senhas, que no cluster vem do Secret ``os-postgres``, sao
-geradas aqui), e o Job de migracao roda o comando dele como o dono. Prova o que
-os manifestos prometem (ADR-042): um papel por uso, nenhum ``trust`` no
-loopback, a sonda ``pg_isready`` e a espera do ``aguarda-migracao``.
+O banco sobe com a imagem, o ambiente, o ``papeis.sql`` e o securityContext do
+StatefulSet de ``k8s/base`` (as senhas, que no cluster vem do Secret
+``os-postgres``, sao geradas aqui), e o Job de migracao roda o comando dele como
+o dono. Prova o que os manifestos prometem (ADR-042): um papel por uso, nenhuma
+senha no log do servidor, nenhum ``trust`` no loopback, a sonda ``pg_isready``
+e a espera do ``aguarda-migracao``.
 """
 
 from __future__ import annotations
@@ -18,42 +19,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
+
+from tests.manifestos import BASE, RAIZ, comando, container, objeto
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from testcontainers.community.postgres import PostgresContainer
 
-_RAIZ = Path(__file__).resolve().parents[2]
-_BASE = _RAIZ / "k8s/base"
 _EMAIL_ADMIN = "admin@pytstop.dev"
-
-
-def _objeto(tipo: str, nome: str) -> dict[str, Any]:
-    # Todo YAML de k8s/base, menos o kustomization.yaml (sem metadata).
-    for arquivo in sorted(set(_BASE.glob("*.yaml")) - {_BASE / "kustomization.yaml"}):
-        for documento in yaml.safe_load_all(arquivo.read_text()):
-            if (documento["kind"], documento["metadata"]["name"]) == (tipo, nome):
-                return dict(documento)
-    msg = f"{tipo}/{nome} nao esta em k8s/base"
-    raise AssertionError(msg)
-
-
-def _container(objeto: dict[str, Any], nome: str) -> dict[str, Any]:
-    especificacao = objeto["spec"]["template"]["spec"]
-    containers = especificacao["containers"] + especificacao.get("initContainers", [])
-    return next(c for c in containers if c["name"] == nome)
-
-
-def _comando(objeto: dict[str, Any], nome: str) -> str:
-    """O script do ``sh -c`` de um container do manifesto."""
-    sh, opcao, script = _container(objeto, nome)["command"]
-    assert (sh, opcao) == ("sh", "-c")
-    return str(script)
+# Todo log do servidor que leva o texto do comando ligado, o pior caso para o
+# script de init (a imagem passa os argumentos tambem ao servidor temporario em
+# que ele roda): por comando, por duracao e por amostragem.
+_LOG_DE_TUDO = (
+    "postgres -c log_statement=all -c log_min_duration_statement=0 "
+    "-c log_min_duration_sample=0 -c log_statement_sample_rate=1 "
+    "-c log_transaction_sample_rate=1"
+)
 
 
 @dataclass(frozen=True)
@@ -81,7 +66,7 @@ def _no_host(script: str, ambiente: dict[str, str], prazo_s: float) -> int:
     return subprocess.run(  # noqa: S603
         ["/bin/sh", "-c", script],
         env={"PATH": caminho, **ambiente},
-        cwd=_RAIZ,
+        cwd=RAIZ,
         capture_output=True,
         timeout=prazo_s,
         check=False,
@@ -108,52 +93,75 @@ def banco() -> Iterator[Banco]:
     """O banco do StatefulSet, ja migrado e semeado pelo Job (como no cluster)."""
     from testcontainers.community.postgres import PostgresContainer
 
-    postgres = _container(_objeto("StatefulSet", "os-postgres"), "postgres")
-    ambiente = {item["name"]: item["value"] for item in postgres["env"]}
-    senhas = {
-        chave: secrets.token_hex(24)
+    postgres = container(objeto("StatefulSet", "os-postgres"), "postgres")
+    ambiente = {
+        item["name"]: item["value"] for item in postgres["env"] if "value" in item
+    }
+    # As senhas vem do Secret os-postgres, uma variavel por chave, com o mesmo nome.
+    do_secret = {
+        item["name"]: item["valueFrom"]["secretKeyRef"]
+        for item in postgres["env"]
+        if "valueFrom" in item
+    }
+    assert do_secret == {
+        chave: {"name": "os-postgres", "key": chave}
         for chave in (
             "POSTGRES_PASSWORD",
             "POSTGRES_OWNER_PASSWORD",
             "POSTGRES_APP_PASSWORD",
             "POSTGRES_EXPORTER_PASSWORD",
-            "ADMIN_PASSWORD",
         )
     }
-    # O servidor loga todo comando, o pior caso para o script de init (a imagem
-    # passa os argumentos tambem ao servidor temporario em que ele roda).
-    container = (
+    senhas = {chave: secrets.token_hex(24) for chave in [*do_secret, "ADMIN_PASSWORD"]}
+    seguranca = postgres["securityContext"]
+    assert seguranca["readOnlyRootFilesystem"] is True
+    assert seguranca["capabilities"] == {"drop": ["ALL"]}
+    pod = objeto("StatefulSet", "os-postgres")["spec"]["template"]["spec"]
+    usuario = (
+        f"{pod['securityContext']['runAsUser']}:{pod['securityContext']['runAsGroup']}"
+    )
+    # O pod do manifesto: usuario 999, raiz somente leitura com os emptyDir do
+    # socket e do /tmp, sem capability; o volume de dados e o da imagem.
+    banco_do_pod = (
         PostgresContainer(
             postgres["image"],
             username=ambiente["POSTGRES_USER"],
             password=senhas["POSTGRES_PASSWORD"],
             dbname=ambiente["POSTGRES_DB"],
         )
-        .with_command("postgres -c log_statement=all")
+        .with_command(_LOG_DE_TUDO)
         .with_volume_mapping(
-            str(_BASE / "papeis.sql"), "/docker-entrypoint-initdb.d/papeis.sql", "ro"
+            str(BASE / "papeis.sql"), "/docker-entrypoint-initdb.d/papeis.sql", "ro"
+        )
+        .with_tmpfs_mount("/var/run/postgresql")
+        .with_tmpfs_mount("/tmp")  # noqa: S108  # o /tmp do container
+        .with_kwargs(
+            user=usuario,
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
         )
     )
     for nome, valor in {**ambiente, **senhas}.items():
-        container.with_env(nome, valor)
-    with container:
-        banco = Banco(container, senhas)
+        banco_do_pod.with_env(nome, valor)
+    with banco_do_pod:
+        banco = Banco(banco_do_pod, senhas)
         job = {
             "ENVIRONMENT": "production",
             "DATABASE_URL": banco.url("os", "POSTGRES_OWNER_PASSWORD"),
             "ADMIN_EMAIL": _EMAIL_ADMIN,
             "ADMIN_PASSWORD": senhas["ADMIN_PASSWORD"],
         }
-        comando = _comando(_objeto("Job", "os-migracao"), "migracao")
+        migracao = comando(objeto("Job", "os-migracao"), "migracao")
         # Duas vezes: o Job roda a cada implantacao e tem de ser idempotente.
-        assert _no_host(comando, job, prazo_s=120) == 0
-        assert _no_host(comando, job, prazo_s=120) == 0
+        assert _no_host(migracao, job, prazo_s=120) == 0
+        assert _no_host(migracao, job, prazo_s=120) == 0
         yield banco
 
 
 def test_nenhuma_senha_chega_ao_log_do_servidor(banco: Banco) -> None:
     # O psql troca o \getenv pela senha antes de enviar o CREATE ROLE: so os
-    # SET do inicio do papeis.sql a tiram do log, com o log de comandos ligado.
+    # SET do inicio do papeis.sql a tiram do log, com todo log ligado.
     log = banco.container.get_wrapped_container().logs().decode()
 
     # O proprio SET sai no log: o log de comandos valia na sessao do script.
@@ -238,7 +246,7 @@ def test_loopback_e_socket_pedem_senha_e_o_exporter_entra_com_a_dele(
 
 
 def test_sonda_do_manifesto_responde_com_o_banco_de_pe(banco: Banco) -> None:
-    sonda = _container(_objeto("StatefulSet", "os-postgres"), "postgres")
+    sonda = container(objeto("StatefulSet", "os-postgres"), "postgres")
     resultado = banco.no_container(*sonda["readinessProbe"]["exec"]["command"])
 
     assert resultado.exit_code == 0, resultado.output
@@ -272,20 +280,30 @@ def test_api_sobe_e_grava_com_o_papel_da_aplicacao(
     assert refresh.status_code == 200
 
 
+def _espera_do_pod() -> str:
+    return comando(objeto("Deployment", "os-service-api"), "aguarda-migracao")
+
+
+def _ainda_esperando(ambiente: dict[str, str]) -> bytes:
+    """O log da espera, que nao termina enquanto a condicao nao vale."""
+    with pytest.raises(subprocess.TimeoutExpired) as em_espera:
+        _no_host(_espera_do_pod(), ambiente, prazo_s=6)
+    return em_espera.value.stderr or b""
+
+
 @pytest.mark.parametrize(
-    ("revisao", "libera"),
+    ("revisao", "motivo"),
     [
-        pytest.param(None, False, id="banco-sem-migracao"),
-        pytest.param("001", False, id="revisao-anterior"),
-        pytest.param("002", True, id="head-desta-imagem"),
-        pytest.param("999", True, id="rollback-banco-adiante"),
+        pytest.param(None, "no revision yet", id="banco-sem-migracao"),
+        pytest.param("001", "001", id="revisao-anterior"),
+        pytest.param("002", None, id="head-desta-imagem"),
+        pytest.param("999", None, id="rollback-banco-adiante"),
     ],
 )
 def test_aguarda_migracao_libera_o_pod_so_com_o_banco_em_head_ou_adiante(
-    banco: Banco, revisao: str | None, libera: bool
+    banco: Banco, revisao: str | None, motivo: str | None
 ) -> None:
     dono = create_engine(banco.url("os", "POSTGRES_OWNER_PASSWORD"))
-    espera = _comando(_objeto("Deployment", "os-service-api"), "aguarda-migracao")
     aplicacao = {"DATABASE_URL": banco.url("os_app", "POSTGRES_APP_PASSWORD")}
     try:
         with dono.begin() as conexao:
@@ -295,12 +313,11 @@ def test_aguarda_migracao_libera_o_pod_so_com_o_banco_em_head_ou_adiante(
                     text("INSERT INTO alembic_version VALUES (:revisao)"),
                     {"revisao": revisao},
                 )
-        if libera:
-            assert _no_host(espera, aplicacao, prazo_s=60) == 0
+        if motivo is None:
+            assert _no_host(_espera_do_pod(), aplicacao, prazo_s=60) == 0
         else:
-            # Segue esperando: o laco nao termina enquanto a condicao nao vale.
-            with pytest.raises(subprocess.TimeoutExpired):
-                _no_host(espera, aplicacao, prazo_s=6)
+            log = _ainda_esperando(aplicacao)
+            assert f"waiting for the migration Job: {motivo}\n".encode() in log
     finally:
         with dono.begin() as conexao:
             conexao.execute(text("UPDATE alembic_version SET version_num = '002'"))
@@ -311,3 +328,14 @@ def test_aguarda_migracao_libera_o_pod_so_com_o_banco_em_head_ou_adiante(
                 )
             )
         dono.dispose()
+
+
+def test_aguarda_migracao_diz_no_log_por_que_nao_conecta(banco: Banco) -> None:
+    # Pelo IPv4, como o nome do banco no cluster: o localhost daqui tenta o ::1
+    # antes, e a primeira linha do erro seria a recusa dele.
+    porta = banco.container.get_exposed_port(5432)
+    errada = f"postgresql://os_app:{secrets.token_hex(24)}@127.0.0.1:{porta}/os"
+
+    log = _ainda_esperando({"DATABASE_URL": errada})
+
+    assert b'password authentication failed for user "os_app"' in log
