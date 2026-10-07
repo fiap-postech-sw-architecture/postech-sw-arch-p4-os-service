@@ -190,11 +190,17 @@ Valor fora da faixa aborta o boot com a variável e o valor na mensagem.
 
 ## Saga
 
-O OS Service orquestra a saga de atendimento ([ADR-035](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/035-saga-orquestrada.md), [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 4): uma instância por OS, com `saga_id = ordem_id`, que também é o `correlation_id` de todas as mensagens. A saga é um *process manager* da camada de aplicação (`src/ordem_servico/aplicacao/saga/`), com estado e regras sem I/O, persistido como agregado próprio na tabela `sagas`, no mesmo PostgreSQL da outbox. A etapa da saga, o status da OS, o passo e o comando seguinte entram no mesmo commit: na abertura, o da requisição; nos eventos, o do consumidor, junto com `mensagens_processadas`.
+O OS Service orquestra a saga de atendimento ([ADR-035](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/035-saga-orquestrada.md), [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 4). Há uma instância por OS, com `saga_id = ordem_id`, que também é o `correlation_id` de todas as mensagens.
+
+- O orquestrador é um *process manager*: o objeto que guarda o estado da saga e, a cada evento, decide o próximo comando. Ele vive na camada de aplicação (`src/ordem_servico/aplicacao/saga/`), com estado e regras sem I/O, e é persistido como agregado próprio na tabela `sagas`, no mesmo PostgreSQL da outbox.
+- A etapa da saga, o status da OS, o registro da transição na linha do tempo da saga e o comando seguinte entram no mesmo commit: na abertura, o da requisição; nos eventos, o do consumidor, junto com `mensagens_processadas`.
 
 ### Por que orquestração
 
-São nove passos (T1 a T9) em três serviços, mais a entrega local (T10), com esperas humanas (mecânico e cliente), um provedor externo (Mercado Pago) e seis compensações. A Aula 02 de SAGA Pattern, citando Richardson, recomenda a coreografia para sagas simples, e esta não é: com coreografia, os passos ficariam espalhados nos três serviços, sem um lugar que diga em que etapa a OS está, e prazos, ordem das compensações e o pivot exigiriam que cada serviço assinasse eventos dos outros dois, com risco de ciclo. Com o orquestrador no serviço que abre a OS, como nos exemplos do material (o orquestrador fica no serviço que inicia a saga), o fluxo inteiro fica num lugar só, testável sem broker, e etapa e status mudam na mesma transação local. Os dois contras que a aula aponta ficam contidos: o orquestrador só conhece a ordem dos passos, as compensações e os prazos (preço, validade e pagamento são dos participantes, que respondem a comandos sem conhecer a saga), e não é ponto único de falha, porque o estado fica no banco e o consumidor roda em réplicas. As alternativas descartadas (coreografia, orquestrador como quarto serviço, motor de workflow) estão no ADR-035.
+- **O tamanho da saga.** São nove passos, T1 a T9 (as transações locais de cada serviço, da abertura à finalização), em três serviços, mais a entrega local (T10), com esperas humanas (mecânico e cliente), um provedor externo (Mercado Pago) e seis compensações. Um dos passos é o *pivot*, o ponto sem retorno (RN-029): o início da execução física, depois do qual não há compensação.
+- **Por que não coreografia.** A Aula 02 de SAGA Pattern, citando Richardson, recomenda a coreografia para sagas simples, e esta não é. Com coreografia, os passos ficariam espalhados nos três serviços, sem um lugar que diga em que etapa a OS está, e prazos, ordem das compensações e o pivot exigiriam que cada serviço assinasse eventos dos outros dois, com risco de ciclo.
+- **Por que no OS, e não num quarto serviço.** Como nos exemplos do material, o orquestrador fica no serviço que inicia a saga: o fluxo inteiro fica num lugar só, testável sem broker, e etapa e status mudam na mesma transação local.
+- **Os dois contras da aula, contidos.** O orquestrador só conhece a ordem dos passos, as compensações e os prazos: preço, validade e pagamento são dos participantes, que respondem a comandos sem conhecer a saga. E ele não é ponto único de falha: o estado fica no banco e o consumidor roda em réplicas. As alternativas descartadas (coreografia, orquestrador como quarto serviço, motor de workflow) estão no ADR-035.
 
 ### Caminho feliz
 
@@ -290,7 +296,12 @@ Etapa (o estado do orquestrador) e status (o que cliente e atendente veem) são 
 | `em_execucao` | `em_execucao` | `ExecucaoFinalizada` | nenhum |
 | `concluida` | `finalizada`; `entregue` com a entrega (T10, fora da saga) | nenhum | nenhum |
 
-A tabela vive no agregado `Saga`: antes de mudar, ele confere que o evento é da OS, que se classifica para ser processado (com os marcos da OS de antes do fato) e que o comando enviado é o da linha, com o `ordem_id` da OS, os itens ou as peças que a saga guarda e o prazo técnico; o orquestrador só traduz cada evento em chamadas (o fato na OS, o comando na outbox e o passo na saga). Cada comando sai com `causation_id` = id do evento que o causou; o `SolicitarDiagnostico` da abertura, causado pela requisição, sai sem ele. O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado` e `AgendarExecucao`) vira o comando em voo da saga, com o prazo técnico (`prazo_resposta_em`, `SAGA_PRAZO_RESPOSTA_SEGUNDOS` depois do envio) e o id de cada envio (`mensagem_ids`), com que a resposta casa pelo `causation_id`. O `SolicitarDiagnostico` e as esperas humanas não têm prazo. A saga guarda só códigos (etapa, gatilho, comando, ator); texto livre e placa ficam na OS e na mensagem.
+As etapas `compensando`, `compensada` e `falha_na_compensacao` já existem no enum, na API e nos gauges, e chegam com as compensações: esta versão não as produz.
+
+- **A tabela vive no agregado `Saga`.** Antes de mudar, ele confere que o evento é da OS, que se classifica para ser processado (com os marcos da OS de antes do fato) e que o comando enviado é o da linha, com o `ordem_id` da OS, os itens ou as peças que a saga guarda e o prazo técnico. O orquestrador só traduz cada evento em chamadas: o fato na OS, o comando na outbox e o registro na saga.
+- **Causa.** Cada comando sai com `causation_id` = id do evento que o causou; o `SolicitarDiagnostico` da abertura, causado pela requisição, sai sem ele.
+- **Comando em voo.** O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado` e `AgendarExecucao`) fica registrado na saga como o comando em voo, o que espera a resposta, com o prazo técnico (`prazo_resposta_em`, `SAGA_PRAZO_RESPOSTA_SEGUNDOS` depois do envio) e o id de cada envio (`mensagem_ids`), com que a resposta casa pelo `causation_id`. O `SolicitarDiagnostico` e as esperas humanas não têm prazo.
+- **Só códigos.** A saga guarda etapa, gatilho, comando e ator; texto livre e placa ficam na OS e na mensagem.
 
 ### Evento fora de ordem
 
@@ -298,7 +309,7 @@ O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa an
 
 | Situação | Exemplo | Desfecho |
 |---|---|---|
-| Etapa do evento é a atual | `OrcamentoGerado` em `aguardando_orcamento` | processado: status, passo e comando seguinte |
+| Etapa do evento é a atual | `OrcamentoGerado` em `aguardando_orcamento` | processado: status, registro e comando seguinte |
 | Etapa já passada, inclusive a resposta republicada | `OrcamentoGerado` em `aguardando_decisao` | ignorado com log (`saga event ignored`) |
 | Mesma etapa, fato já aplicado | `DiagnosticoIniciado` com a OS já em diagnóstico; `PagamentoSolicitado` com o resumo gravado | ignorado com log |
 | Etapa à frente da atual | `ExecucaoIniciada` antes da `ExecucaoAgendada` | adiantado (`FalhaTransitoriaError`): volta pela fila de retry até a saga alcançá-lo |
@@ -309,7 +320,7 @@ O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa an
 | Falha de negócio ou resposta de compensação na etapa em que caberia tratá-la | `OrcamentoRecusado` em `aguardando_decisao` | DLQ com o motivo `sem_tratador_nesta_versao` (nesta versão, sem compensações) |
 | Fato que a OS ou a saga recusam | | DLQ com o motivo `transicao_invalida` |
 
-Nenhum evento fora de ordem vai para a DLQ: o adiantado espera a saga nas cinco cópias de retry (1 a 300 s), bem mais que o atraso entre eventos do mesmo passo. Falhas de negócio (`GeracaoDeOrcamentoFalhou`, `OrcamentoRecusado`, `OrcamentoExpirado`, `ReservaDePecasFalhou`, `PagamentoRecusado`, `PagamentoExpirado`) e respostas de compensação passam pela mesma classificação; nesta versão, a que chega na etapa em que caberia tratá-la vai para a DLQ, onde o alerta a mostra, em vez de ser consumida sem efeito: o `id` dela não entra em `mensagens_processadas`, e o redrive na versão com as compensações a processa. O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
+O descompasso de estado (etapa já passada, fato repetido, saga encerrada) é ignorado com log e nunca vai para a DLQ. O adiantado volta pela fila de retry nas cinco cópias (1, 5, 15, 60 e 300 s, 381 s ao todo), bem mais que o atraso entre eventos do mesmo passo; se a saga ainda não o tiver alcançado, a sexta falha vai para a DLQ, com alerta (RFC-004 seção 4.5, ADR-035). Falhas de negócio (`GeracaoDeOrcamentoFalhou`, `OrcamentoRecusado`, `OrcamentoExpirado`, `ReservaDePecasFalhou`, `PagamentoRecusado`, `PagamentoExpirado`) e respostas de compensação passam pela mesma classificação; nesta versão, a que chega na etapa em que caberia tratá-la vai para a DLQ, onde o alerta a mostra, em vez de ser consumida sem efeito: o `id` dela não entra em `mensagens_processadas`, e o redrive na versão com as compensações a processa. O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
 
 ### Cancelamento nesta versão
 
@@ -318,12 +329,34 @@ O `POST /api/v1/ordens-de-servico/{id}/cancelamento` de OS com a saga em andamen
 ### Consulta e operação
 
 - `GET /api/v1/ordens-de-servico/{id}`: a etapa da saga ao lado do status.
-- `GET /api/v1/ordens-de-servico/{id}/historico`: as mudanças de status, com o ator de cada uma (`sub` do JWT ou o processo `consumidor`), e os passos da saga (gatilho, etapa antes e depois, comando enviado e ator).
-- `GET /api/v1/sagas/{ordem_id}` (admin): etapa, motivo, falha, plano de compensação restante, comando em voo (tipo e hora do envio), reenvios, prazo e passos; é a primeira consulta do [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md).
+- `GET /api/v1/ordens-de-servico/{id}/historico`: as mudanças de status (`mudancas`), com o ator de cada uma (`sub` do JWT ou o processo `consumidor`), e os registros da saga (`passos`: gatilho, etapa antes e depois, comando enviado e ator), em duas listas, cada uma na sua ordem.
+- `GET /api/v1/sagas/{ordem_id}` (admin): etapa, motivo, falha, plano de compensação restante, comando em voo (tipo e hora do envio), reenvios, prazo e registros; é a primeira consulta do [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md).
 
 ```bash
 curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq
 ```
+
+Logo depois do `DiagnosticoConcluido`, a resposta fica assim (registros abreviados: cada um traz também `em`, `mensagem_id`, `comando_id` e `motivo`):
+
+```json
+{
+  "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
+  "etapa": "aguardando_orcamento",
+  "motivo": null,
+  "falha": null,
+  "plano_compensacao": [],
+  "comando_em_voo": {"tipo": "GerarOrcamento", "enviado_em": "2026-10-07T13:02:11Z"},
+  "reenvios": 0,
+  "prazo_resposta_em": "2026-10-07T13:04:11Z",
+  "passos": [
+    {"seq": 1, "gatilho": "abertura", "de": null, "para": "aguardando_diagnostico", "comando": "SolicitarDiagnostico", "ator": "<sub do atendente>"},
+    {"seq": 2, "gatilho": "DiagnosticoIniciado", "de": "aguardando_diagnostico", "para": "aguardando_diagnostico", "comando": null, "ator": "consumidor"},
+    {"seq": 3, "gatilho": "DiagnosticoConcluido", "de": "aguardando_diagnostico", "para": "aguardando_orcamento", "comando": "GerarOrcamento", "ator": "consumidor"}
+  ]
+}
+```
+
+O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_id` (o id da OS, atributo dos spans de mensagem); no Loki, pelo campo `correlation_id` dos logs.
 
 ### Observabilidade da saga
 
@@ -333,10 +366,10 @@ curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" 
 
 ### Testes da saga
 
-- Unitários: cada linha da tabela de etapas (status, comando e `dados`, prazo) e a matriz etapa x tipo (12 x 23), gerada da tabela da RFC e conferida pelo handler (`tests/unitarios/ordem_servico/test_saga.py` e `test_orquestrador.py`).
-- Propriedade: em mil sementes, participantes simulados respondem a cada comando com eventos embaralhados, repetidos com id novo e atrasados, com retry nos atrasos das filas; só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada e nada vai para a DLQ (`test_propriedades_da_saga.py`).
-- BDD de componente: `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ.
-- Integração: relay, consumidor e RabbitMQ reais com participantes falsos, do caminho feliz até `ENTREGUE` num trace só, o adiantado passando pela retry, as recusas na DLQ com o motivo e a transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga e o comando desfaz tudo, inclusive o registro da mensagem (`tests/integracao/mensageria/test_saga_com_broker.py`).
+- Unitários: cada linha da tabela de etapas no agregado e no handler (etapa, status, comando e `dados`, prazo, resumos da OS e ator), as recusas do agregado e a matriz da classificação, gerada de um oráculo escrito a partir da RFC: 12 etapas x 10 perfis da OS x 23 tipos no agregado, e o handler com a OS de cada etapa e com a OS encerrada (`tests/unitarios/ordem_servico/test_saga.py` e `test_orquestrador.py`).
+- Propriedade: em mil sementes, participantes simulados respondem a cada comando com eventos embaralhados, repetidos com id novo e atrasados, com retry nos atrasos das filas, e o atendente tenta cancelar e entregar a OS em pontos aleatórios; só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada, a OS nunca fica encerrada com a saga viva e nada vai para a DLQ. Uma guarda confere que o gerador produz de fato obsoletos, repetidos, adiantados e eventos fora do fluxo (`test_propriedades_da_saga.py`).
+- BDD de componente: `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ; os passos ficam em `tests/integracao/test_saga_atendimento.py`, ao lado das fixtures do banco.
+- Integração: relay, consumidor e RabbitMQ reais com participantes falsos: o caminho feliz até `ENTREGUE` num trace só (com a árvore de spans conferida), o adiantado passando pela retry, a reentrega do mesmo evento sem repetir o comando, as recusas na DLQ com o motivo, a placa e a descrição só no comando da Execução e a transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga e o comando desfaz tudo, inclusive o registro da mensagem (`tests/integracao/mensageria/test_saga_com_broker.py`).
 
 ## Como rodar local
 
