@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
@@ -72,10 +73,13 @@ from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 
 if TYPE_CHECKING:
     import threading
+    from collections.abc import Iterator
     from pathlib import Path
 
-    from opentelemetry.trace import Tracer
+    from opentelemetry.trace import Span, Tracer
     from sqlalchemy.orm import Session, sessionmaker
+
+    from src.compartilhado.infraestrutura.mensageria.contratos import Catalogo
 
 _log = structlog.get_logger(__name__)
 
@@ -277,36 +281,7 @@ class Consumidor:
         tipo = propriedades.type if isinstance(propriedades.type, str) else ""
         rotulo = tipo if tipo in self._catalogo.consumidos else _TIPO_DESCONHECIDO
         cabecalhos = propriedades.headers or {}
-        # O que vai para log e span antes de validar a mensagem: so o id
-        # convertido em UUID (texto qualquer do produtor fica de fora).
-        message_id = _uuid_ou_nada(propriedades.message_id)
-        correlation_id = _uuid_ou_nada(propriedades.correlation_id)
-        ids = {
-            chave: valor
-            for chave, valor in (
-                ("messaging.message.id", message_id),
-                ("messaging.message.conversation_id", correlation_id),
-                ("correlation_id", correlation_id),
-            )
-            if valor is not None
-        }
-        with (
-            structlog.contextvars.bound_contextvars(
-                message_id=message_id, correlation_id=correlation_id, tipo=rotulo
-            ),
-            span_de_mensagem(
-                self._tracer,
-                f"process {rotulo}",
-                contexto=contexto_dos_cabecalhos(cabecalhos),
-                tipo=SpanKind.CONSUMER,
-                atributos={
-                    "messaging.system": "rabbitmq",
-                    "messaging.operation.type": "process",
-                    "messaging.destination.name": FILA,
-                    **ids,
-                },
-            ) as span,
-        ):
+        with self._no_contexto_da_mensagem(propriedades, cabecalhos, rotulo) as span:
             try:
                 tentativa = ler_tentativa(cabecalhos)
                 resultado = self._processar(propriedades, corpo, tipo, tentativa)
@@ -338,6 +313,48 @@ class Consumidor:
             # minimo.
             self._broker.sucesso()
 
+    @contextmanager
+    def _no_contexto_da_mensagem(
+        self,
+        propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
+        cabecalhos: Mapping[str, Any],
+        rotulo: str,
+    ) -> Iterator[Span]:
+        """Span CONSUMER filho do contexto recebido e os ids no contexto do log.
+
+        Antes de validar a mensagem, so o id convertido em UUID vai para log e
+        span (texto qualquer do produtor fica de fora).
+        """
+        message_id = _uuid_ou_nada(propriedades.message_id)
+        correlation_id = _uuid_ou_nada(propriedades.correlation_id)
+        ids = {
+            chave: valor
+            for chave, valor in (
+                ("messaging.message.id", message_id),
+                ("messaging.message.conversation_id", correlation_id),
+                ("correlation_id", correlation_id),
+            )
+            if valor is not None
+        }
+        with (
+            structlog.contextvars.bound_contextvars(
+                message_id=message_id, correlation_id=correlation_id, tipo=rotulo
+            ),
+            span_de_mensagem(
+                self._tracer,
+                f"process {rotulo}",
+                contexto=contexto_dos_cabecalhos(cabecalhos),
+                tipo=SpanKind.CONSUMER,
+                atributos={
+                    "messaging.system": "rabbitmq",
+                    "messaging.operation.type": "process",
+                    "messaging.destination.name": FILA,
+                    **ids,
+                },
+            ) as span,
+        ):
+            yield span
+
     def _processar(
         self,
         propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
@@ -357,49 +374,11 @@ class Consumidor:
             consumidor=self._usuario,
             tentativa=tentativa,
         )
-        mensagem = self._ler(propriedades, corpo, tipo)
+        mensagem = _ler_mensagem(self._catalogo, propriedades, corpo, tipo)
         handler = self._despachante.get(tipo)
         if handler is None:
             raise _MensagemRejeitadaError("sem_handler")
         return self._aplicar(handler, mensagem)
-
-    def _ler(
-        self,
-        propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
-        corpo: bytes,
-        tipo: str,
-    ) -> MensagemRecebida:
-        """Corpo -> envelope validado pelo contrato e coerente com as propriedades."""
-        if len(corpo) > _CORPO_MAXIMO_BYTES:
-            raise _MensagemRejeitadaError("corpo_grande_demais")
-        try:
-            envelope = json.loads(corpo)
-        except (ValueError, RecursionError) as exc:
-            # JSON invalido (UnicodeDecodeError incluso) ou aninhado sem fim.
-            raise _MensagemRejeitadaError("json_invalido") from exc
-        try:
-            self._catalogo.validar(envelope)
-            mensagem = MensagemRecebida.do_envelope(envelope)
-        except ContratoInvalidoError as exc:
-            raise _MensagemRejeitadaError(
-                "contrato_invalido", caminho=exc.caminho, regra=exc.regra
-            ) from exc
-        except (ValueError, RecursionError) as exc:
-            # O que o schema deixa passar e a conversao recusa (data com `\n`
-            # no fim casa o `$` do pattern em Python).
-            raise _MensagemRejeitadaError("contrato_invalido") from exc
-        propriedades_do_envelope = (
-            envelope["tipo"],
-            envelope["id"],
-            envelope["correlation_id"],
-        )
-        if propriedades_do_envelope != (
-            tipo,
-            propriedades.message_id,
-            propriedades.correlation_id,
-        ):
-            raise _MensagemRejeitadaError("propriedades_divergentes")
-        return mensagem
 
     def _aplicar(self, handler: Handler, mensagem: MensagemRecebida) -> str:
         """Handler e ``mensagens_processadas`` numa transacao so, comitada aqui."""
@@ -456,42 +435,13 @@ class Consumidor:
             )
             self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
             return "dlq"
-        # A copia e a original: mesmas propriedades do contrato, o contexto de
-        # trace do span deste consumo (mesmo trace; o tracestate recebido segue
-        # nele) e so o `x-tentativa` incrementado.
-        copia = pika.BasicProperties(
-            message_id=propriedades.message_id,
-            correlation_id=propriedades.correlation_id,
-            type=propriedades.type,
-            content_type=propriedades.content_type,
-            delivery_mode=propriedades.delivery_mode,
-            # O broker so aceita o usuario da propria conexao (406 se outro).
-            user_id=self._usuario,
-            headers={**cabecalhos_do_contexto_atual(), "x-tentativa": tentativa + 1},
+        copia = _propriedades_da_copia(
+            propriedades, tentativa=tentativa, usuario=self._usuario
         )
-        try:
-            self._broker.canal.basic_publish(
-                _EXCHANGE_DE_RETRY, fila_de_retry, corpo, copia, mandatory=True
-            )
-        except (UnroutableError, NackError) as exc:
+        if not _publicar_copia(self._broker.canal, fila_de_retry, corpo, copia):
             # Sem como reagendar: a DLQ guarda a mensagem para o redrive.
-            _log.error(
-                "retry copy refused by the broker; rejected to dlq",
-                fila=fila_de_retry,
-                erro=type(exc).__name__,
-            )
             self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
             return "dlq"
-        except ChannelClosedByBroker as exc:
-            # Permissao de topico ou fila de retry ausente na topologia: o
-            # broker fecha o canal, e a original volta para a fila quando a
-            # conexao fecha (a reconexao segue com backoff).
-            _log.error(
-                "retry copy refused by the broker; check the retry topology",
-                fila=fila_de_retry,
-                codigo=exc.reply_code,
-            )
-            raise
         self._broker.canal.basic_ack(metodo.delivery_tag)
         _log.warning(
             "message processing failed; retry scheduled",
@@ -515,6 +465,105 @@ class Consumidor:
             return
         if apagadas:
             _log.info("old processed messages deleted", linhas=apagadas)
+
+
+def _ler_mensagem(
+    contratos: Catalogo,
+    propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
+    corpo: bytes,
+    tipo: str,
+) -> MensagemRecebida:
+    """Corpo -> envelope validado pelo contrato e coerente com as propriedades."""
+    if len(corpo) > _CORPO_MAXIMO_BYTES:
+        raise _MensagemRejeitadaError("corpo_grande_demais")
+    try:
+        envelope = json.loads(corpo)
+    except (ValueError, RecursionError) as exc:
+        # JSON invalido (UnicodeDecodeError incluso) ou aninhado sem fim.
+        raise _MensagemRejeitadaError("json_invalido") from exc
+    try:
+        contratos.validar(envelope)
+        mensagem = MensagemRecebida.do_envelope(envelope)
+    except ContratoInvalidoError as exc:
+        raise _MensagemRejeitadaError(
+            "contrato_invalido", caminho=exc.caminho, regra=exc.regra
+        ) from exc
+    except (ValueError, RecursionError) as exc:
+        # O que o schema deixa passar e a conversao recusa (data com `\n`
+        # no fim casa o `$` do pattern em Python).
+        raise _MensagemRejeitadaError("contrato_invalido") from exc
+    propriedades_do_envelope = (
+        envelope["tipo"],
+        envelope["id"],
+        envelope["correlation_id"],
+    )
+    if propriedades_do_envelope != (
+        tipo,
+        propriedades.message_id,
+        propriedades.correlation_id,
+    ):
+        raise _MensagemRejeitadaError("propriedades_divergentes")
+    return mensagem
+
+
+def _propriedades_da_copia(
+    propriedades: Any,  # noqa: ANN401  # BasicProperties (pika sem tipos)
+    *,
+    tentativa: int,
+    usuario: str,
+) -> pika.BasicProperties:
+    """A copia de retry e a original: mesmas propriedades do contrato.
+
+    Leva o contexto de trace do span deste consumo (mesmo trace; o tracestate
+    recebido segue nele) e so o ``x-tentativa`` incrementado.
+    """
+    return pika.BasicProperties(
+        message_id=propriedades.message_id,
+        correlation_id=propriedades.correlation_id,
+        type=propriedades.type,
+        content_type=propriedades.content_type,
+        delivery_mode=propriedades.delivery_mode,
+        # O broker so aceita o usuario da propria conexao (406 se outro).
+        user_id=usuario,
+        headers={**cabecalhos_do_contexto_atual(), "x-tentativa": tentativa + 1},
+    )
+
+
+def _publicar_copia(
+    canal: Any,  # noqa: ANN401  # BlockingChannel (pika sem tipos)
+    fila_de_retry: str,
+    corpo: bytes,
+    copia: pika.BasicProperties,
+) -> bool:
+    """Publica a copia na fila de retry, com ``mandatory`` e confirm.
+
+    Devolve False quando o broker a recusa (devolvida sem rota ou nack).
+
+    Raises:
+        ChannelClosedByBroker: permissao de topico ou fila de retry ausente na
+            topologia.
+    """
+    try:
+        canal.basic_publish(
+            _EXCHANGE_DE_RETRY, fila_de_retry, corpo, copia, mandatory=True
+        )
+    except (UnroutableError, NackError) as exc:
+        _log.error(
+            "retry copy refused by the broker; rejected to dlq",
+            fila=fila_de_retry,
+            erro=type(exc).__name__,
+        )
+        return False
+    except ChannelClosedByBroker as exc:
+        # O broker fecha o canal, e a original volta para a fila quando a
+        # conexao fecha (a reconexao segue com backoff).
+        _log.error(
+            "retry copy refused by the broker; check the retry topology",
+            fila=fila_de_retry,
+            codigo=exc.reply_code,
+        )
+        raise
+    return True
 
 
 def _recusar_commit(sessao: Session) -> None:
