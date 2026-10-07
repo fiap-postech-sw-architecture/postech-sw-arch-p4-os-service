@@ -45,6 +45,24 @@ class EtapaSaga(StrEnum):
     FALHA_NA_COMPENSACAO = "falha_na_compensacao"
 
 
+class MotivoCompensacao(StrEnum):
+    """Por que a saga compensa (RFC-004 secao 9): um codigo, nunca texto livre.
+
+    Vai no ``motivo`` dos comandos de compensacao (RFC-004 secao 5.3), na saga
+    e no label ``motivo`` de ``pytstop_saga_compensacoes_total``. O texto que o
+    atendente escreve no cancelamento fica so na OS.
+    """
+
+    ORCAMENTO_RECUSADO = "orcamento_recusado"
+    ORCAMENTO_EXPIRADO = "orcamento_expirado"
+    GERACAO_FALHOU = "geracao_falhou"
+    RESERVA_FALHOU = "reserva_falhou"
+    PAGAMENTO_RECUSADO = "pagamento_recusado"
+    PAGAMENTO_EXPIRADO = "pagamento_expirado"
+    CANCELAMENTO = "cancelamento"
+    PRAZO_TECNICO = "prazo_tecnico"
+
+
 class RegistroDaSaga(TypedDict):
     """Registro da linha do tempo da saga (coluna ``passos``): so codigos.
 
@@ -126,6 +144,13 @@ class EtapaDaSagaAlteradaEvent(DomainEvent):
     etapa_anterior: EtapaSaga = field(kw_only=True)
     etapa_nova: EtapaSaga = field(kw_only=True)
     permanencia: timedelta = field(kw_only=True)
+
+
+@dataclass(frozen=True, slots=True)
+class CompensacaoIniciadaEvent(DomainEvent):
+    """A saga saiu do fluxo normal para compensar, pelo ``motivo``."""
+
+    motivo: MotivoCompensacao = field(kw_only=True)
 
 
 class TransicaoDaSagaInvalidaError(Exception):

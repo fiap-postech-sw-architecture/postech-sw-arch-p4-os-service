@@ -5,10 +5,14 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from prometheus_client import CollectorRegistry
+from prometheus_client import REGISTRY, CollectorRegistry
 from sqlalchemy.orm import Session
 
 from src.compartilhado.dominio.events import DomainEvent
+from src.ordem_servico.aplicacao.saga.modelo import (
+    CompensacaoIniciadaEvent,
+    MotivoCompensacao,
+)
 from src.ordem_servico.infraestrutura import metricas_da_saga
 
 
@@ -39,3 +43,26 @@ def test_fato_sem_metrica_levanta_antes_do_commit() -> None:
         metricas_da_saga.anotar(sessao, [DomainEvent(agregado_id=uuid4())])
 
     assert sessao.info == {}
+
+
+def _compensacoes(motivo: str) -> float | None:
+    return REGISTRY.get_sample_value(
+        "pytstop_saga_compensacoes_total", {"motivo": motivo}
+    )
+
+
+def test_compensacoes_tem_a_serie_de_cada_motivo_e_contam_no_commit() -> None:
+    # Series de rotulo fechado nascem com o processo: o increase() do painel
+    # nao perde a primeira compensacao. O fato so vira metrica no commit.
+    assert all(_compensacoes(m.value) is not None for m in MotivoCompensacao)
+    antes = _compensacoes("reserva_falhou")
+    sessao = Session()
+    fato = CompensacaoIniciadaEvent(
+        agregado_id=uuid4(), motivo=MotivoCompensacao.RESERVA_FALHOU
+    )
+
+    metricas_da_saga.anotar(sessao, [fato])
+    assert _compensacoes("reserva_falhou") == antes
+    sessao.commit()
+
+    assert _compensacoes("reserva_falhou") == (antes or 0) + 1

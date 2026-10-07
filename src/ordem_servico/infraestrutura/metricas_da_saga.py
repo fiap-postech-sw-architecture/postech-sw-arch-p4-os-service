@@ -1,12 +1,12 @@
 """Metricas da saga (RFC-004 secao 9, ADR-043), no registro do prometheus_client.
 
 Contadores e histograma: a ``Saga`` registra os fatos (``SagaIniciadaEvent``,
-``EtapaDaSagaAlteradaEvent``), o repositorio os entrega a sessao no ``salvar``
-e eles so viram metrica no ``after_commit`` da transacao raiz. Rollback (o da
-raiz e o de um SAVEPOINT, que descarta os fatos anotados dentro dele), conflito
-de versao ou commit que falha os descartam: a mensagem que volta pela retry nao
-conta duas vezes. Quem emite e o processo que tira a saga da etapa (API na
-abertura, consumidor nos eventos).
+``EtapaDaSagaAlteradaEvent``, ``CompensacaoIniciadaEvent``), o repositorio os
+entrega a sessao no ``salvar`` e eles so viram metrica no ``after_commit`` da
+transacao raiz. Rollback (o da raiz e o de um SAVEPOINT, que descarta os fatos
+anotados dentro dele), conflito de versao ou commit que falha os descartam: a
+mensagem que volta pela retry nao conta duas vezes. Quem emite e o processo que
+tira a saga da etapa (API na abertura e no cancelamento, consumidor nos eventos).
 
 Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` na hora
 da raspagem, numa conexao propria e com prazo curto, e continua certo com os
@@ -30,7 +30,9 @@ from sqlalchemy import String, event, func, select, text, type_coerce
 from sqlalchemy.orm import Session
 
 from src.ordem_servico.aplicacao.saga.modelo import (
+    CompensacaoIniciadaEvent,
     EtapaDaSagaAlteradaEvent,
+    MotivoCompensacao,
     SagaIniciadaEvent,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
@@ -70,8 +72,15 @@ DURACAO_DA_ETAPA: Final = Histogram(
     # De segundos (resposta automatica) a 7 dias (espera humana).
     buckets=(5, 30, 120, 600, 3600, 14400, 86400, 259200, 604800),
 )
+COMPENSACOES: Final = Counter(
+    "pytstop_saga_compensacoes_total",
+    "Compensacoes iniciadas, por motivo (codigo da RFC-004 secao 9).",
+    ["motivo"],
+)
 for _etapa in ETAPAS_FINAIS:
     SAGAS_FINALIZADAS.labels(resultado=_etapa.value)
+for _motivo in MotivoCompensacao:
+    COMPENSACOES.labels(motivo=_motivo.value)
 for _etapa in ETAPAS_NAO_FINAIS:
     DURACAO_DA_ETAPA.labels(etapa=_etapa.value)
 
@@ -102,6 +111,8 @@ def _observacao(fato: DomainEvent) -> Callable[[], None]:
             return SAGAS_INICIADAS.inc
         case EtapaDaSagaAlteradaEvent():
             return partial(_etapa_alterada, fato)
+        case CompensacaoIniciadaEvent():
+            return COMPENSACOES.labels(motivo=fato.motivo.value).inc
     msg = f"fato da saga sem metrica: {type(fato).__name__}"
     raise TypeError(msg)
 
