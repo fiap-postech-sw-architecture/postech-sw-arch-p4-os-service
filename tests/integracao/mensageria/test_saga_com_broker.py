@@ -777,7 +777,7 @@ def test_redrive_da_dlq_trata_o_evento_que_a_versao_anterior_recusou(
 ) -> None:
     # A versao anterior mandava a falha de negocio e a resposta de compensacao
     # para a DLQ com `sem_tratador_nesta_versao`, sem registrar a mensagem
-    # (D98): o redrive devolve a fila inteira e a versao nova as trata.
+    # (ADR-036): o redrive devolve a fila inteira e a versao nova as trata.
     def sem_tratador(_mensagem: object, _transacao: object) -> Desfecho:
         raise FalhaPermanenteError("sem_tratador_nesta_versao")
 

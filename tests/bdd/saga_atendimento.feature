@@ -222,3 +222,11 @@ Funcionalidade: Saga de atendimento orquestrada pelo OS Service
     E os registros da saga terminam em:
       | gatilho                 |
       | cancelamento_solicitado |
+
+  Cenário: Pagamento confirmado durante a compensação é ignorado
+    Dado os eventos do caminho feliz anteriores a "PagamentoConfirmado"
+    E o atendente pede o cancelamento com o motivo "Cliente desistiu"
+    Quando o Billing publica "PagamentoConfirmado"
+    Então o evento "PagamentoConfirmado" é ignorado
+    E a saga está na etapa "compensando" com a OS "aguardando_pagamento"
+    E nenhum comando saiu em seguida
