@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -24,7 +25,8 @@ from src.ordem_servico.aplicacao.dtos import (
 )
 from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.use_cases import (
-    CANCELAMENTO_INDISPONIVEL,
+    CANCELAMENTO_RECUSADO,
+    ORDEM_JA_CANCELADA,
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
@@ -38,6 +40,7 @@ from src.ordem_servico.dominio.exceptions import (
     OrdemNaoEncontradaException,
     VeiculoNaoEncontradoException,
 )
+from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import (
     ATOR_ATENDENTE,
@@ -56,7 +59,11 @@ from tests.unitarios.fakes import (
     RepoEmMemoria,
     SagasEmMemoria,
 )
-from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
+from tests.unitarios.ordem_servico.cenario_da_saga import (
+    COMPENSACOES,
+    PRAZO,
+    CenarioDaSaga,
+)
 
 
 def _dto() -> AbrirOrdemDTO:
@@ -272,29 +279,72 @@ class TestObterSaga:
             ObterSaga(SagasEmMemoria()).executar(uuid4())
 
 
+def _cancelar_ordem(
+    repo: RepoEmMemoria, uow: FakeUnitOfWork, sagas: SagasEmMemoria
+) -> CancelarOrdem:
+    return CancelarOrdem(repo, uow, sagas, prazo_resposta=PRAZO)
+
+
+def _foto(cenario: CenarioDaSaga) -> tuple[object, ...]:
+    saga, ordem = cenario.saga, cenario.ordem
+    return (
+        saga.etapa,
+        saga.passos,
+        saga.plano_compensacao,
+        saga.comando_em_voo,
+        ordem.status,
+        ordem.historico,
+        ordem.motivo_cancelamento,
+        tuple(cenario.publicador.comandos),
+    )
+
+
+# (perfil da OS, plano): as linhas de cancelamento da tabela da RFC-004 secao
+# 4.4, com o passo em voo no plano.
+CANCELAMENTOS = [
+    pytest.param("aguardando_diagnostico", COMPENSACOES[4:], id="diagnostico"),
+    pytest.param("aguardando_orcamento", COMPENSACOES[3:], id="orcamento-em-voo"),
+    pytest.param("aguardando_decisao", COMPENSACOES[3:], id="decisao"),
+    pytest.param("aguardando_reserva", COMPENSACOES[2:], id="reserva-em-voo"),
+    pytest.param("aguardando_pagamento", COMPENSACOES[1:], id="pagamento-em-voo"),
+    pytest.param("com_checkout", COMPENSACOES[1:], id="checkout-aberto"),
+    pytest.param("aguardando_agendamento", COMPENSACOES, id="agendamento-em-voo"),
+    pytest.param("aguardando_inicio", COMPENSACOES, id="inicio"),
+]
+
+
+def _cenario_no_perfil(perfil: str) -> CenarioDaSaga:
+    if perfil == "com_checkout":
+        cenario = CenarioDaSaga.em("aguardando_pagamento")
+        cenario.receber("PagamentoSolicitado")
+        return cenario
+    return CenarioDaSaga.em(perfil)
+
+
 class TestCancelarOrdem:
-    def test_cancela_pelo_atendimento(self) -> None:
+    def test_os_sem_saga_e_cancelada_direto(self) -> None:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_APROVACAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+        dto = _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
             ordem.id, "cliente desistiu", ator=ATOR_ATENDENTE
         )
 
         assert uow.committed
         assert repo.salvas == [ordem]
-        assert dto.status == "cancelada"
+        assert (dto.status, dto.etapa) == ("cancelada", None)
         assert dto.motivo_cancelamento == "cliente desistiu"
         assert dto.historico[-1].origem == "atendimento"
         assert dto.historico[-1].motivo == "cliente desistiu"
         assert dto.historico[-1].ator == ATOR_ATENDENTE
+        assert uow.comandos == []
 
-    def test_depois_da_execucao_levanta_409_sem_persistir(self) -> None:
+    def test_os_sem_saga_depois_da_execucao_levanta_409_sem_persistir(self) -> None:
         ordem = ordem_em(StatusOrdem.EM_EXECUCAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+            _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
                 ordem.id, "tarde", ator=ATOR_ATENDENTE
             )
 
@@ -302,68 +352,145 @@ class TestCancelarOrdem:
         assert not uow.committed
         assert uow.rolled_back
 
-    def test_conflito_de_versao_propaga_sem_commit(self) -> None:
+    def test_conflito_que_volta_nas_tres_leituras_levanta_sem_commit(self) -> None:
         ordem = ordem_em(StatusOrdem.RECEBIDA)
-        repo, uow = RepoEmMemoria(ordem, conflito=True), FakeUnitOfWork()
+
+        class _SempreEmConflito(RepoEmMemoria):
+            """Cada leitura traz a OS do banco: o rollback desfez a anterior."""
+
+            leituras = 0
+
+            def obter_por_id(self, ordem_id: UUID) -> OrdemDeServico | None:
+                self.leituras += 1
+                return deepcopy(super().obter_por_id(ordem_id))
+
+        repo, uow = _SempreEmConflito(ordem, conflito=True), FakeUnitOfWork()
 
         with pytest.raises(ConflitoDeConcorrenciaException):
-            CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+            _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
                 ordem.id, "x", ator=ATOR_ATENDENTE
             )
 
+        # Reread value (RFC-004 secao 4.5): tres leituras, e o 409 na ultima.
+        assert repo.leituras == 3
         assert not uow.committed
         assert uow.rolled_back
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()).executar(
-                uuid4(), "x", ator=ATOR_ATENDENTE
-            )
+            _cancelar_ordem(
+                RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+            ).executar(uuid4(), "x", ator=ATOR_ATENDENTE)
 
-    @pytest.mark.parametrize(
-        "etapa",
-        [
-            "aguardando_diagnostico",
-            "aguardando_orcamento",
-            "aguardando_decisao",
-            "aguardando_reserva",
-            "aguardando_pagamento",
-            "aguardando_agendamento",
-            "aguardando_inicio",
-            "em_execucao",
-            "compensando",
-            "falha_na_compensacao",
-        ],
-    )
-    def test_com_a_saga_em_andamento_levanta_409_sem_mudar_nada(
+    @pytest.mark.parametrize(("perfil", "plano"), CANCELAMENTOS)
+    def test_antes_do_pivot_a_saga_compensa_e_a_os_guarda_o_pedido(
+        self, perfil: str, plano: tuple[str, ...]
+    ) -> None:
+        cenario = _cenario_no_perfil(perfil)
+        status, enviados = cenario.ordem.status, len(cenario.publicador.comandos)
+
+        dto = cenario.cancelar("  Cliente vendeu o carro  ")
+
+        # A OS guarda o pedido e mantem o status ate a saga compensar.
+        assert (dto.etapa, dto.status) == ("compensando", status.value)
+        assert dto.motivo_cancelamento == "Cliente vendeu o carro"
+        assert dto.historico[-1].para == status.value
+        # A primeira compensacao do plano, sem causation_id: a causa e a
+        # requisicao (RFC-004 secao 5.2).
+        ((tipo, dados, correlation_id, causation_id),) = cenario.publicador.comandos[
+            enviados:
+        ]
+        assert (tipo, correlation_id, causation_id) == (
+            plano[0],
+            cenario.ordem_id,
+            None,
+        )
+        assert (dados["ordem_id"], dados["motivo"]) == (
+            str(cenario.ordem_id),
+            "cancelamento",
+        )
+        saga = cenario.saga
+        assert (saga.motivo, saga.plano_compensacao) == ("cancelamento", plano)
+        assert saga.prazo_resposta_em == cenario.relogio.agora + PRAZO
+        passo = saga.passos[-1]
+        assert (passo["gatilho"], passo["mensagem_id"], passo["ator"]) == (
+            "cancelamento",
+            None,
+            ATOR_ATENDENTE,
+        )
+        assert passo["comando_id"] == cenario.publicador.envelopes[-1]["id"]
+        assert cenario.publicador.committed
+        # O texto livre fica na OS: a saga guarda so codigos.
+        assert "vendeu" not in str(saga.passos) + str(saga.comando_em_voo)
+
+    @pytest.mark.parametrize("etapa", ["compensando", "falha_na_compensacao"])
+    def test_pedido_repetido_na_compensacao_devolve_a_etapa_sem_efeito(
         self, etapa: str
     ) -> None:
+        cenario = CenarioDaSaga.em_compensacao(
+            COMPENSACOES[1:],
+            falha="estorno_recusado" if etapa != "compensando" else None,
+        )
+        antes = _foto(cenario)
+        cenario.publicador.committed = False
+
+        dto = cenario.cancelar("outro motivo")
+
+        assert dto.etapa == etapa
+        assert _foto(cenario) == antes
+        # A compensacao ja comecou: nada a gravar.
+        assert not cenario.publicador.committed
+
+    @pytest.mark.parametrize(
+        ("etapa", "mensagem"),
+        [
+            pytest.param("em_execucao", CANCELAMENTO_RECUSADO, id="em-execucao"),
+            pytest.param("concluida", CANCELAMENTO_RECUSADO, id="concluida"),
+        ],
+    )
+    def test_depois_do_inicio_da_execucao_409(self, etapa: str, mensagem: str) -> None:
         cenario = CenarioDaSaga.em(etapa)
-        status, historico = cenario.ordem.status, cenario.ordem.historico
-        uow = FakeUnitOfWork()
+        antes = _foto(cenario)
 
         with pytest.raises(TransicaoStatusInvalidaException) as exc:
-            CancelarOrdem(cenario.ordens, uow, cenario.sagas).executar(
-                cenario.ordem_id, "cliente desistiu", ator=ATOR_ATENDENTE
-            )
+            cenario.cancelar()
 
-        # A OS nunca fica cancelada com a saga viva: o cancelamento passa pela
-        # saga quando as compensacoes chegarem (RFC-004 secao 4.4).
-        assert exc.value.mensagem == CANCELAMENTO_INDISPONIVEL
-        assert (cenario.ordem.status, cenario.ordem.historico) == (status, historico)
-        assert cenario.saga.etapa.value == etapa
-        assert not uow.committed
-        assert uow.rolled_back
+        assert (exc.value.codigo, exc.value.mensagem) == (
+            "TRANSICAO_STATUS_INVALIDA",
+            mensagem,
+        )
+        assert _foto(cenario) == antes
+        assert cenario.publicador.rolled_back
 
-    def test_com_a_saga_concluida_vale_a_maquina_de_status(self) -> None:
-        cenario = CenarioDaSaga.em("concluida")
+    def test_ordem_ja_cancelada_pela_saga_409(self) -> None:
+        cenario = CenarioDaSaga.em("aguardando_diagnostico")
+        cenario.cancelar()
+        cenario.receber("DiagnosticoDescartado")
+        assert cenario.saga.etapa.value == "compensada"
+        antes = _foto(cenario)
 
         with pytest.raises(TransicaoStatusInvalidaException) as exc:
-            CancelarOrdem(cenario.ordens, FakeUnitOfWork(), cenario.sagas).executar(
-                cenario.ordem_id, "tarde", ator=ATOR_ATENDENTE
-            )
+            cenario.cancelar()
 
-        assert "finalizada para cancelada" in exc.value.mensagem
+        assert exc.value.mensagem == ORDEM_JA_CANCELADA
+        assert _foto(cenario) == antes
+
+    @pytest.mark.parametrize(
+        "motivo",
+        [
+            pytest.param("   ", id="espacos"),
+            pytest.param("desistiu\x00", id="nul"),
+            pytest.param("x" * 501, id="longo"),
+        ],
+    )
+    def test_motivo_invalido_422_sem_mudar_nada(self, motivo: str) -> None:
+        cenario = CenarioDaSaga.em("aguardando_decisao")
+        antes = _foto(cenario)
+
+        with pytest.raises(ValorInvalidoException):
+            cenario.cancelar(motivo)
+
+        assert _foto(cenario) == antes
 
 
 class TestRegistrarEntrega:

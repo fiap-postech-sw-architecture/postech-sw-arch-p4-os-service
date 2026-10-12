@@ -460,6 +460,34 @@ class TestMain:
 
         asyncio.run(_run())
 
+    def test_lifespan_aborta_com_prazo_de_resposta_invalido(self) -> None:
+        """O cancelamento grava o prazo da primeira compensacao: o valor invalido
+        de ``SAGA_PRAZO_RESPOSTA_SEGUNDOS`` aborta o boot, como no consumidor."""
+        app = FastAPI()
+
+        async def _run() -> None:
+            with (
+                patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.compartilhado.infraestrutura.database.criar_engine"),
+                patch("src.main.validar_segredos_no_startup"),
+                patch("src.main.validar_chave_jwt_no_startup"),
+                patch.dict(
+                    os.environ,
+                    {
+                        "DATABASE_URL": "postgresql://x:x@localhost:5432/x",
+                        "SAGA_PRAZO_RESPOSTA_SEGUNDOS": "0",
+                    },
+                    clear=False,
+                ),
+            ):
+                async with lifespan(app):
+                    pass
+
+        with pytest.raises(RuntimeError, match="SAGA_PRAZO_RESPOSTA_SEGUNDOS"):
+            asyncio.run(_run())
+
     def test_lifespan_aborta_com_a_chave_rsa_de_demo_em_producao(self) -> None:
         """Boot em producao falha com a chave RSA de demonstracao do compose.
 

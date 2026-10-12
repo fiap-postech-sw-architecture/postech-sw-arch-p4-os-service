@@ -271,9 +271,7 @@ class Saga(AggregateRoot):
         itens = itens_do_diagnostico(evento.dados) if diagnostico else self._itens
         agendada = evento.tipo == "ExecucaoAgendada"
         posicao = evento.dados["posicao_na_fila"] if agendada else None
-        conferir_envio(
-            transicao, envio, ordem_id=self.id, itens=itens, marcos=marcos
-        )
+        conferir_envio(transicao, envio, ordem_id=self.id, itens=itens, marcos=marcos)
         conferir_prazo(envio, agora)
         self._itens = itens
         gatilho = Gatilho(evento.tipo, evento.id, agora, ator)

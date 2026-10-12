@@ -15,7 +15,7 @@ from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
-from src.ordem_servico.aplicacao.use_cases import AbrirOrdem
+from src.ordem_servico.aplicacao.use_cases import AbrirOrdem, CancelarOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
 from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
+    from src.ordem_servico.aplicacao.dtos import OrdemDeServicoDTO
     from src.ordem_servico.aplicacao.saga.orquestrador import Tratamento
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -136,6 +137,29 @@ FEITO: Final[dict[str, tuple[tuple[str, ...], str | None]]] = {
     "aguardando_pagamento_com_checkout": (("T3", "T5", "T6"), None),
     "aguardando_agendamento": (("T3", "T5", "T6"), "AgendarExecucao"),
     "aguardando_inicio": (("T3", "T5", "T6", "T7"), None),
+}
+# O plano de cada linha da tabela da RFC-004 secao 4.4, pelo que a saga ja fez
+# (``FEITO``) e pelo motivo; as linhas com dois gatilhos ("cancelamento ou
+# prazo") tem uma entrada por gatilho.
+PLANO_DA_RFC: Final[dict[tuple[str, str], tuple[str, ...]]] = {
+    ("aguardando_diagnostico", "cancelamento"): COMPENSACOES[4:],
+    ("aguardando_orcamento", "geracao_falhou"): COMPENSACOES[4:],
+    ("aguardando_orcamento", "cancelamento"): COMPENSACOES[3:],
+    ("aguardando_orcamento", "prazo_tecnico"): COMPENSACOES[3:],
+    ("aguardando_decisao", "orcamento_recusado"): COMPENSACOES[4:],
+    ("aguardando_decisao", "orcamento_expirado"): COMPENSACOES[4:],
+    ("aguardando_decisao", "cancelamento"): COMPENSACOES[3:],
+    ("aguardando_reserva", "reserva_falhou"): COMPENSACOES[3:],
+    ("aguardando_reserva", "cancelamento"): COMPENSACOES[2:],
+    ("aguardando_reserva", "prazo_tecnico"): COMPENSACOES[2:],
+    ("aguardando_pagamento_com_checkout", "pagamento_recusado"): COMPENSACOES[2:],
+    ("aguardando_pagamento_com_checkout", "pagamento_expirado"): COMPENSACOES[2:],
+    ("aguardando_pagamento", "cancelamento"): COMPENSACOES[1:],
+    ("aguardando_pagamento_com_checkout", "cancelamento"): COMPENSACOES[1:],
+    ("aguardando_pagamento", "prazo_tecnico"): COMPENSACOES[1:],
+    ("aguardando_agendamento", "cancelamento"): COMPENSACOES,
+    ("aguardando_agendamento", "prazo_tecnico"): COMPENSACOES,
+    ("aguardando_inicio", "cancelamento"): COMPENSACOES,
 }
 # A compensacao pendente das etapas da compensacao quando o teste nao diz
 # outra: a ultima do plano, que entra sempre.
@@ -395,6 +419,16 @@ class CenarioDaSaga:
         if recebido.origem == "billing-service":
             self.billing[tipo] = recebido.dados
         return tratamento
+
+    def cancelar(self, motivo: str = "cliente desistiu") -> OrdemDeServicoDTO:
+        """O atendente pede o cancelamento pelo caso de uso real, na mesma outbox."""
+        return CancelarOrdem(
+            self.ordens,
+            self.publicador,
+            self.sagas,
+            prazo_resposta=PRAZO,
+            relogio=self.relogio,
+        ).executar(self.ordem_id, motivo, ator=ATOR_ATENDENTE)
 
     def levar_ate(self, etapa: EtapaSaga | str) -> None:
         """Caminho feliz ate a saga entrar na ``etapa`` (OS no status de entrada)."""

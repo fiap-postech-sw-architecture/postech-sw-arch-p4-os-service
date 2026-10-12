@@ -16,16 +16,19 @@ chegam embaralhados, alguns sao republicados com id novo (o participante
 respondendo a um comando repetido) e alguns atrasam bem mais. O adiantado
 volta como a copia da fila de retry, depois do atraso do nivel (1, 5, 15, 60 e
 300 s), e a falha seguinte a quinta copia seria a DLQ (RFC-004 secao 5.1). Em
-pontos aleatorios o atendente tenta cancelar ou entregar a OS.
+pontos aleatorios o atendente pede o cancelamento (pela saga: antes do pivot
+ela compensa, depois e recusado) ou registra a entrega da OS.
 
 A cada entrega: so ``FalhaTransitoriaError`` escapa do handler; o par (etapa,
 status da OS) esta na tabela da RFC-004 secao 4.1; a OS fica cancelada se e so
 se a saga esta compensada; ha prazo se e so se ha comando com prazo em voo; a
 compensacao seguinte so sai depois da resposta da anterior, na ordem do plano
 (o estorno nunca antes da execucao cancelada); o fato ja aplicado nao muda
-nada; nenhum comando sai depois do estado final. No fim: DLQ vazia, a saga
-concluida, compensada ou parada no estorno recusado, com as compensacoes do
-plano da RFC-004 secao 4.4 para o motivo dela.
+nada; nenhum comando sai depois do estado final; o plano de cada compensacao
+e o da tabela da RFC-004 secao 4.4 para o que a saga ja tinha feito e o motivo.
+No fim: DLQ vazia e a saga concluida (pelo caminho feliz ou pela corrida do
+pivot que o inicio venceu), compensada pelo plano inteiro ou parada no estorno
+recusado.
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaErr
 from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaException
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
-from src.ordem_servico.aplicacao.use_cases import CancelarOrdem, RegistrarEntrega
+from src.ordem_servico.aplicacao.use_cases import RegistrarEntrega
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
 from tests.eventos import evento
@@ -53,7 +56,9 @@ from tests.fabricas import ATOR_ATENDENTE
 from tests.unitarios.fakes import FakeUnitOfWork
 from tests.unitarios.ordem_servico.cenario_da_saga import (
     COMPENSACOES,
+    FEITO,
     FLUXO_FELIZ,
+    PLANO_DA_RFC,
     CenarioDaSaga,
 )
 
@@ -76,14 +81,8 @@ FALHAS: Final = (
     "PagamentoRecusado",
     "PagamentoExpirado",
 )
-PLANO_DA_FALHA: Final = {
-    "GeracaoDeOrcamentoFalhou": ("geracao_falhou", COMPENSACOES[4:]),
-    "OrcamentoRecusado": ("orcamento_recusado", COMPENSACOES[4:]),
-    "OrcamentoExpirado": ("orcamento_expirado", COMPENSACOES[4:]),
-    "ReservaDePecasFalhou": ("reserva_falhou", COMPENSACOES[3:]),
-    "PagamentoRecusado": ("pagamento_recusado", COMPENSACOES[2:]),
-    "PagamentoExpirado": ("pagamento_expirado", COMPENSACOES[2:]),
-}
+# O perfil de ``FEITO`` (o que a saga ja fez) de cada estado da saga.
+PERFIL_DO_FEITO: Final = {feito: perfil for perfil, feito in FEITO.items()}
 # A resposta de cada compensacao.
 RESPOSTA: Final = {
     "CancelarExecucao": "ExecucaoCancelada",
@@ -104,7 +103,7 @@ ATRASO_LONGO_S: Final = 30.0
 # OS antes de uma entrega.
 CHANCE_DE_ESTORNO_RECUSADO: Final = 0.3
 CHANCE_DE_APROVACAO_TARDIA: Final = 0.5
-CHANCE_DE_ENCERRAR: Final = 0.1
+CHANCE_DE_ENCERRAR: Final = 0.05
 # Status da OS em cada etapa (tabela da RFC-004 secao 4.1): na compensacao, o
 # de antes do pivot em que ela comecou.
 ANTES_DO_PIVOT: Final = {
@@ -184,6 +183,10 @@ class Simulacao:
     dlq: list[str] = field(default_factory=list)
     # (acao, etapa da saga na tentativa, se passou)
     encerramentos: list[tuple[str, EtapaSaga, bool]] = field(default_factory=list)
+    # A compensacao, quando comecou: (perfil do que a saga ja tinha feito,
+    # motivo, plano).
+    compensacao: tuple[str, str, tuple[str, ...]] | None = None
+    enviados: int = 0
     # Eventos processados: (tipo, causation_id) -> id, e id -> tipo.
     aplicados: dict[tuple[str, UUID | None], UUID] = field(default_factory=dict)
     tipo_do_aplicado: dict[UUID, str] = field(default_factory=dict)
@@ -335,15 +338,14 @@ class Simulacao:
             self.decidir("PagamentoTardio", causa)
 
     def tentar_encerrar(self) -> None:
-        """O atendente pede o cancelamento ou registra a entrega da OS."""
+        """O atendente pede o cancelamento (pela saga) ou registra a entrega."""
         cenario = self.cenario
         acao = self.rnd.choice(("cancelar", "entregar"))
         antes, etapa = _foto(cenario), cenario.saga.etapa
+        feito = _feito(cenario)
         try:
             if acao == "cancelar":
-                CancelarOrdem(cenario.ordens, FakeUnitOfWork(), cenario.sagas).executar(
-                    cenario.ordem_id, "cliente desistiu", ator=ATOR_ATENDENTE
-                )
+                cenario.cancelar()
             else:
                 RegistrarEntrega(
                     cenario.ordens, FakeUnitOfWork(), cenario.sagas
@@ -353,12 +355,39 @@ class Simulacao:
             self.encerramentos.append((acao, etapa, False))
         else:
             self.encerramentos.append((acao, etapa, True))
+            self.registrar_compensacao(etapa, feito)
         _conferir_estado(cenario)
+        self.despachar()
+
+    def registrar_compensacao(
+        self, etapa: EtapaSaga, feito: tuple[tuple[str, ...], str | None]
+    ) -> None:
+        """A compensacao que comecou agora tem o plano da RFC-004 secao 4.4."""
+        saga = self.cenario.saga
+        if etapa in {E.COMPENSANDO, E.FALHA_NA_COMPENSACAO}:
+            return
+        if saga.etapa is not E.COMPENSANDO:
+            return
+        assert self.compensacao is None
+        perfil, motivo = PERFIL_DO_FEITO[feito], saga.motivo
+        assert motivo is not None
+        plano = saga.plano_compensacao
+        assert plano == PLANO_DA_RFC[(perfil, motivo)], (perfil, motivo)
+        self.compensacao = (perfil, motivo, plano)
+
+    def despachar(self) -> None:
+        """Os comandos novos da outbox vao aos participantes, na ordem."""
+        comandos = self.cenario.publicador.comandos
+        for indice in range(self.enviados, len(comandos)):
+            self.conferir_compensacao(indice)
+            self.receber_comando(
+                comandos[indice][0], _id_do_comando(self.cenario, indice)
+            )
+        self.enviados = len(comandos)
 
     def rodar(self) -> None:
         cenario = self.cenario
-        self.receber_comando("SolicitarDiagnostico", _id_do_comando(cenario, 0))
-        enviados = len(cenario.publicador.comandos)
+        self.despachar()
         comandos_no_fim: int | None = None
         while self.agenda:
             if self.rnd.random() < CHANCE_DE_ENCERRAR:
@@ -374,11 +403,7 @@ class Simulacao:
                 assert len(cenario.publicador.comandos) == comandos_no_fim
             elif cenario.saga.encerrada:
                 comandos_no_fim = len(cenario.publicador.comandos)
-            for indice in range(enviados, len(cenario.publicador.comandos)):
-                self.conferir_compensacao(indice)
-                tipo = cenario.publicador.comandos[indice][0]
-                self.receber_comando(tipo, _id_do_comando(cenario, indice))
-            enviados = len(cenario.publicador.comandos)
+            self.despachar()
 
     def entregar(self, entrega: Entrega) -> None:
         """O consumidor do OS trata a mensagem; o adiantado volta pela retry."""
@@ -389,7 +414,7 @@ class Simulacao:
             mensagem.tipo, marcos, causation_id=mensagem.causation_id
         )
         self.classificacoes[classificacao.value] += 1
-        antes = _foto(cenario)
+        antes, etapa, feito = _foto(cenario), cenario.saga.etapa, _feito(cenario)
         try:
             tratamento = cenario.orquestrador.tratar(mensagem)
         except FalhaTransitoriaError:
@@ -408,6 +433,7 @@ class Simulacao:
         if tratamento.desfecho is Desfecho.PROCESSADA:
             self.aplicados[chave] = mensagem.id
             self.tipo_do_aplicado[mensagem.id] = mensagem.tipo
+            self.registrar_compensacao(etapa, feito)
 
     def conferir_compensacao(self, indice: int) -> None:
         """A compensacao sai na ordem do plano, depois da resposta da anterior.
@@ -431,6 +457,12 @@ class Simulacao:
 
 def _motivo_do_desfecho(tipo: str) -> dict[str, str]:
     return {} if tipo == "PagamentoConfirmado" else {"motivo": "codigo do provedor"}
+
+
+def _feito(cenario: CenarioDaSaga) -> tuple[tuple[str, ...], str | None]:
+    """O que a saga ja fez: passos concluidos e o comando em voo."""
+    em_voo = cenario.saga.comando_em_voo
+    return cenario.saga.passos_concluidos, em_voo["tipo"] if em_voo else None
 
 
 def _id_do_comando(cenario: CenarioDaSaga, indice: int) -> UUID:
@@ -494,26 +526,34 @@ def _compensacoes(simulacao: Simulacao) -> list[str]:
 def test_fora_de_ordem_e_compensacao_nao_quebram_a_saga(semente: int) -> None:
     simulacao = _simular(semente)
     saga, ordem = simulacao.cenario.saga, simulacao.cenario.ordem
+    enviadas = _compensacoes(simulacao)
 
     assert simulacao.dlq == [], simulacao.entregas
-    falha = simulacao.roteiro.falha
-    if falha is None:
+    if simulacao.compensacao is None:
         assert saga.etapa is E.CONCLUIDA
         assert ordem.status in {S.FINALIZADA, S.ENTREGUE}
         assert [p["gatilho"] for p in saga.passos] == ["abertura", *FLUXO_FELIZ]
-        assert _compensacoes(simulacao) == []
+        assert enviadas == []
         return
-    motivo, plano = PLANO_DA_FALHA[falha]
-    assert (saga.etapa, saga.motivo, ordem.status) == (
-        E.COMPENSADA,
-        motivo,
-        S.CANCELADA,
-    )
-    assert _compensacoes(simulacao) == list(plano)
-    # Cancelar e entregar a OS em compensacao ou cancelada nao passam.
-    assert all(
-        not ok for _, etapa, ok in simulacao.encerramentos if etapa is not E.CONCLUIDA
-    )
+    _, motivo, plano = simulacao.compensacao
+    match saga.etapa:
+        case E.COMPENSADA:
+            assert (saga.motivo, ordem.status) == (motivo, S.CANCELADA)
+            assert enviadas == list(plano)
+        case E.FALHA_NA_COMPENSACAO:
+            # O provedor recusou o estorno: a sequencia parou nele.
+            assert simulacao.roteiro.estorno_recusado
+            assert saga.falha == "estorno_recusado"
+            assert enviadas == list(plano[: plano.index("EstornarPagamento") + 1])
+            # A OS mantem o status de antes da compensacao.
+            assert ordem.status in ANTES_DO_PIVOT
+        case E.CONCLUIDA:
+            # O inicio da execucao venceu o cancelamento (corrida do pivot).
+            assert (motivo, enviadas) == ("cancelamento", ["CancelarExecucao"])
+            assert "cancelamento_recusado" in [p["motivo"] for p in saga.passos]
+            assert ordem.status in {S.FINALIZADA, S.ENTREGUE}
+        case _:
+            pytest.fail(f"saga parada em {saga.etapa}")
 
 
 def test_gerador_produz_cada_situacao_da_classificacao_e_cada_roteiro() -> None:

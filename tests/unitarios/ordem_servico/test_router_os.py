@@ -5,9 +5,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
-from datetime import UTC, datetime
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog.testing
@@ -23,7 +24,7 @@ from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
 from src.ordem_servico.aplicacao.saga.modelo import Envio
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
-    CANCELAMENTO_INDISPONIVEL,
+    CANCELAMENTO_RECUSADO,
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
@@ -46,6 +47,7 @@ from tests.unitarios.fakes import (
     RepoEmMemoria,
     SagasEmMemoria,
 )
+from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
 
 _BASE = "/api/v1/ordens-de-servico"
 _ROUTER = "src.ordem_servico.interfaces.router"
@@ -78,7 +80,9 @@ def client_como(
         "obter_listar_ordens": ListarOrdens(repo),
         "obter_obter_ordem": ObterOrdem(ConsultaDaOrdemEmMemoria(repo, sagas)),
         "obter_obter_saga": ObterSaga(sagas),
-        "obter_cancelar_ordem": CancelarOrdem(repo, FakeUnitOfWork(), sagas),
+        "obter_cancelar_ordem": CancelarOrdem(
+            repo, FakeUnitOfWork(), sagas, prazo_resposta=timedelta(seconds=120)
+        ),
         "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork(), sagas),
         "obter_consultar_acompanhamento": ConsultarAcompanhamento(consulta),
     }
@@ -324,10 +328,11 @@ class TestConsultas:
 
 
 class TestCancelamento:
-    def test_cancela_e_audita_o_ator(
+    def test_com_a_saga_antes_do_pivot_202_compensando_e_audita(
         self,
         client: TestClient,
         repo: RepoEmMemoria,
+        sagas: SagasEmMemoria,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Logger novo: o do modulo pode estar cacheado por um
@@ -335,24 +340,62 @@ class TestCancelamento:
         monkeypatch.setattr(f"{_ROUTER}._log", structlog.get_logger())
         ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
         repo.ordens[ordem.id] = ordem
+        sagas.sagas[ordem.id] = _saga_aberta(ordem.id, ordem.criado_em)
 
         with structlog.testing.capture_logs() as logs:
             resp = client.post(
-                f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "desistiu"}
+                f"{_BASE}/{ordem.id}/cancelamento",
+                json={"motivo": "cliente vendeu o carro"},
             )
 
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "cancelada"
-        assert resp.json()["motivo_cancelamento"] == "desistiu"
-        assert {
-            "event": "order_cancelled_via_api",
-            "ordem_id": str(ordem.id),
-            "ator": "u-123",
-            "log_level": "info",
-        } in logs
+        assert resp.status_code == 202
+        corpo = resp.json()
+        assert (corpo["status"], corpo["etapa"]) == ("em_diagnostico", "compensando")
+        assert corpo["motivo_cancelamento"] == "cliente vendeu o carro"
+        # Auditoria (ADR-039): ator, acao e alvo, sem o texto do motivo.
+        assert logs == [
+            {
+                "event": "order cancellation requested",
+                "ordem_id": str(ordem.id),
+                "ator": "u-123",
+                "etapa": "compensando",
+                "log_level": "info",
+            }
+        ]
+
+    def test_os_sem_saga_cancela_direto(
+        self, client: TestClient, repo: RepoEmMemoria
+    ) -> None:
+        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
+        repo.ordens[ordem.id] = ordem
+
+        resp = client.post(
+            f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "desistiu"}
+        )
+
+        assert resp.status_code == 202
+        assert (resp.json()["status"], resp.json()["etapa"]) == ("cancelada", None)
+
+    def test_depois_do_inicio_da_execucao_409_com_a_mensagem(
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
+    ) -> None:
+        cenario = CenarioDaSaga.em("em_execucao")
+        repo.ordens.update(cenario.ordens.ordens)
+        sagas.sagas.update(cenario.sagas.sagas)
+
+        resp = client.post(
+            f"{_BASE}/{cenario.ordem_id}/cancelamento", json={"motivo": "x"}
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["erro"] == {
+            "codigo": "TRANSICAO_STATUS_INVALIDA",
+            "mensagem": CANCELAMENTO_RECUSADO,
+            "id_requisicao": resp.headers["X-Request-ID"],
+        }
 
     @pytest.mark.parametrize("estado", [StatusOrdem.EM_EXECUCAO, StatusOrdem.ENTREGUE])
-    def test_depois_do_pivot_409(
+    def test_os_sem_saga_depois_do_pivot_409(
         self, client: TestClient, repo: RepoEmMemoria, estado: StatusOrdem
     ) -> None:
         ordem = ordem_em(estado)
@@ -363,31 +406,14 @@ class TestCancelamento:
         assert resp.status_code == 409
         assert resp.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
 
-    def test_com_a_saga_em_andamento_409_sem_cancelar(
-        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
-    ) -> None:
-        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
-        repo.ordens[ordem.id] = ordem
-        sagas.sagas[ordem.id] = Saga.iniciar(
-            ordem.id,
-            envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=uuid4()),
-            ator=ATOR_ATENDENTE,
-            agora=ordem.criado_em,
-        )
-
-        resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"})
-
-        assert resp.status_code == 409
-        assert resp.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
-        assert resp.json()["erro"]["mensagem"] == CANCELAMENTO_INDISPONIVEL
-        assert ordem.status is StatusOrdem.EM_DIAGNOSTICO
-
-    def test_conflito_de_versao_409(
+    def test_conflito_de_versao_que_volta_nas_releituras_409(
         self, client: TestClient, repo: RepoEmMemoria
     ) -> None:
         ordem = ordem_em(StatusOrdem.RECEBIDA)
         repo.ordens[ordem.id] = ordem
         repo.provocar_conflito()
+        # Cada leitura traz a OS do banco: o rollback desfaz a tentativa.
+        repo.obter_por_id = lambda ordem_id: deepcopy(ordem)  # type: ignore[method-assign]
 
         resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"})
 
@@ -407,6 +433,19 @@ class TestCancelamento:
         resp = client.post(f"{_BASE}/{uuid4()}/cancelamento", json=corpo)
         assert resp.status_code == 422
 
+    def test_motivo_so_com_espacos_422_no_envelope(
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
+    ) -> None:
+        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
+        repo.ordens[ordem.id] = ordem
+        sagas.sagas[ordem.id] = _saga_aberta(ordem.id, ordem.criado_em)
+
+        resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "  "})
+
+        assert resp.status_code == 422
+        assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
+        assert sagas.sagas[ordem.id].etapa.value == "aguardando_diagnostico"
+
     def test_motivo_no_tamanho_maximo_cancela(
         self, client: TestClient, repo: RepoEmMemoria
     ) -> None:
@@ -418,7 +457,16 @@ class TestCancelamento:
             json={"motivo": "x" * TAMANHO_MAXIMO_MOTIVO},
         )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 202
+
+
+def _saga_aberta(ordem_id: UUID, agora: datetime) -> Saga:
+    return Saga.iniciar(
+        ordem_id,
+        envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=uuid4()),
+        ator=ATOR_ATENDENTE,
+        agora=agora,
+    )
 
 
 class TestEntrega:

@@ -3,12 +3,13 @@
 Cada classe expoe ``executar(...)``: compoe repositorio, ``UnitOfWork`` e
 ports; as regras ficam no agregado. A abertura inicia a saga e grava o
 ``SolicitarDiagnostico`` na outbox com ``UnitOfWork.publicar_comando``, no
-mesmo commit da OS; os passos seguintes sao do ``OrquestradorDaSaga``.
+mesmo commit da OS, e o cancelamento a leva a compensar, com a primeira
+compensacao no mesmo commit; os passos seguintes sao do ``OrquestradorDaSaga``.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -17,7 +18,10 @@ from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.cnpj import CNPJ
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.documento import normalizar_cnpj
-from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaException
+from src.compartilhado.dominio.exceptions import (
+    ConflitoDeConcorrenciaException,
+    TransicaoStatusInvalidaException,
+)
 from src.compartilhado.dominio.placa import Placa
 from src.ordem_servico.aplicacao.dtos import (
     AcompanhamentoDTO,
@@ -29,17 +33,31 @@ from src.ordem_servico.aplicacao.dtos import (
     ResumoPagamentoDTO,
     SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.modelo import Envio, SagaNaoEncontradaException
+from src.ordem_servico.aplicacao.saga.compensacao import inicio
+from src.ordem_servico.aplicacao.saga.modelo import (
+    Envio,
+    EtapaSaga,
+    MotivoCompensacao,
+    SagaNaoEncontradaException,
+)
+from src.ordem_servico.aplicacao.saga.orquestrador import dados_da_compensacao
 from src.ordem_servico.aplicacao.saga.saga import Saga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    ANTES_DO_PIVOT,
+    ETAPAS_EM_COMPENSACAO,
+)
 from src.ordem_servico.dominio.exceptions import (
     ClienteNaoEncontradoException,
     OrdemNaoEncontradaException,
     VeiculoNaoEncontradoException,
 )
 from src.ordem_servico.dominio.historico import OrigemMudanca
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from datetime import timedelta
     from uuid import UUID
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
@@ -265,51 +283,117 @@ class ObterSaga:
         )
 
 
-# Ate o cancelamento passar pela saga (compensacoes, RFC-004 secao 4.4).
-CANCELAMENTO_INDISPONIVEL: Final = (
-    "Cancelamento de OS com atendimento em andamento ainda nao disponivel"
-)
+# Respostas do cancelamento recusado (RFC-004 secao 6.1).
+CANCELAMENTO_RECUSADO: Final = "Cancelamento recusado: execução já iniciada"
+ORDEM_JA_CANCELADA: Final = "Ordem já cancelada"
+# Leituras do pedido quando o consumidor grava a mesma OS ou saga no meio.
+_LEITURAS_DO_CANCELAMENTO: Final = 3
+
+
+def _agora() -> datetime:
+    return datetime.now(UTC)
 
 
 class CancelarOrdem:
-    """Cancelamento pelo atendimento antes do inicio da execucao.
+    """Pedido de cancelamento do atendimento (RFC-004 secoes 4.4 e 6.1).
 
-    Sem saga, a OS vai direto para CANCELADA. Com a saga em andamento, o
-    cancelamento passa pelas compensacoes (RFC-004 secao 4.4), que esta versao
-    ainda nao tem: responde 409 sem mudar nada, para a OS nunca ficar cancelada
-    com a saga viva (os eventos seguintes emitiriam comandos para uma OS morta).
+    Antes do pivot, a OS guarda o texto do pedido e a saga entra em
+    compensando, com o plano e a primeira compensacao na outbox, num commit
+    so; a OS so fica CANCELADA quando a ultima compensacao responde. Com a
+    compensacao em curso ou parada, o pedido repetido nao muda nada. Depois do
+    inicio da execucao, ou com a ordem ja cancelada, 409. OS sem saga
+    (anterior a ela) e cancelada direto.
     """
 
     def __init__(
-        self, repo: OrdemDeServicoRepository, uow: UnitOfWork, sagas: SagaRepository
+        self,
+        repo: OrdemDeServicoRepository,
+        uow: UnitOfWork,
+        sagas: SagaRepository,
+        *,
+        prazo_resposta: timedelta,
+        relogio: Callable[[], datetime] = _agora,
     ) -> None:
         self._repo = repo
         self._uow = uow
         self._sagas = sagas
+        self._prazo_resposta = prazo_resposta
+        self._relogio = relogio
 
     def executar(self, ordem_id: UUID, motivo: str, *, ator: str) -> OrdemDeServicoDTO:
-        """Cancela a ordem com origem ATENDIMENTO; ``ator`` e o sub do JWT.
+        """Pede o cancelamento; ``ator`` e o sub do JWT.
+
+        Conflito de versao (o consumidor gravou a mesma OS ou saga no meio):
+        rele e decide de novo, ate tres leituras (*reread value*, RFC-004 secao
+        4.5), porque a etapa pode ter mudado, e com ela a resposta.
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
-            TransicaoStatusInvalidaException: saga em andamento, execucao ja
-                iniciada ou ordem encerrada (409).
-            ConflitoDeConcorrenciaException: escrita concorrente (409).
+            TransicaoStatusInvalidaException: execucao ja iniciada, ordem ja
+                cancelada ou encerrada (409).
+            ConflitoDeConcorrenciaException: o conflito voltou nas tres leituras
+                (409).
             ValorInvalidoException: motivo vazio, longo demais ou com
                 caractere de controle (422).
         """
+        leitura = 1
+        while True:
+            try:
+                return self._cancelar(ordem_id, motivo, ator)
+            except ConflitoDeConcorrenciaException:
+                if leitura == _LEITURAS_DO_CANCELAMENTO:
+                    raise
+                leitura += 1
+
+    def _cancelar(self, ordem_id: UUID, motivo: str, ator: str) -> OrdemDeServicoDTO:
+        """Uma leitura e a decisao sobre ela, numa transacao."""
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
             # Lida na mesma transacao: nada fica aberto depois do commit.
             saga = self._sagas.obter(ordem_id)
-            if saga is not None and not saga.encerrada:
-                raise TransicaoStatusInvalidaException(
-                    mensagem=CANCELAMENTO_INDISPONIVEL
-                )
-            ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
+            if saga is None:
+                ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
+            elif saga.etapa in ETAPAS_EM_COMPENSACAO:
+                # A compensacao ja comecou: o pedido repetido nao muda nada.
+                return _ordem_dto(ordem, saga)
+            else:
+                self._compensar(ordem, saga, motivo, ator)
+            # A OS antes da saga, a mesma ordem do consumidor: sem deadlock.
             self._repo.salvar(ordem)
+            if saga is not None:
+                self._sagas.salvar(saga)
             self._uow.commit()
         return _ordem_dto(ordem, saga)
+
+    def _compensar(
+        self, ordem: OrdemDeServico, saga: Saga, motivo: str, ator: str
+    ) -> None:
+        """O texto na OS, a primeira compensacao na outbox e a saga compensando.
+
+        A primeira compensacao sai sem ``causation_id`` (a causa e a requisicao,
+        RFC-004 secao 5.2) e com o prazo tecnico gravado no envio (secao 4.6).
+        """
+        if saga.etapa is EtapaSaga.COMPENSADA:
+            raise TransicaoStatusInvalidaException(mensagem=ORDEM_JA_CANCELADA)
+        if saga.etapa not in ANTES_DO_PIVOT:
+            raise TransicaoStatusInvalidaException(mensagem=CANCELAMENTO_RECUSADO)
+        ordem.registrar_pedido_de_cancelamento(motivo)
+        agora = max(self._relogio(), saga.atualizada_em)
+        codigo = MotivoCompensacao.CANCELAMENTO
+        primeira = inicio(saga, codigo).plano[0]
+        dados = dados_da_compensacao(primeira, ordem, codigo.value)
+        comando_id = self._uow.publicar_comando(
+            primeira, dados, correlation_id=ordem.id
+        )
+        envio = Envio(
+            tipo=primeira,
+            id=comando_id,
+            dados=dados,
+            prazo_resposta_em=agora + self._prazo_resposta,
+        )
+        saga.cancelar(
+            MarcosDaOrdem.da_ordem(ordem), agora=agora, ator=ator, envio=envio
+        )
 
 
 class RegistrarEntrega:

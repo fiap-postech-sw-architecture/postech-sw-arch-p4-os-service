@@ -182,18 +182,40 @@ def obter_historico(
 
 @router.post(
     "/{ordem_id}/cancelamento",
-    summary="Cancela a ordem antes do inicio da execucao",
-    responses={**_RESPOSTA_404, **_RESPOSTA_409},
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Pede o cancelamento: a saga desfaz os passos e cancela a ordem",
+    responses={
+        **_RESPOSTA_404,
+        409: {
+            "description": (
+                "Cancelamento recusado: execucao ja iniciada (o pivot), ordem ja "
+                "cancelada ou escrita concorrente que voltou nas tres leituras."
+            )
+        },
+    },
 )
 def cancelar_ordem(
     ordem_id: UUID, body: CancelarOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Cancela com motivo; 409 com a saga em andamento, depois do inicio da
-    execucao ou se encerrada (o cancelamento pela saga vem com as compensacoes).
+    """Pede o cancelamento antes do inicio da execucao (RFC-004 secao 4.4).
+
+    202 com a ordem e a etapa ``compensando``: a OS guarda o motivo e mantem o
+    status ate a saga desfazer os passos feitos, um por vez; so entao fica
+    ``cancelada`` (acompanhe pela etapa e pelo historico). Com a compensacao em
+    curso ou parada, o pedido repetido devolve 202 com a etapa atual, sem
+    efeito. Depois do inicio da execucao, 409 ("Cancelamento recusado:
+    execução já iniciada"); ordem ja cancelada, 409 ("Ordem já cancelada").
+    Ordem sem saga e cancelada direto.
     """
     ator = ator_de(usuario)
     resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
-    _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator)
+    # Auditoria (ADR-039): quem, a acao e o alvo; o texto do motivo nunca.
+    _log.info(
+        "order cancellation requested",
+        ordem_id=str(ordem_id),
+        ator=ator,
+        etapa=resultado.etapa,
+    )
     return OrdemDeServicoResponse.model_validate(resultado)
 
 

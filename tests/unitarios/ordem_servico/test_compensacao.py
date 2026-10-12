@@ -1,7 +1,8 @@
 """Plano de compensacao: as 11 linhas da tabela da RFC-004 secao 4.4.
 
-O que a saga ja fez em cada etapa (``FEITO``, no cenario) e o plano esperado
-sao escritos a partir da RFC, e nao lidos do codigo.
+O que a saga ja fez em cada etapa (``FEITO``) e o plano de cada linha
+(``PLANO_DA_RFC``) ficam no cenario, escritos a partir da RFC e nao lidos do
+codigo.
 """
 
 from __future__ import annotations
@@ -15,42 +16,17 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
     plano_de_compensacao,
 )
 from src.ordem_servico.aplicacao.saga.modelo import MotivoCompensacao
-from tests.unitarios.ordem_servico.cenario_da_saga import ESPERADA, FEITO
-
-TODAS = (
-    "CancelarExecucao",
-    "EstornarPagamento",
-    "LiberarReserva",
-    "CancelarOrcamento",
-    "DescartarDiagnostico",
+from tests.unitarios.ordem_servico.cenario_da_saga import (
+    COMPENSACOES,
+    ESPERADA,
+    FEITO,
+    PLANO_DA_RFC,
 )
-# (etapa, motivo, compensacoes em ordem): cada linha da tabela, com uma
-# entrada por gatilho quando a linha junta dois ("cancelamento ou prazo").
+
+# Cada linha da tabela, com uma entrada por gatilho quando a linha junta dois.
 LINHAS = [
-    pytest.param("aguardando_diagnostico", "cancelamento", TODAS[4:], id="1"),
-    pytest.param("aguardando_orcamento", "geracao_falhou", TODAS[4:], id="2"),
-    pytest.param("aguardando_orcamento", "cancelamento", TODAS[3:], id="3-cancel"),
-    pytest.param("aguardando_orcamento", "prazo_tecnico", TODAS[3:], id="3-prazo"),
-    pytest.param("aguardando_decisao", "orcamento_recusado", TODAS[4:], id="4-rec"),
-    pytest.param("aguardando_decisao", "orcamento_expirado", TODAS[4:], id="4-exp"),
-    pytest.param("aguardando_decisao", "cancelamento", TODAS[3:], id="5"),
-    pytest.param("aguardando_reserva", "reserva_falhou", TODAS[3:], id="6"),
-    pytest.param("aguardando_reserva", "cancelamento", TODAS[2:], id="7-cancel"),
-    pytest.param("aguardando_reserva", "prazo_tecnico", TODAS[2:], id="7-prazo"),
-    pytest.param(
-        "aguardando_pagamento_com_checkout", "pagamento_recusado", TODAS[2:], id="8-rec"
-    ),
-    pytest.param(
-        "aguardando_pagamento_com_checkout", "pagamento_expirado", TODAS[2:], id="8-exp"
-    ),
-    pytest.param("aguardando_pagamento", "cancelamento", TODAS[1:], id="9-em-voo"),
-    pytest.param(
-        "aguardando_pagamento_com_checkout", "cancelamento", TODAS[1:], id="9-checkout"
-    ),
-    pytest.param("aguardando_pagamento", "prazo_tecnico", TODAS[1:], id="9-prazo"),
-    pytest.param("aguardando_agendamento", "cancelamento", TODAS, id="10-cancel"),
-    pytest.param("aguardando_agendamento", "prazo_tecnico", TODAS, id="10-prazo"),
-    pytest.param("aguardando_inicio", "cancelamento", TODAS, id="11"),
+    pytest.param(etapa, motivo, plano, id=f"{etapa}-{motivo}")
+    for (etapa, motivo), plano in PLANO_DA_RFC.items()
 ]
 
 
@@ -79,7 +55,7 @@ def test_falhas_de_negocio_e_respostas_sao_as_do_contrato() -> None:
     assert set(RESPOSTA_DA_COMPENSACAO) == {
         tipo for tipo, etapa in ESPERADA.items() if etapa == "compensando"
     }
-    assert {c.value for c in RESPOSTA_DA_COMPENSACAO.values()} == set(TODAS)
+    assert {c.value for c in RESPOSTA_DA_COMPENSACAO.values()} == set(COMPENSACOES)
 
 
 def test_cada_motivo_tem_rotulo_para_a_os_cancelada() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.compartilhado.infraestrutura.ambiente import prazo_de_resposta_da_saga
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
@@ -71,7 +72,12 @@ def obter_obter_saga(session: Session) -> ObterSaga:
 
 
 def obter_cancelar_ordem(session: Session) -> CancelarOrdem:
-    return CancelarOrdem(repo=_repo(session), uow=_uow(session), sagas=_sagas(session))
+    return CancelarOrdem(
+        repo=_repo(session),
+        uow=_uow(session),
+        sagas=_sagas(session),
+        prazo_resposta=prazo_de_resposta_da_saga(),
+    )
 
 
 def obter_registrar_entrega(session: Session) -> RegistrarEntrega:
