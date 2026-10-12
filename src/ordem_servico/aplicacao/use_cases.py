@@ -33,14 +33,16 @@ from src.ordem_servico.aplicacao.dtos import (
     ResumoPagamentoDTO,
     SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.compensacao import inicio
+from src.ordem_servico.aplicacao.saga.compensacao import (
+    dados_da_compensacao,
+    inicio,
+)
 from src.ordem_servico.aplicacao.saga.modelo import (
     Envio,
     EtapaSaga,
     MotivoCompensacao,
     SagaNaoEncontradaException,
 )
-from src.ordem_servico.aplicacao.saga.orquestrador import dados_da_compensacao
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     ANTES_DO_PIVOT,
@@ -51,7 +53,6 @@ from src.ordem_servico.dominio.exceptions import (
     OrdemNaoEncontradaException,
     VeiculoNaoEncontradoException,
 )
-from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -301,8 +302,8 @@ class CancelarOrdem:
     compensando, com o plano e a primeira compensacao na outbox, num commit
     so; a OS so fica CANCELADA quando a ultima compensacao responde. Com a
     compensacao em curso ou parada, o pedido repetido nao muda nada. Depois do
-    inicio da execucao, ou com a ordem ja cancelada, 409. OS sem saga
-    (anterior a ela) e cancelada direto.
+    inicio da execucao, ou com a ordem ja cancelada, 409. Toda OS tem saga
+    desde a abertura: a resposta e sempre 202 ou 409.
     """
 
     def __init__(
@@ -329,6 +330,7 @@ class CancelarOrdem:
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
+            SagaNaoEncontradaException: OS sem saga (404; nao deveria existir).
             TransicaoStatusInvalidaException: execucao ja iniciada, ordem ja
                 cancelada ou encerrada (409).
             ConflitoDeConcorrenciaException: o conflito voltou nas tres leituras
@@ -352,16 +354,14 @@ class CancelarOrdem:
             # Lida na mesma transacao: nada fica aberto depois do commit.
             saga = self._sagas.obter(ordem_id)
             if saga is None:
-                ordem.cancelar(motivo, OrigemMudanca.ATENDIMENTO, ator=ator)
-            elif saga.etapa in ETAPAS_EM_COMPENSACAO:
+                raise SagaNaoEncontradaException(ordem_id)
+            if saga.etapa in ETAPAS_EM_COMPENSACAO:
                 # A compensacao ja comecou: o pedido repetido nao muda nada.
                 return _ordem_dto(ordem, saga)
-            else:
-                self._compensar(ordem, saga, motivo, ator)
+            self._compensar(ordem, saga, motivo, ator)
             # A OS antes da saga, a mesma ordem do consumidor: sem deadlock.
             self._repo.salvar(ordem)
-            if saga is not None:
-                self._sagas.salvar(saga)
+            self._sagas.salvar(saga)
             self._uow.commit()
         return _ordem_dto(ordem, saga)
 
@@ -378,10 +378,11 @@ class CancelarOrdem:
         if saga.etapa not in ANTES_DO_PIVOT:
             raise TransicaoStatusInvalidaException(mensagem=CANCELAMENTO_RECUSADO)
         ordem.registrar_pedido_de_cancelamento(motivo)
+        marcos = MarcosDaOrdem.da_ordem(ordem)
         agora = max(self._relogio(), saga.atualizada_em)
         codigo = MotivoCompensacao.CANCELAMENTO
         primeira = inicio(saga, codigo).plano[0]
-        dados = dados_da_compensacao(primeira, ordem, codigo.value)
+        dados = dados_da_compensacao(primeira, ordem.id, codigo.value, marcos)
         comando_id = self._uow.publicar_comando(
             primeira, dados, correlation_id=ordem.id
         )
@@ -391,9 +392,7 @@ class CancelarOrdem:
             dados=dados,
             prazo_resposta_em=agora + self._prazo_resposta,
         )
-        saga.cancelar(
-            MarcosDaOrdem.da_ordem(ordem), agora=agora, ator=ator, envio=envio
-        )
+        saga.cancelar(marcos, agora=agora, ator=ator, envio=envio)
 
 
 class RegistrarEntrega:

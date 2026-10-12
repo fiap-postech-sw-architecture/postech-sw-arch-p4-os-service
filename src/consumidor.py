@@ -27,12 +27,12 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     subir_metricas,
 )
 from src.compartilhado.infraestrutura.observability import criar_tracer
-from src.ordem_servico.aplicacao.saga.orquestrador import (
+from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
+from src.ordem_servico.aplicacao.saga.tratamento import (
     EventoAdiantadoError,
     EventoRecusadoError,
-    OrquestradorDaSaga,
 )
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
     SagaSQLAlchemyRepository,

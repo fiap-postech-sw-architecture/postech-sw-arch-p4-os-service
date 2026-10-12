@@ -24,6 +24,7 @@ from src.ordem_servico.aplicacao.dtos import (
     SagaDTO,
 )
 from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
     CANCELAMENTO_RECUSADO,
     ORDEM_JA_CANCELADA,
@@ -322,38 +323,23 @@ def _cenario_no_perfil(perfil: str) -> CenarioDaSaga:
 
 
 class TestCancelarOrdem:
-    def test_os_sem_saga_e_cancelada_direto(self) -> None:
-        ordem = ordem_em(StatusOrdem.AGUARDANDO_APROVACAO)
+    @pytest.mark.parametrize("status", [StatusOrdem.RECEBIDA, StatusOrdem.EM_EXECUCAO])
+    def test_os_sem_saga_levanta_404_sem_persistir(self, status: StatusOrdem) -> None:
+        # Toda OS tem saga desde a abertura: nao ha cancelamento direto.
+        ordem = ordem_em(status)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
-            ordem.id, "cliente desistiu", ator=ATOR_ATENDENTE
-        )
-
-        assert uow.committed
-        assert repo.salvas == [ordem]
-        assert (dto.status, dto.etapa) == ("cancelada", None)
-        assert dto.motivo_cancelamento == "cliente desistiu"
-        assert dto.historico[-1].origem == "atendimento"
-        assert dto.historico[-1].motivo == "cliente desistiu"
-        assert dto.historico[-1].ator == ATOR_ATENDENTE
-        assert uow.comandos == []
-
-    def test_os_sem_saga_depois_da_execucao_levanta_409_sem_persistir(self) -> None:
-        ordem = ordem_em(StatusOrdem.EM_EXECUCAO)
-        repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
-
-        with pytest.raises(TransicaoStatusInvalidaException):
+        with pytest.raises(SagaNaoEncontradaException):
             _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
-                ordem.id, "tarde", ator=ATOR_ATENDENTE
+                ordem.id, "x", ator=ATOR_ATENDENTE
             )
 
         assert repo.salvas == []
-        assert not uow.committed
-        assert uow.rolled_back
+        assert (uow.comandos, uow.committed, uow.rolled_back) == ([], False, True)
+        assert ordem.status is status
 
     def test_conflito_que_volta_nas_tres_leituras_levanta_sem_commit(self) -> None:
-        ordem = ordem_em(StatusOrdem.RECEBIDA)
+        cenario = CenarioDaSaga.em("aguardando_decisao")
 
         class _SempreEmConflito(RepoEmMemoria):
             """Cada leitura traz a OS do banco: o rollback desfez a anterior."""
@@ -364,11 +350,16 @@ class TestCancelarOrdem:
                 self.leituras += 1
                 return deepcopy(super().obter_por_id(ordem_id))
 
-        repo, uow = _SempreEmConflito(ordem, conflito=True), FakeUnitOfWork()
+        class _SagasDoBanco(SagasEmMemoria):
+            def obter(self, ordem_id: UUID) -> Saga | None:
+                return deepcopy(super().obter(ordem_id))
+
+        repo, uow = _SempreEmConflito(cenario.ordem, conflito=True), FakeUnitOfWork()
+        sagas = _SagasDoBanco(cenario.saga)
 
         with pytest.raises(ConflitoDeConcorrenciaException):
-            _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
-                ordem.id, "x", ator=ATOR_ATENDENTE
+            _cancelar_ordem(repo, uow, sagas).executar(
+                cenario.ordem_id, "x", ator=ATOR_ATENDENTE
             )
 
         # Reread value (RFC-004 secao 4.5): tres leituras, e o 409 na ultima.
@@ -414,7 +405,7 @@ class TestCancelarOrdem:
         assert saga.prazo_resposta_em == cenario.relogio.agora + PRAZO
         passo = saga.passos[-1]
         assert (passo["gatilho"], passo["mensagem_id"], passo["ator"]) == (
-            "cancelamento",
+            "cancelamento_solicitado",
             None,
             ATOR_ATENDENTE,
         )

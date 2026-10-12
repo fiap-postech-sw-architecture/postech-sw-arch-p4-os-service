@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.ordem_servico.aplicacao.saga.modelo import (
+    GATILHO_CANCELAMENTO_RECUSADO,
     EtapaSaga,
     MotivoCompensacao,
     Transicao,
@@ -26,8 +27,11 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
+    from uuid import UUID
 
+    from src.ordem_servico.aplicacao.saga.modelo import DadosDoContrato
     from src.ordem_servico.aplicacao.saga.saga import Saga
+    from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 _M = MotivoCompensacao
 
@@ -96,18 +100,19 @@ RESPOSTA_DA_COMPENSACAO: Final[Mapping[str, Comando]] = MappingProxyType(
         "DiagnosticoDescartado": Comando.DESCARTAR_DIAGNOSTICO,
     }
 )
-# Motivo da OS cancelada quando o atendente nao escreveu um (RFC-004 secao
-# 4.4): texto para o usuario, com acento, como os rotulos de situacao.
+# Texto da OS cancelada quando o atendente nao escreveu um (RFC-004 secao
+# 4.4) e do e-mail de cancelamento: texto para o usuario, com acento, um por
+# codigo (o teste de exaustividade cobre o enum). Nunca o texto do atendente.
 ROTULO_DO_MOTIVO: Final[Mapping[MotivoCompensacao, str]] = MappingProxyType(
     {
         _M.ORCAMENTO_RECUSADO: "Orçamento recusado pelo cliente",
         _M.ORCAMENTO_EXPIRADO: "Orçamento expirado sem decisão do cliente",
         _M.GERACAO_FALHOU: "Falha na geração do orçamento",
-        _M.RESERVA_FALHOU: "Peças indisponíveis no estoque",
+        _M.RESERVA_FALHOU: "Falta de peça para a reserva",
         _M.PAGAMENTO_RECUSADO: "Pagamento recusado",
-        _M.PAGAMENTO_EXPIRADO: "Pagamento expirado",
-        _M.CANCELAMENTO: "Cancelada pelo atendimento",
-        _M.PRAZO_TECNICO: "Sem resposta de um serviço no prazo",
+        _M.PAGAMENTO_EXPIRADO: "Pagamento não realizado no prazo",
+        _M.CANCELAMENTO: "Cancelamento solicitado pelo atendente",
+        _M.PRAZO_TECNICO: "Serviço sem resposta no prazo técnico",
     }
 )
 
@@ -131,15 +136,13 @@ def plano_de_compensacao(
     )
 
 
-# Codigo do registro quando o inicio da execucao vence o cancelamento, e da
-# falha da compensacao pelo estorno que o provedor recusou (RFC-004 secoes 4.5
-# e 4.7).
-CANCELAMENTO_RECUSADO: Final = "cancelamento_recusado"
+# Falha da compensacao pelo estorno que o provedor recusou (RFC-004 secao 4.7).
 ESTORNO_RECUSADO: Final = "estorno_recusado"
 # O inicio da execucao com so o CancelarExecucao pendente (ou parado): nada foi
-# desfeito, e a saga volta ao fluxo, sem motivo nem plano (RFC-004 secao 4.5).
+# desfeito, e a saga volta ao fluxo, sem motivo nem plano; o registro leva o
+# gatilho do cancelamento recusado (RFC-004 secao 4.5).
 CORRIDA_DO_PIVOT: Final = Transicao(
-    EtapaSaga.EM_EXECUCAO, registro=CANCELAMENTO_RECUSADO
+    EtapaSaga.EM_EXECUCAO, gatilho=GATILHO_CANCELAMENTO_RECUSADO
 )
 
 
@@ -174,3 +177,20 @@ def resposta(saga: Saga, tipo: str) -> Transicao:
     return Transicao(
         EtapaSaga.COMPENSANDO, comando=plano[1], motivo=saga.motivo, plano=plano[1:]
     )
+
+
+def dados_da_compensacao(
+    comando: Comando, ordem_id: UUID, motivo: str | None, marcos: MarcosDaOrdem
+) -> DadosDoContrato:
+    """``{ordem_id, motivo}`` e o id do recurso quando a OS ja o conhece.
+
+    O ``CancelarOrcamento`` leva o ``orcamento_id`` e o ``EstornarPagamento``, o
+    ``pagamento_id``, dos resumos da OS (``marcos``); sem eles (o passo estava
+    em voo), o participante acha o recurso pelo ``ordem_id`` (RFC-004 secao 5.3).
+    """
+    dados = {"ordem_id": str(ordem_id), "motivo": motivo}
+    if comando is Comando.CANCELAR_ORCAMENTO and marcos.orcamento_id is not None:
+        dados["orcamento_id"] = str(marcos.orcamento_id)
+    if comando is Comando.ESTORNAR_PAGAMENTO and marcos.pagamento_id is not None:
+        dados["pagamento_id"] = str(marcos.pagamento_id)
+    return dados

@@ -5,41 +5,38 @@ persistida na tabela ``sagas`` como agregado proprio (RFC-004 secao 4; ADR-035
 "Estado persistido e eventos fora de ordem"). Aqui ficam so o estado e as
 regras, sem I/O: quem le e grava saga e OS e publica os comandos e o
 ``OrquestradorDaSaga`` (ou o caso de uso do cancelamento), pelas portas, numa
-transacao so. A tabela da RFC, a classificacao dos eventos e as conferencias
-ficam em ``tabela_da_saga``; o plano e as transicoes da compensacao, em
-``compensacao``; os tipos, em ``modelo``.
+transacao so. A tabela da RFC esta em ``tabela_da_saga``, a classificacao dos
+eventos em ``classificacao``, as transicoes e conferencias em ``transicoes``,
+o plano e as respostas da compensacao em ``compensacao`` e os tipos em
+``modelo``.
 """
 
 from __future__ import annotations
 
 import re
-from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Final, cast
-from uuid import UUID
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
+from src.ordem_servico.aplicacao.saga.classificacao import Classificacao, classificar
+from src.ordem_servico.aplicacao.saga.leitura_da_saga import LeituraDaSaga
 from src.ordem_servico.aplicacao.saga.modelo import (
-    ComandoEmVoo,
+    GATILHO_ABERTURA,
+    GATILHO_CANCELAMENTO_SOLICITADO,
     CompensacaoIniciadaEvent,
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
     Gatilho,
-    ItemDoDiagnostico,
     MotivoCompensacao,
-    RegistroDaSaga,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     ANTES_DO_PIVOT,
-    ETAPAS_FINAIS,
-    GATILHO_ABERTURA,
-    GATILHO_CANCELAMENTO,
-    Classificacao,
-    classificar,
+)
+from src.ordem_servico.aplicacao.saga.transicoes import (
     conferir_envio,
     conferir_estado,
     conferir_prazo,
@@ -49,9 +46,16 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
 
 if TYPE_CHECKING:
     from datetime import datetime
+    from uuid import UUID
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
-    from src.ordem_servico.aplicacao.saga.modelo import Envio, Transicao
+    from src.ordem_servico.aplicacao.saga.modelo import (
+        ComandoEmVoo,
+        Envio,
+        ItemDoDiagnostico,
+        RegistroDaSaga,
+        Transicao,
+    )
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 
@@ -60,7 +64,7 @@ _TRACEPARENT: Final = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
 
 
 @dataclass(eq=False)
-class Saga(AggregateRoot):
+class Saga(AggregateRoot, LeituraDaSaga):
     """Instancia da saga de uma OS; ``id`` e o ``ordem_id``.
 
     Construir com ``Saga.iniciar``; os eventos andam com ``avancar`` e o
@@ -93,9 +97,8 @@ class Saga(AggregateRoot):
     _versao: int = field(default=1, kw_only=True)
 
     def __post_init__(self) -> None:
-        """Recusa estado contraditorio (``tabela_da_saga.conferir_estado``)."""
         super().__post_init__()
-        conferir_estado(self)
+        self._conferir_invariantes()
 
     @classmethod
     def iniciar(
@@ -131,91 +134,6 @@ class Saga(AggregateRoot):
         )
         return saga
 
-    @property
-    def ordem_id(self) -> UUID:
-        """A OS da saga (o mesmo ``id``, e o ``correlation_id`` das mensagens)."""
-        return self.id
-
-    @property
-    def etapa(self) -> EtapaSaga:
-        """Etapa atual (RFC-004 secao 4.1)."""
-        return self._etapa
-
-    @property
-    def encerrada(self) -> bool:
-        """Concluida ou compensada: nenhum evento muda mais a saga."""
-        return self._etapa in ETAPAS_FINAIS
-
-    @property
-    def motivo(self) -> str | None:
-        """Codigo da compensacao (``orcamento_recusado``, ``cancelamento``...)."""
-        return self._motivo
-
-    @property
-    def falha(self) -> str | None:
-        """``reenvios_esgotados`` ou ``estorno_recusado`` em falha_na_compensacao."""
-        return self._falha
-
-    @property
-    def passos(self) -> tuple[RegistroDaSaga, ...]:
-        """Copia: mudar um passo devolvido nao toca o estado da saga."""
-        return tuple(deepcopy(self._passos))
-
-    @property
-    def passos_concluidos(self) -> tuple[str, ...]:
-        """Passos T concluidos (T3, T5, T6, T7), que a compensacao desfaz."""
-        return tuple(self._passos_concluidos)
-
-    @property
-    def comando_em_voo(self) -> ComandoEmVoo | None:
-        """Copia do comando com prazo a espera de resposta, ou ``None``."""
-        return deepcopy(self._comando_em_voo)
-
-    @property
-    def plano_compensacao(self) -> tuple[str, ...]:
-        """Compensacoes restantes; a primeira e a pendente."""
-        return tuple(self._plano_compensacao)
-
-    @property
-    def itens(self) -> tuple[ItemDoDiagnostico, ...]:
-        """Copia dos itens do ``DiagnosticoConcluido`` (vazio antes dele)."""
-        return tuple(deepcopy(self._itens))
-
-    @property
-    def reenvios(self) -> int:
-        """Reenvios do comando em voo; zero no envio e sem comando em voo."""
-        return self._reenvios
-
-    @property
-    def prazo_resposta_em(self) -> datetime | None:
-        """Prazo tecnico do comando em voo; ``None`` sem resposta automatica."""
-        return self._prazo_resposta_em
-
-    @property
-    def iniciada_em(self) -> datetime:
-        """Instante da abertura da saga (o da OS)."""
-        return self._iniciada_em
-
-    @property
-    def etapa_desde(self) -> datetime:
-        """Instante da entrada na etapa atual (mede a permanencia nela)."""
-        return self._etapa_desde
-
-    @property
-    def atualizada_em(self) -> datetime:
-        """Instante do ultimo passo (o ``em`` dele)."""
-        return self._atualizada_em
-
-    @property
-    def versao(self) -> int:
-        """Versao do lock otimista: comeca em 1 e sobe a cada gravacao."""
-        return self._versao
-
-    @property
-    def traceparent(self) -> str | None:
-        """Contexto W3C da ultima transicao, pai dos spans que a retomam."""
-        return self._traceparent
-
     def registrar_contexto_de_trace(self, traceparent: str) -> None:
         """Guarda o ``traceparent`` W3C (versao 00) da transicao em curso.
 
@@ -230,20 +148,19 @@ class Saga(AggregateRoot):
     def classificar(
         self, tipo: str, marcos: MarcosDaOrdem, *, causation_id: UUID | None = None
     ) -> Classificacao:
-        """Classifica o evento ``tipo`` na etapa atual (``tabela_da_saga``).
+        """Classifica o evento ``tipo`` na etapa atual (``classificacao``).
 
         A compensacao pendente e a primeira do plano; o ``causation_id`` casa a
         resposta com um dos envios do comando em voo (RFC-004 secao 4.4).
         """
         em_voo = self._comando_em_voo
-        envios = {UUID(i) for i in em_voo["mensagem_ids"]} if em_voo else set()
         plano = self._plano_compensacao
         return classificar(
             self._etapa,
             tipo,
             marcos,
             pendente=plano[0] if plano else None,
-            casada=causation_id in envios,
+            casada=em_voo is not None and str(causation_id) in em_voo["mensagem_ids"],
         )
 
     def avancar(
@@ -284,7 +201,7 @@ class Saga(AggregateRoot):
 
         O plano leva os passos concluidos e o em voo (RFC-004 secao 4.4), e o
         ``envio`` e a primeira compensacao dele, com prazo. O registro leva o
-        gatilho ``cancelamento`` e o ``ator`` que pediu.
+        gatilho ``cancelamento_solicitado`` e o ``ator`` que pediu.
 
         Raises:
             TransicaoDaSagaInvalidaError: etapa que nao e de antes do pivot, ou
@@ -295,7 +212,7 @@ class Saga(AggregateRoot):
             transicao, envio, ordem_id=self.id, itens=self._itens, marcos=marcos
         )
         conferir_prazo(envio, agora)
-        pedido = Gatilho(GATILHO_CANCELAMENTO, None, agora, ator)
+        pedido = Gatilho(GATILHO_CANCELAMENTO_SOLICITADO, None, agora, ator)
         self._mudar(transicao, pedido, envio)
 
     # ----- mecanica interna
@@ -333,12 +250,10 @@ class Saga(AggregateRoot):
         self._motivo = transicao.motivo
         self._falha = transicao.falha
         self._plano_compensacao = [c.value for c in transicao.plano]
+        if transicao.gatilho is not None:
+            gatilho = replace(gatilho, tipo=transicao.gatilho)
         passo = gatilho.registro(
-            len(self._passos) + 1,
-            de,
-            self._etapa,
-            envio,
-            transicao.registro or transicao.motivo,
+            len(self._passos) + 1, de, self._etapa, envio, transicao.motivo
         )
         if posicao is not None:
             passo["posicao_na_fila"] = posicao
@@ -346,18 +261,25 @@ class Saga(AggregateRoot):
         if transicao.concluido is not None:
             self._passos_concluidos = [*self._passos_concluidos, transicao.concluido]
         self._esperar_resposta(envio)
+        self._conferir_invariantes()
 
     def _esperar_resposta(self, envio: Envio | None) -> None:
         """O envio conferido vira o comando em voo; sem ele, nada fica em voo.
 
         Todo comando enviado depois da abertura tem resposta automatica, entao o
-        envio conferido sempre traz o prazo.
+        envio conferido sempre traz o prazo. Na falha da compensacao o comando
+        em voo permanece, sem prazo, para a retomada reenvia-lo (RFC-004 4.7).
         """
-        if envio is None:
+        if self._etapa is EtapaSaga.FALHA_NA_COMPENSACAO:
+            self._prazo_resposta_em = None
+        elif envio is None:
             self._comando_em_voo = None
             self._prazo_resposta_em = None
             self._reenvios = 0
-            return
-        self._comando_em_voo = envio.em_voo(self._atualizada_em)
-        self._prazo_resposta_em = envio.prazo_resposta_em
-        self._reenvios = 0
+        else:
+            self._comando_em_voo = envio.em_voo(self._atualizada_em)
+            self._prazo_resposta_em = envio.prazo_resposta_em
+            self._reenvios = 0
+
+    def _conferir_invariantes(self) -> None:
+        conferir_estado(self)

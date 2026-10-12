@@ -16,12 +16,11 @@ from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import Comando, Desfecho
 from src.ordem_servico.aplicacao.saga import orquestrador as modulo
+from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
+from src.ordem_servico.aplicacao.saga.compensacao import dados_da_compensacao
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
-from src.ordem_servico.aplicacao.saga.orquestrador import (
-    Tratamento,
-    dados_da_compensacao,
-)
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
+from src.ordem_servico.aplicacao.saga.tratamento import Tratamento
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
 from tests.fabricas import ordem_em
@@ -76,7 +75,7 @@ FALHAS = [
         "aguardando_reserva",
         "reserva_falhou",
         COMPENSACOES[3:],
-        "Peças indisponíveis no estoque",
+        "Falta de peça para a reserva",
         id="reserva",
     ),
     pytest.param(
@@ -92,7 +91,7 @@ FALHAS = [
         "aguardando_pagamento",
         "pagamento_expirado",
         COMPENSACOES[2:],
-        "Pagamento expirado",
+        "Pagamento não realizado no prazo",
         id="pagamento-expirado",
     ),
 ]
@@ -220,7 +219,9 @@ def test_dados_da_compensacao_levam_o_id_que_a_os_conhece(
         and str(ordem.resumo_pagamento.pagamento_id),
     }
 
-    dados = dados_da_compensacao(Comando(comando), ordem, "cancelamento")
+    dados = dados_da_compensacao(
+        Comando(comando), ordem.id, "cancelamento", MarcosDaOrdem.da_ordem(ordem)
+    )
 
     assert dados == {
         "ordem_id": str(ordem.id),
@@ -242,7 +243,11 @@ def test_cada_compensacao_pendente_por_cada_resposta_pelo_handler(
     pendente: str, tipo: str, casada: bool
 ) -> None:
     plano = COMPENSACOES[COMPENSACOES.index(pendente) :]
-    cenario = CenarioDaSaga.em_compensacao(plano)
+    # O cancelamento da cobranca so responde ao pagamento ainda em aberto.
+    status = S.AGUARDANDO_PAGAMENTO if tipo == "PagamentoCancelado" else None
+    cenario = CenarioDaSaga.em_compensacao(
+        plano, **({"status": status} if status else {})
+    )
     antes = _foto(cenario)
     enviados = len(cenario.publicador.comandos)
     causa = _envio_pendente(cenario) if casada else uuid4()
@@ -403,7 +408,8 @@ def test_inicio_da_execucao_vence_o_cancelamento(etapa: str) -> None:
         S.EM_EXECUCAO,
         None,
     )
-    assert cenario.saga.passos[-1]["motivo"] == "cancelamento_recusado"
+    passo = cenario.saga.passos[-1]
+    assert (passo["gatilho"], passo["motivo"]) == ("cancelamento_recusado", None)
     assert (cenario.saga.motivo, cenario.saga.plano_compensacao) == (None, ())
     assert len(cenario.publicador.comandos) == enviados
     # Dai em diante, o fluxo normal: a finalizacao conclui a saga.

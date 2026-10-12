@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
+from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
 from src.ordem_servico.aplicacao.saga.saga import Saga
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import Classificacao
 from src.ordem_servico.aplicacao.use_cases import AbrirOrdem, CancelarOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
@@ -340,8 +340,8 @@ class CenarioDaSaga:
 
         A OS chega ao ``status`` pelos fatos de dominio. A pendente (a primeira
         do plano) sai pelo publicador, e o comando em voo guarda o id dela: o
-        evento do cenario a responde pelo ``causation_id``. Parada na falha,
-        nada fica em voo.
+        evento do cenario a responde pelo ``causation_id``. Parada na falha, o
+        comando em voo fica, sem prazo.
         """
         cenario = cls()
         cenario._reidratar(
@@ -375,7 +375,7 @@ class CenarioDaSaga:
         campos: dict[str, Any] = {}
         if etapa in EM_COMPENSACAO:
             campos = {"_motivo": motivo, "_plano_compensacao": list(plano)}
-        if etapa == "compensando":
+        if etapa in EM_COMPENSACAO:
             dados = {"ordem_id": str(ordem.id), "motivo": motivo}
             enviado = self.publicador.publicar_comando(
                 plano[0], dados, correlation_id=ordem.id
@@ -386,7 +386,9 @@ class CenarioDaSaga:
                 "mensagem_ids": [str(enviado)],
                 "enviado_em": agora.isoformat(),
             }
-            campos["_prazo_resposta_em"] = agora + PRAZO
+            # Parada na falha, o comando em voo fica sem prazo (RFC-004 4.7).
+            if etapa == "compensando":
+                campos["_prazo_resposta_em"] = agora + PRAZO
         if etapa == "falha_na_compensacao":
             campos["_falha"] = falha or "estorno_recusado"
         self.sagas.sagas = {

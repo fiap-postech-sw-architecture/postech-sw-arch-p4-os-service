@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Final, NotRequired, TypedDict
 
 from src.compartilhado.dominio.events import DomainEvent
 from src.compartilhado.dominio.exceptions import EntidadeNaoEncontradaException
@@ -63,13 +63,35 @@ class MotivoCompensacao(StrEnum):
     PRAZO_TECNICO = "prazo_tecnico"
 
 
+# Palavras do ``gatilho`` que nao sao tipo de mensagem (lista fechada): o
+# registro de um evento leva o tipo dele, e cada pedido ou decisao do proprio
+# OS, uma destas.
+GATILHO_ABERTURA: Final = "abertura"
+GATILHO_CANCELAMENTO_SOLICITADO: Final = "cancelamento_solicitado"
+GATILHO_CANCELAMENTO_RECUSADO: Final = "cancelamento_recusado"
+GATILHO_REENVIO: Final = "reenvio"
+GATILHO_PRAZO_ESGOTADO: Final = "prazo_esgotado"
+GATILHO_RETOMADA: Final = "retomada"
+GATILHOS_DE_PROCESSO: Final = frozenset(
+    {
+        GATILHO_ABERTURA,
+        GATILHO_CANCELAMENTO_SOLICITADO,
+        GATILHO_CANCELAMENTO_RECUSADO,
+        GATILHO_REENVIO,
+        GATILHO_PRAZO_ESGOTADO,
+        GATILHO_RETOMADA,
+    }
+)
+
+
 class RegistroDaSaga(TypedDict):
     """Registro da linha do tempo da saga (coluna ``passos``): so codigos.
 
     Um por transicao aplicada, inclusive as que nao concluem um passo T (o
     ``DiagnosticoIniciado``, o ``PagamentoSolicitado``): ``gatilho`` e o tipo
-    do evento ou ``abertura``; ``comando`` e ``comando_id``, o comando que a
-    transicao enviou. ``em`` e ISO 8601 em UTC. Nunca texto livre.
+    do evento ou uma das palavras de ``GATILHOS_DE_PROCESSO``; ``comando`` e
+    ``comando_id``, o comando que a transicao enviou. ``em`` e ISO 8601 em
+    UTC. Nunca texto livre.
     """
 
     seq: int
@@ -84,6 +106,8 @@ class RegistroDaSaga(TypedDict):
     ator: str
     # So no registro do ExecucaoAgendada: a fila viva e a da Execucao.
     posicao_na_fila: NotRequired[int]
+    # So no registro do reenvio por prazo: quantos reenvios o comando ja teve.
+    reenvio: NotRequired[int]
 
 
 # JSON ja validado pelo schema do contrato (contratos/, RFC-004 secao 5.5): os
@@ -145,9 +169,10 @@ class Envio:
 class Gatilho:
     """O que mudou a saga, quando e por quem: o cabecalho de cada registro.
 
-    ``tipo`` e o tipo do evento, ou ``abertura`` e ``cancelamento`` nos pedidos
-    pela API; ``mensagem_id``, o id do evento (``None`` nos pedidos); ``ator``,
-    o processo ou o ``sub`` de quem pediu.
+    ``tipo`` e o tipo do evento ou uma palavra de ``GATILHOS_DE_PROCESSO``
+    (``abertura`` e ``cancelamento_solicitado`` nos pedidos pela API);
+    ``mensagem_id``, o id do evento (``None`` nos pedidos); ``ator``, o
+    processo ou o ``sub`` de quem pediu.
     """
 
     tipo: str
@@ -185,8 +210,8 @@ class Transicao:
     ``seguinte`` e a etapa depois dele; ``comando``, o que o envio tem de ser
     (nenhum envio com ``None``); ``concluido``, o passo T que ele conclui, que
     a compensacao desfaz. ``motivo``, ``plano`` e ``falha`` sao os da
-    compensacao depois dele (vazios no fluxo normal), e ``registro``, o codigo
-    que o registro leva quando nao e o motivo (``cancelamento_recusado``).
+    compensacao depois dele (vazios no fluxo normal), e ``gatilho``, a palavra
+    que o registro leva no lugar do tipo do evento (``cancelamento_recusado``).
     """
 
     seguinte: EtapaSaga
@@ -195,7 +220,7 @@ class Transicao:
     motivo: str | None = None
     plano: tuple[Comando, ...] = ()
     falha: str | None = None
-    registro: str | None = None
+    gatilho: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

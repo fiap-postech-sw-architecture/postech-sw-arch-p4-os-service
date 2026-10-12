@@ -25,6 +25,7 @@ from src.ordem_servico.aplicacao.saga.modelo import Envio
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
     CANCELAMENTO_RECUSADO,
+    ORDEM_JA_CANCELADA,
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
@@ -47,7 +48,7 @@ from tests.unitarios.fakes import (
     RepoEmMemoria,
     SagasEmMemoria,
 )
-from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
+from tests.unitarios.ordem_servico.cenario_da_saga import COMPENSACOES, CenarioDaSaga
 
 _BASE = "/api/v1/ordens-de-servico"
 _ROUTER = "src.ordem_servico.interfaces.router"
@@ -363,18 +364,54 @@ class TestCancelamento:
             }
         ]
 
-    def test_os_sem_saga_cancela_direto(
-        self, client: TestClient, repo: RepoEmMemoria
+    @pytest.mark.parametrize(
+        "estado", [StatusOrdem.EM_DIAGNOSTICO, StatusOrdem.ENTREGUE]
+    )
+    def test_os_sem_saga_404(
+        self, client: TestClient, repo: RepoEmMemoria, estado: StatusOrdem
     ) -> None:
-        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
+        # Toda OS tem saga desde a abertura: nao ha cancelamento direto.
+        ordem = ordem_em(estado)
         repo.ordens[ordem.id] = ordem
 
         resp = client.post(
             f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "desistiu"}
         )
 
+        assert resp.status_code == 404
+        assert resp.json()["erro"]["codigo"] == "ENTIDADE_NAO_ENCONTRADA"
+        assert ordem.status is estado
+
+    def test_pedido_repetido_na_compensacao_202_com_a_etapa_sem_efeito(
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
+    ) -> None:
+        cenario = CenarioDaSaga.em_compensacao(COMPENSACOES[1:])
+        repo.ordens.update(cenario.ordens.ordens)
+        sagas.sagas.update(cenario.sagas.sagas)
+
+        resp = client.post(
+            f"{_BASE}/{cenario.ordem_id}/cancelamento", json={"motivo": "de novo"}
+        )
+
         assert resp.status_code == 202
-        assert (resp.json()["status"], resp.json()["etapa"]) == ("cancelada", None)
+        assert resp.json()["etapa"] == "compensando"
+        assert resp.json()["motivo_cancelamento"] is None
+
+    def test_ordem_ja_cancelada_409_com_a_mensagem(
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
+    ) -> None:
+        cenario = CenarioDaSaga.em("aguardando_diagnostico")
+        cenario.cancelar()
+        cenario.receber("DiagnosticoDescartado")
+        repo.ordens.update(cenario.ordens.ordens)
+        sagas.sagas.update(cenario.sagas.sagas)
+
+        resp = client.post(
+            f"{_BASE}/{cenario.ordem_id}/cancelamento", json={"motivo": "x"}
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["erro"]["mensagem"] == ORDEM_JA_CANCELADA
 
     def test_depois_do_inicio_da_execucao_409_com_a_mensagem(
         self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
@@ -394,26 +431,17 @@ class TestCancelamento:
             "id_requisicao": resp.headers["X-Request-ID"],
         }
 
-    @pytest.mark.parametrize("estado", [StatusOrdem.EM_EXECUCAO, StatusOrdem.ENTREGUE])
-    def test_os_sem_saga_depois_do_pivot_409(
-        self, client: TestClient, repo: RepoEmMemoria, estado: StatusOrdem
-    ) -> None:
-        ordem = ordem_em(estado)
-        repo.ordens[ordem.id] = ordem
-
-        resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"})
-
-        assert resp.status_code == 409
-        assert resp.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
-
     def test_conflito_de_versao_que_volta_nas_releituras_409(
-        self, client: TestClient, repo: RepoEmMemoria
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
     ) -> None:
         ordem = ordem_em(StatusOrdem.RECEBIDA)
         repo.ordens[ordem.id] = ordem
+        saga = _saga_aberta(ordem.id, ordem.criado_em)
+        sagas.sagas[ordem.id] = saga
         repo.provocar_conflito()
-        # Cada leitura traz a OS do banco: o rollback desfaz a tentativa.
+        # Cada leitura traz a OS e a saga do banco: o rollback desfaz a tentativa.
         repo.obter_por_id = lambda ordem_id: deepcopy(ordem)  # type: ignore[method-assign]
+        sagas.obter = lambda ordem_id: deepcopy(saga)  # type: ignore[method-assign]
 
         resp = client.post(f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"})
 
@@ -447,10 +475,11 @@ class TestCancelamento:
         assert sagas.sagas[ordem.id].etapa.value == "aguardando_diagnostico"
 
     def test_motivo_no_tamanho_maximo_cancela(
-        self, client: TestClient, repo: RepoEmMemoria
+        self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria
     ) -> None:
         ordem = ordem_em(StatusOrdem.RECEBIDA)
         repo.ordens[ordem.id] = ordem
+        sagas.sagas[ordem.id] = _saga_aberta(ordem.id, ordem.criado_em)
 
         resp = client.post(
             f"{_BASE}/{ordem.id}/cancelamento",

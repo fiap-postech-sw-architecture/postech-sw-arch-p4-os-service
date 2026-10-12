@@ -21,11 +21,12 @@ ela compensa, depois e recusado) ou registra a entrega da OS.
 
 A cada entrega: so ``FalhaTransitoriaError`` escapa do handler; o par (etapa,
 status da OS) esta na tabela da RFC-004 secao 4.1; a OS fica cancelada se e so
-se a saga esta compensada; ha prazo se e so se ha comando com prazo em voo; a
-compensacao seguinte so sai depois da resposta da anterior, na ordem do plano
-(o estorno nunca antes da execucao cancelada); o fato ja aplicado nao muda
-nada; nenhum comando sai depois do estado final; o plano de cada compensacao
-e o da tabela da RFC-004 secao 4.4 para o que a saga ja tinha feito e o motivo.
+se a saga esta compensada; ha prazo se e so se ha comando com prazo em voo
+(parada no estorno recusado, o comando fica em voo, sem prazo); a compensacao
+seguinte so sai depois da resposta da anterior, na ordem do plano (o estorno
+nunca antes da execucao cancelada); o fato ja aplicado nao muda nada; nenhum
+comando sai depois do estado final; o plano de cada compensacao e o da tabela
+da RFC-004 secao 4.4 para o que a saga ja tinha feito e o motivo.
 No fim: DLQ vazia e a saga concluida (pelo caminho feliz ou pela corrida do
 pivot que o inicio venceu), compensada pelo plano inteiro ou parada no estorno
 recusado.
@@ -493,7 +494,12 @@ def _conferir_estado(cenario: CenarioDaSaga) -> None:
     saga, ordem = cenario.saga, cenario.ordem
     assert ordem.status in PARES[saga.etapa], (saga.etapa, ordem.status)
     em_voo = saga.comando_em_voo
-    assert (saga.prazo_resposta_em is None) is (em_voo is None)
+    # Parada na falha, o comando em voo fica, sem prazo (RFC-004 secao 4.7).
+    if saga.etapa is E.FALHA_NA_COMPENSACAO:
+        assert em_voo is not None
+        assert saga.prazo_resposta_em is None
+    else:
+        assert (saga.prazo_resposta_em is None) is (em_voo is None)
     assert em_voo is None or em_voo["tipo"] in COMANDOS_COM_PRAZO
     # Sem comando em voo, nada a reenviar (e o contador do proximo comeca do zero).
     assert em_voo is not None or saga.reenvios == 0
@@ -545,12 +551,16 @@ def test_fora_de_ordem_e_compensacao_nao_quebram_a_saga(semente: int) -> None:
             assert simulacao.roteiro.estorno_recusado
             assert saga.falha == "estorno_recusado"
             assert enviadas == list(plano[: plano.index("EstornarPagamento") + 1])
+            # A pendente segue no plano e em voo para a retomada.
+            assert saga.plano_compensacao[0] == "EstornarPagamento"
+            assert saga.comando_em_voo is not None
+            assert saga.comando_em_voo["tipo"] == "EstornarPagamento"
             # A OS mantem o status de antes da compensacao.
             assert ordem.status in ANTES_DO_PIVOT
         case E.CONCLUIDA:
             # O inicio da execucao venceu o cancelamento (corrida do pivot).
             assert (motivo, enviadas) == ("cancelamento", ["CancelarExecucao"])
-            assert "cancelamento_recusado" in [p["motivo"] for p in saga.passos]
+            assert "cancelamento_recusado" in [p["gatilho"] for p in saga.passos]
             assert ordem.status in {S.FINALIZADA, S.ENTREGUE}
         case _:
             pytest.fail(f"saga parada em {saga.etapa}")
