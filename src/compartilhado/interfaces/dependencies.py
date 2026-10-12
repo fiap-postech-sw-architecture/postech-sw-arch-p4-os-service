@@ -5,9 +5,11 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
+    from sqlalchemy import Connection, Engine
     from sqlalchemy.orm import Session
 
 _session_factory: Callable[[], Session] | None = None
+_engine_de_metricas: Engine | None = None
 
 
 def configurar_session_factory(factory: Callable[[], Session]) -> None:
@@ -37,3 +39,20 @@ def obter_session() -> Generator[Session]:
         yield session
     finally:
         session.close()
+
+
+def configurar_engine_de_metricas(engine: Engine) -> None:
+    """Registra a engine das consultas do ``/metrics``, fora do pool das requisicoes."""
+    global _engine_de_metricas  # noqa: PLW0603  # DI singleton configurado no startup
+    _engine_de_metricas = engine
+
+
+def abrir_conexao_de_metricas() -> Connection:
+    """Conexao da engine das metricas; quem abre fecha (``with``).
+
+    Levanta RuntimeError se a engine nao foi configurada (raspagem antes do boot).
+    """
+    if _engine_de_metricas is None:
+        msg = "Engine de metricas nao configurada"
+        raise RuntimeError(msg)
+    return _engine_de_metricas.connect()

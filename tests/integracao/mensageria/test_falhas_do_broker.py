@@ -49,10 +49,10 @@ from src.compartilhado.infraestrutura.mensageria.outbox import Outbox
 from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
+from tests.eventos import envelope_de_evento
 from tests.integracao.broker import (
     EmSegundoPlano,
     EsperasRegistradas,
-    envelope_de_evento,
     esperar_ate,
 )
 

@@ -33,8 +33,10 @@ class MudancaDeStatus(Entity):
     """Linha do historico (entidade interna do agregado, append-only).
 
     ``de`` e ``None`` so na abertura. ``sequencia`` (1, 2, ...) ordena a linha
-    do tempo sem depender da resolucao do relogio. Sem mutadores: o agregado
-    cria e nunca altera.
+    do tempo sem depender da resolucao do relogio. ``ator`` e quem provocou a
+    mudanca: o ``sub`` do JWT do usuario ou o processo (``consumidor``,
+    ``prazos``), RFC-004 secao 7.2; ``None`` so nas linhas anteriores a ele.
+    Sem mutadores: o agregado cria e nunca altera.
     """
 
     _sequencia: int = field(kw_only=True)
@@ -43,6 +45,7 @@ class MudancaDeStatus(Entity):
     _origem: OrigemMudanca = field(kw_only=True)
     # Texto livre (motivo de cancelamento): fora do repr, pode conter PII.
     _motivo: str | None = field(kw_only=True, repr=False)
+    _ator: str | None = field(kw_only=True)
     _ocorrido_em: datetime = field(kw_only=True)
 
     @property
@@ -64,6 +67,10 @@ class MudancaDeStatus(Entity):
     @property
     def motivo(self) -> str | None:
         return self._motivo
+
+    @property
+    def ator(self) -> str | None:
+        return self._ator
 
     @property
     def ocorrido_em(self) -> datetime:

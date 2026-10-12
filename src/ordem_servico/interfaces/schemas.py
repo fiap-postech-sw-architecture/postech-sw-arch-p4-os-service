@@ -113,6 +113,13 @@ class OrdemDeServicoResponse(_ComSituacao):
     versao: int = Field(description="Versao do lock otimista (muda a cada escrita).")
     criado_em: datetime
     atualizado_em: datetime
+    etapa: str | None = Field(
+        description=(
+            "Etapa da saga, o estado do orquestrador (nao e o status): "
+            "aguardando_diagnostico, ..., em_execucao, concluida, compensando, "
+            "compensada ou falha_na_compensacao."
+        )
+    )
 
 
 class OrdemResumoResponse(_ComSituacao):
@@ -146,14 +153,91 @@ class MudancaDeStatusResponse(BaseModel):
     para: str
     origem: str = Field(description="atendimento, execucao, billing ou saga.")
     motivo: str | None
+    ator: str | None = Field(
+        description=(
+            "Quem provocou a mudanca: o sub do JWT do usuario ou o processo "
+            "(consumidor, prazos)."
+        )
+    )
     ocorrido_em: datetime
 
 
+class PassoDaSagaResponse(BaseModel):
+    """Um registro da linha do tempo da saga: gatilho, etapas e comando enviado."""
+
+    seq: int = Field(description="Ordem do registro na saga (1 na abertura).")
+    em: datetime = Field(description="Instante em que a saga aplicou o gatilho.")
+    de: str | None = Field(description="Etapa anterior (None na abertura).")
+    para: str = Field(description="Etapa depois do passo.")
+    gatilho: str = Field(description="Tipo do evento recebido ou abertura.")
+    mensagem_id: UUID | None = Field(description="Id do evento recebido.")
+    comando: str | None = Field(description="Comando enviado no passo.")
+    comando_id: UUID | None = Field(description="Id do envelope do comando.")
+    motivo: str | None = Field(description="Codigo da compensacao, quando houver.")
+    ator: str = Field(
+        description="sub do JWT de quem agiu ou o processo (consumidor, prazos)."
+    )
+    posicao_na_fila: int | None = Field(
+        default=None, description="So no ExecucaoAgendada: a posicao informada."
+    )
+
+
 class HistoricoResponse(BaseModel):
-    """Linha do tempo da ordem, da abertura ate a ultima mudanca de status."""
+    """Linha do tempo da ordem: mudancas de status e registros da saga."""
 
     ordem_id: UUID
-    mudancas: list[MudancaDeStatusResponse]
+    mudancas: list[MudancaDeStatusResponse] = Field(
+        description="Mudancas de status da OS, na ordem da sequencia."
+    )
+    passos: list[PassoDaSagaResponse] = Field(
+        description=(
+            "Registros da saga, na ordem do seq: cada evento aplicado e a "
+            "abertura, com o comando que enviaram (lista vazia sem saga)."
+        )
+    )
+
+
+class ComandoEmVooResponse(BaseModel):
+    """Comando com prazo tecnico a espera de resposta."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tipo: str
+    enviado_em: datetime
+
+
+class SagaResponse(BaseModel):
+    """Estado da saga para a operacao (runbook da saga)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    ordem_id: UUID
+    etapa: str = Field(
+        description=(
+            "Etapa atual (RFC-004 secao 4.1): aguardando_diagnostico, ..., "
+            "concluida, compensando, compensada ou falha_na_compensacao."
+        )
+    )
+    motivo: str | None = Field(description="Codigo da compensacao em curso.")
+    falha: str | None = Field(
+        description="reenvios_esgotados ou estorno_recusado (falha_na_compensacao)."
+    )
+    plano_compensacao: list[str] = Field(
+        description="Compensacoes restantes; a primeira e a pendente."
+    )
+    comando_em_voo: ComandoEmVooResponse | None = Field(
+        description=(
+            "Comando com resposta automatica a espera dela (tipo e envio); "
+            "None nas esperas humanas e depois da resposta."
+        )
+    )
+    reenvios: int = Field(description="Reenvios do comando em voo (0 no envio).")
+    prazo_resposta_em: datetime | None = Field(
+        description="Prazo tecnico do comando em voo (None sem resposta automatica)."
+    )
+    passos: list[PassoDaSagaResponse] = Field(
+        description="Registros da saga, na ordem do seq."
+    )
 
 
 class AcompanhamentoRequest(BaseModel):

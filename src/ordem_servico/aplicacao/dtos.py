@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from decimal import Decimal
     from uuid import UUID
 
+    from src.ordem_servico.aplicacao.saga.modelo import RegistroDaSaga
+
 
 @dataclass(frozen=True, slots=True)
 class AbrirOrdemDTO:
@@ -23,6 +25,21 @@ class AbrirOrdemDTO:
     veiculo_id: UUID
     # Texto livre: fora do repr (pode conter PII).
     descricao_problema: str = field(repr=False)
+    # sub do JWT de quem abre (vai para o historico).
+    ator: str
+
+
+@dataclass(frozen=True, slots=True)
+class RetratoDoVeiculo:
+    """Veiculo como a Execucao o recebe no ``SolicitarDiagnostico`` (RFC-004 secao 5.3).
+
+    A placa e dado pessoal: fora do repr.
+    """
+
+    placa: str = field(repr=False)
+    marca: str
+    modelo: str
+    ano: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +51,7 @@ class MudancaDeStatusDTO:
     para: str
     origem: str
     motivo: str | None = field(repr=False)
+    ator: str | None
     ocorrido_em: datetime
 
 
@@ -77,6 +95,9 @@ class OrdemDeServicoDTO:
     criado_em: datetime
     atualizado_em: datetime
     historico: tuple[MudancaDeStatusDTO, ...]
+    # Etapa da saga (``None`` so para OS sem saga) e os passos dela.
+    etapa: str | None
+    passos: tuple[RegistroDaSaga, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,3 +119,26 @@ class AcompanhamentoDTO:
     status: str
     criado_em: datetime
     atualizado_em: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ComandoEmVooDTO:
+    """Comando com prazo tecnico a espera de resposta: tipo e hora do envio."""
+
+    tipo: str
+    enviado_em: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class SagaDTO:
+    """Estado da saga para a operacao (RFC-004 secoes 4.7 e 6.1): so codigos."""
+
+    ordem_id: UUID
+    etapa: str
+    motivo: str | None
+    falha: str | None
+    plano_compensacao: tuple[str, ...]
+    comando_em_voo: ComandoEmVooDTO | None
+    reenvios: int
+    prazo_resposta_em: datetime | None
+    passos: tuple[RegistroDaSaga, ...]

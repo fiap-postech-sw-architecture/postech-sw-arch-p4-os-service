@@ -16,13 +16,21 @@ from src.compartilhado.dominio.exceptions import (
     ValorInvalidoException,
 )
 from src.compartilhado.dominio.placa import Placa
-from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, AcompanhamentoDTO
+from src.ordem_servico.aplicacao.dtos import (
+    AbrirOrdemDTO,
+    AcompanhamentoDTO,
+    ComandoEmVooDTO,
+    SagaDTO,
+)
+from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.use_cases import (
+    CANCELAMENTO_INDISPONIVEL,
     AbrirOrdem,
     CancelarOrdem,
     ConsultarAcompanhamento,
     ListarOrdens,
     ObterOrdem,
+    ObterSaga,
     RegistrarEntrega,
 )
 from src.ordem_servico.dominio.exceptions import (
@@ -32,6 +40,7 @@ from src.ordem_servico.dominio.exceptions import (
 )
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import (
+    ATOR_ATENDENTE,
     CHECKOUT_URL,
     EXPIRA_EM,
     LINK_DECISAO,
@@ -39,25 +48,32 @@ from tests.fabricas import (
     ordem_em,
 )
 from tests.unitarios.fakes import (
+    RETRATO,
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
+    ConsultaDaOrdemEmMemoria,
     FakeUnitOfWork,
     RepoEmMemoria,
+    SagasEmMemoria,
 )
+from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
 
 
 def _dto() -> AbrirOrdemDTO:
     return AbrirOrdemDTO(
-        cliente_id=uuid4(), veiculo_id=uuid4(), descricao_problema="Freio rangendo"
+        cliente_id=uuid4(),
+        veiculo_id=uuid4(),
+        descricao_problema="Freio rangendo",
+        ator=ATOR_ATENDENTE,
     )
 
 
 class TestAbrirOrdem:
-    def test_abre_persiste_e_projeta(self) -> None:
-        repo, uow = RepoEmMemoria(), FakeUnitOfWork()
+    def test_abre_a_os_e_a_saga_e_grava_o_solicitar_diagnostico(self) -> None:
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
         dto = _dto()
 
-        resultado = AbrirOrdem(repo, uow, ClientePortFake()).executar(dto)
+        resultado = AbrirOrdem(repo, uow, ClientePortFake(), sagas).executar(dto)
 
         assert uow.committed
         (salva,) = repo.salvas
@@ -72,47 +88,95 @@ class TestAbrirOrdem:
         assert resultado.pagamento is None
         assert resultado.versao == 1
         (abertura,) = resultado.historico
-        assert (abertura.de, abertura.para, abertura.origem) == (
+        assert (abertura.de, abertura.para, abertura.origem, abertura.ator) == (
             None,
             "recebida",
             "atendimento",
+            ATOR_ATENDENTE,
         )
+        # Comando com o retrato do veiculo; causa e a requisicao (sem causation).
+        (comando,) = uow.comandos
+        assert comando == (
+            "SolicitarDiagnostico",
+            {
+                "ordem_id": salva.id,
+                "veiculo_id": dto.veiculo_id,
+                "veiculo": {
+                    "placa": RETRATO.placa,
+                    "marca": RETRATO.marca,
+                    "modelo": RETRATO.modelo,
+                    "ano": RETRATO.ano,
+                },
+                "descricao_problema": "Freio rangendo",
+            },
+            salva.id,
+            None,
+        )
+        (saga,) = sagas.salvas
+        assert saga.ordem_id == salva.id
+        assert saga.etapa.value == "aguardando_diagnostico"
+        assert saga.iniciada_em == salva.criado_em
+        (passo,) = saga.passos
+        assert (passo["gatilho"], passo["comando"], passo["ator"]) == (
+            "abertura",
+            "SolicitarDiagnostico",
+            ATOR_ATENDENTE,
+        )
+        assert passo["comando_id"] == uow.envelopes[0]["id"]
+        # Sem resposta automatica: nada em voo e nada da placa ou do texto livre.
+        assert (saga.comando_em_voo, saga.prazo_resposta_em) == (None, None)
+        assert "BRA2E19" not in str(saga.passos)
 
     def test_cliente_inexistente_ou_inativo_levanta_sem_persistir(self) -> None:
-        repo, uow = RepoEmMemoria(), FakeUnitOfWork()
-        uc = AbrirOrdem(repo, uow, ClientePortFake(cliente_ok=False))
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+        uc = AbrirOrdem(repo, uow, ClientePortFake(cliente_ok=False), sagas)
 
         with pytest.raises(ClienteNaoEncontradoException):
             uc.executar(_dto())
 
-        assert repo.salvas == []
+        assert (repo.salvas, sagas.salvas, uow.comandos) == ([], [], [])
         assert not uow.committed
 
     def test_veiculo_de_outro_cliente_levanta_sem_persistir(self) -> None:
-        repo, uow = RepoEmMemoria(), FakeUnitOfWork()
-        uc = AbrirOrdem(repo, uow, ClientePortFake(veiculo_ok=False))
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+        uc = AbrirOrdem(repo, uow, ClientePortFake(veiculo_ok=False), sagas)
 
         with pytest.raises(VeiculoNaoEncontradoException):
             uc.executar(_dto())
 
-        assert repo.salvas == []
+        assert (repo.salvas, sagas.salvas, uow.comandos) == ([], [], [])
         assert not uow.committed
 
     def test_descricao_invalida_levanta_valor_invalido(self) -> None:
         dto = AbrirOrdemDTO(
-            cliente_id=uuid4(), veiculo_id=uuid4(), descricao_problema="   "
+            cliente_id=uuid4(),
+            veiculo_id=uuid4(),
+            descricao_problema="   ",
+            ator=ATOR_ATENDENTE,
         )
+        uow, sagas = FakeUnitOfWork(), SagasEmMemoria()
         with pytest.raises(ValorInvalidoException, match="descricao do problema"):
-            AbrirOrdem(RepoEmMemoria(), FakeUnitOfWork(), ClientePortFake()).executar(
-                dto
-            )
+            AbrirOrdem(RepoEmMemoria(), uow, ClientePortFake(), sagas).executar(dto)
+        assert (sagas.salvas, uow.comandos) == ([], [])
+
+    def test_conflito_na_saga_desfaz_tudo(self) -> None:
+        repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
+        sagas.provocar_conflito()
+
+        with pytest.raises(ConflitoDeConcorrenciaException):
+            AbrirOrdem(repo, uow, ClientePortFake(), sagas).executar(_dto())
+
+        assert not uow.committed
+        assert uow.rolled_back
 
 
 class TestObterOrdem:
     def test_projeta_resumos_e_historico(self) -> None:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_PAGAMENTO)
 
-        dto = ObterOrdem(RepoEmMemoria(ordem)).executar(ordem.id)
+        dto = ObterOrdem(
+            ConsultaDaOrdemEmMemoria(RepoEmMemoria(ordem), SagasEmMemoria())
+        ).executar(ordem.id)
 
         assert dto.status == "aguardando_pagamento"
         assert dto.orcamento is not None
@@ -135,12 +199,77 @@ class TestObterOrdem:
             "atendimento",
             "execucao",
             "billing",
-            "billing",
+            "execucao",
         ]
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            ObterOrdem(RepoEmMemoria()).executar(uuid4())
+            ObterOrdem(
+                ConsultaDaOrdemEmMemoria(RepoEmMemoria(), SagasEmMemoria())
+            ).executar(uuid4())
+
+    def test_projeta_a_etapa_e_os_passos_da_saga(self) -> None:
+        cenario = CenarioDaSaga()
+        cenario.receber("DiagnosticoIniciado")
+
+        dto = ObterOrdem(
+            ConsultaDaOrdemEmMemoria(cenario.ordens, cenario.sagas)
+        ).executar(cenario.ordem_id)
+
+        assert dto.etapa == "aguardando_diagnostico"
+        assert dto.passos == cenario.saga.passos
+        assert [p["gatilho"] for p in dto.passos] == [
+            "abertura",
+            "DiagnosticoIniciado",
+        ]
+
+    def test_ordem_sem_saga_sai_sem_etapa(self) -> None:
+        ordem = ordem_em(StatusOrdem.RECEBIDA)
+
+        dto = ObterOrdem(
+            ConsultaDaOrdemEmMemoria(RepoEmMemoria(ordem), SagasEmMemoria())
+        ).executar(ordem.id)
+
+        assert (dto.etapa, dto.passos) == (None, ())
+
+
+class TestObterSaga:
+    def test_projeta_o_estado_da_saga_com_o_comando_em_voo(self) -> None:
+        cenario = CenarioDaSaga()
+        cenario.receber("DiagnosticoIniciado")
+        cenario.receber("DiagnosticoConcluido")
+        saga = cenario.saga
+
+        dto = ObterSaga(cenario.sagas).executar(cenario.ordem_id)
+
+        assert dto == SagaDTO(
+            ordem_id=cenario.ordem_id,
+            etapa="aguardando_orcamento",
+            motivo=None,
+            falha=None,
+            plano_compensacao=(),
+            comando_em_voo=ComandoEmVooDTO(
+                tipo="GerarOrcamento", enviado_em=cenario.relogio.agora
+            ),
+            reenvios=0,
+            prazo_resposta_em=saga.prazo_resposta_em,
+            passos=saga.passos,
+        )
+
+    def test_sem_comando_em_voo(self) -> None:
+        cenario = CenarioDaSaga()
+
+        dto = ObterSaga(cenario.sagas).executar(cenario.ordem_id)
+
+        assert (dto.etapa, dto.comando_em_voo, dto.prazo_resposta_em) == (
+            "aguardando_diagnostico",
+            None,
+            None,
+        )
+
+    def test_inexistente_levanta_404(self) -> None:
+        with pytest.raises(SagaNaoEncontradaException):
+            ObterSaga(SagasEmMemoria()).executar(uuid4())
 
 
 class TestCancelarOrdem:
@@ -148,7 +277,9 @@ class TestCancelarOrdem:
         ordem = ordem_em(StatusOrdem.AGUARDANDO_APROVACAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = CancelarOrdem(repo, uow).executar(ordem.id, "cliente desistiu")
+        dto = CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+            ordem.id, "cliente desistiu", ator=ATOR_ATENDENTE
+        )
 
         assert uow.committed
         assert repo.salvas == [ordem]
@@ -156,13 +287,16 @@ class TestCancelarOrdem:
         assert dto.motivo_cancelamento == "cliente desistiu"
         assert dto.historico[-1].origem == "atendimento"
         assert dto.historico[-1].motivo == "cliente desistiu"
+        assert dto.historico[-1].ator == ATOR_ATENDENTE
 
     def test_depois_da_execucao_levanta_409_sem_persistir(self) -> None:
         ordem = ordem_em(StatusOrdem.EM_EXECUCAO)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            CancelarOrdem(repo, uow).executar(ordem.id, "tarde")
+            CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+                ordem.id, "tarde", ator=ATOR_ATENDENTE
+            )
 
         assert repo.salvas == []
         assert not uow.committed
@@ -173,14 +307,63 @@ class TestCancelarOrdem:
         repo, uow = RepoEmMemoria(ordem, conflito=True), FakeUnitOfWork()
 
         with pytest.raises(ConflitoDeConcorrenciaException):
-            CancelarOrdem(repo, uow).executar(ordem.id, "x")
+            CancelarOrdem(repo, uow, SagasEmMemoria()).executar(
+                ordem.id, "x", ator=ATOR_ATENDENTE
+            )
 
         assert not uow.committed
         assert uow.rolled_back
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):
-            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork()).executar(uuid4(), "x")
+            CancelarOrdem(RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()).executar(
+                uuid4(), "x", ator=ATOR_ATENDENTE
+            )
+
+    @pytest.mark.parametrize(
+        "etapa",
+        [
+            "aguardando_diagnostico",
+            "aguardando_orcamento",
+            "aguardando_decisao",
+            "aguardando_reserva",
+            "aguardando_pagamento",
+            "aguardando_agendamento",
+            "aguardando_inicio",
+            "em_execucao",
+            "compensando",
+            "falha_na_compensacao",
+        ],
+    )
+    def test_com_a_saga_em_andamento_levanta_409_sem_mudar_nada(
+        self, etapa: str
+    ) -> None:
+        cenario = CenarioDaSaga.em(etapa)
+        status, historico = cenario.ordem.status, cenario.ordem.historico
+        uow = FakeUnitOfWork()
+
+        with pytest.raises(TransicaoStatusInvalidaException) as exc:
+            CancelarOrdem(cenario.ordens, uow, cenario.sagas).executar(
+                cenario.ordem_id, "cliente desistiu", ator=ATOR_ATENDENTE
+            )
+
+        # A OS nunca fica cancelada com a saga viva: o cancelamento passa pela
+        # saga quando as compensacoes chegarem (RFC-004 secao 4.4).
+        assert exc.value.mensagem == CANCELAMENTO_INDISPONIVEL
+        assert (cenario.ordem.status, cenario.ordem.historico) == (status, historico)
+        assert cenario.saga.etapa.value == etapa
+        assert not uow.committed
+        assert uow.rolled_back
+
+    def test_com_a_saga_concluida_vale_a_maquina_de_status(self) -> None:
+        cenario = CenarioDaSaga.em("concluida")
+
+        with pytest.raises(TransicaoStatusInvalidaException) as exc:
+            CancelarOrdem(cenario.ordens, FakeUnitOfWork(), cenario.sagas).executar(
+                cenario.ordem_id, "tarde", ator=ATOR_ATENDENTE
+            )
+
+        assert "finalizada para cancelada" in exc.value.mensagem
 
 
 class TestRegistrarEntrega:
@@ -188,11 +371,16 @@ class TestRegistrarEntrega:
         ordem = ordem_em(StatusOrdem.FINALIZADA)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = RegistrarEntrega(repo, uow).executar(ordem.id)
+        dto = RegistrarEntrega(repo, uow, SagasEmMemoria()).executar(
+            ordem.id, ator=ATOR_ATENDENTE
+        )
 
         assert uow.committed
         assert dto.status == "entregue"
-        assert dto.historico[-1].origem == "atendimento"
+        assert (dto.historico[-1].origem, dto.historico[-1].ator) == (
+            "atendimento",
+            ATOR_ATENDENTE,
+        )
 
     @pytest.mark.parametrize(
         "estado",
@@ -203,7 +391,9 @@ class TestRegistrarEntrega:
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            RegistrarEntrega(repo, uow).executar(ordem.id)
+            RegistrarEntrega(repo, uow, SagasEmMemoria()).executar(
+                ordem.id, ator=ATOR_ATENDENTE
+            )
 
         assert repo.salvas == []
         assert not uow.committed

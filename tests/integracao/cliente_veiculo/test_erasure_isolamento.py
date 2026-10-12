@@ -65,11 +65,12 @@ def _abrir(
         cliente_id=cliente.id,
         veiculo_id=cliente.veiculos[0].id,
         descricao_problema=f"Relato de {cliente.nome}",
+        ator="atendente-teste",
     )
     repo = OrdemDeServicoSQLAlchemyRepository(sess)
     repo.salvar(ordem)
     if cancelar_com is not None:
-        ordem.cancelar(cancelar_com, OrigemMudanca.ATENDIMENTO)
+        ordem.cancelar(cancelar_com, OrigemMudanca.ATENDIMENTO, ator="atendente-teste")
         repo.salvar(ordem)
     if ate is not None:
         for proximo in FLUXO[1 : FLUXO.index(ate) + 1]:

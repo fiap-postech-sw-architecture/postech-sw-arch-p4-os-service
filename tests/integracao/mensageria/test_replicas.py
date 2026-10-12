@@ -35,7 +35,8 @@ from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, cat
 from src.compartilhado.infraestrutura.mensageria.outbox import Outbox
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
-from tests.integracao.broker import EmSegundoPlano, envelope_de_evento, esperar_ate
+from tests.eventos import envelope_de_evento
+from tests.integracao.broker import EmSegundoPlano, esperar_ate
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator

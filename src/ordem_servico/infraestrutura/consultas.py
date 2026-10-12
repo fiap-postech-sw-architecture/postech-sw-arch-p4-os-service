@@ -1,4 +1,8 @@
-"""Query services de leitura do contexto OS (projecoes, sem hidratar o agregado)."""
+"""Query services de leitura do contexto OS.
+
+O acompanhamento projeta so as colunas que expoe; a consulta da OS hidrata a OS
+e a saga juntas, num SELECT, para o status e a etapa sairem do mesmo instante.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +13,16 @@ from sqlalchemy import select
 from src.cliente_veiculo.infraestrutura.mapping import clientes_table, veiculos_table
 from src.compartilhado.infraestrutura.encryption import EncryptionService
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
-from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
+from src.ordem_servico.aplicacao.saga.saga import Saga
+from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+from src.ordem_servico.infraestrutura.mapping import (
+    ordens_de_servico_table,
+    sagas_table,
+)
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.orm import Session
 
     from src.compartilhado.dominio.documento import Documento
@@ -53,3 +64,21 @@ class ConsultaAcompanhamentoSQLAlchemy:
             criado_em=linha.criado_em,
             atualizado_em=linha.atualizado_em,
         )
+
+
+class ConsultaDaOrdemSQLAlchemy:
+    """``ConsultaDaOrdem``: a OS e a saga dela num SELECT so (LEFT JOIN)."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
+        linha = self._session.execute(
+            select(OrdemDeServico, Saga)
+            .outerjoin(Saga, sagas_table.c.ordem_id == _t.c.id)
+            .where(_t.c.id == ordem_id)
+        ).first()
+        if linha is None:
+            return None
+        ordem, saga = linha
+        return ordem, saga

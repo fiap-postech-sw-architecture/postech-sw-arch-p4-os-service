@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import exists, select
+from sqlalchemy import select
 
 from src.cliente_veiculo.infraestrutura.mapping import clientes_table, veiculos_table
+from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -43,11 +44,18 @@ class ClienteSQLAlchemyAdapter:
         )
         return self._session.execute(stmt).first() is not None
 
-    def veiculo_pertence_ao_cliente(self, cliente_id: UUID, veiculo_id: UUID) -> bool:
-        stmt = select(
-            exists().where(
-                veiculos_table.c.id == veiculo_id,
-                veiculos_table.c.cliente_id == cliente_id,
+    def retrato_do_veiculo(
+        self, cliente_id: UUID, veiculo_id: UUID
+    ) -> RetratoDoVeiculo | None:
+        """Retrato do veiculo para o ``SolicitarDiagnostico``, se for do cliente."""
+        v = veiculos_table
+        linha = self._session.execute(
+            select(v.c.placa, v.c.marca, v.c.modelo, v.c.ano).where(
+                v.c.id == veiculo_id, v.c.cliente_id == cliente_id
             )
+        ).first()
+        if linha is None:
+            return None
+        return RetratoDoVeiculo(
+            placa=linha.placa, marca=linha.marca, modelo=linha.modelo, ano=linha.ano
         )
-        return bool(self._session.scalar(stmt))

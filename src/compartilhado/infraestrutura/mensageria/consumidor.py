@@ -21,10 +21,11 @@ routing key e a fila de retry do nivel da nova tentativa (``os.eventos.retry.1s`
 devolve a copia a ``os.eventos`` pelo dead letter. Uma fila por atraso, e nao um
 ``expiration`` por mensagem numa fila so, porque a mensagem so expira na cabeca
 da fila: uma copia de 300 s seguraria as de 1 s. Esgotadas as cinco, ou erro
-permanente (tipo, origem, JSON ou contrato invalidos, ou qualquer outra
-excecao): ``reject`` sem requeue, e a fila manda a mensagem para a
-``os.eventos.dlq``. Uma vez por hora apaga, em lotes, as linhas de
-``mensagens_processadas`` com mais de 30 dias.
+permanente (tipo, origem, JSON ou contrato invalidos, ``FalhaPermanenteError``
+do handler, com o motivo dela no log, ou qualquer outra excecao): ``reject``
+sem requeue, e a fila manda a mensagem para a ``os.eventos.dlq``. Uma vez por
+hora apaga, em lotes, as linhas de ``mensagens_processadas`` com mais de 30
+dias.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from src.compartilhado.aplicacao.mensageria import (
     ContratoInvalidoError,
     Desfecho,
+    FalhaPermanenteError,
     FalhaTransitoriaError,
     MensagemRecebida,
 )
@@ -392,6 +394,10 @@ class Consumidor:
                 desfecho = handler(mensagem, TransacaoDaMensagem(sessao))
             except _TRANSITORIOS:
                 raise
+            except FalhaPermanenteError as exc:
+                # Causa prevista pelo handler: o codigo diz ao operador o que
+                # fazer antes do redrive.
+                raise _MensagemRejeitadaError(exc.motivo) from exc
             except Exception as exc:
                 # Bug ou regra violada: repetir nao muda o resultado. So o tipo
                 # e o lugar da excecao vao para o log: a mensagem dela pode

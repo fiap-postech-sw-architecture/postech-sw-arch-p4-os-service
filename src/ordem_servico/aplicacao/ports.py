@@ -2,9 +2,9 @@
 
 Definidas no contexto consumidor e implementadas na infraestrutura:
 ``ClientePort`` em ``adapters.py`` (Anti-Corruption Layer: consulta o contexto
-Cliente+Veiculo sem importar o agregado vizinho) e ``ConsultaAcompanhamento``
-em ``consultas.py`` (query service de leitura, fora do repositorio do
-agregado).
+Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento`` e
+``ConsultaDaOrdem`` em ``consultas.py`` (query services de leitura, fora do
+repositorio do agregado) e ``SagaRepository`` em ``repository.py``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
-    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
+    from src.ordem_servico.aplicacao.saga.saga import Saga
+    from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 
 class ClientePort(Protocol):
@@ -27,8 +29,14 @@ class ClientePort(Protocol):
         """Indica se o cliente existe e esta ativo."""
         pass
 
-    def veiculo_pertence_ao_cliente(self, cliente_id: UUID, veiculo_id: UUID) -> bool:
-        """Indica se o veiculo existe e pertence ao cliente informado."""
+    def retrato_do_veiculo(
+        self, cliente_id: UUID, veiculo_id: UUID
+    ) -> RetratoDoVeiculo | None:
+        """Placa, marca, modelo e ano do veiculo do cliente.
+
+        ``None`` se o veiculo nao existe ou e de outro cliente (casos que a
+        abertura nao distingue).
+        """
         pass
 
 
@@ -42,5 +50,34 @@ class ConsultaAcompanhamento(Protocol):
 
         Recebe os VOs ja validados: quem chama garante que documento e placa
         invalidos nunca chegam ao banco.
+        """
+        pass
+
+
+class ConsultaDaOrdem(Protocol):
+    """Leitura da OS com a saga dela numa consulta so (RFC-004 secao 4).
+
+    O status e a etapa saem do mesmo instante: um commit do consumidor entre
+    duas leituras mostraria o status velho com a etapa nova.
+    """
+
+    def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
+        """A OS e a saga (``None`` sem saga), ou ``None`` sem a OS."""
+        pass
+
+
+class SagaRepository(Protocol):
+    """Persistencia da saga (agregado proprio, RFC-004 secao 4), sob a transacao."""
+
+    def obter(self, ordem_id: UUID) -> Saga | None:
+        """A saga da OS ``ordem_id``, ou ``None``."""
+        pass
+
+    def salvar(self, saga: Saga) -> None:
+        """Persiste a saga com lock otimista pela ``versao``.
+
+        Raises:
+            ConflitoDeConcorrenciaException: outra transacao gravou a mesma
+                saga desde a leitura.
         """
         pass

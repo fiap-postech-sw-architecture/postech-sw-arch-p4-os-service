@@ -27,6 +27,7 @@ from structlog.testing import capture_logs
 from src.compartilhado.aplicacao.mensageria import (
     Comando,
     Desfecho,
+    FalhaPermanenteError,
     FalhaTransitoriaError,
     MensagemRecebida,
 )
@@ -41,11 +42,11 @@ from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
+from tests.eventos import envelope_de_evento
 from tests.integracao.broker import (
     SENHAS,
     TTL_DE_RETRY_MS,
     EmSegundoPlano,
-    envelope_de_evento,
     esperar_ate,
 )
 from tests.integracao.seed_helpers import (
@@ -431,6 +432,36 @@ def test_erro_permanente_do_handler_vai_direto_para_a_dlq(
     assert _processadas(engine) == []
 
 
+def test_falha_permanente_do_handler_vai_para_a_dlq_com_o_motivo_e_volta_no_redrive(
+    engine: Engine,
+    broker: Broker,
+    consumidor: Callable[..., Consumidor],
+    rastreador: Rastreador,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    espiao = Espiao(FalhaPermanenteError("sem_tratador_nesta_versao"))
+    envelope = envelope_de_evento("OrcamentoRecusado")
+    retries = _retries()
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+
+    with capture_logs() as logs, EmSegundoPlano(consumidor(espiao)):
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+        # O redrive (a mesma mensagem de novo, na versao que a trata) e
+        # processado: o id nao ficou em mensagens_processadas.
+        broker.publicar_evento(envelope)
+        esperar_ate(lambda: _processadas(engine) == [UUID(envelope["id"])])
+
+    assert len(espiao.recebidas) == 2
+    assert _retries() == retries
+    assert [
+        (log["event"], log.get("motivo")) for log in logs if "dlq" in log["event"]
+    ] == [("message rejected to dlq", "sem_tratador_nesta_versao")]
+    recusa, redrive = rastreador.spans("process OrcamentoRecusado")
+    assert recusa.status.description == "sem_tratador_nesta_versao"
+    assert redrive.status.is_ok
+
+
 class _Saga:
     """Handler como o da saga: a OS vai a EM_DIAGNOSTICO e sai um GerarOrcamento.
 
@@ -448,7 +479,7 @@ class _Saga:
         ordens = OrdemDeServicoSQLAlchemyRepository(session=transacao.session)
         ordem = ordens.obter_por_id(mensagem.correlation_id)
         assert ordem is not None
-        ordem.registrar_diagnostico_iniciado()
+        ordem.registrar_diagnostico_iniciado(ator="consumidor")
         ordens.salvar(ordem)
         transacao.publicar_comando(
             Comando.GERAR_ORCAMENTO,
