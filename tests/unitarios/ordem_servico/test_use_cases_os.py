@@ -23,6 +23,7 @@ from src.ordem_servico.aplicacao.dtos import (
     ComandoEmVooDTO,
     SagaDTO,
 )
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
@@ -283,7 +284,7 @@ class TestObterSaga:
 def _cancelar_ordem(
     repo: RepoEmMemoria, uow: FakeUnitOfWork, sagas: SagasEmMemoria
 ) -> CancelarOrdem:
-    return CancelarOrdem(repo, uow, sagas, prazo_resposta=PRAZO)
+    return CancelarOrdem(repo, uow, sagas, ContextoDeEnvio(PRAZO))
 
 
 def _foto(cenario: CenarioDaSaga) -> tuple[object, ...]:

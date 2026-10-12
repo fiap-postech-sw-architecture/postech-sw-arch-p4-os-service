@@ -9,7 +9,7 @@ compensacao no mesmo commit; os passos seguintes sao do ``OrquestradorDaSaga``.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import TYPE_CHECKING, Final
 
 import structlog
@@ -57,8 +57,6 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from datetime import timedelta
     from uuid import UUID
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
@@ -70,6 +68,7 @@ if TYPE_CHECKING:
         ConsultaDaOrdem,
         SagaRepository,
     )
+    from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 _log = structlog.get_logger(__name__)
@@ -291,10 +290,6 @@ ORDEM_JA_CANCELADA: Final = "Ordem já cancelada"
 _LEITURAS_DO_CANCELAMENTO: Final = 3
 
 
-def _agora() -> datetime:
-    return datetime.now(UTC)
-
-
 class CancelarOrdem:
     """Pedido de cancelamento do atendimento (RFC-004 secoes 4.4 e 6.1).
 
@@ -311,15 +306,12 @@ class CancelarOrdem:
         repo: OrdemDeServicoRepository,
         uow: UnitOfWork,
         sagas: SagaRepository,
-        *,
-        prazo_resposta: timedelta,
-        relogio: Callable[[], datetime] = _agora,
+        contexto: ContextoDeEnvio,
     ) -> None:
         self._repo = repo
         self._uow = uow
         self._sagas = sagas
-        self._prazo_resposta = prazo_resposta
-        self._relogio = relogio
+        self._contexto = contexto
 
     def executar(self, ordem_id: UUID, motivo: str, *, ator: str) -> OrdemDeServicoDTO:
         """Pede o cancelamento; ``ator`` e o sub do JWT.
@@ -358,11 +350,14 @@ class CancelarOrdem:
             if saga.etapa in ETAPAS_EM_COMPENSACAO:
                 # A compensacao ja comecou: o pedido repetido nao muda nada.
                 return _ordem_dto(ordem, saga)
-            self._compensar(ordem, saga, motivo, ator)
-            # A OS antes da saga, a mesma ordem do consumidor: sem deadlock.
-            self._repo.salvar(ordem)
-            self._sagas.salvar(saga)
-            self._uow.commit()
+            # O comando e o contexto que a saga passa a guardar nascem no span
+            # do cancelamento, filho do trace dela (ADR-043).
+            with self._contexto.span("saga cancelamento", saga.traceparent):
+                self._compensar(ordem, saga, motivo, ator)
+                # A OS antes da saga, a mesma ordem do consumidor: sem deadlock.
+                self._repo.salvar(ordem)
+                self._sagas.salvar(saga)
+                self._uow.commit()
         return _ordem_dto(ordem, saga)
 
     def _compensar(
@@ -379,7 +374,7 @@ class CancelarOrdem:
             raise TransicaoStatusInvalidaException(mensagem=CANCELAMENTO_RECUSADO)
         ordem.registrar_pedido_de_cancelamento(motivo)
         marcos = MarcosDaOrdem.da_ordem(ordem)
-        agora = max(self._relogio(), saga.atualizada_em)
+        agora = max(self._contexto.relogio(), saga.atualizada_em)
         codigo = MotivoCompensacao.CANCELAMENTO
         primeira = inicio(saga, codigo).plano[0]
         dados = dados_da_compensacao(primeira, ordem.id, codigo.value, marcos)
@@ -390,7 +385,7 @@ class CancelarOrdem:
             tipo=primeira,
             id=comando_id,
             dados=dados,
-            prazo_resposta_em=agora + self._prazo_resposta,
+            prazo_resposta_em=agora + self._contexto.prazo_resposta,
         )
         saga.cancelar(marcos, agora=agora, ator=ator, envio=envio)
 

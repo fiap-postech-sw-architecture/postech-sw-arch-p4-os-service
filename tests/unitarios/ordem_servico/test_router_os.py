@@ -21,6 +21,7 @@ from src.compartilhado.dominio.placa import Placa
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.modelo import Envio
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
@@ -82,7 +83,7 @@ def client_como(
         "obter_obter_ordem": ObterOrdem(ConsultaDaOrdemEmMemoria(repo, sagas)),
         "obter_obter_saga": ObterSaga(sagas),
         "obter_cancelar_ordem": CancelarOrdem(
-            repo, FakeUnitOfWork(), sagas, prazo_resposta=timedelta(seconds=120)
+            repo, FakeUnitOfWork(), sagas, ContextoDeEnvio(timedelta(seconds=120))
         ),
         "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork(), sagas),
         "obter_consultar_acompanhamento": ConsultarAcompanhamento(consulta),

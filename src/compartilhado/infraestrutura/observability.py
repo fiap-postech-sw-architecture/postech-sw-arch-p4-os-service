@@ -45,6 +45,10 @@ _NOME_DO_SERVICO = "pytstop-os-service"
 # Marcador que substitui a query string nos spans (TD-017).
 _QUERY_REDIGIDA = "REDACTED"
 
+# Tracer do provider que ``configurar_otel`` monta, para os spans que o caso de
+# uso abre a mao (``rastreamento_da_saga``); sem a exportacao ligada, o no-op.
+_tracer_da_api: Tracer | None = None
+
 
 def _redigir_pii_da_span(span: object, scope: object) -> None:
     """``server_request_hook`` do FastAPIInstrumentor: remove PII da query.
@@ -128,6 +132,8 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
     )
     # Pod kill/SIGTERM nao perde os ultimos spans: o shutdown() descarrega o batch.
     atexit.register(provider.shutdown)
+    global _tracer_da_api  # noqa: PLW0603  # init-once, como o provider
+    _tracer_da_api = provider.get_tracer(f"{_NOME_DO_SERVICO}.api")
 
     # tracer_provider explicito nos dois instrumentadores em vez de
     # trace.set_tracer_provider global: o provider global so aceita um set
@@ -153,6 +159,13 @@ def configurar_otel(app: FastAPI, engine: Engine) -> bool:
     SQLAlchemyInstrumentor().instrument(engine=engine, tracer_provider=provider)
     _log.info("otel configurado: traces OTLP ativos", endpoint=endpoint)
     return True
+
+
+def tracer_da_api() -> Tracer:
+    """Tracer da API: o do provider de ``configurar_otel``, ou o no-op sem ele."""
+    from opentelemetry.trace import NoOpTracer
+
+    return _tracer_da_api or NoOpTracer()
 
 
 def atributos_do_recurso(processo: str) -> dict[str, str]:

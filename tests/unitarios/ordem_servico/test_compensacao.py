@@ -58,6 +58,31 @@ def test_falhas_de_negocio_e_respostas_sao_as_do_contrato() -> None:
     assert {c.value for c in RESPOSTA_DA_COMPENSACAO.values()} == set(COMPENSACOES)
 
 
+# O texto da OS cancelada e do e-mail de cancelamento, um por codigo da RFC-004
+# secao 9 (escrito aqui, nao importado do modulo testado).
+ROTULOS = {
+    "orcamento_recusado": "Orçamento recusado pelo cliente",
+    "orcamento_expirado": "Orçamento expirado sem decisão do cliente",
+    "geracao_falhou": "Falha na geração do orçamento",
+    "reserva_falhou": "Falta de peça para a reserva",
+    "pagamento_recusado": "Pagamento recusado",
+    "pagamento_expirado": "Pagamento não realizado no prazo",
+    "cancelamento": "Cancelamento solicitado pelo atendente",
+    "prazo_tecnico": "Serviço sem resposta no prazo técnico",
+}
+
+
 def test_cada_motivo_tem_rotulo_para_a_os_cancelada() -> None:
     assert set(ROTULO_DO_MOTIVO) == set(MotivoCompensacao)
     assert all(0 < len(rotulo) <= 500 for rotulo in ROTULO_DO_MOTIVO.values())
+
+
+@pytest.mark.parametrize(
+    ("motivo", "rotulo"), [pytest.param(m, r, id=m) for m, r in ROTULOS.items()]
+)
+def test_rotulo_de_cada_codigo(motivo: str, rotulo: str) -> None:
+    assert ROTULO_DO_MOTIVO[MotivoCompensacao(motivo)] == rotulo
+
+
+def test_os_oito_codigos_da_rfc() -> None:
+    assert {m.value for m in MotivoCompensacao} == set(ROTULOS)

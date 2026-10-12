@@ -12,6 +12,10 @@ from uuid import UUID
 
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
+    ContextoDeEnvio,
+    sem_span,
+)
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
 from src.ordem_servico.aplicacao.saga.saga import Saga
@@ -31,6 +35,7 @@ if TYPE_CHECKING:
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.ordem_servico.aplicacao.dtos import OrdemDeServicoDTO
+    from src.ordem_servico.aplicacao.saga.contexto_de_envio import SpanDaSaga
     from src.ordem_servico.aplicacao.saga.orquestrador import Tratamento
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -422,14 +427,13 @@ class CenarioDaSaga:
             self.billing[tipo] = recebido.dados
         return tratamento
 
-    def cancelar(self, motivo: str = "cliente desistiu") -> OrdemDeServicoDTO:
+    def cancelar(
+        self, motivo: str = "cliente desistiu", span: SpanDaSaga = sem_span
+    ) -> OrdemDeServicoDTO:
         """O atendente pede o cancelamento pelo caso de uso real, na mesma outbox."""
+        contexto = ContextoDeEnvio(PRAZO, self.relogio, span)
         return CancelarOrdem(
-            self.ordens,
-            self.publicador,
-            self.sagas,
-            prazo_resposta=PRAZO,
-            relogio=self.relogio,
+            self.ordens, self.publicador, self.sagas, contexto
         ).executar(self.ordem_id, motivo, ator=ATOR_ATENDENTE)
 
     def levar_ate(self, etapa: EtapaSaga | str) -> None:

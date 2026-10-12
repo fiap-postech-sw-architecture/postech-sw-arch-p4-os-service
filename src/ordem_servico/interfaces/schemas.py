@@ -169,8 +169,19 @@ class PassoDaSagaResponse(BaseModel):
     em: datetime = Field(description="Instante em que a saga aplicou o gatilho.")
     de: str | None = Field(description="Etapa anterior (None na abertura).")
     para: str = Field(description="Etapa depois do passo.")
-    gatilho: str = Field(description="Tipo do evento recebido ou abertura.")
-    mensagem_id: UUID | None = Field(description="Id do evento recebido.")
+    gatilho: str = Field(
+        description=(
+            "Tipo do evento recebido ou uma palavra fixa: abertura, "
+            "cancelamento_solicitado, cancelamento_recusado, reenvio, "
+            "prazo_esgotado ou retomada."
+        )
+    )
+    mensagem_id: UUID | None = Field(
+        description=(
+            "Id do evento recebido (None nos pedidos da API e nos registros do "
+            "processo de prazos)."
+        )
+    )
     comando: str | None = Field(description="Comando enviado no passo.")
     comando_id: UUID | None = Field(description="Id do envelope do comando.")
     motivo: str | None = Field(description="Codigo da compensacao, quando houver.")
@@ -228,7 +239,8 @@ class SagaResponse(BaseModel):
     comando_em_voo: ComandoEmVooResponse | None = Field(
         description=(
             "Comando com resposta automatica a espera dela (tipo e envio); "
-            "None nas esperas humanas e depois da resposta."
+            "None nas esperas humanas e depois da resposta. Em "
+            "falha_na_compensacao fica a compensacao pendente, sem prazo."
         )
     )
     reenvios: int = Field(description="Reenvios do comando em voo (0 no envio).")

@@ -10,7 +10,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from src.compartilhado.infraestrutura.ambiente import prazo_de_resposta_da_saga
+from src.compartilhado.infraestrutura.observability import tracer_da_api
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.use_cases import (
     AbrirOrdem,
     CancelarOrdem,
@@ -25,6 +27,7 @@ from src.ordem_servico.infraestrutura.consultas import (
     ConsultaAcompanhamentoSQLAlchemy,
     ConsultaDaOrdemSQLAlchemy,
 )
+from src.ordem_servico.infraestrutura.rastreamento_da_saga import span_da_saga
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
     SagaSQLAlchemyRepository,
@@ -76,7 +79,9 @@ def obter_cancelar_ordem(session: Session) -> CancelarOrdem:
         repo=_repo(session),
         uow=_uow(session),
         sagas=_sagas(session),
-        prazo_resposta=prazo_de_resposta_da_saga(),
+        contexto=ContextoDeEnvio(
+            prazo_de_resposta_da_saga(), span=span_da_saga(tracer_da_api())
+        ),
     )
 
 
