@@ -205,7 +205,7 @@ def cancelar_ordem(
     curso ou parada, o pedido repetido devolve 202 com a etapa atual, sem
     efeito. Depois do inicio da execucao, 409 ("Cancelamento recusado:
     execução já iniciada"); ordem ja cancelada, 409 ("Ordem já cancelada").
-    Ordem sem saga e cancelada direto.
+    Toda OS tem saga desde a abertura: sem ela, 404.
     """
     ator = ator_de(usuario)
     resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
