@@ -317,13 +317,20 @@ def test_estorno_casado_conclui_a_compensacao_com_qualquer_motivo(motivo: str) -
         "outra-pendente",
         "falha",
         "compensada",
+        "checkout-aberto",
+        "aguardando_agendamento",
         "aguardando_inicio",
+        "em_execucao",
+        "concluida",
     ],
 )
 def test_estorno_automatico_so_atualiza_o_resumo(motivo: str, onde: str) -> None:
     # O PagamentoEstornado do estorno automatico leva o id do SolicitarPagamento
     # e pode chegar em qualquer etapa: a saga nao muda nem envia comando.
     match onde:
+        case "checkout-aberto":
+            cenario = CenarioDaSaga.em("aguardando_pagamento")
+            cenario.receber("PagamentoSolicitado")
         case "estorno-pendente":
             cenario = CenarioDaSaga.em_compensacao(COMPENSACOES[1:])
         case "outra-pendente":
@@ -338,12 +345,17 @@ def test_estorno_automatico_so_atualiza_o_resumo(motivo: str, onde: str) -> None
         case _:
             cenario = CenarioDaSaga.em(onde)
     antes = _foto(cenario)
+    ordens_salvas, sagas_salvas = len(cenario.ordens.salvas), len(cenario.sagas.salvas)
     # O causation_id e o do SolicitarPagamento, nunca o de um envio em voo.
     automatico = evento(
         "PagamentoEstornado", cenario.ordem_id, causation_id=uuid4(), motivo=motivo
     )
 
     tratamento = cenario.orquestrador.tratar(automatico)
+
+    # So a OS e gravada (o resumo); a saga fica como estava.
+    assert len(cenario.ordens.salvas) == ordens_salvas + 1
+    assert len(cenario.sagas.salvas) == sagas_salvas
 
     assert tratamento == Tratamento(
         Desfecho.PROCESSADA, cenario.saga.etapa, cenario.saga.etapa
@@ -354,21 +366,51 @@ def test_estorno_automatico_so_atualiza_o_resumo(motivo: str, onde: str) -> None
     assert (depois[:6], depois[-1]) == (antes[:6], antes[-1])
 
 
-def test_estorno_automatico_sem_resumo_ou_ja_estornado_e_ignorado(
+@pytest.mark.parametrize(
+    "etapa",
+    [
+        "aguardando_diagnostico",
+        "aguardando_orcamento",
+        "aguardando_decisao",
+        "aguardando_reserva",
+        "aguardando_pagamento",
+    ],
+)
+def test_estorno_automatico_sem_resumo_e_ignorado_nas_etapas_antes_do_checkout(
+    monkeypatch: pytest.MonkeyPatch, etapa: str
+) -> None:
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    cenario = CenarioDaSaga.em(etapa)
+    antes = _foto(cenario)
+    salvas = len(cenario.ordens.salvas)
+
+    with capture_logs() as logs:
+        tratamento = cenario.receber("PagamentoEstornado")
+
+    assert tratamento.desfecho is Desfecho.IGNORADA
+    assert [(log["event"], log["classificacao"]) for log in logs] == [
+        ("saga event ignored", "estorno_automatico")
+    ]
+    assert _foto(cenario) == antes
+    assert len(cenario.ordens.salvas) == salvas
+
+
+def test_estorno_automatico_repetido_e_ignorado(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(modulo, "_log", structlog.get_logger())
-    sem_resumo = CenarioDaSaga.em("aguardando_reserva")
     estornado = CenarioDaSaga.em("aguardando_inicio")
     estornado.receber("PagamentoEstornado")
+    antes = _foto(estornado)
 
     with capture_logs() as logs:
-        tratamentos = [c.receber("PagamentoEstornado") for c in (sem_resumo, estornado)]
+        tratamento = estornado.receber("PagamentoEstornado")
 
-    assert [t.desfecho for t in tratamentos] == [Desfecho.IGNORADA] * 2
+    assert tratamento.desfecho is Desfecho.IGNORADA
     assert [(log["event"], log["classificacao"]) for log in logs] == [
         ("saga event ignored", "estorno_automatico")
-    ] * 2
+    ]
+    assert _foto(estornado) == antes
 
 
 def test_estorno_automatico_sai_no_log_sem_os_dados_do_pagamento(

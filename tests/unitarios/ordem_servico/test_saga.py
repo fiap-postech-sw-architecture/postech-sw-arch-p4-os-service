@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -54,6 +54,9 @@ DEPOIS = AGORA + timedelta(minutes=10)
 PRAZO = DEPOIS + timedelta(minutes=2)
 C = Classificacao
 E = EtapaSaga
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 S = StatusOrdem
 # Itens do DiagnosticoConcluido de exemplo do platform (um servico e uma peca).
 _ITENS = itens_do_diagnostico(evento("DiagnosticoConcluido", uuid4()).dados)
@@ -1541,6 +1544,71 @@ class TestCancelar:
             saga.cancelar(_marcos(), agora=agora, ator=ATOR_ATENDENTE, envio=envio)
 
         assert _foto(saga) == antes
+
+
+class TestIdDoRecursoNaCompensacao:
+    # O CancelarOrcamento leva o orcamento_id e o EstornarPagamento o
+    # pagamento_id quando a OS ja os tem, e nenhum quando nao (RFC-004 secao
+    # 5.3): a saga confere contra o que a OS guarda.
+    @pytest.mark.parametrize(
+        ("comando", "campo", "perfil"),
+        [
+            pytest.param("CancelarOrcamento", "orcamento_id", "aguardando_decisao"),
+            pytest.param(
+                "EstornarPagamento", "pagamento_id", "aguardando_pagamento_com_checkout"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "dados",
+        [
+            pytest.param(lambda campo: {}, id="sem-o-id-que-a-os-tem"),
+            pytest.param(lambda campo: {campo: str(uuid4())}, id="outro-id"),
+        ],
+    )
+    def test_id_ausente_ou_de_outro_recurso_e_recusado(
+        self,
+        comando: str,
+        campo: str,
+        perfil: str,
+        dados: Callable[[str], dict[str, str]],
+    ) -> None:
+        saga = saga_em(perfil.removesuffix("_com_checkout"), **_feito(perfil))
+        marcos = _marcos(checkout=perfil.endswith("com_checkout"))
+        certo = _compensacao(comando, saga, "cancelamento", marcos)
+        errado = Envio(
+            tipo=certo.tipo,
+            id=certo.id,
+            dados={
+                "ordem_id": str(saga.ordem_id),
+                "motivo": "cancelamento",
+                **dados(campo),
+            },
+            prazo_resposta_em=PRAZO,
+        )
+        antes = _foto(saga)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
+            saga.cancelar(marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=errado)
+
+        assert _foto(saga) == antes
+
+    def test_id_que_a_os_nao_tem_nao_vai_no_comando(self) -> None:
+        saga = saga_em("aguardando_orcamento", **_feito("aguardando_orcamento"))
+        marcos = _marcos(orcamento_id=None)
+        com_id = Envio(
+            tipo=Comando.CANCELAR_ORCAMENTO,
+            id=uuid4(),
+            dados={
+                "ordem_id": str(saga.ordem_id),
+                "motivo": "cancelamento",
+                "orcamento_id": str(_ORCAMENTO_ID),
+            },
+            prazo_resposta_em=PRAZO,
+        )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
+            saga.cancelar(marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=com_id)
 
 
 class TestClassificarNaCompensacao:
