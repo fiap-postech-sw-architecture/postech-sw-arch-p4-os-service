@@ -4,7 +4,8 @@ O orcamento e o pagamento pertencem ao Billing; a OS guarda so o resumo que
 chega pelos fatos da saga (``OrcamentoGerado``, ``PagamentoSolicitado`` e os
 estados seguintes do pagamento), para a consulta de status nao depender de
 outro servico (RFC-004 secao 7.1). O ciclo do resumo do pagamento (o primeiro
-e o solicitado; o confirmado parte dele) fica nas funcoes do fim do modulo.
+e o solicitado; os outros estados partem dele) fica nos metodos do VO e nas
+funcoes do fim do modulo.
 """
 
 from __future__ import annotations
@@ -95,21 +96,6 @@ class StatusPagamento(StrEnum):
     ESTORNADO = "estornado"
 
 
-# Ciclo do pagamento no Billing (RFC-004 secao 7.1): solicitado; depois
-# confirmado, recusado, expirado ou cancelado; por fim estornado (o confirmado
-# pela compensacao, e o encerrado quando a aprovacao chega depois).
-_FASE_DO_PAGAMENTO: Final = MappingProxyType(
-    {
-        StatusPagamento.SOLICITADO: 0,
-        StatusPagamento.CONFIRMADO: 1,
-        StatusPagamento.RECUSADO: 1,
-        StatusPagamento.EXPIRADO: 1,
-        StatusPagamento.CANCELADO: 1,
-        StatusPagamento.ESTORNADO: 2,
-    }
-)
-
-
 @dataclass(frozen=True, slots=True)
 class ResumoPagamento(ValueObject):
     """Pagamento solicitado ao Billing: id, estado, valor, checkout e expiracao."""
@@ -127,6 +113,52 @@ class ResumoPagamento(ValueObject):
         _exigir_tipo(self.valor, Dinheiro, "valor do pagamento")
         _exigir_url_http(self.checkout_url, "checkout_url do pagamento")
         _exigir_instante(self.expira_em, "expiracao do pagamento")
+
+    def confirmado(self) -> ResumoPagamento:
+        """O mesmo pagamento, confirmado pelo Billing."""
+        return replace(self, status=StatusPagamento.CONFIRMADO)
+
+    def recusado(self) -> ResumoPagamento:
+        """O mesmo pagamento, recusado: so o solicitado passa a recusado.
+
+        Em outro estado o recusado e antigo (o estorno da aprovacao tardia pode
+        chegar antes dele): o resumo segue como esta.
+        """
+        return self._se_solicitado(StatusPagamento.RECUSADO)
+
+    def expirado(self) -> ResumoPagamento:
+        """O mesmo pagamento, expirado: so o solicitado passa a expirado."""
+        return self._se_solicitado(StatusPagamento.EXPIRADO)
+
+    def cancelado(self) -> ResumoPagamento:
+        """O mesmo pagamento, com a cobranca cancelada (``EstornarPagamento``).
+
+        So a cobranca em aberto se cancela; repetir o cancelamento devolve o
+        mesmo valor.
+
+        Raises:
+            ViolacaoRegraDeNegocioException: pagamento em outro estado.
+        """
+        if self.status is StatusPagamento.CANCELADO:
+            return self
+        if self.status is not StatusPagamento.SOLICITADO:
+            msg = f"Pagamento {self.status.value} nao se cancela"
+            raise ViolacaoRegraDeNegocioException(msg)
+        return replace(self, status=StatusPagamento.CANCELADO)
+
+    def estornado(self) -> ResumoPagamento:
+        """O mesmo pagamento, estornado: de qualquer estado, e idempotente.
+
+        Serve ao estorno da compensacao (origem confirmado) e ao estorno tardio,
+        que o Billing faz sozinho com a aprovacao que chega depois do
+        encerramento (ADR-040).
+        """
+        return replace(self, status=StatusPagamento.ESTORNADO)
+
+    def _se_solicitado(self, novo: StatusPagamento) -> ResumoPagamento:
+        if self.status is not StatusPagamento.SOLICITADO:
+            return self
+        return replace(self, status=novo)
 
 
 def pagamento_solicitado(
@@ -147,32 +179,52 @@ def pagamento_solicitado(
     return novo
 
 
-def pagamento_no_status(
-    atual: ResumoPagamento | None, status: StatusPagamento
-) -> ResumoPagamento:
-    """O mesmo pagamento, no estado que o Billing informou (RFC-004 secao 7.1).
-
-    O resumo so anda para a frente no ciclo do Billing: os eventos chegam fora
-    de ordem, e o estado mais antigo que chega depois de um mais novo (o
-    recusado depois do estorno da aprovacao tardia) devolve o ``atual``. O
-    ``SOLICITADO`` e o do primeiro resumo (``pagamento_solicitado``), e o
-    ``CONFIRMADO`` so parte dele.
+def pagamento_exigido(atual: ResumoPagamento | None) -> ResumoPagamento:
+    """O resumo do pagamento, de onde parte todo estado depois do solicitado.
 
     Raises:
-        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, o
-            ``SOLICITADO`` outra vez ou o confirmado de outro estado.
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado.
     """
     if atual is None:
         msg = "Ordem sem pagamento solicitado"
         raise ViolacaoRegraDeNegocioException(msg)
-    if status is StatusPagamento.SOLICITADO:
-        msg = "Pagamento ja solicitado para esta ordem"
+    return atual
+
+
+def pagamento_no_estado(
+    atual: ResumoPagamento | None, status: StatusPagamento
+) -> ResumoPagamento:
+    """O resumo no estado que o Billing informou depois do checkout.
+
+    So os estados que nao mexem no status da OS: recusado, expirado, cancelado
+    e estornado (o confirmado tem a transicao propria, ``pagamento_confirmado``).
+
+    Raises:
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, estado
+            que esta funcao nao aplica ou que a origem nao admite.
+    """
+    resumo = pagamento_exigido(atual)
+    transicao = _TRANSICOES_DO_PAGAMENTO.get(status)
+    if transicao is None:
+        msg = f"Estado de pagamento {status.value} nao e aplicado aqui"
         raise ViolacaoRegraDeNegocioException(msg)
-    if status is StatusPagamento.CONFIRMADO and (
-        atual.status is not StatusPagamento.SOLICITADO
-    ):
-        msg = f"Pagamento {atual.status.value} nao passa a confirmado"
-        raise ViolacaoRegraDeNegocioException(msg)
-    if _FASE_DO_PAGAMENTO[status] <= _FASE_DO_PAGAMENTO[atual.status]:
-        return atual
-    return replace(atual, status=status)
+    return transicao(resumo)
+
+
+def pagamento_confirmado(atual: ResumoPagamento | None) -> ResumoPagamento:
+    """O resumo do ``PagamentoConfirmado``: o solicitado, agora confirmado.
+
+    Raises:
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado.
+    """
+    return pagamento_exigido(atual).confirmado()
+
+
+_TRANSICOES_DO_PAGAMENTO: Final = MappingProxyType(
+    {
+        StatusPagamento.RECUSADO: ResumoPagamento.recusado,
+        StatusPagamento.EXPIRADO: ResumoPagamento.expirado,
+        StatusPagamento.CANCELADO: ResumoPagamento.cancelado,
+        StatusPagamento.ESTORNADO: ResumoPagamento.estornado,
+    }
+)

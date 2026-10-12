@@ -29,7 +29,8 @@ from src.ordem_servico.dominio.resumos import (
     ResumoOrcamento,
     ResumoPagamento,
     StatusPagamento,
-    pagamento_no_status,
+    pagamento_confirmado,
+    pagamento_no_estado,
     pagamento_solicitado,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
@@ -253,28 +254,28 @@ class OrdemDeServico(AggregateRoot):
         self._resumo_pagamento = pagamento_solicitado(self._resumo_pagamento, resumo)
         self._atualizado_em = datetime.now(UTC)
 
-    def registrar_status_do_pagamento(
-        self, status: StatusPagamento, *, ator: str
-    ) -> None:
-        """Estado novo do pagamento ja solicitado, informado pelo Billing.
+    def registrar_pagamento_confirmado(self, *, ator: str) -> None:
+        """``PagamentoConfirmado`` (Billing): o resumo passa a confirmado.
 
-        ``CONFIRMADO`` leva a OS a AGUARDANDO_EXECUCAO: o agendamento seguinte e
-        tecnico (RFC-004 secao 4.1). Os outros so trocam o resumo, em qualquer
-        status e so para a frente no ciclo (``resumos.pagamento_no_status``).
+        AGUARDANDO_PAGAMENTO -> AGUARDANDO_EXECUCAO: o agendamento que vem depois
+        e tecnico e nao falha por regra de negocio (RFC-004 secao 4.1).
         """
-        confirmado = status is StatusPagamento.CONFIRMADO
-        if confirmado:
-            _maquina.validar_transicao(self._status, StatusOrdem.AGUARDANDO_EXECUCAO)
-        novo = pagamento_no_status(self._resumo_pagamento, status)
-        if novo is self._resumo_pagamento:
-            return  # estado mais antigo, chegado fora de ordem: nada muda
-        if confirmado:
-            self._aplicar_transicao(
-                StatusOrdem.AGUARDANDO_EXECUCAO, origem=OrigemMudanca.BILLING, ator=ator
-            )
-        else:
-            self._atualizado_em = datetime.now(UTC)
-        self._resumo_pagamento = novo
+        _maquina.validar_transicao(self._status, StatusOrdem.AGUARDANDO_EXECUCAO)
+        confirmado = pagamento_confirmado(self._resumo_pagamento)
+        self._aplicar_transicao(
+            StatusOrdem.AGUARDANDO_EXECUCAO, origem=OrigemMudanca.BILLING, ator=ator
+        )
+        self._resumo_pagamento = confirmado
+
+    def registrar_estado_do_pagamento(self, status: StatusPagamento) -> None:
+        """Estado do pagamento depois do checkout, so no resumo (o status fica).
+
+        Recusado e expirado vem do Billing na etapa do pagamento; cancelado e
+        estornado, da compensacao ou do estorno tardio, com a OS em qualquer
+        status (RFC-004 secao 4.4). A tabela de origens e de ``resumos``.
+        """
+        self._resumo_pagamento = pagamento_no_estado(self._resumo_pagamento, status)
+        self._atualizado_em = datetime.now(UTC)
 
     def registrar_execucao_iniciada(self, *, ator: str) -> None:
         """``ExecucaoIniciada`` (Execucao), o pivot da saga.

@@ -84,9 +84,7 @@ FATOS: list[tuple[str, Callable[[OrdemDeServico], None], S, S, OM, str]] = [
     ),
     (
         "pagamento_confirmado",
-        lambda o: o.registrar_status_do_pagamento(
-            StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
-        ),
+        lambda o: o.registrar_pagamento_confirmado(ator=ATOR_PROCESSO),
         S.AGUARDANDO_PAGAMENTO,
         S.AGUARDANDO_EXECUCAO,
         OM.BILLING,
@@ -392,9 +390,7 @@ class TestFatosDaSaga:
         solicitado = ordem.resumo_pagamento
         assert solicitado is not None
 
-        ordem.registrar_status_do_pagamento(
-            StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
-        )
+        ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
 
         confirmado = ordem.resumo_pagamento
         assert confirmado is not None
@@ -409,25 +405,23 @@ class TestFatosDaSaga:
         antes = _fotografia(ordem)
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            ordem.registrar_status_do_pagamento(
-                StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
-            )
+            ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
 
         assert _fotografia(ordem) == antes
 
     @pytest.mark.usefixtures("relogio_que_avanca")
     @pytest.mark.parametrize(
-        ("estado", "status"),
+        ("estado", "novo"),
         [
-            *(
-                pytest.param(S.AGUARDANDO_PAGAMENTO, s, id=f"solicitado-{s.value}")
-                for s in (
-                    StatusPagamento.RECUSADO,
-                    StatusPagamento.EXPIRADO,
-                    StatusPagamento.CANCELADO,
-                    StatusPagamento.ESTORNADO,
-                )
-            ),
+            pytest.param(S.AGUARDANDO_PAGAMENTO, s, id=f"solicitado-{s.value}")
+            for s in (
+                StatusPagamento.RECUSADO,
+                StatusPagamento.EXPIRADO,
+                StatusPagamento.CANCELADO,
+                StatusPagamento.ESTORNADO,
+            )
+        ]
+        + [
             pytest.param(
                 S.AGUARDANDO_EXECUCAO, StatusPagamento.ESTORNADO, id="confirmado"
             ),
@@ -435,62 +429,66 @@ class TestFatosDaSaga:
         ],
     )
     def test_outros_estados_do_pagamento_so_trocam_o_resumo(
-        self, status: StatusPagamento, estado: StatusOrdem
+        self, estado: StatusOrdem, novo: StatusPagamento
     ) -> None:
         # A OS espelha o Billing: recusado e expirado na etapa do pagamento,
         # cancelado e estornado na compensacao ou no estorno automatico, que
         # chega com a OS em qualquer status (RFC-004 secao 4.4).
         ordem = ordem_em(estado)
-        solicitado = ordem.resumo_pagamento
+        atual = ordem.resumo_pagamento
         historico = ordem.historico
         ordem.limpar_eventos()
 
-        ordem.registrar_status_do_pagamento(status, ator=ATOR_PROCESSO)
+        ordem.registrar_estado_do_pagamento(novo)
 
-        assert solicitado is not None
-        assert ordem.resumo_pagamento == replace(solicitado, status=status)
+        assert atual is not None
+        assert ordem.resumo_pagamento == replace(atual, status=novo)
         assert (ordem.status, ordem.historico) == (estado, historico)
         assert ordem.coletar_eventos() == []
         assert ordem.atualizado_em > historico[-1].ocorrido_em
 
-    def test_estado_antigo_do_pagamento_fora_de_ordem_nao_muda_nada(self) -> None:
-        # O recusado que chega depois do estorno da aprovacao tardia nao desfaz
-        # o estorno, nem conta como alteracao da OS.
-        ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
-        ordem.registrar_status_do_pagamento(
-            StatusPagamento.ESTORNADO, ator=ATOR_PROCESSO
-        )
-        antes = _fotografia(ordem)
-
-        ordem.registrar_status_do_pagamento(
-            StatusPagamento.RECUSADO, ator=ATOR_PROCESSO
-        )
-
-        assert _fotografia(ordem) == antes
-
     @pytest.mark.parametrize(
-        "status", [s for s in StatusPagamento if s is not StatusPagamento.CONFIRMADO]
+        "estado",
+        [
+            StatusPagamento.RECUSADO,
+            StatusPagamento.EXPIRADO,
+            StatusPagamento.CANCELADO,
+            StatusPagamento.ESTORNADO,
+        ],
     )
     def test_estado_do_pagamento_sem_pagamento_solicitado_levanta_sem_mutar(
-        self, status: StatusPagamento
+        self, estado: StatusPagamento
     ) -> None:
         ordem = _aguardando_pagamento_sem_resumo()
         antes = _fotografia(ordem)
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            ordem.registrar_status_do_pagamento(status, ator=ATOR_PROCESSO)
+            ordem.registrar_estado_do_pagamento(estado)
 
         assert _fotografia(ordem) == antes
 
-    def test_pagamento_solicitado_pelo_estado_levanta_sem_mutar(self) -> None:
-        # O primeiro resumo vem completo do PagamentoSolicitado, nunca daqui.
+    @pytest.mark.parametrize(
+        "estado", [StatusPagamento.SOLICITADO, StatusPagamento.CONFIRMADO]
+    )
+    def test_solicitado_e_confirmado_tem_metodo_proprio(
+        self, estado: StatusPagamento
+    ) -> None:
         ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
         antes = _fotografia(ordem)
 
-        with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
-            ordem.registrar_status_do_pagamento(
-                StatusPagamento.SOLICITADO, ator=ATOR_PROCESSO
-            )
+        with pytest.raises(ViolacaoRegraDeNegocioException, match=estado.value):
+            ordem.registrar_estado_do_pagamento(estado)
+
+        assert _fotografia(ordem) == antes
+
+    def test_cancelado_de_pagamento_que_nao_esta_em_aberto_levanta_sem_mutar(
+        self,
+    ) -> None:
+        ordem = ordem_em(S.AGUARDANDO_EXECUCAO)
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="nao se cancela"):
+            ordem.registrar_estado_do_pagamento(StatusPagamento.CANCELADO)
 
         assert _fotografia(ordem) == antes
 
