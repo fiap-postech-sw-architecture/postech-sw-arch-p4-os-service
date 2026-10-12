@@ -72,12 +72,12 @@ def classificar(
     ``EstornarPagamento``, so casadas), ignorada fora disso. Com a compensacao
     em curso ou parada, o inicio e o fim da execucao seguem a corrida do pivot
     (``_na_corrida_do_pivot``) e o resto do fluxo normal e ignorado. No fluxo,
-    o evento de etapa ja passada e ignorado
-    e o de etapa a frente, adiantado; na mesma etapa, os marcos da OS
-    desempatam: ``DiagnosticoConcluido`` antes do diagnostico iniciado e
-    ``PagamentoConfirmado``, ``Recusado`` ou ``Expirado`` antes do checkout
-    aberto sao adiantados; ``DiagnosticoIniciado`` com o diagnostico ja
-    iniciado e ``PagamentoSolicitado`` com o checkout ja aberto, repetidos.
+    o evento de etapa ja passada e ignorado e o de etapa a frente, adiantado;
+    na mesma etapa, os marcos da OS desempatam: ``DiagnosticoConcluido`` antes
+    do diagnostico iniciado e ``PagamentoConfirmado``, ``Recusado`` ou
+    ``Expirado`` antes do checkout aberto sao adiantados;
+    ``DiagnosticoIniciado`` com o diagnostico ja iniciado e
+    ``PagamentoSolicitado`` com o checkout ja aberto, repetidos.
     """
     esperada = ETAPA_ESPERADA[tipo]
     responde = etapa is _E.COMPENSANDO and _responde(tipo, pendente, casada=casada)

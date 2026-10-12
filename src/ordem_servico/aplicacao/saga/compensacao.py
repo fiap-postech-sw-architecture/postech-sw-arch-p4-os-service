@@ -9,7 +9,7 @@ resposta automatica (RFC-004 secao 4.3). As compensacoes saem uma por vez,
 cada uma esperando a resposta (``RESPOSTA_DA_COMPENSACAO``): a resposta da
 ultima termina a saga em ``compensada``, e o estorno recusado a para em
 ``falha_na_compensacao``. As transicoes daqui sao conferidas pela ``Saga``
-antes de mudar (``tabela_da_saga``).
+antes de mudar (``transicoes``).
 """
 
 from __future__ import annotations

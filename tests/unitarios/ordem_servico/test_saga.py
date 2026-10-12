@@ -315,6 +315,39 @@ class TestInvariantes:
         with pytest.raises(ValueError, match="guarda o comando em voo, sem prazo"):
             saga_em("falha_na_compensacao", **campos)
 
+    def test_todo_mutador_termina_conferindo_as_invariantes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A conferencia roda depois da mudanca: a etapa vista nela e a nova.
+        vistas: list[EtapaSaga] = []
+        original = Saga._conferir_invariantes
+
+        def espiao(saga: Saga) -> None:
+            vistas.append(saga.etapa)
+            original(saga)
+
+        monkeypatch.setattr(Saga, "_conferir_invariantes", espiao)
+        saga = saga_em("aguardando_diagnostico")
+        assert vistas == [E.AGUARDANDO_DIAGNOSTICO]
+        vistas.clear()
+
+        saga.avancar(
+            evento("DiagnosticoConcluido", saga.ordem_id),
+            _marcos(),
+            agora=DEPOIS,
+            ator=ATOR_PROCESSO,
+            envio=_envio(Comando.GERAR_ORCAMENTO, saga),
+        )
+        assert vistas == [E.AGUARDANDO_ORCAMENTO]
+
+        saga.cancelar(
+            _marcos(),
+            agora=DEPOIS,
+            ator=ATOR_ATENDENTE,
+            envio=_compensacao("CancelarOrcamento", saga, "cancelamento"),
+        )
+        assert vistas == [E.AGUARDANDO_ORCAMENTO, E.COMPENSANDO]
+
     def test_falha_na_compensacao_guarda_o_comando_em_voo_e_os_reenvios(self) -> None:
         saga = saga_em("falha_na_compensacao", _reenvios=5)
 
