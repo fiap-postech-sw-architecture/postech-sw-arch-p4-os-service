@@ -23,7 +23,10 @@ from src.compartilhado.aplicacao.mensageria import (
     FalhaTransitoriaError,
     MensagemRecebida,
 )
-from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.dominio.exceptions import (
+    ConflitoDeConcorrenciaException,
+    TransicaoStatusInvalidaException,
+)
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.outbox_mapping import (
     outbox_table,
@@ -34,6 +37,7 @@ from src.consumidor import montar_despachante
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import (
     obter_abrir_ordem,
+    obter_cancelar_ordem,
     obter_obter_ordem,
     obter_obter_saga,
     obter_registrar_entrega,
@@ -44,7 +48,7 @@ from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
-    from src.ordem_servico.aplicacao.dtos import OrdemDeServicoDTO
+    from src.ordem_servico.aplicacao.dtos import OrdemDeServicoDTO, SagaDTO
 
 scenarios("saga_atendimento.feature")
 
@@ -193,23 +197,57 @@ class Atendimento:
         self.barramento = Barramento(session_factory)
         self.ordem_id = UUID(int=0)
         self.veiculo: tuple[UUID, UUID] | None = None
-        # Comandos entregues antes do ultimo evento publicado.
+        # Comandos entregues antes do ultimo evento publicado ou pedido.
         self.comandos_antes = 0
+        self.cancelamento: OrdemDeServicoDTO | None = None
+        self.recusa: TransicaoStatusInvalidaException | None = None
 
-    def publicar(self, tipo: str, participante: str | None = None) -> None:
-        """O participante publica o evento, no trace do comando que o abriu."""
+    def publicar(
+        self,
+        tipo: str,
+        participante: str | None = None,
+        *,
+        causa: str | None = None,
+        **dados: Any,
+    ) -> None:
+        """O participante publica o evento, no trace do comando que o abriu.
+
+        ``causa`` e o comando que o evento responde, quando nao e o que abriu o
+        fluxo dele (o estorno automatico leva o id do ``SolicitarPagamento``).
+        """
         produtor = catalogo().produtor(tipo)
         if participante is not None and _PARTICIPANTE[participante] != produtor:
             msg = f"o cenario poe {participante} publicando {tipo}, de {produtor}"
             raise ValueError(msg)
         self.comandos_antes = len(self.barramento.entregues)
+        causa = causa or _COMANDO_QUE_ABRIU[tipo]
         self.barramento.publicar(
             envelope_de_evento(
                 tipo,
                 correlation_id=self.ordem_id,
-                causation_id=self.barramento.comandos[_COMANDO_QUE_ABRIU[tipo]]["id"],
+                causation_id=self.barramento.comandos[causa]["id"],
+                **dados,
             )
         )
+
+    def cancelar(self, motivo: str) -> None:
+        """O atendente pede o cancelamento pelo caso de uso da API."""
+        self.comandos_antes = len(self.barramento.entregues)
+        self.cancelamento = None
+        self.recusa = None
+        with self.session_factory() as sessao:
+            try:
+                self.cancelamento = obter_cancelar_ordem(sessao).executar(
+                    self.ordem_id, motivo, ator=_ATENDENTE
+                )
+            except TransicaoStatusInvalidaException as exc:
+                self.recusa = exc
+        self.barramento.levar_a_outbox()
+
+    def saga(self) -> SagaDTO:
+        """A saga como o ``GET /api/v1/sagas/{id}`` a projeta."""
+        with self.session_factory() as sessao:
+            return obter_obter_saga(sessao).executar(self.ordem_id)
 
     def ordem(self) -> OrdemDeServicoDTO:
         """A OS como o ``GET /api/v1/ordens-de-servico/{id}`` a projeta."""
@@ -218,8 +256,7 @@ class Atendimento:
 
     def compensacao_pendente(self) -> str | None:
         """A primeira do plano, como o ``GET /api/v1/sagas/{id}`` a mostra."""
-        with self.session_factory() as sessao:
-            saga = obter_obter_saga(sessao).executar(self.ordem_id)
+        saga = self.saga()
         if saga.etapa != "compensando":
             return None
         return saga.plano_compensacao[0]
@@ -268,6 +305,7 @@ def _publicar(atendimento: Atendimento, participante: str, tipo: str) -> None:
     atendimento.publicar(tipo, participante)
 
 
+@given("os participantes respondem a cada compensação")
 @when("os participantes respondem a cada compensação")
 def _responder_compensacoes(atendimento: Atendimento) -> None:
     while (pendente := atendimento.compensacao_pendente()) is not None:
@@ -322,6 +360,101 @@ def _cancelada(atendimento: Atendimento, motivo: str) -> None:
     )
     ultima = ordem.historico[-1]
     assert (ultima.para, ultima.origem, ultima.motivo) == ("cancelada", "saga", motivo)
+
+
+@given(parsers.parse('o atendente pede o cancelamento com o motivo "{motivo}"'))
+@when(parsers.parse('o atendente pede o cancelamento com o motivo "{motivo}"'))
+def _cancelar_a_ordem(atendimento: Atendimento, motivo: str) -> None:
+    atendimento.cancelar(motivo)
+
+
+@given(parsers.parse('{participante} responde "{tipo}" ao "{comando}"'))
+@when(parsers.parse('{participante} responde "{tipo}" ao "{comando}"'))
+def _responder_ao_comando(
+    atendimento: Atendimento, participante: str, tipo: str, comando: str
+) -> None:
+    atendimento.publicar(tipo, participante, causa=comando)
+
+
+@when("o Billing publica o estorno automático da aprovação tardia")
+def _estorno_automatico(atendimento: Atendimento) -> None:
+    # O Billing estorna sozinho a aprovacao que chega depois do cancelamento: o
+    # evento leva o id do SolicitarPagamento (RFC-004 secao 5.2).
+    atendimento.publicar(
+        "PagamentoEstornado",
+        "o Billing",
+        causa="SolicitarPagamento",
+        motivo="pagamento_apos_encerramento",
+    )
+
+
+@then(parsers.parse('o pedido é aceito com a saga na etapa "{etapa}"'))
+def _pedido_aceito(atendimento: Atendimento, etapa: str) -> None:
+    assert atendimento.recusa is None
+    assert atendimento.cancelamento is not None
+    assert atendimento.cancelamento.etapa == etapa
+
+
+@then(parsers.parse('o pedido é recusado com 409 e a mensagem "{mensagem}"'))
+def _pedido_recusado(atendimento: Atendimento, mensagem: str) -> None:
+    assert atendimento.cancelamento is None
+    assert atendimento.recusa is not None
+    assert (atendimento.recusa.codigo, atendimento.recusa.mensagem) == (
+        "TRANSICAO_STATUS_INVALIDA",
+        mensagem,
+    )
+
+
+@then(parsers.parse('a OS segue "{status}" e guarda o motivo "{motivo}"'))
+def _guarda_o_pedido(atendimento: Atendimento, status: str, motivo: str) -> None:
+    ordem = atendimento.ordem()
+    assert (ordem.status, ordem.motivo_cancelamento) == (status, motivo)
+    # O texto do atendente fica so na OS: a saga guarda codigos.
+    assert motivo not in str(atendimento.saga())
+
+
+@then("a OS não guarda mais o motivo do pedido")
+def _descartou_o_pedido(atendimento: Atendimento) -> None:
+    assert atendimento.ordem().motivo_cancelamento is None
+
+
+@then(parsers.parse('o comando em voo da saga é "{comando}"'))
+def _em_voo(atendimento: Atendimento, comando: str) -> None:
+    em_voo = atendimento.saga().comando_em_voo
+    assert em_voo is not None
+    assert em_voo.tipo == comando
+    assert atendimento.saga().prazo_resposta_em is not None
+
+
+@then("nenhum comando saiu em seguida")
+def _nenhum_comando(atendimento: Atendimento) -> None:
+    assert atendimento.barramento.entregues[atendimento.comandos_antes :] == []
+
+
+@then(
+    parsers.parse('a falha da saga é "{falha}" com a compensação pendente "{comando}"')
+)
+def _falha(atendimento: Atendimento, falha: str, comando: str) -> None:
+    saga = atendimento.saga()
+    assert (saga.falha, saga.plano_compensacao[0]) == (falha, comando)
+    # O comando em voo fica, sem prazo, para a retomada reenvia-lo.
+    assert saga.comando_em_voo is not None
+    assert (saga.comando_em_voo.tipo, saga.prazo_resposta_em) == (comando, None)
+
+
+@then(parsers.parse('a OS mostra o pagamento "{status}"'))
+def _pagamento(atendimento: Atendimento, status: str) -> None:
+    pagamento = atendimento.ordem().pagamento
+    assert pagamento is not None
+    assert pagamento.status == status
+
+
+@then("os registros da saga terminam em:")
+def _registros_finais(atendimento: Atendimento, datatable: list[list[str]]) -> None:
+    _cabecalho, *linhas = datatable
+    esperados = [gatilho for (gatilho,) in linhas]
+    gatilhos = [p["gatilho"] for p in atendimento.ordem().passos]
+    assert gatilhos[-len(esperados) :] == esperados
 
 
 @then("os registros da saga são, em ordem:")
