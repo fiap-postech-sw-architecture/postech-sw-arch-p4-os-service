@@ -625,6 +625,36 @@ class TestAvancar:
             timedelta(minutes=15),
         )
 
+    def test_permanencia_na_compensacao_conta_desde_a_entrada_na_etapa(
+        self,
+    ) -> None:
+        # A compensacao e a primeira etapa com varios registros (um por
+        # resposta): a duracao que o histograma recebe e a da etapa inteira.
+        saga, enviado = _compensando(COMPENSACOES[3:])
+        saga.avancar(
+            evento("OrcamentoCancelado", saga.ordem_id, causation_id=enviado),
+            _marcos(),
+            agora=AGORA + timedelta(minutes=5),
+            ator=ATOR_PROCESSO,
+            envio=_compensacao("DescartarDiagnostico", saga, "cancelamento"),
+        )
+        saga.limpar_eventos()
+        ultimo = UUID(saga.comando_em_voo["mensagem_ids"][-1])  # type: ignore[index]
+
+        saga.avancar(
+            evento("DiagnosticoDescartado", saga.ordem_id, causation_id=ultimo),
+            _marcos(),
+            agora=AGORA + timedelta(minutes=9),
+            ator=ATOR_PROCESSO,
+        )
+
+        (mudanca,) = saga.coletar_eventos()
+        assert isinstance(mudanca, EtapaDaSagaAlteradaEvent)
+        assert (mudanca.etapa_anterior, mudanca.permanencia) == (
+            E.COMPENSANDO,
+            timedelta(minutes=9),
+        )
+
     def test_dado_malformado_levanta_antes_de_mudar(self) -> None:
         # O schema do contrato barra o evento sem a posicao; quem chamar sem
         # ele encontra a saga intacta.
@@ -1382,6 +1412,39 @@ class TestRespostaDaCompensacao:
 
         assert _foto(saga) == antes
 
+    @pytest.mark.parametrize("posicao", [0, 1, 2])
+    @pytest.mark.parametrize(
+        "resposta",
+        ["PagamentoCancelado", "PagamentoEstornado", "EstornoDePagamentoFalhou"],
+    )
+    def test_resposta_ao_envio_original_ou_a_um_reenvio_casa_pelo_causation_id(
+        self, resposta: str, posicao: int
+    ) -> None:
+        # O comando foi reenviado duas vezes: a resposta de qualquer um dos tres
+        # envios (o original inclusive) responde a pendente (RFC-004 secao 4.4).
+        ids = [uuid4(), uuid4(), uuid4()]
+        saga, _ = _compensando(
+            COMPENSACOES[1:],
+            _comando_em_voo={
+                "tipo": "EstornarPagamento",
+                "dados": {},
+                "mensagem_ids": [str(i) for i in ids],
+                "enviado_em": AGORA.isoformat(),
+            },
+        )
+        falhou = resposta == "EstornoDePagamentoFalhou"
+        envio = None if falhou else _compensacao("LiberarReserva", saga, "cancelamento")
+
+        saga.avancar(
+            evento(resposta, saga.ordem_id, causation_id=ids[posicao]),
+            _marcos(),
+            agora=DEPOIS,
+            ator=ATOR_PROCESSO,
+            envio=envio,
+        )
+
+        assert saga.etapa is (E.FALHA_NA_COMPENSACAO if falhou else E.COMPENSANDO)
+
     def test_resposta_que_envia_outra_compensacao_e_recusada(self) -> None:
         saga, enviado = _compensando(COMPENSACOES[2:])
         antes = _foto(saga)
@@ -1527,17 +1590,36 @@ class TestCancelar:
             pytest.param({"motivo": "prazo_tecnico"}, DEPOIS, id="outro-motivo"),
             pytest.param({}, AGORA - timedelta(seconds=1), id="instante-que-volta"),
             pytest.param({}, datetime(2026, 10, 7, 13), id="instante-sem-fuso"),
+            pytest.param({"prazo_resposta_em": None}, DEPOIS, id="prazo-ausente"),
+            pytest.param({"prazo_resposta_em": DEPOIS}, DEPOIS, id="prazo-no-instante"),
+            pytest.param(
+                {"prazo_resposta_em": DEPOIS - timedelta(seconds=1)},
+                DEPOIS,
+                id="prazo-no-passado",
+            ),
+            pytest.param(
+                {"prazo_resposta_em": datetime(2026, 10, 7, 14)},
+                DEPOIS,
+                id="prazo-sem-fuso",
+            ),
         ],
     )
     def test_envio_ou_instante_errado_e_recusado(
         self, mudanca: dict[str, Any], agora: datetime
     ) -> None:
+        # A guarda do prazo e da propria ``cancelar``: sem ela o envio errado so
+        # seria barrado pelas invariantes, depois de a saga mudar.
         saga = saga_em("aguardando_diagnostico")
         antes = _foto(saga)
         envio = _compensacao(
             mudanca.get("comando", "DescartarDiagnostico"),
             saga,
             mudanca.get("motivo", "cancelamento"),
+            **(
+                {"prazo_resposta_em": mudanca["prazo_resposta_em"]}
+                if "prazo_resposta_em" in mudanca
+                else {}
+            ),
         )
 
         with pytest.raises(TransicaoDaSagaInvalidaError):
