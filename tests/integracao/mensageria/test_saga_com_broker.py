@@ -712,6 +712,70 @@ def test_cancelamento_depois_do_pagamento_compensa_uma_por_vez_na_ordem_da_rfc(
     }
 
 
+def test_falta_de_peca_compensa_o_orcamento_e_o_diagnostico_e_cancela_a_os(
+    atendimento: Atendimento,
+    engine: Engine,
+    broker: Broker,
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Falha de negocio de ponta a ponta no broker real: a reserva falha, e a saga
+    # desfaz o orcamento e o diagnostico, um por vez, cada um causado pela
+    # resposta anterior (RFC-004 secoes 4.4 e 5.2).
+    compensacoes = _amostra("pytstop_saga_compensacoes_total", motivo="reserva_falhou")
+    compensadas = _amostra("pytstop_saga_finalizadas_total", resultado="compensada")
+    ordem_id = atendimento.abrir()
+    atendimento.receber("SolicitarDiagnostico")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
+    atendimento.esperar_passo("DiagnosticoIniciado")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
+    atendimento.receber("GerarOrcamento")
+    atendimento.responder("GerarOrcamento", "OrcamentoGerado")
+    atendimento.esperar_passo("OrcamentoGerado")
+    atendimento.responder("GerarOrcamento", "OrcamentoAprovado")
+    atendimento.receber("ReservarPecas")
+
+    falta = atendimento.responder("ReservarPecas", "ReservaDePecasFalhou")
+
+    cancelar = atendimento.receber("CancelarOrcamento")
+    assert (cancelar["dados"]["motivo"], cancelar["causation_id"]) == (
+        "reserva_falhou",
+        falta["id"],
+    )
+    # Uma por vez: o diagnostico so e descartado depois do orcamento cancelado.
+    assert _compensacoes_na_outbox(engine) == ["CancelarOrcamento"]
+    cancelado = atendimento.responder("CancelarOrcamento", "OrcamentoCancelado")
+    descartar = atendimento.receber("DescartarDiagnostico")
+    assert (descartar["dados"]["motivo"], descartar["causation_id"]) == (
+        "reserva_falhou",
+        cancelado["id"],
+    )
+    assert _compensacoes_na_outbox(engine) == [
+        "CancelarOrcamento",
+        "DescartarDiagnostico",
+    ]
+    atendimento.responder("DescartarDiagnostico", "DiagnosticoDescartado")
+    esperar_ate(lambda: atendimento.etapa() == "compensada")
+
+    with session_factory() as sess:
+        ordem = obter_obter_ordem(sess).executar(ordem_id)
+    assert (ordem.status, ordem.etapa) == ("cancelada", "compensada")
+    ultima = ordem.historico[-1]
+    assert (ultima.origem, ultima.motivo) == ("saga", "Falta de peça para a reserva")
+    assert atendimento.gatilhos()[-4:] == [
+        "OrcamentoAprovado",
+        "ReservaDePecasFalhou",
+        "OrcamentoCancelado",
+        "DiagnosticoDescartado",
+    ]
+    assert broker.contar(_DLQ) == 0
+    assert _amostra(
+        "pytstop_saga_compensacoes_total", motivo="reserva_falhou"
+    ) == pytest.approx(compensacoes + 1)
+    assert _amostra(
+        "pytstop_saga_finalizadas_total", resultado="compensada"
+    ) == pytest.approx(compensadas + 1)
+
+
 def test_estorno_recusado_para_a_sequencia_e_guarda_o_comando_em_voo(
     atendimento: Atendimento,
     engine: Engine,
@@ -768,7 +832,25 @@ def test_estorno_recusado_para_a_sequencia_e_guarda_o_comando_em_voo(
     assert broker.contar(_DLQ) == 0
 
 
-def test_redrive_da_dlq_trata_o_evento_que_a_versao_anterior_recusou(
+def _redrive(broker: Broker, nome: str) -> None:
+    """O mesmo shovel de ``make redrive FILA=os.eventos``, do platform."""
+    broker.rabbitmqctl(
+        "set_parameter",
+        "shovel",
+        nome,
+        json.dumps(
+            {
+                "src-uri": "amqp://",
+                "src-queue": _DLQ,
+                "dest-uri": "amqp://",
+                "dest-queue": "os.eventos",
+                "src-delete-after": "queue-length",
+            }
+        ),
+    )
+
+
+def test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova(
     engine: Engine,
     session_factory: sessionmaker[Session],
     broker: Broker,
@@ -777,7 +859,9 @@ def test_redrive_da_dlq_trata_o_evento_que_a_versao_anterior_recusou(
 ) -> None:
     # A versao anterior mandava a falha de negocio e a resposta de compensacao
     # para a DLQ com `sem_tratador_nesta_versao`, sem registrar a mensagem
-    # (ADR-036): o redrive devolve a fila inteira e a versao nova as trata.
+    # (ADR-036). A ordem do procedimento: implantar a versao nova e so depois o
+    # redrive. Antes disso a versao anterior, que ainda consome `os.eventos`, as
+    # recusa de novo.
     def sem_tratador(_mensagem: object, _transacao: object) -> Desfecho:
         raise FalhaPermanenteError("sem_tratador_nesta_versao")
 
@@ -800,6 +884,13 @@ def test_redrive_da_dlq_trata_o_evento_que_a_versao_anterior_recusou(
         esperar_ate(lambda: broker.contar(_DLQ) == 1)
         assert atendimento.etapa() == "aguardando_pagamento"
 
+        # Redrive ANTES de implantar: a versao anterior recusa de novo.
+        recusadas = _consumidas("PagamentoRecusado", "dlq")
+        _redrive(broker, "redrive-antes-de-implantar")
+        esperar_ate(lambda: _consumidas("PagamentoRecusado", "dlq") == recusadas + 1)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+        assert atendimento.etapa() == "aguardando_pagamento"
+
     pasta_nova = tmp_path / "nova"
     pasta_nova.mkdir()
     with (
@@ -807,21 +898,8 @@ def test_redrive_da_dlq_trata_o_evento_que_a_versao_anterior_recusou(
         EmSegundoPlano(_consumidor(session_factory, broker, rastreador, pasta_nova)),
     ):
         esperar_ate(lambda: (pasta_nova / "consumidor-pronto").exists())
-        # O mesmo shovel de `make -C platform redrive FILA=os.eventos`.
-        broker.rabbitmqctl(
-            "set_parameter",
-            "shovel",
-            "redrive-os.eventos",
-            json.dumps(
-                {
-                    "src-uri": "amqp://",
-                    "src-queue": _DLQ,
-                    "dest-uri": "amqp://",
-                    "dest-queue": "os.eventos",
-                    "src-delete-after": "queue-length",
-                }
-            ),
-        )
+        # Versao nova implantada: agora o redrive trata o evento.
+        _redrive(broker, "redrive-depois-de-implantar")
         esperar_ate(lambda: atendimento.etapa() == "compensando")
         liberacao = atendimento.receber("LiberarReserva")
 
