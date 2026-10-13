@@ -409,7 +409,9 @@ class TestAvancar:
             envio=compensacao_enviada("DescartarDiagnostico", saga, "cancelamento"),
         )
         saga.limpar_eventos()
-        ultimo = UUID(saga.comando_em_voo["mensagem_ids"][-1])  # type: ignore[index]
+        em_voo = saga.comando_em_voo
+        assert em_voo is not None
+        ultimo = UUID(em_voo["mensagem_ids"][-1])
 
         saga.avancar(
             evento("DiagnosticoDescartado", saga.ordem_id, causation_id=ultimo),
