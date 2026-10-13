@@ -1,21 +1,20 @@
-# Exemplo de borda de um servico (o OS Service, prefixo /os), para o
-# repositorio do servico copiar para o k8s/ dele, no proprio namespace. O
-# make smoke aplica este arquivo no kind, sem mudar nada, com um servidor de
-# eco no lugar da API.
+# Borda do OS Service no Kong (ADR-038): os Services de borda e o Ingress do
+# prefixo /os, no namespace do servico. Os objetos sao os de
+# k8s/exemplos/borda-os-service.yaml do platform, sem mudanca; so este
+# cabecalho e daqui.
 #
 # So sai pela borda o que o ADR-038 permite: /api/v1/*, /docs, /openapi.json
 # e o JWKS. /api/v1/admin/* e /metrics casam o Ingress fora-da-borda (o
 # caminho mais longo vence) e respondem 404. Caminho com %2F ou %5C responde
 # 404 pelo plugin global bloqueia-barra-codificada, antes de qualquer rota: o
 # Kong casa por segmento e nao trata %2F como /, entao sem ele
-# /os/api/v1/admin%2Foutbox passaria por /os/api/v1. O Billing tem o seu
-# exemplo em borda-billing-service.yaml (webhook e simulador do checkout).
+# /os/api/v1/admin%2Foutbox passaria por /os/api/v1.
 #
 # strip-path tira do caminho tudo o que a regra casou: /os/api/v1/x chega ao
 # upstream como <konghq.com/path do Service> + /x. Por isso cada prefixo tem
 # um Service proprio, todos com os mesmos pods, com o konghq.com/path que
-# devolve o prefixo. O Service interno do servico (o do JWKS_URL e do
-# BILLING_URL) fica sem anotacao.
+# devolve o prefixo. O Service interno do servico (o do JWKS_URL de Billing e
+# Execucao) fica sem anotacao.
 #
 # Rate limiting: o global (60/min por IP) vale para toda rota sem anotacao;
 # login, autenticacao, publico e JWKS anotam o plugin da classe.
