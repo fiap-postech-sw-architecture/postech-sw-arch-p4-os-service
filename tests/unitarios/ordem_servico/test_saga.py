@@ -20,20 +20,28 @@ from uuid import UUID, uuid4
 import pytest
 
 from src.compartilhado.aplicacao.mensageria import Comando, MensagemRecebida
+from src.ordem_servico.aplicacao.saga import transicoes
 from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
 from src.ordem_servico.aplicacao.saga.modelo import (
     CompensacaoIniciadaEvent,
     Envio,
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
+    Gatilho,
+    GatilhoDeProcesso,
     MotivoCompensacao,
     SagaIniciadaEvent,
+    Transicao,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
     pecas_dos_itens,
 )
 from src.ordem_servico.aplicacao.saga.saga import Saga
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    COMANDOS_COM_PRAZO,
+    GATILHOS_VALIDOS,
+)
+from src.ordem_servico.aplicacao.saga.transicoes import conferir_gatilho
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
@@ -893,6 +901,75 @@ class TestRecusasDoAvancar:
                 agora=DEPOIS,
                 ator=ATOR_PROCESSO,
                 envio=envio,
+            )
+
+        assert _foto(saga) == antes
+
+
+class TestVocabularioDoGatilho:
+    # O gatilho de um registro e o tipo da mensagem ou uma das seis palavras do
+    # processo; a lista e fechada, e o GET /sagas a documenta.
+    PALAVRAS = frozenset(
+        {
+            "abertura",
+            "cancelamento_solicitado",
+            "cancelamento_recusado",
+            "reenvio",
+            "prazo_esgotado",
+            "retomada",
+        }
+    )
+
+    def test_vocabulario_e_os_23_tipos_mais_as_6_palavras(self) -> None:
+        # Escrito a partir do oraculo do cenario, nao do modulo testado.
+        assert set(ESPERADA) | self.PALAVRAS == GATILHOS_VALIDOS
+        assert len(GATILHOS_VALIDOS) == 29
+        assert {g.value for g in GatilhoDeProcesso} == self.PALAVRAS
+
+    @pytest.mark.parametrize("gatilho", sorted(set(ESPERADA) | PALAVRAS))
+    def test_gatilho_do_vocabulario_passa(self, gatilho: str) -> None:
+        conferir_gatilho(Transicao(E.EM_EXECUCAO), Gatilho(gatilho, None, AGORA, "x"))
+
+    @pytest.mark.parametrize(
+        "gatilho",
+        ["", "evento", "Abertura", "abertura ", "diagnosticoiniciado", "retomar"],
+    )
+    def test_gatilho_fora_do_vocabulario_e_recusado(self, gatilho: str) -> None:
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="vocabulario"):
+            conferir_gatilho(
+                Transicao(E.EM_EXECUCAO), Gatilho(gatilho, None, AGORA, "x")
+            )
+
+    def test_o_da_transicao_vale_no_lugar_do_tipo_do_evento(self) -> None:
+        # A corrida do pivot grava cancelamento_recusado; o tipo da mensagem
+        # (aqui fora do vocabulario) nao conta quando a transicao diz o seu.
+        conferir_gatilho(
+            Transicao(E.EM_EXECUCAO, gatilho="cancelamento_recusado"),
+            Gatilho("qualquer", None, AGORA, "x"),
+        )
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="inventado"):
+            conferir_gatilho(
+                Transicao(E.EM_EXECUCAO, gatilho="inventado"),
+                Gatilho("abertura", None, AGORA, "x"),
+            )
+
+    def test_a_saga_recusa_o_registro_com_gatilho_fora_do_vocabulario(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        saga, _ = _compensando(COMPENSACOES)
+        antes = _foto(saga)
+        monkeypatch.setattr(
+            transicoes,
+            "CORRIDA_DO_PIVOT",
+            Transicao(E.EM_EXECUCAO, gatilho="inventado"),
+        )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="inventado"):
+            saga.avancar(
+                evento("ExecucaoIniciada", saga.ordem_id),
+                _marcos(),
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
             )
 
         assert _foto(saga) == antes

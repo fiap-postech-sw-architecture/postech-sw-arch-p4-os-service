@@ -12,6 +12,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from src.ordem_servico.aplicacao.saga.modelo import GatilhoDeProcesso
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.dominio.texto_livre import (
     TAMANHO_MAXIMO_DESCRICAO,
@@ -177,9 +178,8 @@ class PassoDaSagaResponse(BaseModel):
     para: str = Field(description="Etapa depois do passo.")
     gatilho: str = Field(
         description=(
-            "Tipo do evento recebido ou uma palavra fixa: abertura, "
-            "cancelamento_solicitado, cancelamento_recusado, reenvio, "
-            "prazo_esgotado ou retomada."
+            "Tipo da mensagem que mudou a saga (um dos eventos que o OS consome) "
+            f"ou uma palavra do processo: {', '.join(GatilhoDeProcesso)}."
         )
     )
     mensagem_id: UUID | None = Field(

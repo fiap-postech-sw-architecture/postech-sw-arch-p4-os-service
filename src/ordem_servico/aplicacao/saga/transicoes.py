@@ -4,7 +4,8 @@
 gatilho provoca (a linha do fluxo normal, o inicio da compensacao, a resposta
 da pendente ou a corrida do pivot, RFC-004 secoes 4.1, 4.4 e 4.5);
 ``conferir_envio`` e ``conferir_prazo`` confrontam o comando gravado na outbox
-com ela; ``conferir_estado`` e a invariante do estado.
+com ela; ``conferir_gatilho`` e ``conferir_estado`` guardam o vocabulario do
+registro e a invariante do estado.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     COMANDOS_COM_PRAZO,
     ETAPAS_EM_COMPENSACAO,
     FLUXO_NORMAL,
+    GATILHOS_VALIDOS,
     PRIORIDADE_DO_AGENDAMENTO,
 )
 
@@ -43,6 +45,7 @@ if TYPE_CHECKING:
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.ordem_servico.aplicacao.saga.modelo import (
         Envio,
+        Gatilho,
         ItemDoDiagnostico,
         Transicao,
     )
@@ -157,6 +160,21 @@ def conferir_envio(
 
 def _texto(valor: UUID | None) -> str | None:
     return None if valor is None else str(valor)
+
+
+def conferir_gatilho(transicao: Transicao, gatilho: Gatilho) -> None:
+    """O gatilho que o registro leva e do vocabulario fechado (``GATILHOS_VALIDOS``).
+
+    E o da transicao quando ela diz um (``cancelamento_recusado``), senao o do
+    pedido: o tipo da mensagem ou uma palavra do processo.
+
+    Raises:
+        TransicaoDaSagaInvalidaError: gatilho fora do vocabulario.
+    """
+    registrado = transicao.gatilho or gatilho.tipo
+    if registrado not in GATILHOS_VALIDOS:
+        msg = f"gatilho {registrado!r} fora do vocabulario da saga"
+        raise TransicaoDaSagaInvalidaError(msg)
 
 
 def conferir_prazo(envio: Envio | None, agora: datetime) -> None:

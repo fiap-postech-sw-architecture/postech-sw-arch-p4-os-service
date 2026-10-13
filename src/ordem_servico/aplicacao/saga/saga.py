@@ -22,12 +22,11 @@ from src.compartilhado.dominio.aggregate_root import AggregateRoot
 from src.ordem_servico.aplicacao.saga.classificacao import Classificacao, classificar
 from src.ordem_servico.aplicacao.saga.leitura_da_saga import LeituraDaSaga
 from src.ordem_servico.aplicacao.saga.modelo import (
-    GATILHO_ABERTURA,
-    GATILHO_CANCELAMENTO_SOLICITADO,
     CompensacaoIniciadaEvent,
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
     Gatilho,
+    GatilhoDeProcesso,
     MotivoCompensacao,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
@@ -39,6 +38,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
 from src.ordem_servico.aplicacao.saga.transicoes import (
     conferir_envio,
     conferir_estado,
+    conferir_gatilho,
     conferir_prazo,
     transicao_do_cancelamento,
     transicao_do_evento,
@@ -127,7 +127,7 @@ class Saga(AggregateRoot, LeituraDaSaga):
             _etapa_desde=agora,
             _atualizada_em=agora,
         )
-        abertura = Gatilho(GATILHO_ABERTURA, None, agora, ator)
+        abertura = Gatilho(GatilhoDeProcesso.ABERTURA.value, None, agora, ator)
         saga._passos = [abertura.registro(1, None, saga._etapa, envio, None)]
         saga._registrar_evento(
             SagaIniciadaEvent(agregado_id=ordem_id, ocorrido_em=agora)
@@ -212,7 +212,9 @@ class Saga(AggregateRoot, LeituraDaSaga):
             transicao, envio, ordem_id=self.id, itens=self._itens, marcos=marcos
         )
         conferir_prazo(envio, agora)
-        pedido = Gatilho(GATILHO_CANCELAMENTO_SOLICITADO, None, agora, ator)
+        pedido = Gatilho(
+            GatilhoDeProcesso.CANCELAMENTO_SOLICITADO.value, None, agora, ator
+        )
         self._mudar(transicao, pedido, envio)
 
     # ----- mecanica interna
@@ -225,6 +227,7 @@ class Saga(AggregateRoot, LeituraDaSaga):
         posicao: int | None = None,
     ) -> None:
         """Aplica a transicao ja conferida e anota o registro dela."""
+        conferir_gatilho(transicao, gatilho)
         de, agora = self._etapa, gatilho.em
         if transicao.seguinte is not de:
             self._registrar_evento(

@@ -14,7 +14,11 @@ from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.ordem_servico.aplicacao.saga.compensacao import ORDEM_DAS_COMPENSACOES
-from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga, Transicao
+from src.ordem_servico.aplicacao.saga.modelo import (
+    EtapaSaga,
+    GatilhoDeProcesso,
+    Transicao,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -73,6 +77,10 @@ ETAPA_ESPERADA: Final[Mapping[str, EtapaSaga]] = MappingProxyType(
         "ExecucaoCancelada": _E.COMPENSANDO,
     }
 )
+
+# O vocabulario fechado do gatilho de um registro (RFC-004 secao 7.2): o tipo de
+# cada mensagem consumida ou uma palavra do processo.
+GATILHOS_VALIDOS: Final = frozenset(ETAPA_ESPERADA) | frozenset(GatilhoDeProcesso)
 
 # Linha da tabela da RFC-004 secao 4.1 de cada evento do fluxo normal: etapa
 # seguinte, comando enviado (com prazo tecnico se estiver em

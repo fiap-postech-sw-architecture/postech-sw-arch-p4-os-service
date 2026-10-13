@@ -19,8 +19,11 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
     inicio,
     resposta,
 )
-from src.ordem_servico.aplicacao.saga.linhas_do_fluxo import ATOR_CONSUMIDOR
-from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga, MotivoCompensacao
+from src.ordem_servico.aplicacao.saga.modelo import (
+    ATOR_CONSUMIDOR,
+    EtapaSaga,
+    MotivoCompensacao,
+)
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.resumos import StatusPagamento

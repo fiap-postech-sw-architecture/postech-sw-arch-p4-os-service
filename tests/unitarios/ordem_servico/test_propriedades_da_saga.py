@@ -50,7 +50,10 @@ import pytest
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaTransitoriaError
 from src.compartilhado.dominio.exceptions import TransicaoStatusInvalidaException
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    COMANDOS_COM_PRAZO,
+    GATILHOS_VALIDOS,
+)
 from src.ordem_servico.aplicacao.use_cases import RegistrarEntrega
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
@@ -590,6 +593,8 @@ def test_fora_de_ordem_e_compensacao_nao_quebram_a_saga(semente: int) -> None:
     enviadas = _compensacoes(simulacao)
 
     assert simulacao.dlq == [], simulacao.entregas
+    # O vocabulario do gatilho e fechado: o tipo da mensagem ou uma palavra.
+    assert {p["gatilho"] for p in saga.passos} <= GATILHOS_VALIDOS
     if simulacao.compensacao is None:
         assert saga.etapa is E.CONCLUIDA
         assert ordem.status in {S.FINALIZADA, S.ENTREGUE}

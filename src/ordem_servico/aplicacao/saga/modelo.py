@@ -63,25 +63,28 @@ class MotivoCompensacao(StrEnum):
     PRAZO_TECNICO = "prazo_tecnico"
 
 
-# Palavras do ``gatilho`` que nao sao tipo de mensagem (lista fechada): o
-# registro de um evento leva o tipo dele, e cada pedido ou decisao do proprio
-# OS, uma destas.
-GATILHO_ABERTURA: Final = "abertura"
-GATILHO_CANCELAMENTO_SOLICITADO: Final = "cancelamento_solicitado"
-GATILHO_CANCELAMENTO_RECUSADO: Final = "cancelamento_recusado"
-GATILHO_REENVIO: Final = "reenvio"
-GATILHO_PRAZO_ESGOTADO: Final = "prazo_esgotado"
-GATILHO_RETOMADA: Final = "retomada"
-GATILHOS_DE_PROCESSO: Final = frozenset(
-    {
-        GATILHO_ABERTURA,
-        GATILHO_CANCELAMENTO_SOLICITADO,
-        GATILHO_CANCELAMENTO_RECUSADO,
-        GATILHO_REENVIO,
-        GATILHO_PRAZO_ESGOTADO,
-        GATILHO_RETOMADA,
-    }
-)
+class GatilhoDeProcesso(StrEnum):
+    """As palavras do ``gatilho`` que nao sao tipo de mensagem (RFC-004 secao 7.2).
+
+    O gatilho de um registro e o tipo da mensagem que o provocou (um dos eventos
+    de ``ETAPA_ESPERADA``) ou uma destas palavras, quando o pedido ou a decisao
+    e do proprio OS. A lista e fechada: a saga recusa outra palavra
+    (``GATILHOS_VALIDOS``) e e a que o ``GET /sagas`` documenta.
+    """
+
+    ABERTURA = "abertura"
+    CANCELAMENTO_SOLICITADO = "cancelamento_solicitado"
+    CANCELAMENTO_RECUSADO = "cancelamento_recusado"
+    REENVIO = "reenvio"
+    PRAZO_ESGOTADO = "prazo_esgotado"
+    RETOMADA = "retomada"
+
+
+# Quem provoca os fatos que o consumidor aplica (historico da OS e registros da
+# saga), e a falha da compensacao pelo estorno que o provedor recusou (RFC-004
+# secao 4.7).
+ATOR_CONSUMIDOR: Final = "consumidor"
+ESTORNO_RECUSADO: Final = "estorno_recusado"
 
 
 class RegistroDaSaga(TypedDict):
@@ -89,7 +92,7 @@ class RegistroDaSaga(TypedDict):
 
     Um por transicao aplicada, inclusive as que nao concluem um passo T (o
     ``DiagnosticoIniciado``, o ``PagamentoSolicitado``): ``gatilho`` e o tipo
-    do evento ou uma das palavras de ``GATILHOS_DE_PROCESSO``; ``comando`` e
+    do evento ou uma das palavras de ``GatilhoDeProcesso``; ``comando`` e
     ``comando_id``, o comando que a transicao enviou. ``em`` e ISO 8601 em
     UTC. Nunca texto livre.
     """
@@ -106,8 +109,6 @@ class RegistroDaSaga(TypedDict):
     ator: str
     # So no registro do ExecucaoAgendada: a fila viva e a da Execucao.
     posicao_na_fila: NotRequired[int]
-    # So no registro do reenvio por prazo: quantos reenvios o comando ja teve.
-    reenvio: NotRequired[int]
 
 
 # JSON ja validado pelo schema do contrato (contratos/, RFC-004 secao 5.5): os
@@ -169,7 +170,7 @@ class Envio:
 class Gatilho:
     """O que mudou a saga, quando e por quem: o cabecalho de cada registro.
 
-    ``tipo`` e o tipo do evento ou uma palavra de ``GATILHOS_DE_PROCESSO``
+    ``tipo`` e o tipo do evento ou uma palavra de ``GatilhoDeProcesso``
     (``abertura`` e ``cancelamento_solicitado`` nos pedidos pela API);
     ``mensagem_id``, o id do evento (``None`` nos pedidos); ``ator``, o
     processo ou o ``sub`` de quem pediu.

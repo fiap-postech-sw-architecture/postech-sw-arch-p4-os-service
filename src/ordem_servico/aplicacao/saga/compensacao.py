@@ -19,8 +19,9 @@ from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.ordem_servico.aplicacao.saga.modelo import (
-    GATILHO_CANCELAMENTO_RECUSADO,
+    ESTORNO_RECUSADO,
     EtapaSaga,
+    GatilhoDeProcesso,
     MotivoCompensacao,
     Transicao,
 )
@@ -136,13 +137,11 @@ def plano_de_compensacao(
     )
 
 
-# Falha da compensacao pelo estorno que o provedor recusou (RFC-004 secao 4.7).
-ESTORNO_RECUSADO: Final = "estorno_recusado"
 # O inicio da execucao com so o CancelarExecucao pendente (ou parado): nada foi
 # desfeito, e a saga volta ao fluxo, sem motivo nem plano; o registro leva o
 # gatilho do cancelamento recusado (RFC-004 secao 4.5).
 CORRIDA_DO_PIVOT: Final = Transicao(
-    EtapaSaga.EM_EXECUCAO, gatilho=GATILHO_CANCELAMENTO_RECUSADO
+    EtapaSaga.EM_EXECUCAO, gatilho=GatilhoDeProcesso.CANCELAMENTO_RECUSADO.value
 )
 
 

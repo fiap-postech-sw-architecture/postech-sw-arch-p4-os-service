@@ -39,11 +39,9 @@ from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
 from src.ordem_servico.aplicacao.saga.linhas_da_compensacao import (
     LINHAS_DA_COMPENSACAO,
 )
-from src.ordem_servico.aplicacao.saga.linhas_do_fluxo import (
-    ATOR_CONSUMIDOR,
-    LINHAS_DO_FLUXO,
-)
+from src.ordem_servico.aplicacao.saga.linhas_do_fluxo import LINHAS_DO_FLUXO
 from src.ordem_servico.aplicacao.saga.modelo import (
+    ATOR_CONSUMIDOR,
     DadosDoContrato,
     Envio,
     EtapaSaga,

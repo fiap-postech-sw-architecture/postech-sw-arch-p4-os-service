@@ -766,6 +766,24 @@ def test_openapi_documenta_401_403_e_404_das_rotas_de_os() -> None:
     assert {"401", "403"} <= set(caminhos["/api/v1/clientes"]["post"]["responses"])
 
 
+def test_openapi_documenta_o_vocabulario_do_gatilho_da_saga() -> None:
+    esquemas = TestClient(criar_app()).get("/openapi.json").json()["components"]
+    descricao = esquemas["schemas"]["PassoDaSagaResponse"]["properties"]["gatilho"][
+        "description"
+    ]
+
+    palavras = descricao.removesuffix(".").split(": ")[-1].split(", ")
+
+    assert palavras == [
+        "abertura",
+        "cancelamento_solicitado",
+        "cancelamento_recusado",
+        "reenvio",
+        "prazo_esgotado",
+        "retomada",
+    ]
+
+
 class TestSaga:
     """``GET /api/v1/sagas/{ordem_id}``: so o admin, para a operacao."""
 

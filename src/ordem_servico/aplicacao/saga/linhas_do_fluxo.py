@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Final, cast
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.ordem_servico.aplicacao.saga.modelo import (
+    ATOR_CONSUMIDOR,
     itens_do_diagnostico,
     pecas_dos_itens,
 )
@@ -31,9 +32,6 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
     from src.ordem_servico.dominio.resumos import ResumoOrcamento
-
-# Ator dos fatos que o consumidor aplica (historico da OS e registros da saga).
-ATOR_CONSUMIDOR: Final = "consumidor"
 
 # O comando que a linha envia: tipo e ``dados`` (sem ele, ``None``).
 type Pedido = tuple[Comando, DadosDoContrato] | None
