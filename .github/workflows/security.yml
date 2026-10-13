@@ -61,6 +61,8 @@ jobs:
           tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
       - name: gitleaks (historico do HEAD)
         run: gitleaks git . --log-opts="HEAD" --config .gitleaks.toml --redact --no-banner --verbose
+      - name: Regras do .gitleaks.toml reprovam senha em URL num manifesto e no historico (teste negativo)
+        run: scripts/ci/testa-gitleaks.sh
 
   trivy:
     runs-on: ubuntu-24.04
