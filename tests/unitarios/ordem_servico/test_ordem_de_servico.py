@@ -481,16 +481,18 @@ class TestFatosDaSaga:
 
         assert _fotografia(ordem) == antes
 
-    def test_cancelado_de_pagamento_que_nao_esta_em_aberto_levanta_sem_mutar(
+    def test_cancelado_de_pagamento_que_nao_esta_em_aberto_mantem_o_resumo(
         self,
     ) -> None:
+        # O cancelamento chegou depois de um estado mais novo (ou repetido): o
+        # resumo segue como esta e nada levanta, para nao travar a compensacao.
         ordem = ordem_em(S.AGUARDANDO_EXECUCAO)
-        antes = _fotografia(ordem)
+        antes = ordem.resumo_pagamento
 
-        with pytest.raises(ViolacaoRegraDeNegocioException, match="nao se cancela"):
-            ordem.registrar_estado_do_pagamento(StatusPagamento.CANCELADO)
+        ordem.registrar_estado_do_pagamento(StatusPagamento.CANCELADO)
 
-        assert _fotografia(ordem) == antes
+        assert ordem.resumo_pagamento == antes
+        assert ordem.status is S.AGUARDANDO_EXECUCAO
 
     @pytest.mark.usefixtures("relogio_que_avanca")
     def test_fluxo_completo_produz_linha_do_tempo_encadeada(self) -> None:

@@ -7,7 +7,9 @@ as decisoes humanas (mecanico e cliente) num instante sorteado depois do
 comando que as habilita. O roteiro de cada semente escolhe uma falha de negocio
 (ou nenhuma), se o provedor recusa o estorno e se o cliente paga depois de a
 cobranca ser cancelada, expirada ou recusada (o Billing estorna sozinho,
-ADR-040). A compensacao que chega antes do fato humano o anula (a lapide da
+ADR-040), e em parte delas o estorno automatico chega ao consumidor antes da
+resposta ao ``EstornarPagamento`` (duas replicas entregando em ordem trocada).
+A compensacao que chega antes do fato humano o anula (a lapide da
 RFC-004 secao 4.5), e o ``CancelarExecucao`` depois do inicio e ignorado sem
 resposta.
 
@@ -104,6 +106,8 @@ ATRASO_LONGO_S: Final = 30.0
 # OS antes de uma entrega.
 CHANCE_DE_ESTORNO_RECUSADO: Final = 0.3
 CHANCE_DE_APROVACAO_TARDIA: Final = 0.5
+# Chance de o estorno automatico chegar antes da resposta ao EstornarPagamento.
+CHANCE_DE_INVERTER_O_ESTORNO: Final = 0.5
 CHANCE_DE_ENCERRAR: Final = 0.05
 # Status da OS em cada etapa (tabela da RFC-004 secao 4.1): na compensacao, o
 # de antes do pivot em que ela comecou.
@@ -166,6 +170,7 @@ class Roteiro:
     falha: str | None
     estorno_recusado: bool
     aprovacao_tardia: bool
+    inverte_o_estorno: bool
 
 
 @dataclass
@@ -182,6 +187,8 @@ class Simulacao:
     # Como cada entrega se classificou na etapa em que chegou.
     classificacoes: Counter[str] = field(default_factory=Counter)
     dlq: list[str] = field(default_factory=list)
+    # Respostas casadas do cancelamento que chegaram com o resumo ja estornado.
+    cancelados_apos_o_estorno: int = 0
     # (acao, etapa da saga na tentativa, se passou)
     encerramentos: list[tuple[str, EtapaSaga, bool]] = field(default_factory=list)
     # A compensacao, quando comecou: (perfil do que a saga ja tinha feito,
@@ -199,11 +206,22 @@ class Simulacao:
     def agendar(self, instante: float, acao: Decisao | Entrega) -> None:
         heapq.heappush(self.agenda, (instante, next(self.sequencia), acao))
 
-    def publicar(self, tipo: str, causa: UUID, **dados: Any) -> None:
-        """O participante publica: entrega com atraso, as vezes repetida."""
+    def publicar(
+        self,
+        tipo: str,
+        causa: UUID,
+        *,
+        janela: tuple[float, float] = (0, JANELA_S),
+        **dados: Any,
+    ) -> None:
+        """O participante publica: entrega com atraso, as vezes repetida.
+
+        ``janela`` e o atraso de entrega, em segundos depois de agora; so uma
+        janela dada (o estorno que passa a frente) dispensa o atraso longo.
+        """
         mensagem = evento(tipo, self.cenario.ordem_id, causation_id=causa, **dados)
-        entrega = self.agora + self.rnd.uniform(0, JANELA_S)
-        if self.rnd.random() < CHANCE_DE_ATRASAR:
+        entrega = self.agora + self.rnd.uniform(*janela)
+        if janela[0] == 0 and self.rnd.random() < CHANCE_DE_ATRASAR:
             entrega += self.rnd.uniform(0, ATRASO_LONGO_S)
         self.agendar(entrega, Entrega(mensagem))
         if self.rnd.random() < CHANCE_DE_REPETIR:
@@ -243,6 +261,10 @@ class Simulacao:
             case "SolicitarPagamento":
                 p.pagamento, p.pago_por = "solicitado", comando_id
                 self.publicar("PagamentoSolicitado", comando_id)
+                if self.roteiro.inverte_o_estorno:
+                    # O atendente cancela com o checkout aberto: a compensacao
+                    # tem o EstornarPagamento, que e onde a ordem se inverte.
+                    self.decidir("Cancelamento", comando_id)
                 recusa = falha in {"PagamentoRecusado", "PagamentoExpirado"}
                 self.decidir(
                     falha if recusa and falha else "PagamentoConfirmado", comando_id
@@ -284,11 +306,33 @@ class Simulacao:
         elif p.pagamento in {"confirmado", "estornado"}:
             p.pagamento = "estornado"
             self.publicar("PagamentoEstornado", comando_id, motivo="compensacao")
+        elif self.roteiro.inverte_o_estorno and p.pago_por is not None:
+            self.estorno_automatico_passa_a_frente(comando_id, p.pago_por)
         else:
             # Solicitado (ou em voo), ja cancelado, recusado ou expirado: a
             # cobranca fecha sem nada a devolver.
             p.pagamento = "cancelado"
             self.publicar("PagamentoCancelado", comando_id)
+
+    def estorno_automatico_passa_a_frente(
+        self, comando_id: UUID, pago_por: UUID
+    ) -> None:
+        """A aprovacao tardia ja estornada: o estorno chega antes do cancelamento.
+
+        O Billing cancela a cobranca em resposta ao comando e estorna sozinho a
+        aprovacao que chegou, mas duas replicas do consumidor entregam o
+        ``PagamentoEstornado`` (causa: o ``SolicitarPagamento``) antes do
+        ``PagamentoCancelado`` (causa: o comando), que chega depois da janela
+        em que o estorno chega.
+        """
+        self.participantes.pagamento = "estornado"
+        self.publicar(
+            "PagamentoEstornado",
+            pago_por,
+            janela=(0.0, JANELA_S),
+            motivo="pagamento_apos_encerramento",
+        )
+        self.publicar("PagamentoCancelado", comando_id, janela=(JANELA_S, 2 * JANELA_S))
 
     def tomar_decisao(self, decisao: Decisao) -> None:
         """O fato humano acontece, salvo se uma compensacao chegou antes."""
@@ -309,6 +353,8 @@ class Simulacao:
                     self.publicar(tipo, causa)
             case "PagamentoConfirmado" | "PagamentoRecusado" | "PagamentoExpirado":
                 self.pagar(tipo, causa)
+            case "Cancelamento":
+                self.tentar_encerrar("cancelar")
             case "PagamentoTardio":
                 if p.pagamento in {"cancelado", "recusado", "expirado"}:
                     p.pagamento = "estornado"
@@ -338,10 +384,10 @@ class Simulacao:
             # depois e estornada pelo proprio Billing.
             self.decidir("PagamentoTardio", causa)
 
-    def tentar_encerrar(self) -> None:
+    def tentar_encerrar(self, acao: str | None = None) -> None:
         """O atendente pede o cancelamento (pela saga) ou registra a entrega."""
         cenario = self.cenario
-        acao = self.rnd.choice(("cancelar", "entregar"))
+        acao = acao or self.rnd.choice(("cancelar", "entregar"))
         antes, etapa = _foto(cenario), cenario.saga.etapa
         feito = _feito(cenario)
         try:
@@ -415,6 +461,14 @@ class Simulacao:
             mensagem.tipo, marcos, causation_id=mensagem.causation_id
         )
         self.classificacoes[classificacao.value] += 1
+        resumo = cenario.ordem.resumo_pagamento
+        if (
+            mensagem.tipo == "PagamentoCancelado"
+            and classificacao.value == "processar"
+            and resumo is not None
+            and resumo.status.value == "estornado"
+        ):
+            self.cancelados_apos_o_estorno += 1
         antes, etapa, feito = _foto(cenario), cenario.saga.etapa, _feito(cenario)
         try:
             tratamento = cenario.orquestrador.tratar(mensagem)
@@ -517,6 +571,7 @@ def _simular(semente: int) -> Simulacao:
         falha=rnd.choice(FALHAS),
         estorno_recusado=rnd.random() < CHANCE_DE_ESTORNO_RECUSADO,
         aprovacao_tardia=rnd.random() < CHANCE_DE_APROVACAO_TARDIA,
+        inverte_o_estorno=rnd.random() < CHANCE_DE_INVERTER_O_ESTORNO,
     )
     simulacao = Simulacao(CenarioDaSaga(), rnd, roteiro)
     simulacao.rodar()
@@ -570,26 +625,30 @@ def test_gerador_produz_cada_situacao_da_classificacao_e_cada_roteiro() -> None:
     # Guarda do gerador: nas mil sementes, as entregas caem em cada situacao da
     # RFC-004 secoes 4.4 e 4.5 que a propriedade promete exercitar, e cada
     # falha de negocio e o caminho feliz aparecem. Medido com este gerador
-    # (entregas, sementes): obsoleto (386, 252), repetido (38, 38), fora do
-    # fluxo (1.276, 714), fora da compensacao (466, 387), estorno automatico
-    # (158, 124) e adiantado (1.596, 621); cada roteiro em 128 a 159 sementes.
+    # (entregas, sementes): obsoleto (217, 155), repetido (38, 38), fora do
+    # fluxo (1.649, 796), fora da compensacao (566, 454), estorno automatico
+    # (261, 196) e adiantado (1.171, 513); cada roteiro em 128 a 159 sementes; o
+    # cancelamento casado que chega com o resumo ja estornado, em 22 sementes.
     # Os minimos ficam perto da metade; o teto do adiantado impede que ele
     # domine. Mudou o gerador (inclusive um sorteio a mais), meca de novo.
     simulacoes = [_simular(s) for s in SEMENTES]
     total: Counter[str] = sum((s.classificacoes for s in simulacoes), Counter())
     sementes = Counter(c for s in simulacoes for c in s.classificacoes)
     roteiros = Counter(s.roteiro.falha for s in simulacoes)
-    assert total["obsoleto"] > 190
-    assert sementes["obsoleto"] > 120
+    assert total["obsoleto"] > 100
+    assert sementes["obsoleto"] > 75
     assert total["repetido"] > 15
     assert sementes["repetido"] > 15
-    assert total["fora_do_fluxo"] > 600
-    assert sementes["fora_do_fluxo"] > 350
-    assert total["fora_da_compensacao"] > 230
-    assert sementes["fora_da_compensacao"] > 190
-    assert total["estorno_automatico"] > 75
-    assert sementes["estorno_automatico"] > 60
-    assert 800 < total["adiantado"] < 2400
-    assert sementes["adiantado"] > 300
+    assert total["fora_do_fluxo"] > 800
+    assert sementes["fora_do_fluxo"] > 400
+    assert total["fora_da_compensacao"] > 280
+    assert sementes["fora_da_compensacao"] > 225
+    assert total["estorno_automatico"] > 130
+    assert sementes["estorno_automatico"] > 98
+    assert 600 < total["adiantado"] < 2400
+    assert sementes["adiantado"] > 250
+    # A inversao entre as duas replicas: o estorno automatico antes da resposta
+    # casada, que a saga aplica sem prender a compensacao.
+    assert sum(s.cancelados_apos_o_estorno for s in simulacoes) >= 10
     assert all(roteiros[f] > 100 for f in FALHAS)
     assert sum(1 for s in simulacoes if s.dlq) == 0

@@ -133,18 +133,12 @@ class ResumoPagamento(ValueObject):
     def cancelado(self) -> ResumoPagamento:
         """O mesmo pagamento, com a cobranca cancelada (``EstornarPagamento``).
 
-        So a cobranca em aberto se cancela; repetir o cancelamento devolve o
-        mesmo valor.
-
-        Raises:
-            ViolacaoRegraDeNegocioException: pagamento em outro estado.
+        So a cobranca em aberto passa a cancelada. Em outro estado a resposta do
+        Billing chegou depois de um estado mais novo (o estorno automatico da
+        aprovacao tardia, ADR-040) ou e repetida: o resumo segue como esta, para
+        a resposta ao comando concluir a compensacao em qualquer estado dele.
         """
-        if self.status is StatusPagamento.CANCELADO:
-            return self
-        if self.status is not StatusPagamento.SOLICITADO:
-            msg = f"Pagamento {self.status.value} nao se cancela"
-            raise ViolacaoRegraDeNegocioException(msg)
-        return replace(self, status=StatusPagamento.CANCELADO)
+        return self._se_solicitado(StatusPagamento.CANCELADO)
 
     def estornado(self) -> ResumoPagamento:
         """O mesmo pagamento, estornado: de qualquer estado, e idempotente.
@@ -198,10 +192,11 @@ def pagamento_no_estado(
 
     So os estados que nao mexem no status da OS: recusado, expirado, cancelado
     e estornado (o confirmado tem a transicao propria, ``pagamento_confirmado``).
+    Um estado antigo que chega depois de um mais novo nao o desfaz.
 
     Raises:
-        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, estado
-            que esta funcao nao aplica ou que a origem nao admite.
+        ViolacaoRegraDeNegocioException: pagamento ainda nao solicitado, ou
+            estado que esta funcao nao aplica.
     """
     resumo = pagamento_exigido(atual)
     transicao = _TRANSICOES_DO_PAGAMENTO.get(status)

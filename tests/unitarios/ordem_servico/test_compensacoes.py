@@ -21,6 +21,7 @@ from src.ordem_servico.aplicacao.saga.compensacao import dados_da_compensacao
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.tratamento import Tratamento
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
+from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
 from tests.fabricas import ordem_em
@@ -243,11 +244,7 @@ def test_cada_compensacao_pendente_por_cada_resposta_pelo_handler(
     pendente: str, tipo: str, casada: bool
 ) -> None:
     plano = COMPENSACOES[COMPENSACOES.index(pendente) :]
-    # O cancelamento da cobranca so responde ao pagamento ainda em aberto.
-    status = S.AGUARDANDO_PAGAMENTO if tipo == "PagamentoCancelado" else None
-    cenario = CenarioDaSaga.em_compensacao(
-        plano, **({"status": status} if status else {})
-    )
+    cenario = CenarioDaSaga.em_compensacao(plano)
     antes = _foto(cenario)
     enviados = len(cenario.publicador.comandos)
     causa = _envio_pendente(cenario) if casada else uuid4()
@@ -299,6 +296,107 @@ def test_estorno_casado_conclui_a_compensacao_com_qualquer_motivo(motivo: str) -
             cenario.ordem_id,
             causation_id=_envio_pendente(cenario),
             motivo=motivo,
+        )
+    )
+
+    assert tratamento.desfecho is Desfecho.PROCESSADA
+    assert cenario.saga.plano_compensacao == COMPENSACOES[2:]
+    assert cenario.publicador.comandos[-1][0] == "LiberarReserva"
+    assert cenario.ordem.resumo_pagamento is not None
+    assert cenario.ordem.resumo_pagamento.status.value == "estornado"
+
+
+def _estorno_automatico(cenario: CenarioDaSaga) -> None:
+    """O Billing estorna sozinho a aprovacao tardia (causa: o SolicitarPagamento)."""
+    automatico = evento(
+        "PagamentoEstornado",
+        cenario.ordem_id,
+        causation_id=uuid4(),
+        motivo="pagamento_apos_encerramento",
+    )
+    assert cenario.orquestrador.tratar(automatico).desfecho is Desfecho.PROCESSADA
+
+
+def test_cancelado_casado_depois_do_estorno_automatico_conclui_a_compensacao() -> None:
+    # Duas replicas do consumidor podem entregar o estorno automatico antes da
+    # resposta ao EstornarPagamento: o resumo ja esta estornado, e a resposta
+    # casada nao pode prender a saga em compensando (sem saida pelo redrive).
+    cenario = CenarioDaSaga.em_compensacao(
+        COMPENSACOES[1:], status=S.AGUARDANDO_PAGAMENTO
+    )
+    _estorno_automatico(cenario)
+    assert cenario.ordem.resumo_pagamento is not None
+    assert cenario.ordem.resumo_pagamento.status.value == "estornado"
+
+    tratamento = cenario.orquestrador.tratar(
+        evento(
+            "PagamentoCancelado",
+            cenario.ordem_id,
+            causation_id=_envio_pendente(cenario),
+        )
+    )
+
+    assert tratamento == Tratamento(Desfecho.PROCESSADA, E.COMPENSANDO, E.COMPENSANDO)
+    assert cenario.saga.plano_compensacao == COMPENSACOES[2:]
+    assert cenario.publicador.comandos[-1][0] == "LiberarReserva"
+    # O estado mais novo fica: o estorno nao volta a cancelado.
+    assert cenario.ordem.resumo_pagamento.status.value == "estornado"
+
+
+@pytest.mark.parametrize(
+    ("estado_anterior", "resumo_depois"),
+    [
+        pytest.param("solicitado", "cancelado", id="em-aberto"),
+        pytest.param("cancelado", "cancelado", id="repetida"),
+        pytest.param("recusado", "recusado", id="recusado"),
+        pytest.param("expirado", "expirado", id="expirado"),
+        pytest.param("estornado", "estornado", id="estornado"),
+        pytest.param("confirmado", "confirmado", id="confirmado"),
+    ],
+)
+def test_cancelado_casado_conclui_a_compensacao_com_o_resumo_em_qualquer_estado(
+    estado_anterior: str, resumo_depois: str
+) -> None:
+    confirmado = estado_anterior == "confirmado"
+    cenario = CenarioDaSaga.em_compensacao(
+        COMPENSACOES[1:],
+        status=S.AGUARDANDO_EXECUCAO if confirmado else S.AGUARDANDO_PAGAMENTO,
+    )
+    if not confirmado and estado_anterior != "solicitado":
+        cenario.ordem.registrar_estado_do_pagamento(StatusPagamento(estado_anterior))
+
+    tratamento = cenario.orquestrador.tratar(
+        evento(
+            "PagamentoCancelado",
+            cenario.ordem_id,
+            causation_id=_envio_pendente(cenario),
+        )
+    )
+
+    assert tratamento.desfecho is Desfecho.PROCESSADA
+    assert cenario.saga.plano_compensacao == COMPENSACOES[2:]
+    assert cenario.publicador.comandos[-1][0] == "LiberarReserva"
+    assert cenario.ordem.resumo_pagamento is not None
+    assert cenario.ordem.resumo_pagamento.status.value == resumo_depois
+
+
+@pytest.mark.parametrize("anterior", ["cancelado", "estornado"])
+def test_estornado_casado_conclui_a_compensacao_com_o_resumo_ja_cancelado_ou_estornado(
+    anterior: str,
+) -> None:
+    # A resposta inversa: o PagamentoEstornado do comando chega com o resumo ja
+    # cancelado (ou estornado pelo automatico) e o deixa estornado.
+    cenario = CenarioDaSaga.em_compensacao(
+        COMPENSACOES[1:], status=S.AGUARDANDO_PAGAMENTO
+    )
+    cenario.ordem.registrar_estado_do_pagamento(StatusPagamento(anterior))
+
+    tratamento = cenario.orquestrador.tratar(
+        evento(
+            "PagamentoEstornado",
+            cenario.ordem_id,
+            causation_id=_envio_pendente(cenario),
+            motivo="compensacao",
         )
     )
 

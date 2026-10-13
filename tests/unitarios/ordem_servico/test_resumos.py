@@ -189,18 +189,12 @@ _ORIGENS = (
     _S.CANCELADO,
     _S.ESTORNADO,
 )
-# RFC-004 secao 4.4 e 7.1: o cancelamento so atinge a cobranca em aberto (ou o
-# cancelamento repetido); o estorno serve a compensacao (origem confirmado) e
-# ao estorno tardio do Billing, que aceita qualquer origem: seis origens por
-# duas transicoes, 12 celulas.
-_CANCELADO = {
-    _S.SOLICITADO: _S.CANCELADO,
-    _S.CONFIRMADO: None,
-    _S.RECUSADO: None,
-    _S.EXPIRADO: None,
-    _S.CANCELADO: _S.CANCELADO,
-    _S.ESTORNADO: None,
-}
+# RFC-004 secao 4.4 e 7.1: o cancelamento so atinge a cobranca em aberto; em
+# outro estado a resposta chegou depois de um mais novo (ou repetida) e o resumo
+# segue como esta, sem recusar a resposta do Billing; o estorno serve a
+# compensacao (origem confirmado) e ao estorno tardio do Billing, que aceita
+# qualquer origem: seis origens por duas transicoes, 12 celulas.
+_CANCELADO = {o: _S.CANCELADO if o is _S.SOLICITADO else o for o in _ORIGENS}
 _ESTORNADO = dict.fromkeys(_ORIGENS, _S.ESTORNADO)
 
 
@@ -210,14 +204,10 @@ class TestTransicoesDoPagamento:
         [pytest.param(o, d, id=f"{o.value}-cancelado") for o, d in _CANCELADO.items()],
     )
     def test_cancelado_pela_tabela(
-        self, origem: StatusPagamento, destino: StatusPagamento | None
+        self, origem: StatusPagamento, destino: StatusPagamento
     ) -> None:
         resumo = _pagamento(status=origem)
 
-        if destino is None:
-            with pytest.raises(ViolacaoRegraDeNegocioException, match=origem.value):
-                resumo.cancelado()
-            return
         assert resumo.cancelado() == _pagamento(
             pagamento_id=resumo.pagamento_id, status=destino
         )

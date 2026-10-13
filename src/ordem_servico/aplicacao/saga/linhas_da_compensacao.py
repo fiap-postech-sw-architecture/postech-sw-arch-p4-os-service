@@ -75,8 +75,10 @@ def _resposta_da_compensacao(
     """A seguinte do plano sai; depois da ultima, a OS e cancelada.
 
     O cancelamento e o estorno do pagamento passam ao resumo da OS, quando ela
-    o tem. A OS cancelada leva o texto do pedido do atendente ou o rotulo do
-    motivo (RFC-004 secao 4.4).
+    o tem, e nunca recusam a resposta casada: se o estorno automatico chegou
+    antes, o resumo segue estornado e a compensacao avanca (ADR-040). A OS
+    cancelada leva o texto do pedido do atendente ou o rotulo do motivo
+    (RFC-004 secao 4.4).
     """
     estado = ESTADO_DO_PAGAMENTO.get(evento.tipo)
     if estado is not None and ordem.resumo_pagamento is not None:
