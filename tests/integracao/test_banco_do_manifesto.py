@@ -24,6 +24,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 
 from tests.manifestos import BASE, RAIZ, comando, container, objeto
+from tests.migracoes import revisao_anterior, revisao_head
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -194,7 +195,7 @@ def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nao_cria_tabela(
     assert all(tabelas.values()), tabelas
     assert sequencias
     assert all(sequencias.values()), sequencias
-    assert versao == "002"
+    assert versao == revisao_head()
 
 
 def test_papel_do_exporter_le_as_estatisticas_e_nenhuma_tabela(banco: Banco) -> None:
@@ -295,8 +296,8 @@ def _ainda_esperando(ambiente: dict[str, str]) -> bytes:
     ("revisao", "motivo"),
     [
         pytest.param(None, "no revision yet", id="banco-sem-migracao"),
-        pytest.param("001", "001", id="revisao-anterior"),
-        pytest.param("002", None, id="head-desta-imagem"),
+        pytest.param(revisao_anterior(), revisao_anterior(), id="revisao-anterior"),
+        pytest.param(revisao_head(), None, id="head-desta-imagem"),
         pytest.param("999", None, id="rollback-banco-adiante"),
     ],
 )
@@ -305,6 +306,11 @@ def test_aguarda_migracao_libera_o_pod_so_com_o_banco_em_head_ou_adiante(
 ) -> None:
     dono = create_engine(banco.url("os", "POSTGRES_OWNER_PASSWORD"))
     aplicacao = {"DATABASE_URL": banco.url("os_app", "POSTGRES_APP_PASSWORD")}
+    # A fixture banco e do modulo: o finally devolve a revisao que o Job deixou.
+    with dono.connect() as conexao:
+        original = conexao.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
     try:
         with dono.begin() as conexao:
             conexao.execute(text("DELETE FROM alembic_version"))
@@ -320,12 +326,10 @@ def test_aguarda_migracao_libera_o_pod_so_com_o_banco_em_head_ou_adiante(
             assert f"waiting for the migration Job: {motivo}\n".encode() in log
     finally:
         with dono.begin() as conexao:
-            conexao.execute(text("UPDATE alembic_version SET version_num = '002'"))
+            conexao.execute(text("DELETE FROM alembic_version"))
             conexao.execute(
-                text(
-                    "INSERT INTO alembic_version SELECT '002' "
-                    "WHERE NOT EXISTS (SELECT 1 FROM alembic_version)"
-                )
+                text("INSERT INTO alembic_version VALUES (:original)"),
+                {"original": original},
             )
         dono.dispose()
 
