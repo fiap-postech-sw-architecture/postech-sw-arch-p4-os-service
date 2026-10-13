@@ -802,6 +802,45 @@ def test_openapi_documenta_401_403_e_404_das_rotas_de_os() -> None:
     assert {"401", "403"} <= set(caminhos["/api/v1/clientes"]["post"]["responses"])
 
 
+def test_openapi_do_cancelamento_diz_o_que_cada_resposta_significa() -> None:
+    documento = TestClient(criar_app()).get("/openapi.json").json()
+    rota = documento["paths"]["/api/v1/ordens-de-servico/{ordem_id}/cancelamento"]
+    respostas = rota["post"]["responses"]
+    esquemas = documento["components"]["schemas"]
+
+    assert {"202", "401", "403", "404", "409", "422"} <= set(respostas)
+    assert "compensando" in respostas["202"]["description"]
+    assert "Successful Response" not in respostas["202"]["description"]
+    for codigo, erro in [
+        ("404", "ENTIDADE_NAO_ENCONTRADA"),
+        ("409", "TRANSICAO_STATUS_INVALIDA"),
+        ("422", "VALOR_INVALIDO"),
+    ]:
+        exemplo = respostas[codigo]["content"]["application/json"]["example"]["erro"]
+        assert (exemplo["codigo"], set(exemplo)) == (
+            erro,
+            {"codigo", "mensagem", "id_requisicao"},
+        )
+    assert "CONFLITO_DE_CONCORRENCIA" in respostas["409"]["description"]
+    pedido = esquemas["CancelarOrdemRequest"]
+    assert pedido["examples"] == [{"motivo": "Cliente vendeu o veiculo"}]
+    assert pedido["properties"]["motivo"]["minLength"] == 1
+    assert pedido["properties"]["motivo"]["maxLength"] == TAMANHO_MAXIMO_MOTIVO
+
+
+def test_openapi_diz_o_novo_significado_do_motivo_de_cancelamento() -> None:
+    esquemas = TestClient(criar_app()).get("/openapi.json").json()["components"]
+    campo = esquemas["schemas"]["OrdemDeServicoResponse"]["properties"][
+        "motivo_cancelamento"
+    ]
+
+    descricao = campo["description"]
+
+    assert "202" in descricao
+    assert "so fica cancelada quando a saga termina" in descricao
+    assert "null" in descricao
+
+
 def test_openapi_documenta_o_vocabulario_do_gatilho_da_saga() -> None:
     esquemas = TestClient(criar_app()).get("/openapi.json").json()["components"]
     descricao = esquemas["schemas"]["PassoDaSagaResponse"]["properties"]["gatilho"][

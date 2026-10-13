@@ -18,7 +18,7 @@ from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
 )
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from tests.unitarios.fakes import FakeUnitOfWork
-from tests.unitarios.ordem_servico.test_saga import AGORA, saga_em
+from tests.unitarios.ordem_servico.saga_de_teste import AGORA, saga_em
 
 PRAZO = timedelta(seconds=120)
 DADOS = {"ordem_id": str(uuid4()), "motivo": "cancelamento"}
