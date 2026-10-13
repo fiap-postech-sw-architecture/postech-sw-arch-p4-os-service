@@ -281,13 +281,14 @@ class TestCicloDaOrdem:
 
         historico = api_client.get(f"{_OS}/{ordem_id}/historico", headers=headers)
         # O ator de cada linha e o sub do JWT de quem agiu ou o processo (RFC-004
-        # secao 7.2): a compensacao termina pelo consumidor, com o texto do pedido.
+        # secao 7.2): a OS cancelada deixa o sub de quem pediu o cancelamento
+        # (ADR-039), com o texto do pedido; o registro da saga e do consumidor.
         assert [
             (m["de"], m["para"], m["origem"], m["motivo"], m["ator"])
             for m in historico.json()["mudancas"]
         ] == [
             (None, "recebida", "atendimento", None, str(admin_user.id)),
-            ("recebida", "cancelada", "saga", "cliente desistiu", "consumidor"),
+            ("recebida", "cancelada", "saga", "cliente desistiu", str(admin_user.id)),
         ]
         assert [
             (p["gatilho"], p["ator"], p["motivo"]) for p in historico.json()["passos"]

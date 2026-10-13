@@ -16,6 +16,7 @@ from src.ordem_servico.dominio.resumos import (
     StatusPagamento,
     pagamento_confirmado,
     pagamento_exigido,
+    pagamento_no_estado,
     pagamento_solicitado,
 )
 from tests.fabricas import EXPIRA_EM, VALIDO_ATE
@@ -174,6 +175,19 @@ class TestCicloDoPagamento:
         solicitado = _pagamento()
 
         assert pagamento_confirmado(solicitado) == solicitado.confirmado()
+
+    @pytest.mark.parametrize(
+        "status", [StatusPagamento.SOLICITADO, StatusPagamento.CONFIRMADO]
+    )
+    def test_estado_com_transicao_propria_nao_passa_por_pagamento_no_estado(
+        self, status: StatusPagamento
+    ) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match=status.value):
+            pagamento_no_estado(_pagamento(), status)
+
+    def test_estado_depois_do_checkout_sem_resumo_levanta(self) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
+            pagamento_no_estado(None, StatusPagamento.ESTORNADO)
 
     def test_confirmado_sem_solicitado_levanta(self) -> None:
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):

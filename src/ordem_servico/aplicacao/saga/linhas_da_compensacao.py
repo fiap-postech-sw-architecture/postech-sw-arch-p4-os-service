@@ -62,15 +62,13 @@ def _compensacao(transicao: Transicao, ordem: OrdemDeServico) -> Pedido:
 def _ator_do_cancelamento(saga: Saga) -> str:
     """Quem cancelou a OS: o atendente que pediu (o ``sub`` do registro do pedido).
 
-    As demais compensacoes sao decisao do processo (ADR-039: o historico da OS
-    guarda o ``sub`` de quem agiu).
+    Sem o pedido de um atendente (as falhas de negocio), a decisao e do processo
+    (ADR-039: o historico da OS guarda o ``sub`` de quem agiu).
     """
-    if saga.motivo == MotivoCompensacao.CANCELAMENTO:
-        pedido = GatilhoDeProcesso.CANCELAMENTO_SOLICITADO.value
-        return next(
-            (p["ator"] for p in saga.passos if p["gatilho"] == pedido), ATOR_CONSUMIDOR
-        )
-    return ATOR_CONSUMIDOR
+    pedido = GatilhoDeProcesso.CANCELAMENTO_SOLICITADO.value
+    return next(
+        (p["ator"] for p in saga.passos if p["gatilho"] == pedido), ATOR_CONSUMIDOR
+    )
 
 
 def _falha_de_negocio(
