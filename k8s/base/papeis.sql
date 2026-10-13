@@ -31,7 +31,8 @@ REVOKE ALL ON DATABASE postgres FROM PUBLIC;
 
 -- Aplicacao (API, relay e consumidor): so DML nas tabelas que o dono criar.
 -- As tabelas nascem depois, no Job, e por isso o privilegio vem por default
--- privileges, que cobrem tambem a alembic_version lida pelo aguarda-migracao.
+-- privileges. Elas cobrem tambem a alembic_version, lida pelo aguarda-migracao:
+-- o env.py das migracoes tira a escrita dela a cada upgrade.
 CREATE ROLE os_app LOGIN PASSWORD :'senha_app';
 GRANT CONNECT ON DATABASE os TO os_app;
 GRANT USAGE ON SCHEMA public TO os_app;

@@ -74,6 +74,10 @@ def administrador(banco: Banco) -> Iterator[Engine]:
         engine.dispose()
 
 
+def _permitidos_em(tabela: str) -> tuple[str, ...]:
+    return ("SELECT",) if tabela == "alembic_version" else _DML
+
+
 def _negado(url: str, comando: str) -> None:
     """O ``comando``, com o papel da ``url``, e recusado por falta de privilegio."""
     engine = create_engine(url)
@@ -159,9 +163,10 @@ def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nenhum_outro_privilegio(
 
     nomes = {tabela for tabela, _ in tabelas}
     assert {"alembic_version", "outbox", "usuarios"} <= nomes
-    # DML em toda tabela, e nenhum TRUNCATE, REFERENCES nem TRIGGER.
+    # DML em toda tabela, e nenhum TRUNCATE, REFERENCES nem TRIGGER; a
+    # alembic_version, so leitura: quem a escreve e o Job de migracao.
     assert tabelas == {
-        (tabela, privilegio): privilegio in _DML
+        (tabela, privilegio): privilegio in _permitidos_em(tabela)
         for tabela in nomes
         for privilegio in (*_DML, *_OUTROS)
     }
@@ -181,6 +186,14 @@ def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nenhum_outro_privilegio(
         pytest.param("ALTER TABLE outbox ADD COLUMN intrusa int", id="altera-tabela"),
         pytest.param("CREATE INDEX ix_intrusa ON outbox (id)", id="cria-indice"),
         pytest.param("TRUNCATE outbox", id="trunca-tabela"),
+        pytest.param(
+            "INSERT INTO alembic_version VALUES ('zzz')", id="escreve-a-versao"
+        ),
+        pytest.param(
+            "UPDATE alembic_version SET version_num = 'zzz'", id="troca-a-versao"
+        ),
+        pytest.param("DELETE FROM alembic_version", id="apaga-a-versao"),
+        pytest.param("TRUNCATE alembic_version", id="trunca-a-versao"),
         pytest.param("CREATE SCHEMA intrusa", id="cria-schema"),
         pytest.param("CREATE EXTENSION pg_trgm", id="cria-extensao"),
         pytest.param("CREATE TEMP TABLE intrusa (id int)", id="cria-tabela-temporaria"),
