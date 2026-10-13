@@ -29,8 +29,16 @@ format:
 lint-arch:
 	$(PY) lint-imports
 
+# Os testes dos manifestos, do aguardar e dos papeis do banco entram no mesmo
+# mypy strict de src (a lista cresce; os demais testes ainda nao passam nele).
+TESTES_TIPADOS := tests/manifestos.py tests/migracoes.py \
+	tests/unitarios/test_manifestos.py tests/unitarios/test_contrato_dos_manifestos.py \
+	tests/unitarios/test_entrypoint.py tests/unitarios/test_scripts_ci.py \
+	tests/integracao/banco_do_manifesto.py tests/integracao/test_banco.py \
+	tests/integracao/test_banco_do_manifesto.py tests/integracao/test_log_do_init_do_banco.py
+
 typecheck:
-	$(PY) mypy src scripts
+	$(PY) mypy src scripts $(TESTES_TIPADOS)
 
 security:
 	$(PY) bandit -r src scripts -c pyproject.toml -q
