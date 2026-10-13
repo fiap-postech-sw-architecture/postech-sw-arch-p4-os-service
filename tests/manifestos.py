@@ -51,7 +51,7 @@ def literais_do_servico(
 ) -> dict[str, str]:
     """Os literais do ConfigMap ``os-service`` de uma kustomization."""
     documento = yaml.safe_load(kustomization.read_text())
-    gerador = next(
+    gerador: dict[str, Any] = next(
         (
             g
             for g in documento.get("configMapGenerator", [])

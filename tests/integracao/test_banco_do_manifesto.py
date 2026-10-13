@@ -27,19 +27,34 @@ from tests.migracoes import revisao_anterior, revisao_head
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-# Privilegio do papel conectado em cada tabela e sequencia do schema public.
-# MATERIALIZED: sem ele o planner pode avaliar a funcao de privilegio antes do
-# filtro e falhar num objeto de outro tipo ou de outro schema.
+    from sqlalchemy import Engine
+    from sqlalchemy.sql.elements import TextClause
+
+# Os privilegios de tabela que o papel da aplicacao pode ter: DML nas tabelas
+# do dono; nenhum dos outros (o TRUNCATE esvazia a tabela sem passar por DML).
+_DML = ("SELECT", "INSERT", "UPDATE", "DELETE")
+_OUTROS = ("TRUNCATE", "REFERENCES", "TRIGGER")
+# O papel do banco e a pergunta de privilegio de cada tabela e sequencia do
+# schema public. MATERIALIZED: sem ele o planner pode avaliar a funcao de
+# privilegio antes do filtro e falhar num objeto de outro tipo ou de outro schema.
 _PRIVILEGIO_NAS_TABELAS = text(
     "WITH t AS MATERIALIZED (SELECT oid, relname FROM pg_class WHERE relkind = 'r' "
     "AND relnamespace = 'public'::regnamespace) "
-    "SELECT relname, has_table_privilege(oid, 'SELECT,INSERT,UPDATE,DELETE') FROM t"
+    "SELECT relname, privilegio, has_table_privilege(:papel, oid, privilegio) "
+    "FROM t CROSS JOIN unnest(CAST(:privilegios AS text[])) AS privilegio"
 )
 _PRIVILEGIO_NAS_SEQUENCIAS = text(
     "WITH s AS MATERIALIZED (SELECT oid, relname FROM pg_class WHERE relkind = 'S' "
     "AND relnamespace = 'public'::regnamespace) "
-    "SELECT relname, has_sequence_privilege(oid, 'USAGE') FROM s"
+    "SELECT relname, privilegio, has_sequence_privilege(:papel, oid, privilegio) "
+    "FROM s CROSS JOIN unnest(CAST(:privilegios AS text[])) AS privilegio"
 )
+_ATRIBUTOS_DOS_PAPEIS = text(
+    "SELECT rolname, rolcanlogin, rolsuper, rolcreaterole, rolcreatedb, "
+    "rolreplication, rolbypassrls FROM pg_roles WHERE rolname = ANY(:papeis)"
+)
+_PAPEIS = ("os", "os_app", "os_exporter")
+_NEGADO = r"permission denied|must be owner"
 
 
 @pytest.fixture(scope="module")
@@ -47,6 +62,42 @@ def banco() -> Iterator[Banco]:
     """O banco do StatefulSet, ja migrado e semeado pelo Job (como no cluster)."""
     with subir_banco(migrar=True) as banco:
         yield banco
+
+
+@pytest.fixture(scope="module")
+def administrador(banco: Banco) -> Iterator[Engine]:
+    """O superusuario, so para perguntar ao catalogo o que cada papel pode."""
+    engine = create_engine(banco.url_do_superusuario())
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def _negado(url: str, comando: str) -> None:
+    """O ``comando``, com o papel da ``url``, e recusado por falta de privilegio."""
+    engine = create_engine(url)
+    try:
+        with (
+            engine.connect() as conexao,
+            pytest.raises(ProgrammingError, match=_NEGADO),
+        ):
+            conexao.execute(text(comando))
+    finally:
+        engine.dispose()
+
+
+def _privilegios(
+    administrador: Engine,
+    consulta: TextClause,
+    papel: str,
+    privilegios: tuple[str, ...],
+) -> dict[tuple[str, str], bool]:
+    with administrador.connect() as conexao:
+        linhas = conexao.execute(
+            consulta, {"papel": papel, "privilegios": list(privilegios)}
+        ).all()
+    return {(tabela, privilegio): permitido for tabela, privilegio, permitido in linhas}
 
 
 def test_nenhuma_senha_chega_ao_log_do_servidor(banco: Banco) -> None:
@@ -59,48 +110,149 @@ def test_nenhuma_senha_chega_ao_log_do_servidor(banco: Banco) -> None:
     assert [chave for chave, senha in banco.senhas.items() if senha in log] == []
 
 
-def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nao_cria_tabela(
-    banco: Banco,
+def test_papeis_fazem_login_e_nao_administram_nada(administrador: Engine) -> None:
+    with administrador.connect() as conexao:
+        atributos = {
+            papel: tuple(linha)
+            for papel, *linha in conexao.execute(
+                _ATRIBUTOS_DOS_PAPEIS, {"papeis": list(_PAPEIS)}
+            ).all()
+        }
+
+    # Login sim; superusuario, CREATEROLE, CREATEDB, replicacao e BYPASSRLS nao.
+    assert atributos == dict.fromkeys(
+        _PAPEIS, (True, False, False, False, False, False)
+    )
+
+
+def test_so_o_exporter_pertence_a_um_papel_e_e_o_pg_monitor(
+    administrador: Engine,
 ) -> None:
+    # A aplicacao fora do pg_write_all_data (escrita em qualquer tabela) e do
+    # pg_monitor; o dono sem membership nenhuma.
+    with administrador.connect() as conexao:
+        membros = conexao.execute(
+            text(
+                "SELECT membro.rolname, papel.rolname FROM pg_auth_members "
+                "JOIN pg_roles membro ON membro.oid = member "
+                "JOIN pg_roles papel ON papel.oid = roleid "
+                "WHERE membro.rolname = ANY(:papeis)"
+            ),
+            {"papeis": list(_PAPEIS)},
+        ).all()
+
+    assert [tuple(linha) for linha in membros] == [("os_exporter", "pg_monitor")]
+
+
+def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nenhum_outro_privilegio(
+    banco: Banco, administrador: Engine
+) -> None:
+    tabelas = _privilegios(
+        administrador, _PRIVILEGIO_NAS_TABELAS, "os_app", (*_DML, *_OUTROS)
+    )
+    sequencias = _privilegios(
+        administrador,
+        _PRIVILEGIO_NAS_SEQUENCIAS,
+        "os_app",
+        ("USAGE", "SELECT", "UPDATE"),
+    )
+
+    nomes = {tabela for tabela, _ in tabelas}
+    assert {"alembic_version", "outbox", "usuarios"} <= nomes
+    # DML em toda tabela, e nenhum TRUNCATE, REFERENCES nem TRIGGER.
+    assert tabelas == {
+        (tabela, privilegio): privilegio in _DML
+        for tabela in nomes
+        for privilegio in (*_DML, *_OUTROS)
+    }
+    # Sequencias: ler e usar, nao reposicionar.
+    assert {privilegio for (_, privilegio), ok in sequencias.items() if ok} == {
+        "USAGE",
+        "SELECT",
+    }
+    assert {nome for nome, _ in sequencias}
+
+
+@pytest.mark.parametrize(
+    "comando",
+    [
+        pytest.param("CREATE TABLE intrusa (id int)", id="cria-tabela"),
+        pytest.param("DROP TABLE outbox", id="apaga-tabela"),
+        pytest.param("ALTER TABLE outbox ADD COLUMN intrusa int", id="altera-tabela"),
+        pytest.param("CREATE INDEX ix_intrusa ON outbox (id)", id="cria-indice"),
+        pytest.param("TRUNCATE outbox", id="trunca-tabela"),
+        pytest.param("CREATE SCHEMA intrusa", id="cria-schema"),
+        pytest.param("CREATE EXTENSION pg_trgm", id="cria-extensao"),
+        pytest.param("CREATE ROLE intrusa LOGIN", id="cria-papel"),
+        pytest.param("SET ROLE os", id="assume-o-dono"),
+        pytest.param("COPY (SELECT 1) TO PROGRAM 'id'", id="copy-para-programa"),
+        pytest.param("SELECT pg_read_file('/etc/passwd')", id="le-arquivo-do-servidor"),
+    ],
+)
+def test_papel_da_aplicacao_nao_altera_schema_nem_chega_ao_servidor(
+    banco: Banco, comando: str
+) -> None:
+    _negado(banco.url_do("Deployment", "os-service-api", "api"), comando)
+
+
+@pytest.mark.parametrize(
+    "comando",
+    [
+        pytest.param("CREATE ROLE intrusa LOGIN", id="cria-papel"),
+        pytest.param("COPY (SELECT 1) TO PROGRAM 'id'", id="copy-para-programa"),
+        pytest.param("SELECT pg_read_file('/etc/passwd')", id="le-arquivo-do-servidor"),
+    ],
+)
+def test_dono_do_schema_nao_cria_papel_nem_chega_ao_servidor(
+    banco: Banco, comando: str
+) -> None:
+    _negado(banco.url_do("Job", "os-migracao", "migracao"), comando)
+
+
+def test_api_le_a_versao_do_banco(banco: Banco) -> None:
     engine = create_engine(banco.url_do("Deployment", "os-service-api", "api"))
     try:
         with engine.connect() as conexao:
-            tabelas = dict(conexao.execute(_PRIVILEGIO_NAS_TABELAS).all())
-            sequencias = dict(conexao.execute(_PRIVILEGIO_NAS_SEQUENCIAS).all())
             versao = conexao.execute(
                 text("SELECT version_num FROM alembic_version")
             ).scalar_one()
-            with pytest.raises(ProgrammingError, match="permission denied"):
-                conexao.execute(text("CREATE TABLE intrusa (id int)"))
-            conexao.rollback()
-            with pytest.raises(ProgrammingError, match="must be owner"):
-                conexao.execute(text("DROP TABLE outbox"))
     finally:
         engine.dispose()
 
-    # Todas as tabelas da migracao, inclusive a alembic_version, e a sequencia
-    # do id da outbox.
-    assert {"alembic_version", "outbox", "usuarios"} <= tabelas.keys()
-    assert all(tabelas.values()), tabelas
-    assert sequencias
-    assert all(sequencias.values()), sequencias
     assert versao == revisao_head()
 
 
-def test_papel_do_exporter_le_as_estatisticas_e_nenhuma_tabela(banco: Banco) -> None:
+@pytest.mark.parametrize(
+    "comando",
+    [
+        pytest.param("CREATE TABLE intrusa (id int)", id="cria-tabela"),
+        pytest.param("SELECT 1 FROM usuarios", id="le-tabela-da-aplicacao"),
+        pytest.param("SELECT 1 FROM alembic_version", id="le-a-versao"),
+        pytest.param("COPY (SELECT 1) TO PROGRAM 'id'", id="copy-para-programa"),
+        pytest.param("SELECT pg_read_file('/etc/passwd')", id="le-arquivo-do-servidor"),
+        pytest.param("SET ROLE os", id="assume-o-dono"),
+    ],
+)
+def test_papel_do_exporter_nao_le_tabela_nem_escreve_nem_chega_ao_servidor(
+    banco: Banco, comando: str
+) -> None:
+    _negado(banco.url_do_exporter(), comando)
+
+
+def test_papel_do_exporter_le_as_estatisticas_do_servidor(banco: Banco) -> None:
     engine = create_engine(banco.url_do_exporter())
     try:
         with engine.connect() as conexao:
-            # pg_monitor: le as estatisticas de todas as sessoes, inclusive o
-            # texto das consultas dos outros papeis.
+            sessoes = conexao.execute(
+                text("SELECT count(*) FROM pg_stat_activity")
+            ).scalar_one()
             monitor = conexao.execute(
                 text("SELECT pg_has_role('pg_monitor', 'USAGE')")
             ).scalar_one()
-            with pytest.raises(ProgrammingError, match="permission denied"):
-                conexao.execute(text("SELECT 1 FROM usuarios"))
     finally:
         engine.dispose()
 
+    assert sessoes >= 1
     assert monitor is True
 
 
