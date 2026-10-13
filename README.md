@@ -43,13 +43,12 @@ Fora de `development` e `test`, o boot aborta se a chave estiver ausente, ilegí
 
 ### Rotação da chave
 
-A chave privada não entra no repositório nem na imagem (`*.pem` e `*.key` são ignorados pelo git e pelo Docker); gere as chaves num diretório temporário e leve-as direto para o Secret:
+A chave privada não entra no repositório nem na imagem (`*.pem` e `*.key` são ignorados pelo git e pelo Docker); gere as chaves num diretório temporário, fora do repositório, e apague-o depois de atualizar o Secret. A pública da nova sai da `nova.pem`; a da atual sai da chave que está no Secret, gravada no mesmo diretório como `atual.pem`:
 
 ```bash
-chaves="$(mktemp -d)"   # fora do repositório; apague depois de atualizar o Secret
+chaves="$(mktemp -d)"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$chaves/nova.pem"
-openssl pkey -in "$chaves/nova.pem" -pubout     # pública da nova
-# A pública da atual sai da chave que está no Secret, gravada no mesmo diretório:
+openssl pkey -in "$chaves/nova.pem" -pubout
 openssl pkey -in "$chaves/atual.pem" -pubout
 ```
 
@@ -379,10 +378,12 @@ O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_
 
 Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/).
 
+O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, as migrações, o admin de demonstração, o relay e o consumidor; o `make compose-down` derruba tudo e apaga os volumes.
+
 ```bash
-make compose-up      # build da imagem, PostgreSQL 16, RabbitMQ, migrações, admin de demonstração, relay e consumidor
+make compose-up
 curl -s localhost:8000/api/v1/saude
-make compose-down    # derruba e apaga os volumes
+make compose-down
 ```
 
 A API sobe em `http://localhost:8000` (porta configurável com `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O RabbitMQ do compose carrega a topologia de `contratos/rabbitmq/` e cria os usuários dos três serviços; o console fica em `http://localhost:15674` (usuário `admin`, senha de demonstração em `contratos/rabbitmq/rabbitmq-admin.json`) e o AMQP em `localhost:5674`, fora das portas do compose do platform. O usuário de demonstração é `admin@pytstop.dev` com a senha de `ADMIN_PASSWORD` no `docker-compose.yml` (valores só de dev; o boot com `ENVIRONMENT=production` recusa esses literais).
@@ -394,16 +395,16 @@ TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
 curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN"
 ```
 
-Fora do compose (API, relay e consumidor no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`):
+Fora do compose (API, relay e consumidor no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`). A API sobe em `http://127.0.0.1:8000`; o relay e o consumidor ficam cada um num terminal, com o mesmo `.env` (o `METRICS_PORT` do consumidor tem de ser outro que o do relay):
 
 ```bash
 docker run -d --name os-postgres -p 127.0.0.1:5432:5432 \
   -e POSTGRES_DB=os -e POSTGRES_USER=pytstop -e POSTGRES_PASSWORD=pytstop postgres:16
 cp .env.example .env && set -a && . ./.env && set +a
 uv run alembic upgrade head && uv run python scripts/seed_admin.py
-uv run python -m src.main         # API em http://127.0.0.1:8000
-uv run python -m src.relay        # outro terminal, com o mesmo .env
-uv run python -m src.consumidor   # outro terminal (METRICS_PORT diferente do relay)
+uv run python -m src.main
+uv run python -m src.relay
+uv run python -m src.consumidor
 ```
 
 ## Implantação
@@ -424,11 +425,11 @@ Todo pod roda sem root (uid 1001; 999 no banco e 65534 no exporter), sem escalar
 
 ### Implantar no kind
 
-Com o platform clonado ao lado deste repositório:
+Com o platform clonado ao lado deste repositório, o primeiro comando sobe o cluster, a plataforma e os Secrets do serviço; o segundo implanta a imagem deste commit, com o Job de migração e os rollouts; o terceiro roda o smoke:
 
 ```bash
-make -C ../postech-sw-arch-p4-platform kind-up deploy     # cluster, plataforma e os Secrets do serviço
-make kind-deploy                                            # imagem deste commit, Job de migração e rollouts
+make -C ../postech-sw-arch-p4-platform kind-up deploy
+make kind-deploy
 ../postech-sw-arch-p4-platform/scripts/ci/smoke-servicos.sh os-service
 ```
 
@@ -475,16 +476,10 @@ A chave RSA do JWT gira pelas etapas da [rotação da chave](#rotação-da-chave
 
 ## Qualidade
 
-```bash
-make check   # uv.lock em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest
-make manifests  # kubeconform e trivy config dos três overlays de k8s/
-make audit   # pip-audit das dependências de runtime (com os extras da imagem)
-make smoke   # imagem pelo entrypoint real: readiness, login do admin semeado validado pelo JWKS
-             # (e a assinatura adulterada recusada), log de boot em JSON, a imagem de produção
-             # (usuário 1001, ENVIRONMENT=production, sem header server), relay e consumidor
-             # prontos (/metrics respondendo, outbox_pendentes numerico, consumidor inscrito
-             # em os.eventos com prefetch 1 no list_consumers), depois down -v
-```
+- `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
+- `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
+- `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
+- `make smoke`: a imagem pelo entrypoint real, com readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`), o relay e o consumidor prontos (`/metrics` respondendo, `outbox_pendentes` numérico, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), e depois `down -v`.
 
 `make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
