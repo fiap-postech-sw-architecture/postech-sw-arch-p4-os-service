@@ -180,22 +180,25 @@ class TestSecurityHeadersMiddleware:
         resp_openapi = client.get("/openapi.json")
         assert "Content-Security-Policy" not in resp_openapi.headers
 
+    @pytest.mark.parametrize("prefixo", ["/os", "/outro"])
     def test_swagger_atras_do_prefixo_da_borda_sem_csp_e_com_o_openapi_dele(
-        self,
+        self, prefixo: str
     ) -> None:
         # O app real no uvicorn com o --root-path do entrypoint (ROOT_PATH=/os
         # no cluster): o Kong tira o prefixo, o uvicorn o devolve ao path, e o
-        # Swagger precisa da excecao do CSP e do openapi.json sob o prefixo.
-        with servir(criar_app(), root_path="/os") as url:
+        # Swagger precisa da excecao do CSP e do openapi.json sob o prefixo. Um
+        # segundo prefixo prova que o middleware le o root_path do scope, e nao
+        # um /os fixo.
+        with servir(criar_app(), root_path=prefixo) as url:
             docs = httpx.get(f"{url}/docs")
             openapi = httpx.get(f"{url}/openapi.json")
             saude = httpx.get(f"{url}/api/v1/saude")
 
         assert docs.status_code == 200
         assert "Content-Security-Policy" not in docs.headers
-        assert "url: '/os/openapi.json'" in docs.text
+        assert f"url: '{prefixo}/openapi.json'" in docs.text
         assert "Content-Security-Policy" not in openapi.headers
-        assert openapi.json()["servers"] == [{"url": "/os"}]
+        assert openapi.json()["servers"] == [{"url": prefixo}]
         assert saude.status_code == 200
         assert saude.headers["Content-Security-Policy"] == "default-src 'none'"
 
