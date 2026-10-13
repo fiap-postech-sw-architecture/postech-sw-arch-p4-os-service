@@ -1,5 +1,6 @@
-"""Scripts do CI (``scripts/ci/``): o relatorio das imagens de terceiros dos
-manifestos, que nunca reprova o job."""
+"""Scripts do CI (``scripts/ci/``): a conferencia que estreita a excecao do
+trivy (KSV-0109) ao ``PASSWORD`` lido do ambiente, e o relatorio das imagens de
+terceiros dos manifestos, que nunca reprova o job."""
 
 from __future__ import annotations
 
@@ -7,8 +8,101 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 RAIZ = Path(__file__).resolve().parents[2]
+CONFERENCIA_DE_SENHAS = RAIZ / "scripts" / "ci" / "confere-senhas-do-papeis.sh"
 RELATORIO_TERCEIROS = RAIZ / "scripts" / "ci" / "relatorio-trivy-terceiros.sh"
+
+
+def _conferir(arquivo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - o script do proprio repositorio
+        ["/bin/bash", str(CONFERENCIA_DE_SENHAS), str(arquivo)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+
+def _script_de_papeis(tmp_path: Path, *linhas: str) -> Path:
+    arquivo = tmp_path / "papeis.sql"
+    arquivo.write_text(
+        "\\getenv senha_app POSTGRES_APP_PASSWORD\n" + "\n".join(linhas) + "\n"
+    )
+    return arquivo
+
+
+def test_o_papeis_sql_do_repositorio_so_le_senha_do_ambiente() -> None:
+    resultado = _conferir(RAIZ / "k8s" / "base" / "papeis.sql")
+
+    assert resultado.returncode == 0, resultado.stderr
+
+
+def test_o_make_manifests_roda_a_conferencia_dos_passwords() -> None:
+    # Sem esta chamada a conferencia existiria e o trivy seguiria deixando passar
+    # um PASSWORD literal no ConfigMap do papeis.sql.
+    receita = (RAIZ / "Makefile").read_text().split("\nmanifests:\n", 1)[1]
+
+    assert receita.startswith("\t@scripts/ci/confere-senhas-do-papeis.sh\n")
+
+
+@pytest.mark.parametrize(
+    "linha",
+    [
+        "CREATE ROLE os_app LOGIN PASSWORD '0f1e2d3c4b5a69788796a5b4c3d2e1f0';",
+        "CREATE ROLE os_app LOGIN password '0f1e';",
+        "ALTER ROLE os_app ENCRYPTED PASSWORD 'abc';",
+        "CREATE ROLE os_app LOGIN PASSWORD\n  'quebrada-em-duas-linhas';",
+        "CREATE ROLE os_app LOGIN PASSWORD NULL;",
+        "CREATE ROLE os_app LOGIN PASSWORD ':senha_app';",
+        "CREATE ROLE os_app LOGIN PASSWORD :'senha_app' || 'x';",
+    ],
+    ids=[
+        "literal",
+        "minusculo",
+        "encrypted",
+        "literal-na-linha-seguinte",
+        "null",
+        "variavel-entre-aspas",
+        "variavel-concatenada",
+    ],
+)
+def test_password_que_nao_vem_do_psql_reprova(tmp_path: Path, linha: str) -> None:
+    resultado = _conferir(_script_de_papeis(tmp_path, linha))
+
+    assert resultado.returncode == 1
+    assert "PASSWORD sem a variavel do psql" in resultado.stderr
+
+
+def test_variavel_que_o_script_nao_le_com_getenv_reprova(tmp_path: Path) -> None:
+    resultado = _conferir(
+        _script_de_papeis(tmp_path, "CREATE ROLE os_app LOGIN PASSWORD :'senha_dono';")
+    )
+
+    assert resultado.returncode == 1
+    assert "senha_dono nao e lida com \\getenv" in resultado.stderr
+
+
+def test_password_na_variavel_lida_do_ambiente_e_no_comentario_passa(
+    tmp_path: Path,
+) -> None:
+    arquivo = _script_de_papeis(
+        tmp_path,
+        "-- PASSWORD '0f1e' num comentario nao conta",
+        "CREATE ROLE os_app LOGIN PASSWORD :'senha_app';  -- PASSWORD 'outra'",
+        "ALTER ROLE os_app\n  PASSWORD :'senha_app';",
+    )
+
+    assert _conferir(arquivo).returncode == 0
+
+
+def test_script_sem_password_reprova_porque_nao_prova_nada(tmp_path: Path) -> None:
+    resultado = _conferir(_script_de_papeis(tmp_path, "SELECT 1;"))
+
+    assert resultado.returncode == 1
+    assert "nenhum PASSWORD" in resultado.stderr
+
 
 # O trivy de mentira repete o do CI: o relatorio sai no stdout e o codigo e 1
 # quando ha achado, salvo com --exit-code 0; a imagem de FALHA_EM nao chega a

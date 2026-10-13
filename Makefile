@@ -180,6 +180,7 @@ TRIVY_CONFIG := docker run --rm -i \
 # O render vai para uma variavel antes: num pipe, o sh sem pipefail esconderia
 # a falha do kustomize atras do kubeconform satisfeito com a entrada vazia.
 manifests:
+	@scripts/ci/confere-senhas-do-papeis.sh
 	@set -e; for overlay in kind kind-ci k3s; do \
 		echo ">> kubeconform e trivy: k8s/overlays/$$overlay"; \
 		manifestos="$$(kubectl kustomize "k8s/overlays/$$overlay")"; \

@@ -9,7 +9,9 @@ default ignore := false
 # KSV-0109 le o PASSWORD :'senha_...' do papeis.sql como senha gravada no
 # ConfigMap; o valor e uma variavel do psql, lida do ambiente do container do
 # banco (Secret os-postgres) pelo \getenv. So este ConfigMap: senha num outro
-# continua reprovando.
+# continua reprovando. A excecao vale para o ConfigMap inteiro, e por isso o
+# make manifests roda scripts/ci/confere-senhas-do-papeis.sh, que reprova um
+# PASSWORD literal no papeis.sql.
 ignore if {
 	input.ID == "KSV-0109"
 	startswith(input.Message, "ConfigMap 'os-postgres-init-")
