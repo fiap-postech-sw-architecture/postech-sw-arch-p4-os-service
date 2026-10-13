@@ -440,7 +440,7 @@ curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/cancelamento \
   -d '{"motivo": "Cliente vendeu o veículo"}' | jq '{status, etapa, motivo_cancelamento}'
 ```
 
-Antes do `ExecucaoIniciada` a resposta é `{"status": "aguardando_execucao", "etapa": "compensando", "motivo_cancelamento": "Cliente vendeu o veículo"}`; repetido o mesmo `POST` depois do início da execução, vem o 409 acima.
+Com a OS recém-aberta (sem resposta dos participantes ainda), a resposta é `{"status": "recebida", "etapa": "compensando", "motivo_cancelamento": "Cliente vendeu o veículo"}`; repetido o mesmo `POST`, vem outro 202, sem efeito, e depois do início da execução vem o 409 da tabela.
 
 - **Conflito de versão.** Quando o consumidor grava a mesma OS ou saga no meio, a requisição relê as duas e decide de novo, até três leituras (*reread value*, RFC-004 seção 4.5).
 - **O texto do atendente.** O `motivo_cancelamento` mudou de significado nesta versão: antes só tinha valor na OS já cancelada, e agora é o texto do pedido, guardado já no 202, enquanto a OS segue com o status anterior. Quem lê a OS vê o texto com a etapa `compensando`, e ele volta a `null` se o início da execução vencer o pedido. As OS canceladas antes continuam como estavam, com o texto no mesmo campo.
