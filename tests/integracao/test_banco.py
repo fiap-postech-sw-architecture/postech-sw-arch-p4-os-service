@@ -8,6 +8,7 @@ de esperar relogio.
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
@@ -183,6 +184,17 @@ def test_revisoes_da_imagem_trazem_a_head_e_as_anteriores() -> None:
     assert head == revisao_head()
     assert {head, revisao_anterior(), "001"} <= conhecidas
     assert "999" not in conhecidas
+
+
+def test_imagem_sem_nenhuma_migracao_recusa_em_vez_de_liberar_o_pod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "migrations" / "versions").mkdir(parents=True)
+    (tmp_path / "alembic.ini").write_text("[alembic]\nscript_location = migrations\n")
+    monkeypatch.setattr(banco, "_RAIZ", tmp_path)
+
+    with pytest.raises(RuntimeError, match="nenhuma migracao"):
+        banco.revisoes_da_imagem()
 
 
 def test_main_aguardar_usa_a_database_url_do_ambiente(

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError
 
 from src.compartilhado.infraestrutura.database import (
     criar_engine,
@@ -44,14 +44,15 @@ def revisoes_da_imagem() -> tuple[str, frozenset[str]]:
     config.set_main_option("script_location", str(_RAIZ / "migrations"))
     script = ScriptDirectory.from_config(config)
     head = script.get_current_head()
-    assert head is not None  # noqa: S101  # a imagem sempre traz migracoes
+    if head is None:
+        msg = "a imagem nao traz nenhuma migracao em migrations/versions"
+        raise RuntimeError(msg)
     return head, frozenset(revisao.revision for revisao in script.walk_revisions())
 
 
-def _causa(erro: SQLAlchemyError) -> str:
+def _causa(erro: DBAPIError) -> str:
     """Tipo e primeira linha do erro do driver, que nunca leva a senha."""
-    origem = getattr(erro, "orig", None) or erro
-    linhas = str(origem).strip().splitlines()
+    linhas = str(erro.orig).strip().splitlines()
     return f"{type(erro).__name__}: {linhas[0] if linhas else ''}"
 
 
@@ -62,7 +63,7 @@ def _motivo_da_espera(
     try:
         with engine.connect() as conexao:
             atual = MigrationContext.configure(conexao).get_current_revision()
-    except SQLAlchemyError as erro:
+    except DBAPIError as erro:
         return _causa(erro)
     if atual is None:
         return "no revision yet"
