@@ -42,6 +42,10 @@ _log = structlog.get_logger(__name__)
 # Temporario do container (/tmp): as probes do Kubernetes leem daqui.
 DIRETORIO_DE_SAUDE: Final = Path(tempfile.gettempdir())
 _PORTA_DE_METRICAS: Final = 9100
+# Idade maxima do heartbeat que a sonda de liveness do Kubernetes aceita
+# (k8s/base/relay.yaml e consumidor.yaml; um teste confere os manifestos): acima
+# dos cerca de 70 s de um publish preso no broker mudo (mensageria/amqp.py).
+IDADE_MAXIMA_DO_HEARTBEAT_S: Final = 90
 # Limpezas da outbox e de `mensagens_processadas`: uma vez por hora.
 INTERVALO_DE_LIMPEZA_S: Final = 3600.0
 # Relay e consumidor: no maximo 4 conexoes do pool cada, e nenhum comando nem
