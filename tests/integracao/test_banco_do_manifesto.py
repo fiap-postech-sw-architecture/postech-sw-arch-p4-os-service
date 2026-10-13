@@ -3,9 +3,11 @@
 O banco sobe com a imagem, o ambiente, o ``papeis.sql`` e o securityContext do
 StatefulSet de ``k8s/base`` (as senhas, que no cluster vem do Secret
 ``os-postgres``, sao geradas aqui), e o Job de migracao roda o comando dele como
-o dono. Prova o que os manifestos prometem (ADR-042): um papel por uso, nenhuma
-senha no log do servidor, nenhum ``trust`` no loopback, a sonda ``pg_isready``
-e a espera do ``aguarda-migracao``.
+o dono. Cada processo se conecta com a ``DATABASE_URL`` do proprio manifesto.
+Prova o que os manifestos prometem (ADR-042): um papel por uso, com o que cada
+um pode e nao pode, nenhum ``trust`` no loopback, a sonda ``pg_isready`` e a
+espera do ``aguarda-migracao``. O log do servidor fica em
+``test_log_do_init_do_banco.py``.
 """
 
 from __future__ import annotations
@@ -102,16 +104,6 @@ def _privilegios(
             consulta, {"papel": papel, "privilegios": list(privilegios)}
         ).all()
     return {(tabela, privilegio): permitido for tabela, privilegio, permitido in linhas}
-
-
-def test_nenhuma_senha_chega_ao_log_do_servidor(banco: Banco) -> None:
-    # O psql troca o \getenv pela senha antes de enviar o CREATE ROLE: so os
-    # SET do inicio do papeis.sql a tiram do log, com todo log ligado.
-    log = banco.log_do_servidor()
-
-    # O proprio SET sai no log: o log de comandos valia na sessao do script.
-    assert "statement: SET log_statement = 'none';" in log
-    assert [chave for chave, senha in banco.senhas.items() if senha in log] == []
 
 
 def test_papeis_fazem_login_e_nao_administram_nada(administrador: Engine) -> None:
