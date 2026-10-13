@@ -48,6 +48,7 @@ def test_entrypoint_passa_o_prefixo_da_borda_ao_uvicorn(
         "--port",
         "8000",
         "--no-proxy-headers",
+        "--no-access-log",
         "--no-server-header",
         "--root-path",
         prefixo,
