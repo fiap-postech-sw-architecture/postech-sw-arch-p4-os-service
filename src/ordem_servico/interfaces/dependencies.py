@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.compartilhado.infraestrutura.ambiente import prazo_de_resposta_da_saga
 from src.compartilhado.infraestrutura.observability import tracer_da_api
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
@@ -27,6 +26,7 @@ from src.ordem_servico.infraestrutura.consultas import (
     ConsultaAcompanhamentoSQLAlchemy,
     ConsultaDaOrdemSQLAlchemy,
 )
+from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 from src.ordem_servico.infraestrutura.rastreamento_da_saga import span_da_saga
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
@@ -34,11 +34,25 @@ from src.ordem_servico.infraestrutura.repository import (
 )
 
 if TYPE_CHECKING:
+    from datetime import timedelta
+
     from sqlalchemy.orm import Session
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
     from src.ordem_servico.aplicacao.ports import SagaRepository
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
+
+
+_prazo_de_resposta: timedelta | None = None
+
+
+def configurar_prazo_de_resposta(prazo: timedelta) -> None:
+    """Registra o prazo de resposta da saga lido no startup, uma vez so.
+
+    Sem o startup (os testes montam o app sem o lifespan), vale o do ambiente.
+    """
+    global _prazo_de_resposta  # noqa: PLW0603  # DI singleton configurado no startup
+    _prazo_de_resposta = prazo
 
 
 def _repo(session: Session) -> OrdemDeServicoRepository:
@@ -80,7 +94,8 @@ def obter_cancelar_ordem(session: Session) -> CancelarOrdem:
         uow=_uow(session),
         sagas=_sagas(session),
         contexto=ContextoDeEnvio(
-            prazo_de_resposta_da_saga(), span=span_da_saga(tracer_da_api())
+            _prazo_de_resposta or prazo_de_resposta_da_saga(),
+            span=span_da_saga(tracer_da_api()),
         ),
     )
 

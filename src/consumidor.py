@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from opentelemetry import trace
 
-from src.compartilhado.infraestrutura.ambiente import prazo_de_resposta_da_saga
 from src.compartilhado.infraestrutura.database import criar_session_factory
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     Consumidor,
@@ -34,6 +33,7 @@ from src.ordem_servico.aplicacao.saga.tratamento import (
     EventoAdiantadoError,
     EventoRecusadoError,
 )
+from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
     SagaSQLAlchemyRepository,

@@ -460,6 +460,47 @@ class TestMain:
 
         asyncio.run(_run())
 
+    def test_lifespan_guarda_o_prazo_de_resposta_lido_uma_vez(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A rota do cancelamento usa o valor lido no boot, nao o ambiente."""
+        from datetime import timedelta
+
+        from src.ordem_servico.interfaces import dependencies
+
+        monkeypatch.setattr(dependencies, "_prazo_de_resposta", None)
+        app = FastAPI()
+
+        async def _run() -> None:
+            with (
+                patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.compartilhado.infraestrutura.database.criar_engine"),
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_session_factory"
+                ),
+                patch("src.main.validar_segredos_no_startup"),
+                patch("src.main.validar_chave_jwt_no_startup"),
+                patch.dict(
+                    os.environ,
+                    {
+                        "DATABASE_URL": "postgresql://x:x@localhost:5432/x",
+                        "SAGA_PRAZO_RESPOSTA_SEGUNDOS": "45",
+                    },
+                    clear=False,
+                ),
+            ):
+                async with lifespan(app):
+                    pass
+
+        asyncio.run(_run())
+
+        assert dependencies._prazo_de_resposta == timedelta(seconds=45)
+
     def test_lifespan_aborta_com_prazo_de_resposta_invalido(self) -> None:
         """O cancelamento grava o prazo da primeira compensacao: o valor invalido
         de ``SAGA_PRAZO_RESPOSTA_SEGUNDOS`` aborta o boot, como no consumidor."""

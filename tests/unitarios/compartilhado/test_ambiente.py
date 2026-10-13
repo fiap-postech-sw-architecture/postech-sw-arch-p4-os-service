@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 import pytest
 
 from src.compartilhado.infraestrutura.ambiente import (
     inteiro_do_ambiente,
     numero_do_ambiente,
-    prazo_de_resposta_da_saga,
 )
 
 
@@ -56,23 +53,3 @@ def test_numero_invalido_aborta_o_boot(
 
     with pytest.raises(RuntimeError, match="OUTBOX_POLL_SEGUNDOS"):
         numero_do_ambiente("OUTBOX_POLL_SEGUNDOS", 5.0, minimo=0.1)
-
-
-def test_prazo_de_resposta_da_saga_tem_padrao_de_120_s(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("SAGA_PRAZO_RESPOSTA_SEGUNDOS", raising=False)
-    assert prazo_de_resposta_da_saga() == timedelta(seconds=120)
-
-    monkeypatch.setenv("SAGA_PRAZO_RESPOSTA_SEGUNDOS", "1")
-    assert prazo_de_resposta_da_saga() == timedelta(seconds=1)
-
-
-@pytest.mark.parametrize("valor", ["0", "-1", "2m"])
-def test_prazo_de_resposta_invalido_aborta_o_boot(
-    monkeypatch: pytest.MonkeyPatch, valor: str
-) -> None:
-    monkeypatch.setenv("SAGA_PRAZO_RESPOSTA_SEGUNDOS", valor)
-
-    with pytest.raises(RuntimeError, match="SAGA_PRAZO_RESPOSTA_SEGUNDOS"):
-        prazo_de_resposta_da_saga()
