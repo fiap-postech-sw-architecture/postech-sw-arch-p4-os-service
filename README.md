@@ -472,7 +472,33 @@ Os comandos usam o contexto do kind; no k3s, troque o `--context`. O pod lê o S
 
 3. Reinicie quem usa o papel: o `os_app`, os Deployments (`kubectl --context kind-pytstop-p4 -n pytstop-os rollout restart deployment`); o `os_exporter`, o StatefulSet do banco, de que o exporter é sidecar; o `os`, ninguém, porque o Job a relê na próxima implantação; o `postgres`, o StatefulSet do banco, que lê a senha dele só no start (sem o restart, a troca seguinte não autentica). Até o restart, conexão nova com a senha antiga é recusada.
 
-A chave RSA do JWT gira pelas etapas da [rotação da chave](#rotação-da-chave), com as chaves de cada etapa no Secret `os-jwt` e um `rollout restart deployment/os-service-api` a cada etapa; o JWKS pela borda fica em `https://localhost/os/.well-known/jwks.json`. A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ilegíveis os dados pessoais já cifrados. E a `ADMIN_PASSWORD` (Secret `os-admin`) não gira pelo Secret: a semente só cria o admin que ainda não existe.
+A chave RSA do JWT gira pelas etapas da [rotação da chave](#rotação-da-chave), e cada etapa repete os mesmos três passos, com `$chaves` o diretório da rotação:
+
+1. Grave as duas chaves da etapa no Secret `os-jwt`. Os PEM entram pelo ambiente do `jq`, nunca por argumento, que fica no `ps` e no pedido ao apiserver. `privada` é o arquivo da `JWT_PRIVATE_KEY` e `anterior` é a pública da `JWT_PREVIOUS_PUBLIC_KEY`, vazia na etapa 3. O exemplo é a etapa 1; nas outras só as duas primeiras linhas mudam, como na tabela da rotação (etapa 2: `nova.pem` e a pública da `atual.pem`; etapa 3: `nova.pem` e `anterior=""`):
+
+   ```bash
+   privada="$chaves/atual.pem"
+   anterior="$(openssl pkey -in "$chaves/nova.pem" -pubout)"
+   kubectl --context kind-pytstop-p4 -n pytstop-os get secret os-jwt -o json \
+     | PRIVADA="$(cat "$privada")" ANTERIOR="$anterior" \
+       jq '.data.JWT_PRIVATE_KEY = (env.PRIVADA | @base64) | .data.JWT_PREVIOUS_PUBLIC_KEY = (env.ANTERIOR | @base64)' \
+     | kubectl --context kind-pytstop-p4 replace -f -
+   ```
+
+2. Reinicie a API e espere o rollout:
+
+   ```bash
+   kubectl --context kind-pytstop-p4 -n pytstop-os rollout restart deployment/os-service-api
+   kubectl --context kind-pytstop-p4 -n pytstop-os rollout status deployment/os-service-api
+   ```
+
+3. Espere os 10 min do cache do JWKS nos consumidores e confira o `kid` pela borda antes da etapa seguinte; a primeira chave da lista é a que assina:
+
+   ```bash
+   curl -sk https://localhost/os/.well-known/jwks.json | jq '.keys[].kid'
+   ```
+
+A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ilegíveis os dados pessoais já cifrados. E a `ADMIN_PASSWORD` (Secret `os-admin`) não gira pelo Secret: a semente só cria o admin que ainda não existe.
 
 ## Qualidade
 
