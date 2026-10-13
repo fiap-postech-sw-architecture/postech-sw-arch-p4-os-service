@@ -23,6 +23,12 @@ CREATE ROLE os LOGIN PASSWORD :'senha_dono';
 ALTER DATABASE os OWNER TO os;
 ALTER SCHEMA public OWNER TO os;
 
+-- O PUBLIC tem CONNECT e TEMPORARY em todo banco novo: sem tirar, o GRANT
+-- CONNECT abaixo nao diz nada, e qualquer papel entra no banco postgres e cria
+-- tabela temporaria. Cada papel recebe so o CONNECT de que precisa.
+REVOKE ALL ON DATABASE os FROM PUBLIC;
+REVOKE ALL ON DATABASE postgres FROM PUBLIC;
+
 -- Aplicacao (API, relay e consumidor): so DML nas tabelas que o dono criar.
 -- As tabelas nascem depois, no Job, e por isso o privilegio vem por default
 -- privileges, que cobrem tambem a alembic_version lida pelo aguarda-migracao.
@@ -36,4 +42,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE os IN SCHEMA public
 
 -- postgres_exporter, sidecar do banco: estatisticas do servidor, nenhuma tabela.
 CREATE ROLE os_exporter LOGIN PASSWORD :'senha_exporter';
+GRANT CONNECT ON DATABASE os TO os_exporter;
 GRANT pg_monitor TO os_exporter;

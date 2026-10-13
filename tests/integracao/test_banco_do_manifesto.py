@@ -183,6 +183,7 @@ def test_papel_da_aplicacao_faz_dml_em_toda_tabela_e_nenhum_outro_privilegio(
         pytest.param("TRUNCATE outbox", id="trunca-tabela"),
         pytest.param("CREATE SCHEMA intrusa", id="cria-schema"),
         pytest.param("CREATE EXTENSION pg_trgm", id="cria-extensao"),
+        pytest.param("CREATE TEMP TABLE intrusa (id int)", id="cria-tabela-temporaria"),
         pytest.param("CREATE ROLE intrusa LOGIN", id="cria-papel"),
         pytest.param("SET ROLE os", id="assume-o-dono"),
         pytest.param("COPY (SELECT 1) TO PROGRAM 'id'", id="copy-para-programa"),
@@ -209,6 +210,41 @@ def test_dono_do_schema_nao_cria_papel_nem_chega_ao_servidor(
     _negado(banco.url_do("Job", "os-migracao", "migracao"), comando)
 
 
+@pytest.mark.parametrize(
+    ("papel", "banco_alvo", "privilegio", "permitido"),
+    [
+        pytest.param("os", "os", "CONNECT", True, id="dono-conecta-no-proprio-banco"),
+        pytest.param("os", "os", "CREATE", True, id="dono-cria-no-proprio-banco"),
+        pytest.param("os", "postgres", "CONNECT", False, id="dono-fora-do-postgres"),
+        pytest.param("os_app", "os", "CONNECT", True, id="app-conecta"),
+        pytest.param(
+            "os_app", "os", "TEMPORARY", False, id="app-sem-tabela-temporaria"
+        ),
+        pytest.param("os_app", "os", "CREATE", False, id="app-sem-create-no-banco"),
+        pytest.param("os_app", "postgres", "CONNECT", False, id="app-fora-do-postgres"),
+        pytest.param("os_exporter", "os", "CONNECT", True, id="exporter-conecta"),
+        pytest.param(
+            "os_exporter", "os", "TEMPORARY", False, id="exporter-sem-tabela-temporaria"
+        ),
+        pytest.param(
+            "os_exporter", "postgres", "CONNECT", False, id="exporter-fora-do-postgres"
+        ),
+    ],
+)
+def test_so_o_dono_tem_mais_que_o_connect_no_banco(
+    administrador: Engine, papel: str, banco_alvo: str, privilegio: str, permitido: bool
+) -> None:
+    # O PUBLIC tem CONNECT e TEMPORARY em todo banco novo, e o GRANT CONNECT do
+    # papeis.sql nao diria nada se o script nao os tirasse.
+    with administrador.connect() as conexao:
+        tem = conexao.execute(
+            text("SELECT has_database_privilege(:papel, :banco, :privilegio)"),
+            {"papel": papel, "banco": banco_alvo, "privilegio": privilegio},
+        ).scalar_one()
+
+    assert tem is permitido
+
+
 def test_api_le_a_versao_do_banco(banco: Banco) -> None:
     engine = create_engine(banco.url_do("Deployment", "os-service-api", "api"))
     try:
@@ -226,6 +262,7 @@ def test_api_le_a_versao_do_banco(banco: Banco) -> None:
     "comando",
     [
         pytest.param("CREATE TABLE intrusa (id int)", id="cria-tabela"),
+        pytest.param("CREATE TEMP TABLE intrusa (id int)", id="cria-tabela-temporaria"),
         pytest.param("SELECT 1 FROM usuarios", id="le-tabela-da-aplicacao"),
         pytest.param("SELECT 1 FROM alembic_version", id="le-a-versao"),
         pytest.param("COPY (SELECT 1) TO PROGRAM 'id'", id="copy-para-programa"),
