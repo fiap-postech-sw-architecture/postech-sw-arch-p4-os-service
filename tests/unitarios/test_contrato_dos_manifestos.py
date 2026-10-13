@@ -378,3 +378,70 @@ def test_politica_do_banco_libera_o_namespace_no_5432_e_so_o_prometheus_no_expor
     assert [_par(item) for item in metricas["from"]] == [_PROMETHEUS]
     assert metricas["ports"] == [{"port": 9187, "protocol": "TCP"}]
     assert {5432, 9187} <= _portas_dos_workloads(overlay)["os-postgres"]
+
+
+# O CIDR de pods de cada cluster: o Kong chega a API com o IP de um pod dele, e
+# o X-Forwarded-For que ele manda vale como IP do cliente so se vier desta rede.
+CIDR_DE_PODS = {
+    "kind": "10.244.0.0/16",
+    "kind-ci": "10.244.0.0/16",
+    "k3s": "10.42.0.0/16",
+}
+
+
+def _configmap_do_servico(overlay: str) -> dict[str, str]:
+    (configmap,) = (
+        c
+        for c in do_render_por_tipo(overlay, "ConfigMap")
+        if c["metadata"]["name"].startswith("os-service-")
+    )
+    return dict(configmap["data"])
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_confianca_no_x_forwarded_for_e_so_do_cidr_de_pods_do_cluster(
+    overlay: str,
+) -> None:
+    configuracao = _configmap_do_servico(overlay)
+
+    assert configuracao["TRUSTED_PROXIES"] == CIDR_DE_PODS[overlay]
+    assert "*" not in configuracao["TRUSTED_PROXIES"]
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_root_path_e_o_prefixo_que_a_borda_roteia_e_producao_nao_cai_em_dev(
+    overlay: str,
+) -> None:
+    configuracao = _configmap_do_servico(overlay)
+    prefixos = {
+        "/" + caminho["path"].split("/")[1]
+        for ingress in do_render_por_tipo(overlay, "Ingress")
+        for regra in ingress["spec"]["rules"]
+        for caminho in regra["http"]["paths"]
+    }
+
+    assert prefixos == {"/os"}
+    assert configuracao["ROOT_PATH"] == "/os"
+    assert configuracao["ENVIRONMENT"] == "production"
+
+
+@pytest.mark.parametrize(
+    ("overlay", "maximo_da_api", "disco_do_banco"),
+    [
+        pytest.param("kind", 2, "1Gi", id="kind"),
+        pytest.param("kind-ci", 1, "1Gi", id="kind-ci"),
+        pytest.param("k3s", 3, "5Gi", id="k3s"),
+    ],
+)
+def test_overlay_dimensiona_a_api_e_o_disco_do_banco(
+    overlay: str, maximo_da_api: int, disco_do_banco: str
+) -> None:
+    hpa = do_render(overlay, "HorizontalPodAutoscaler", "os-service-api")
+    banco = do_render(overlay, "StatefulSet", "os-postgres")
+
+    assert (hpa["spec"]["minReplicas"], hpa["spec"]["maxReplicas"]) == (
+        1,
+        maximo_da_api,
+    )
+    (volume,) = banco["spec"]["volumeClaimTemplates"]
+    assert volume["spec"]["resources"]["requests"]["storage"] == disco_do_banco
