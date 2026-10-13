@@ -25,6 +25,7 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
 )
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
+    InvarianteDaSagaError,
     MotivoCompensacao,
     TransicaoDaSagaInvalidaError,
     pecas_dos_itens,
@@ -213,7 +214,7 @@ def conferir_estado(saga: LeituraDaSaga) -> None:
     sempre nela.
 
     Raises:
-        ValueError: estado contraditorio.
+        InvarianteDaSagaError: estado contraditorio.
     """
     em_voo = saga.comando_em_voo is not None
     com_prazo = saga.prazo_resposta_em is not None
@@ -233,4 +234,4 @@ def conferir_estado(saga: LeituraDaSaga) -> None:
         msg = "a falha so existe em falha_na_compensacao, e sempre nela"
     else:
         return
-    raise ValueError(msg)
+    raise InvarianteDaSagaError(msg)

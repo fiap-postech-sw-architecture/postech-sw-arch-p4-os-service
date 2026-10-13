@@ -24,7 +24,7 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
-from tests.fabricas import ATOR_PROCESSO, ordem_em
+from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
 from tests.unitarios.ordem_servico.cenario_da_saga import (
     COMPENSACOES,
     RESPONDE,
@@ -642,3 +642,89 @@ def test_transicao_da_compensacao_sai_no_log_com_o_motivo(
             "tipo": "OrcamentoRecusado",
         }
     ]
+
+
+def test_estorno_recusado_leva_a_saga_a_falha_com_a_causa_no_tratamento_e_no_aviso(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A saga parada no estorno e o que o alerta "Saga parada" mostra: a causa vai
+    # ao log em aviso e ao tratamento (o span), sem o texto do provedor.
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    cenario = CenarioDaSaga.em_compensacao(
+        COMPENSACOES[1:], status=S.AGUARDANDO_PAGAMENTO
+    )
+
+    with capture_logs() as logs:
+        tratamento = cenario.orquestrador.tratar(
+            evento(
+                "EstornoDePagamentoFalhou",
+                cenario.ordem_id,
+                causation_id=_envio_pendente(cenario),
+                motivo="Pagamento fora do prazo de estorno do provedor.",
+            )
+        )
+
+    assert tratamento == Tratamento(
+        Desfecho.PROCESSADA, E.COMPENSANDO, E.FALHA_NA_COMPENSACAO, "estorno_recusado"
+    )
+    assert logs == [
+        {
+            "event": "saga transition",
+            "log_level": "warning",
+            "etapa": "compensando",
+            "etapa_nova": "falha_na_compensacao",
+            "status": "aguardando_pagamento",
+            "motivo": "cancelamento",
+            "falha": "estorno_recusado",
+            "correlation_id": str(cenario.ordem_id),
+            "tipo": "EstornoDePagamentoFalhou",
+        }
+    ]
+    assert "provedor" not in str(logs)
+
+
+def test_transicao_sem_falha_nao_leva_a_chave_falha_no_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    cenario = CenarioDaSaga.em("aguardando_decisao")
+
+    with capture_logs() as logs:
+        tratamento = cenario.receber("OrcamentoRecusado")
+
+    assert tratamento.falha is None
+    assert "falha" not in logs[0]
+
+
+def test_cancelamento_pelo_atendente_deixa_o_sub_dele_no_historico_da_os() -> None:
+    # ADR-039: o historico da OS guarda o ator de cada transicao, e o
+    # cancelamento deixa o sub de quem pediu (nao o do processo).
+    cenario = CenarioDaSaga.em("aguardando_decisao")
+    cenario.cancelar("Cliente vendeu o carro")
+
+    _responder_ate_o_fim(cenario)
+
+    cancelada = cenario.ordem.historico[-1]
+    assert (cancelada.para, cancelada.origem.value) == (S.CANCELADA, "saga")
+    assert cancelada.ator == ATOR_ATENDENTE
+    assert cenario.saga.passos[-1]["ator"] == "consumidor"
+
+
+def test_falha_de_negocio_cancela_a_os_em_nome_do_processo() -> None:
+    cenario = CenarioDaSaga.em("aguardando_decisao")
+    cenario.receber("OrcamentoRecusado")
+
+    _responder_ate_o_fim(cenario)
+
+    assert cenario.ordem.historico[-1].ator == "consumidor"
+
+
+def test_cancelamento_sem_o_registro_do_pedido_cai_no_processo() -> None:
+    # Saga reidratada de uma linha sem o registro do pedido: sem sub a dizer.
+    cenario = CenarioDaSaga.em_compensacao(
+        COMPENSACOES[4:], status=S.AGUARDANDO_APROVACAO
+    )
+
+    _responder_ate_o_fim(cenario)
+
+    assert cenario.ordem.historico[-1].ator == "consumidor"

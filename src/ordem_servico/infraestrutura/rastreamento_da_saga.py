@@ -14,8 +14,9 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from opentelemetry import trace
-from opentelemetry.trace import Link, SpanKind
+from opentelemetry.trace import Link, SpanKind, StatusCode
 
+from src.compartilhado.dominio.exceptions import DomainException
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     contexto_dos_cabecalhos,
 )
@@ -46,7 +47,17 @@ def span_da_saga(tracer: Tracer) -> SpanDaSaga:
             links=[Link(disparo)] if disparo.is_valid else [],
             record_exception=False,
             set_status_on_exception=False,
-        ):
-            yield
+        ) as span:
+            try:
+                yield
+            except DomainException:
+                # Recusa de negocio (404, 409, 422): resposta esperada, e a
+                # mensagem pode ecoar o que o cliente enviou.
+                raise
+            except Exception as exc:
+                # Falha inesperada (banco, contrato da outbox, invariante): o
+                # span marca o erro com o tipo, sem a mensagem nem o traceback.
+                span.set_status(StatusCode.ERROR, type(exc).__name__)
+                raise
 
     return abrir

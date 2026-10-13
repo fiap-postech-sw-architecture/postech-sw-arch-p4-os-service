@@ -111,6 +111,35 @@ def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
     }
 
 
+def test_handler_marca_a_falha_da_compensacao_no_span(
+    monkeypatch: pytest.MonkeyPatch, rastreador: Rastreador
+) -> None:
+    tratamento = Tratamento(
+        Desfecho.PROCESSADA,
+        EtapaSaga.COMPENSANDO,
+        EtapaSaga.FALHA_NA_COMPENSACAO,
+        "estorno_recusado",
+    )
+    monkeypatch.setattr(
+        processo_consumidor, "OrquestradorDaSaga", _OrquestradorFalso(tratamento)
+    )
+
+    with rastreador.tracer.start_as_current_span("process EstornoDePagamentoFalhou"):
+        processo_consumidor.tratar_evento_da_saga(
+            _mensagem(),
+            TransacaoDaMensagem(MagicMock()),
+            prazo_resposta=timedelta(seconds=9),
+        )
+
+    (span,) = rastreador.spans()
+    assert span.attributes == {
+        "pytstop.saga.etapa": "compensando",
+        "pytstop.saga.etapa_nova": "falha_na_compensacao",
+        "pytstop.saga.desfecho": "processada",
+        "pytstop.saga.falha": "estorno_recusado",
+    }
+
+
 def test_handler_marca_o_adiantado_no_span_e_relanca(
     monkeypatch: pytest.MonkeyPatch, rastreador: Rastreador
 ) -> None:

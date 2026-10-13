@@ -135,15 +135,19 @@ class OrquestradorDaSaga:
         self._aplicar(evento, saga, ordem, marcos)
         self._ordens.salvar(ordem)
         self._sagas.salvar(saga)
-        _log.info(
+        # A saga parada na compensacao pede atencao (alerta "Saga parada"): aviso,
+        # com a causa. O texto do motivo do provedor nunca vai ao log.
+        parada = saga.etapa is EtapaSaga.FALHA_NA_COMPENSACAO
+        (_log.warning if parada else _log.info)(
             "saga transition",
             etapa=etapa.value,
             etapa_nova=saga.etapa.value,
             status=ordem.status.value,
             motivo=saga.motivo,
+            **({"falha": saga.falha} if parada else {}),
             **contexto,
         )
-        return Tratamento(Desfecho.PROCESSADA, etapa, saga.etapa)
+        return Tratamento(Desfecho.PROCESSADA, etapa, saga.etapa, saga.falha)
 
     def _ler(self, evento: MensagemRecebida) -> tuple[Saga, OrdemDeServico]:
         """Saga e OS do ``correlation_id``, conferido contra o ``ordem_id``."""

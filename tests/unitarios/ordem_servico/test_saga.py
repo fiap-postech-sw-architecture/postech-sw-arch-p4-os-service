@@ -29,6 +29,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
     Gatilho,
     GatilhoDeProcesso,
+    InvarianteDaSagaError,
     MotivoCompensacao,
     SagaIniciadaEvent,
     Transicao,
@@ -308,7 +309,7 @@ class TestInvariantes:
         ],
     )
     def test_estado_contraditorio_nao_monta(self, campos: dict[str, Any]) -> None:
-        with pytest.raises(ValueError, match=r"prazo|reenvios"):
+        with pytest.raises(InvarianteDaSagaError, match=r"prazo|reenvios"):
             saga_em("aguardando_orcamento", **campos)
 
     @pytest.mark.parametrize(
@@ -323,7 +324,9 @@ class TestInvariantes:
     ) -> None:
         # RFC-004 secao 4.7: a retomada reenvia o comando guardado, e o `prazos`
         # nao age sobre a saga parada.
-        with pytest.raises(ValueError, match="guarda o comando em voo, sem prazo"):
+        with pytest.raises(
+            InvarianteDaSagaError, match="guarda o comando em voo, sem prazo"
+        ):
             saga_em("falha_na_compensacao", **campos)
 
     def test_todo_mutador_termina_conferindo_as_invariantes(
@@ -376,7 +379,7 @@ class TestInvariantes:
     def test_compensacao_exige_motivo_e_plano(
         self, etapa: str, campos: dict[str, Any]
     ) -> None:
-        with pytest.raises(ValueError, match=etapa):
+        with pytest.raises(InvarianteDaSagaError, match=etapa):
             saga_em(etapa, **campos)
 
     @pytest.mark.parametrize(
@@ -405,7 +408,7 @@ class TestInvariantes:
     def test_plano_e_falha_so_onde_cabem(
         self, etapa: str, campos: dict[str, Any], erro: str
     ) -> None:
-        with pytest.raises(ValueError, match=erro):
+        with pytest.raises(InvarianteDaSagaError, match=erro):
             saga_em(etapa, **campos)
 
 

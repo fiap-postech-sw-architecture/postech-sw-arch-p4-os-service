@@ -22,11 +22,16 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class Tratamento:
-    """Desfecho do evento e a etapa antes e depois dele (span e log)."""
+    """Desfecho do evento e a etapa antes e depois dele (span e log).
+
+    ``falha`` e a da compensacao quando o evento levou a saga a
+    ``falha_na_compensacao`` (``estorno_recusado``): o span e o log dizem a causa.
+    """
 
     desfecho: Desfecho
     etapa: EtapaSaga
     etapa_nova: EtapaSaga
+    falha: str | None = None
 
 
 class EventoAdiantadoError(FalhaTransitoriaError):

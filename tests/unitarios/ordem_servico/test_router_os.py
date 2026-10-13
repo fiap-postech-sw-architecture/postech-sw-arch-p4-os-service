@@ -21,7 +21,7 @@ from src.compartilhado.interfaces.dependencies import obter_session
 from src.main import criar_app
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
-from src.ordem_servico.aplicacao.saga.modelo import Envio
+from src.ordem_servico.aplicacao.saga.modelo import Envio, InvarianteDaSagaError
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
     CANCELAMENTO_RECUSADO,
@@ -453,6 +453,42 @@ class TestCancelamento:
         assert resp.status_code == 404
         assert resp.json()["erro"]["codigo"] == "ENTIDADE_NAO_ENCONTRADA"
         assert ordem.status is estado
+
+    @pytest.mark.usefixtures("client")
+    def test_invariante_da_saga_violada_e_500_sem_o_texto_do_estado(
+        self,
+        repo: RepoEmMemoria,
+        sagas: SagasEmMemoria,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Estado contraditorio da saga e bug do servidor, nao entrada invalida:
+        # nao vira o 422 VALOR_INVALIDO com o texto do estado interno.
+        ordem = ordem_em(StatusOrdem.EM_DIAGNOSTICO)
+        repo.ordens[ordem.id] = ordem
+        sagas.sagas[ordem.id] = _saga_aberta(ordem.id, ordem.criado_em)
+        interno = "falha_na_compensacao guarda o comando em voo, sem prazo"
+
+        def _viola(_saga: object) -> None:
+            raise InvarianteDaSagaError(interno)
+
+        monkeypatch.setattr(
+            "src.ordem_servico.aplicacao.saga.saga.conferir_estado", _viola
+        )
+        app = criar_app()
+        app.dependency_overrides[obter_session] = lambda: MagicMock()
+        app.dependency_overrides[obter_usuario_atual] = lambda: {
+            "sub": "u-123",
+            "papel": "atendente",
+            "type": "access",
+        }
+
+        resp = TestClient(app, raise_server_exceptions=False).post(
+            f"{_BASE}/{ordem.id}/cancelamento", json={"motivo": "x"}
+        )
+
+        assert resp.status_code == 500
+        assert resp.json()["erro"]["codigo"] == "ERRO_INTERNO"
+        assert interno not in resp.text
 
     def test_pedido_repetido_na_compensacao_202_com_a_etapa_sem_efeito(
         self, client: TestClient, repo: RepoEmMemoria, sagas: SagasEmMemoria

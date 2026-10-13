@@ -22,6 +22,7 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
 from src.ordem_servico.aplicacao.saga.modelo import (
     ATOR_CONSUMIDOR,
     EtapaSaga,
+    GatilhoDeProcesso,
     MotivoCompensacao,
 )
 from src.ordem_servico.dominio.historico import OrigemMudanca
@@ -56,6 +57,20 @@ def _compensacao(transicao: Transicao, ordem: OrdemDeServico) -> Pedido:
     marcos = MarcosDaOrdem.da_ordem(ordem)
     dados = dados_da_compensacao(transicao.comando, ordem.id, transicao.motivo, marcos)
     return transicao.comando, dados
+
+
+def _ator_do_cancelamento(saga: Saga) -> str:
+    """Quem cancelou a OS: o atendente que pediu (o ``sub`` do registro do pedido).
+
+    As demais compensacoes sao decisao do processo (ADR-039: o historico da OS
+    guarda o ``sub`` de quem agiu).
+    """
+    if saga.motivo == MotivoCompensacao.CANCELAMENTO:
+        pedido = GatilhoDeProcesso.CANCELAMENTO_SOLICITADO.value
+        return next(
+            (p["ator"] for p in saga.passos if p["gatilho"] == pedido), ATOR_CONSUMIDOR
+        )
+    return ATOR_CONSUMIDOR
 
 
 def _falha_de_negocio(
@@ -98,7 +113,7 @@ def _resposta_da_compensacao(
         # Em compensacao a saga sempre tem o motivo (``conferir_estado``).
         rotulo = ROTULO_DO_MOTIVO[MotivoCompensacao(cast("str", saga.motivo))]
         motivo = ordem.motivo_cancelamento or rotulo
-        ordem.cancelar(motivo, OrigemMudanca.SAGA, ator=ATOR_CONSUMIDOR)
+        ordem.cancelar(motivo, OrigemMudanca.SAGA, ator=_ator_do_cancelamento(saga))
     return _compensacao(transicao, ordem)
 
 

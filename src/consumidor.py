@@ -88,6 +88,8 @@ def tratar_evento_da_saga(
             "pytstop.saga.desfecho": tratamento.desfecho.value,
         }
     )
+    if tratamento.falha is not None:
+        span.set_attribute("pytstop.saga.falha", tratamento.falha)
     return tratamento.desfecho
 
 

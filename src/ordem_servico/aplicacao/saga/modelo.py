@@ -249,6 +249,15 @@ class TransicaoDaSagaInvalidaError(Exception):
     """Evento aplicado fora da etapa em que ele e esperado: bug de quem chama."""
 
 
+class InvarianteDaSagaError(Exception):
+    """Estado contraditorio da saga: bug, ou linha gravada por outra versao.
+
+    Nao e ``ValueError`` de proposito: o handler da API devolveria o texto do
+    estado interno como 422 de entrada invalida. Aqui vira 500 com o erro no
+    log, e no consumidor, a DLQ com o motivo ``erro_no_handler``.
+    """
+
+
 class SagaNaoEncontradaException(EntidadeNaoEncontradaException):
     """A OS nao tem saga: 404 na API; no consumidor, erro permanente (DLQ)."""
 

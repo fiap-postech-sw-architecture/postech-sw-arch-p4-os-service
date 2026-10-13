@@ -5,8 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
-from opentelemetry.trace import INVALID_SPAN_ID
+import pytest
+from opentelemetry.trace import INVALID_SPAN_ID, StatusCode
 
+from src.compartilhado.dominio.exceptions import (
+    ConflitoDeConcorrenciaException,
+    TransicaoStatusInvalidaException,
+    ValorInvalidoException,
+)
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import sem_span
 from src.ordem_servico.infraestrutura.rastreamento_da_saga import span_da_saga
 from tests.rastreamento import Rastreador, traceparent
@@ -69,6 +75,45 @@ def test_fora_de_qualquer_span_a_acao_abre_o_trace_sem_link() -> None:
     (acao,) = rastreador.spans("saga cancelamento")
     assert (acao.parent, acao.links) == (None, ())
     assert acao.context.span_id != INVALID_SPAN_ID
+
+
+def test_falha_inesperada_marca_o_span_com_erro_e_o_tipo_sem_a_mensagem() -> None:
+    rastreador = Rastreador()
+
+    with (
+        pytest.raises(RuntimeError),
+        span_da_saga(rastreador.tracer)("saga cancelamento", None),
+    ):
+        msg = "dado do cliente na mensagem"
+        raise RuntimeError(msg)
+
+    (acao,) = rastreador.spans("saga cancelamento")
+    assert acao.status.status_code is StatusCode.ERROR
+    assert acao.status.description == "RuntimeError"
+    assert acao.events == ()
+
+
+@pytest.mark.parametrize(
+    "recusa",
+    [
+        TransicaoStatusInvalidaException(mensagem="Cancelamento recusado"),
+        ValorInvalidoException(mensagem="Motivo invalido"),
+        ConflitoDeConcorrenciaException(),
+    ],
+    ids=["409", "422", "conflito"],
+)
+def test_recusa_de_negocio_nao_marca_o_span_como_erro(recusa: Exception) -> None:
+    rastreador = Rastreador()
+
+    with (
+        pytest.raises(type(recusa)),
+        span_da_saga(rastreador.tracer)("saga cancelamento", None),
+    ):
+        raise recusa
+
+    (acao,) = rastreador.spans("saga cancelamento")
+    assert acao.status.status_code is StatusCode.UNSET
+    assert acao.events == ()
 
 
 def test_sem_span_nao_abre_nada() -> None:
