@@ -16,8 +16,8 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
     RESPOSTA_DA_COMPENSACAO,
     ROTULO_DO_MOTIVO,
     dados_da_compensacao,
-    inicio,
-    resposta,
+    inicio_da_compensacao,
+    resposta_da_compensacao,
 )
 from src.ordem_servico.aplicacao.saga.modelo import (
     ATOR_CONSUMIDOR,
@@ -69,7 +69,12 @@ def _falha_de_negocio(
     estado = ESTADO_DO_PAGAMENTO.get(evento.tipo)
     if estado is not None:
         ordem.registrar_estado_do_pagamento(estado, ator=ATOR_CONSUMIDOR)
-    return _compensacao(inicio(saga, MOTIVO_DA_FALHA[evento.tipo]), ordem)
+    transicao = inicio_da_compensacao(
+        saga.passos_concluidos,
+        saga.tipo_do_comando_em_voo,
+        MOTIVO_DA_FALHA[evento.tipo],
+    )
+    return _compensacao(transicao, ordem)
 
 
 def _resposta_da_compensacao(
@@ -86,7 +91,9 @@ def _resposta_da_compensacao(
     estado = ESTADO_DO_PAGAMENTO.get(evento.tipo)
     if estado is not None and ordem.resumo_pagamento is not None:
         ordem.registrar_estado_do_pagamento(estado, ator=ATOR_CONSUMIDOR)
-    transicao = resposta(saga, evento.tipo)
+    transicao = resposta_da_compensacao(
+        evento.tipo, saga.plano_compensacao, saga.motivo
+    )
     if transicao.seguinte is EtapaSaga.COMPENSADA:
         # Em compensacao a saga sempre tem o motivo (``conferir_estado``).
         rotulo = ROTULO_DO_MOTIVO[MotivoCompensacao(cast("str", saga.motivo))]

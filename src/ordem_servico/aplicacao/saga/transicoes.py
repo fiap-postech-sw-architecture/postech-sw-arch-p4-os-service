@@ -19,8 +19,9 @@ from src.ordem_servico.aplicacao.saga.compensacao import (
     MOTIVO_DA_FALHA,
     ORDEM_DAS_COMPENSACOES,
     RESPOSTA_DA_COMPENSACAO,
-    inicio,
-    resposta,
+    dados_da_compensacao,
+    inicio_da_compensacao,
+    resposta_da_compensacao,
 )
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
@@ -43,20 +44,23 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
+    from src.ordem_servico.aplicacao.saga.leitura_da_saga import LeituraDaSaga
     from src.ordem_servico.aplicacao.saga.modelo import (
         Envio,
         Gatilho,
         ItemDoDiagnostico,
         Transicao,
     )
-    from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 _E = EtapaSaga
 
 
 def transicao_do_evento(
-    saga: Saga, evento: MensagemRecebida, marcos: MarcosDaOrdem, agora: datetime
+    saga: LeituraDaSaga,
+    evento: MensagemRecebida,
+    marcos: MarcosDaOrdem,
+    agora: datetime,
 ) -> Transicao:
     """A transicao que o ``evento`` provoca na ``saga`` agora, se ele pode.
 
@@ -78,9 +82,11 @@ def transicao_do_evento(
     elif not _instante_valido(saga, agora):
         msg = f"{tipo} num instante sem fuso ou anterior ao ultimo registro"
     elif tipo in MOTIVO_DA_FALHA:
-        return inicio(saga, MOTIVO_DA_FALHA[tipo])
+        return inicio_da_compensacao(
+            saga.passos_concluidos, saga.tipo_do_comando_em_voo, MOTIVO_DA_FALHA[tipo]
+        )
     elif tipo in RESPOSTA_DA_COMPENSACAO:
-        return resposta(saga, tipo)
+        return resposta_da_compensacao(tipo, saga.plano_compensacao, saga.motivo)
     elif saga.etapa in ETAPAS_EM_COMPENSACAO:
         # So o ExecucaoIniciada se classifica para processar aqui.
         return CORRIDA_DO_PIVOT
@@ -89,7 +95,7 @@ def transicao_do_evento(
     raise TransicaoDaSagaInvalidaError(msg)
 
 
-def transicao_do_cancelamento(saga: Saga, agora: datetime) -> Transicao:
+def transicao_do_cancelamento(saga: LeituraDaSaga, agora: datetime) -> Transicao:
     """O pedido de cancelamento antes do pivot: a compensacao comeca (RFC-004 4.4).
 
     Raises:
@@ -101,11 +107,15 @@ def transicao_do_cancelamento(saga: Saga, agora: datetime) -> Transicao:
     elif not _instante_valido(saga, agora):
         msg = "cancelamento num instante sem fuso ou anterior ao ultimo registro"
     else:
-        return inicio(saga, MotivoCompensacao.CANCELAMENTO)
+        return inicio_da_compensacao(
+            saga.passos_concluidos,
+            saga.tipo_do_comando_em_voo,
+            MotivoCompensacao.CANCELAMENTO,
+        )
     raise TransicaoDaSagaInvalidaError(msg)
 
 
-def _instante_valido(saga: Saga, agora: datetime) -> bool:
+def _instante_valido(saga: LeituraDaSaga, agora: datetime) -> bool:
     return agora.tzinfo is not None and agora >= saga.atualizada_em
 
 
@@ -136,30 +146,26 @@ def conferir_envio(
         enviado = envio.tipo if envio is not None else "nenhum comando"
         msg = f"a linha envia {transicao.comando or 'nenhum comando'}, nao {enviado}"
         raise TransicaoDaSagaInvalidaError(msg)
-    # Sem orcamento na OS, str(None), que e "None", nao casa com id nenhum.
-    da_saga: dict[Comando, dict[str, object]] = {
-        Comando.GERAR_ORCAMENTO: {"itens": list(itens)},
-        Comando.RESERVAR_PECAS: {"pecas": pecas_dos_itens(itens)},
-        Comando.SOLICITAR_PAGAMENTO: {"orcamento_id": str(marcos.orcamento_id)},
-        Comando.AGENDAR_EXECUCAO: {"prioridade": PRIORIDADE_DO_AGENDAMENTO},
-        **{c: {"motivo": transicao.motivo} for c in ORDEM_DAS_COMPENSACOES},
-        Comando.CANCELAR_ORCAMENTO: {
-            "motivo": transicao.motivo,
-            "orcamento_id": _texto(marcos.orcamento_id),
-        },
-        Comando.ESTORNAR_PAGAMENTO: {
-            "motivo": transicao.motivo,
-            "pagamento_id": _texto(marcos.pagamento_id),
-        },
-    }
-    esperados = {"ordem_id": str(ordem_id), **da_saga.get(envio.tipo, {})}
-    if any(envio.dados.get(chave) != valor for chave, valor in esperados.items()):
+    if envio.tipo in ORDEM_DAS_COMPENSACOES:
+        # A mesma montagem que o orquestrador e o cancelamento usam: sem o id do
+        # recurso na OS, nenhum id vai no comando.
+        esperados: dict[str, object] = dict(
+            dados_da_compensacao(envio.tipo, ordem_id, transicao.motivo, marcos)
+        )
+        confere = dict(envio.dados) == esperados
+    else:
+        # Sem orcamento na OS, str(None), que e "None", nao casa com id nenhum.
+        da_saga: dict[Comando, dict[str, object]] = {
+            Comando.GERAR_ORCAMENTO: {"itens": list(itens)},
+            Comando.RESERVAR_PECAS: {"pecas": pecas_dos_itens(itens)},
+            Comando.SOLICITAR_PAGAMENTO: {"orcamento_id": str(marcos.orcamento_id)},
+            Comando.AGENDAR_EXECUCAO: {"prioridade": PRIORIDADE_DO_AGENDAMENTO},
+        }
+        esperados = {"ordem_id": str(ordem_id), **da_saga.get(envio.tipo, {})}
+        confere = all(envio.dados.get(k) == v for k, v in esperados.items())
+    if not confere:
         msg = f"{envio.tipo} com dados que nao sao os desta saga"
         raise TransicaoDaSagaInvalidaError(msg)
-
-
-def _texto(valor: UUID | None) -> str | None:
-    return None if valor is None else str(valor)
 
 
 def conferir_gatilho(transicao: Transicao, gatilho: Gatilho) -> None:
@@ -197,7 +203,7 @@ def conferir_prazo(envio: Envio | None, agora: datetime) -> None:
         raise TransicaoDaSagaInvalidaError(msg)
 
 
-def conferir_estado(saga: Saga) -> None:
+def conferir_estado(saga: LeituraDaSaga) -> None:
     """Invariantes do estado da saga, para quem a monta por fora do ``iniciar``.
 
     Prazo se e so se ha comando em voo, salvo em ``falha_na_compensacao``, onde

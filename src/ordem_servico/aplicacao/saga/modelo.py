@@ -149,7 +149,7 @@ class Envio:
 
     tipo: Comando
     id: UUID
-    dados: DadosDoContrato = field(default_factory=dict, hash=False)
+    dados: DadosDoContrato = field(default_factory=dict, hash=False, repr=False)
     prazo_resposta_em: datetime | None = None
 
     def __post_init__(self) -> None:

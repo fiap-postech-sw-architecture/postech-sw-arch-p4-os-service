@@ -102,7 +102,7 @@ def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
 
     assert desfecho is tratamento.desfecho
     assert falso.montado_com["publicador"] is transacao
-    assert falso.montado_com["prazo_resposta"] == timedelta(seconds=9)
+    assert falso.montado_com["contexto"].prazo_resposta == timedelta(seconds=9)
     (span,) = rastreador.spans()
     assert span.attributes == {
         "pytstop.saga.etapa": tratamento.etapa.value,

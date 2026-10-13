@@ -23,6 +23,7 @@ from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
     ViolacaoRegraDeNegocioException,
 )
+from src.ordem_servico.aplicacao.saga import contexto_de_envio
 from src.ordem_servico.aplicacao.saga import orquestrador as modulo
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import (
@@ -419,7 +420,7 @@ def test_relogio_atras_do_ultimo_registro_nao_recua_o_registro(
     # A replica que trata o DiagnosticoConcluido le um relogio atras do que
     # gravou o DiagnosticoIniciado: o evento passa no instante do anterior, e
     # passando de 1 s o log mostra a defasagem.
-    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    monkeypatch.setattr(contexto_de_envio, "_log", structlog.get_logger())
     cenario = CenarioDaSaga()
     cenario.receber("DiagnosticoIniciado")
     anterior = _relogio_atras_do_ultimo_registro(cenario, atras)
@@ -452,7 +453,7 @@ def test_relogio_mais_de_60_s_atras_do_ultimo_registro_vai_para_a_dlq(
 ) -> None:
     # Nao e jitter entre replicas: relogio fora de hora gravaria `em` e prazos
     # no futuro. Nada e gravado, e o log diz de quanto era a defasagem.
-    monkeypatch.setattr(modulo, "_log", structlog.get_logger())
+    monkeypatch.setattr(contexto_de_envio, "_log", structlog.get_logger())
     cenario = CenarioDaSaga()
     cenario.receber("DiagnosticoIniciado")
     _relogio_atras_do_ultimo_registro(cenario, timedelta(seconds=60, milliseconds=1))

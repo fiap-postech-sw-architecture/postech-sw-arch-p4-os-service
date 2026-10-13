@@ -307,8 +307,7 @@ class CenarioDaSaga:
             ordens=self.ordens,
             sagas=self.sagas,
             publicador=self.publicador,
-            prazo_resposta=PRAZO,
-            relogio=self.relogio,
+            contexto=ContextoDeEnvio(PRAZO, self.relogio),
         )
 
     @classmethod

@@ -27,6 +27,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     subir_metricas,
 )
 from src.compartilhado.infraestrutura.observability import criar_tracer
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
 from src.ordem_servico.aplicacao.saga.tratamento import (
@@ -63,7 +64,7 @@ def tratar_evento_da_saga(
         ordens=OrdemDeServicoSQLAlchemyRepository(session=transacao.session),
         sagas=SagaSQLAlchemyRepository(session=transacao.session),
         publicador=transacao,
-        prazo_resposta=prazo_resposta,
+        contexto=ContextoDeEnvio(prazo_resposta),
     )
     try:
         tratamento = orquestrador.tratar(mensagem)

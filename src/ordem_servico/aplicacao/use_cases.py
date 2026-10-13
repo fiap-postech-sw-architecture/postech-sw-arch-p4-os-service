@@ -34,14 +34,10 @@ from src.ordem_servico.aplicacao.dtos import (
     ResumoPagamentoDTO,
     SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.compensacao import (
-    dados_da_compensacao,
-    inicio,
-)
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import enviar
 from src.ordem_servico.aplicacao.saga.modelo import (
-    Envio,
     EtapaSaga,
-    MotivoCompensacao,
+    GatilhoDeProcesso,
     SagaNaoEncontradaException,
 )
 from src.ordem_servico.aplicacao.saga.saga import Saga
@@ -180,26 +176,26 @@ class AbrirOrdem:
         with self._uow:
             self._repo.salvar(ordem)
             # Causa e a requisicao HTTP: sem causation_id (RFC-004 secao 5.2).
-            comando_id = self._uow.publicar_comando(
-                Comando.SOLICITAR_DIAGNOSTICO,
-                {
-                    "ordem_id": ordem.id,
-                    "veiculo_id": ordem.veiculo_id,
-                    "veiculo": {
-                        "placa": veiculo.placa,
-                        "marca": veiculo.marca,
-                        "modelo": veiculo.modelo,
-                        "ano": veiculo.ano,
+            envio = enviar(
+                self._uow,
+                (
+                    Comando.SOLICITAR_DIAGNOSTICO,
+                    {
+                        "ordem_id": ordem.id,
+                        "veiculo_id": ordem.veiculo_id,
+                        "veiculo": {
+                            "placa": veiculo.placa,
+                            "marca": veiculo.marca,
+                            "modelo": veiculo.modelo,
+                            "ano": veiculo.ano,
+                        },
+                        "descricao_problema": ordem.descricao_problema,
                     },
-                    "descricao_problema": ordem.descricao_problema,
-                },
+                ),
                 correlation_id=ordem.id,
             )
             saga = Saga.iniciar(
-                ordem.id,
-                envio=Envio(tipo=Comando.SOLICITAR_DIAGNOSTICO, id=comando_id),
-                ator=dto.ator,
-                agora=ordem.criado_em,
+                ordem.id, envio=envio, ator=dto.ator, agora=ordem.criado_em
             )
             self._sagas.salvar(saga)
             self._uow.commit()
@@ -408,22 +404,17 @@ class CancelarOrdem:
             raise TransicaoStatusInvalidaException(mensagem=ORDEM_JA_CANCELADA)
         if saga.etapa not in ANTES_DO_PIVOT:
             raise TransicaoStatusInvalidaException(mensagem=CANCELAMENTO_RECUSADO)
-        ordem.registrar_pedido_de_cancelamento(motivo)
+        # O que pode recusar o pedido vem antes de mudar a OS ou gravar o comando.
         marcos = MarcosDaOrdem.da_ordem(ordem)
-        agora = max(self._contexto.relogio(), saga.atualizada_em)
-        codigo = MotivoCompensacao.CANCELAMENTO
-        primeira = inicio(saga, codigo).plano[0]
-        dados = dados_da_compensacao(primeira, ordem.id, codigo.value, marcos)
-        comando_id = self._uow.publicar_comando(
-            primeira, dados, correlation_id=ordem.id
+        agora = self._contexto.instante_do_passo(
+            saga, tipo=GatilhoDeProcesso.CANCELAMENTO_SOLICITADO
         )
-        envio = Envio(
-            tipo=primeira,
-            id=comando_id,
-            dados=dados,
-            prazo_resposta_em=agora + self._contexto.prazo_resposta,
+        primeira = saga.primeira_compensacao_do_cancelamento(marcos, agora=agora)
+        ordem.registrar_pedido_de_cancelamento(motivo)
+        envio = self._contexto.enviar(
+            self._uow, primeira, correlation_id=ordem.id, agora=agora
         )
-        saga.cancelar(marcos, agora=agora, ator=ator, envio=envio)
+        saga.solicitar_cancelamento(marcos, agora=agora, ator=ator, envio=envio)
 
 
 class RegistrarEntrega:

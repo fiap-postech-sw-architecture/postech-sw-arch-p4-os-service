@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -23,7 +23,10 @@ from src.ordem_servico.aplicacao.dtos import (
     ComandoEmVooDTO,
     SagaDTO,
 )
-from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
+    ContextoDeEnvio,
+    RelogioDefasadoError,
+)
 from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
 from src.ordem_servico.aplicacao.use_cases import (
     CANCELAMENTO_RECUSADO,
@@ -373,9 +376,25 @@ class TestCancelarOrdem:
                 cenario.ordem_id, "x", ator=ATOR_ATENDENTE
             )
 
-        assert [(log["event"], log["resultado"], log["ator"]) for log in logs] == [
+        auditoria = [log for log in logs if log["event"].startswith("order canc")]
+        assert [(log["event"], log["resultado"], log["ator"]) for log in auditoria] == [
             ("order cancellation refused", "CONFLITO_DE_CONCORRENCIA", ATOR_ATENDENTE)
         ]
+
+    def test_relogio_muito_atras_do_ultimo_registro_recusa_sem_efeito(self) -> None:
+        # A mesma politica do consumidor: mais de 60 s nao e jitter, e o passo
+        # gravaria prazos no futuro. Nada e gravado.
+        cenario = CenarioDaSaga.em("aguardando_decisao")
+        antes = _foto(cenario)
+        cenario.publicador.committed = False
+        cenario.relogio.agora = cenario.saga.atualizada_em - timedelta(seconds=62)
+
+        with pytest.raises(RelogioDefasadoError):
+            cenario.cancelar()
+
+        assert _foto(cenario) == antes
+        assert cenario.publicador.rolled_back
+        assert not cenario.publicador.committed
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):

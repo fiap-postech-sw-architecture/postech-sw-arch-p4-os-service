@@ -23,7 +23,6 @@ atras do ultimo registro da saga.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 from uuid import UUID
@@ -36,14 +35,13 @@ from src.compartilhado.dominio.exceptions import (
     ViolacaoRegraDeNegocioException,
 )
 from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import RelogioDefasadoError
 from src.ordem_servico.aplicacao.saga.linhas_da_compensacao import (
     LINHAS_DA_COMPENSACAO,
 )
 from src.ordem_servico.aplicacao.saga.linhas_do_fluxo import LINHAS_DO_FLUXO
 from src.ordem_servico.aplicacao.saga.modelo import (
     ATOR_CONSUMIDOR,
-    DadosDoContrato,
-    Envio,
     EtapaSaga,
     TransicaoDaSagaInvalidaError,
 )
@@ -56,22 +54,22 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.resumos import StatusPagamento
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from datetime import datetime
 
-    from src.compartilhado.aplicacao.mensageria import Comando, MensagemRecebida
+    from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
     from src.ordem_servico.aplicacao.ports import SagaRepository
+    from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
+        ComandoParaEnviar,
+        ContextoDeEnvio,
+    )
+    from src.ordem_servico.aplicacao.saga.modelo import Envio
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 _log = structlog.get_logger(__name__)
 
-# Quanto o relogio desta replica pode estar atras do ultimo registro da saga
-# (de outra replica ou da API): ate 1 s e jitter e passa sem aviso; acima, o
-# aviso mostra a defasagem; acima de 60 s nao e jitter, e o evento vai para a DLQ.
-_DEFASAGEM_SEM_AVISO: Final = timedelta(seconds=1)
-_DEFASAGEM_MAXIMA: Final = timedelta(seconds=60)
 # O que a OS ou a saga recusam ao aplicar o fato: estado incompativel com o
 # evento, que nenhuma nova tentativa muda.
 _RECUSAS_DO_DOMINIO: Final = (
@@ -79,10 +77,6 @@ _RECUSAS_DO_DOMINIO: Final = (
     ViolacaoRegraDeNegocioException,
     TransicaoDaSagaInvalidaError,
 )
-
-
-def _agora() -> datetime:
-    return datetime.now(UTC)
 
 
 class OrquestradorDaSaga:
@@ -99,14 +93,12 @@ class OrquestradorDaSaga:
         ordens: OrdemDeServicoRepository,
         sagas: SagaRepository,
         publicador: PublicadorDeComandos,
-        prazo_resposta: timedelta,
-        relogio: Callable[[], datetime] = _agora,
+        contexto: ContextoDeEnvio,
     ) -> None:
         self._ordens = ordens
         self._sagas = sagas
         self._publicador = publicador
-        self._prazo_resposta = prazo_resposta
-        self._relogio = relogio
+        self._contexto = contexto
 
     def tratar(self, evento: MensagemRecebida) -> Tratamento:
         """Classifica e aplica ``evento``; o commit e de quem chama.
@@ -193,7 +185,10 @@ class OrquestradorDaSaga:
     ) -> None:
         """A linha do evento: fato na OS, comando na outbox e registro na saga."""
         aplicar = _LINHAS[evento.tipo]
-        agora = self._instante_do_passo(evento, saga)
+        try:
+            agora = self._contexto.instante_do_passo(saga, tipo=evento.tipo)
+        except RelogioDefasadoError as exc:
+            raise EventoRecusadoError("relogio_defasado", saga.etapa) from exc
         try:
             pedido = aplicar(evento, saga, ordem)
             envio = self._enviar(pedido, evento, agora) if pedido else None
@@ -201,55 +196,20 @@ class OrquestradorDaSaga:
         except _RECUSAS_DO_DOMINIO as exc:
             raise EventoRecusadoError("transicao_invalida", saga.etapa) from exc
 
-    def _instante_do_passo(self, evento: MensagemRecebida, saga: Saga) -> datetime:
-        """O relogio, sem ficar antes do ultimo registro da saga.
-
-        O registro anterior pode vir de outra replica (ou da API) com o relogio
-        uns milissegundos a frente, e a saga recusaria o novo como instante que
-        volta: ele fica no instante do anterior. Passando de 1 s o aviso mostra a
-        defasagem, e passando de 60 s o evento vai para a DLQ: relogio fora de
-        hora gravaria ``em`` e prazos no futuro.
-
-        Raises:
-            EventoRecusadoError: ``relogio_defasado``.
-        """
-        agora = self._relogio()
-        defasagem = saga.atualizada_em - agora
-        if defasagem > _DEFASAGEM_SEM_AVISO:
-            _log.warning(
-                "saga clock behind last record",
-                etapa=saga.etapa.value,
-                defasagem_segundos=defasagem.total_seconds(),
-                correlation_id=str(saga.ordem_id),
-                tipo=evento.tipo,
-            )
-        if defasagem > _DEFASAGEM_MAXIMA:
-            raise EventoRecusadoError("relogio_defasado", saga.etapa)
-        return max(agora, saga.atualizada_em)
-
     def _enviar(
-        self,
-        pedido: tuple[Comando, DadosDoContrato],
-        evento: MensagemRecebida,
-        agora: datetime,
+        self, pedido: ComandoParaEnviar, evento: MensagemRecebida, agora: datetime
     ) -> Envio:
         """Grava o comando na outbox, causado pelo ``evento`` (RFC-004 secao 5.2).
 
         Todo comando que um evento envia tem resposta automatica: sai com o
         prazo tecnico (RFC-004 secao 4.6), que a saga confere contra a linha.
         """
-        tipo, dados = pedido
-        comando_id = self._publicador.publicar_comando(
-            tipo,
-            dados,
+        return self._contexto.enviar(
+            self._publicador,
+            pedido,
             correlation_id=evento.correlation_id,
             causation_id=evento.id,
-        )
-        return Envio(
-            tipo=tipo,
-            id=comando_id,
-            dados=dados,
-            prazo_resposta_em=agora + self._prazo_resposta,
+            agora=agora,
         )
 
 

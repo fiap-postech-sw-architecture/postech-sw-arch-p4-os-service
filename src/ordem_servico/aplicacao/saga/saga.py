@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Final, cast
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.aggregate_root import AggregateRoot
-from src.ordem_servico.aplicacao.saga.classificacao import Classificacao, classificar
 from src.ordem_servico.aplicacao.saga.leitura_da_saga import LeituraDaSaga
 from src.ordem_servico.aplicacao.saga.modelo import (
     CompensacaoIniciadaEvent,
@@ -68,8 +67,8 @@ class Saga(AggregateRoot, LeituraDaSaga):
     """Instancia da saga de uma OS; ``id`` e o ``ordem_id``.
 
     Construir com ``Saga.iniciar``; os eventos andam com ``avancar`` e o
-    pedido de cancelamento com ``cancelar``, que impoem as tabelas da RFC-004
-    (secoes 4.1 e 4.4) antes de mudar. A ``versao`` e o lock otimista da
+    pedido de cancelamento com ``solicitar_cancelamento``, que impoem as tabelas
+    da RFC-004 (secoes 4.1 e 4.4) antes de mudar. A ``versao`` e o lock otimista da
     persistencia, como na OS. Listas e dicts sao trocados por novos a cada
     mudanca (a coluna JSONB nao detecta mutacao no lugar).
     """
@@ -145,24 +144,6 @@ class Saga(AggregateRoot, LeituraDaSaga):
             raise ValueError(msg)
         self._traceparent = traceparent
 
-    def classificar(
-        self, tipo: str, marcos: MarcosDaOrdem, *, causation_id: UUID | None = None
-    ) -> Classificacao:
-        """Classifica o evento ``tipo`` na etapa atual (``classificacao``).
-
-        A compensacao pendente e a primeira do plano; o ``causation_id`` casa a
-        resposta com um dos envios do comando em voo (RFC-004 secao 4.4).
-        """
-        em_voo = self._comando_em_voo
-        plano = self._plano_compensacao
-        return classificar(
-            self._etapa,
-            tipo,
-            marcos,
-            pendente=plano[0] if plano else None,
-            casada=em_voo is not None and str(causation_id) in em_voo["mensagem_ids"],
-        )
-
     def avancar(
         self,
         evento: MensagemRecebida,
@@ -194,14 +175,15 @@ class Saga(AggregateRoot, LeituraDaSaga):
         gatilho = Gatilho(evento.tipo, evento.id, agora, ator)
         self._mudar(transicao, gatilho, envio, posicao)
 
-    def cancelar(
+    def solicitar_cancelamento(
         self, marcos: MarcosDaOrdem, *, agora: datetime, ator: str, envio: Envio
     ) -> None:
         """Pedido de cancelamento antes do pivot: a compensacao comeca.
 
         O plano leva os passos concluidos e o em voo (RFC-004 secao 4.4), e o
         ``envio`` e a primeira compensacao dele, com prazo. O registro leva o
-        gatilho ``cancelamento_solicitado`` e o ``ator`` que pediu.
+        gatilho ``cancelamento_solicitado`` e o ``ator`` que pediu. A OS so fica
+        cancelada quando a ultima compensacao responde.
 
         Raises:
             TransicaoDaSagaInvalidaError: etapa que nao e de antes do pivot, ou

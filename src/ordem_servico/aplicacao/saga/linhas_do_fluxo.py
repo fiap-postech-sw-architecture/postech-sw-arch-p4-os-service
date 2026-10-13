@@ -28,13 +28,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
-    from src.ordem_servico.aplicacao.saga.modelo import DadosDoContrato
+    from src.ordem_servico.aplicacao.saga.contexto_de_envio import ComandoParaEnviar
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
     from src.ordem_servico.dominio.resumos import ResumoOrcamento
 
-# O comando que a linha envia: tipo e ``dados`` (sem ele, ``None``).
-type Pedido = tuple[Comando, DadosDoContrato] | None
+# O comando que a linha envia (sem ele, ``None``).
+type Pedido = ComandoParaEnviar | None
 type Linha = Callable[[MensagemRecebida, Saga, OrdemDeServico], Pedido]
 
 

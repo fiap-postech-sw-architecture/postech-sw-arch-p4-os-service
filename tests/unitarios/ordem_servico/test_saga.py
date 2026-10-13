@@ -351,7 +351,7 @@ class TestInvariantes:
         )
         assert vistas == [E.AGUARDANDO_ORCAMENTO]
 
-        saga.cancelar(
+        saga.solicitar_cancelamento(
             _marcos(),
             agora=DEPOIS,
             ator=ATOR_ATENDENTE,
@@ -1603,6 +1603,21 @@ CANCELAMENTOS = [
 ]
 
 
+# (perfil do que a saga ja fez, plano) das linhas de cancelamento da RFC-004 4.4.
+CANCELAMENTOS_DA_SAGA = [
+    pytest.param("aguardando_diagnostico", COMPENSACOES[4:], id="diagnostico"),
+    pytest.param("aguardando_orcamento", COMPENSACOES[3:], id="orcamento-em-voo"),
+    pytest.param("aguardando_decisao", COMPENSACOES[3:], id="decisao"),
+    pytest.param("aguardando_reserva", COMPENSACOES[2:], id="reserva-em-voo"),
+    pytest.param("aguardando_pagamento", COMPENSACOES[1:], id="pagamento-em-voo"),
+    pytest.param(
+        "aguardando_pagamento_com_checkout", COMPENSACOES[1:], id="checkout-aberto"
+    ),
+    pytest.param("aguardando_agendamento", COMPENSACOES, id="agendamento-em-voo"),
+    pytest.param("aguardando_inicio", COMPENSACOES, id="inicio"),
+]
+
+
 class TestCancelar:
     @pytest.mark.parametrize(("perfil", "etapa", "plano"), CANCELAMENTOS)
     def test_antes_do_pivot_compensa_os_passos_e_o_em_voo(
@@ -1612,7 +1627,9 @@ class TestCancelar:
         marcos = _marcos(checkout=perfil.endswith("com_checkout"))
         envio = _compensacao(plano[0], saga, "cancelamento", marcos)
 
-        saga.cancelar(marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=envio)
+        saga.solicitar_cancelamento(
+            marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=envio
+        )
 
         assert (saga.etapa, saga.motivo) == (E.COMPENSANDO, "cancelamento")
         assert saga.plano_compensacao == plano
@@ -1651,7 +1668,7 @@ class TestCancelar:
         antes = _foto(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match=etapa):
-            saga.cancelar(
+            saga.solicitar_cancelamento(
                 _marcos(),
                 agora=DEPOIS,
                 ator=ATOR_ATENDENTE,
@@ -1700,9 +1717,55 @@ class TestCancelar:
         )
 
         with pytest.raises(TransicaoDaSagaInvalidaError):
-            saga.cancelar(_marcos(), agora=agora, ator=ATOR_ATENDENTE, envio=envio)
+            saga.solicitar_cancelamento(
+                _marcos(), agora=agora, ator=ATOR_ATENDENTE, envio=envio
+            )
 
         assert _foto(saga) == antes
+
+    @pytest.mark.parametrize(("perfil", "plano"), CANCELAMENTOS_DA_SAGA)
+    def test_primeira_compensacao_vem_pronta_para_enviar_sem_mudar_a_saga(
+        self, perfil: str, plano: tuple[str, ...]
+    ) -> None:
+        saga = saga_em(perfil.removesuffix("_com_checkout"), **_feito(perfil))
+        marcos = _marcos(checkout=perfil.endswith("com_checkout"))
+        antes = _foto(saga)
+
+        comando, dados = saga.primeira_compensacao_do_cancelamento(marcos, agora=DEPOIS)
+
+        assert comando == plano[0]
+        # Os mesmos dados que o solicitar_cancelamento confere: serve de envio.
+        assert dados == dict(_compensacao(plano[0], saga, "cancelamento", marcos).dados)
+        assert _foto(saga) == antes
+        saga.solicitar_cancelamento(
+            marcos,
+            agora=DEPOIS,
+            ator=ATOR_ATENDENTE,
+            envio=Envio(tipo=comando, id=uuid4(), dados=dados, prazo_resposta_em=PRAZO),
+        )
+        assert saga.plano_compensacao[0] == plano[0]
+
+    @pytest.mark.parametrize(
+        "etapa", ["em_execucao", "concluida", "compensando", "compensada"]
+    )
+    def test_primeira_compensacao_fora_de_antes_do_pivot_e_recusada(
+        self, etapa: str
+    ) -> None:
+        saga = saga_em(etapa)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match=etapa):
+            saga.primeira_compensacao_do_cancelamento(_marcos(), agora=DEPOIS)
+
+    @pytest.mark.parametrize(
+        "agora", [AGORA - timedelta(seconds=1), datetime(2026, 10, 7, 13)]
+    )
+    def test_primeira_compensacao_com_instante_errado_e_recusada(
+        self, agora: datetime
+    ) -> None:
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="instante"):
+            saga_em("aguardando_diagnostico").primeira_compensacao_do_cancelamento(
+                _marcos(), agora=agora
+            )
 
 
 class TestIdDoRecursoNaCompensacao:
@@ -1748,9 +1811,26 @@ class TestIdDoRecursoNaCompensacao:
         antes = _foto(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
-            saga.cancelar(marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=errado)
+            saga.solicitar_cancelamento(
+                marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=errado
+            )
 
         assert _foto(saga) == antes
+
+    def test_campo_a_mais_nos_dados_da_compensacao_e_recusado(self) -> None:
+        saga = saga_em("aguardando_diagnostico")
+        certo = _compensacao("DescartarDiagnostico", saga, "cancelamento")
+        com_a_mais = Envio(
+            tipo=certo.tipo,
+            id=certo.id,
+            dados={**certo.dados, "descricao": "texto livre"},
+            prazo_resposta_em=PRAZO,
+        )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
+            saga.solicitar_cancelamento(
+                _marcos(), agora=DEPOIS, ator=ATOR_ATENDENTE, envio=com_a_mais
+            )
 
     def test_id_que_a_os_nao_tem_nao_vai_no_comando(self) -> None:
         saga = saga_em("aguardando_orcamento", **_feito("aguardando_orcamento"))
@@ -1767,7 +1847,9 @@ class TestIdDoRecursoNaCompensacao:
         )
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
-            saga.cancelar(marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=com_id)
+            saga.solicitar_cancelamento(
+                marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=com_id
+            )
 
 
 class TestClassificarNaCompensacao:

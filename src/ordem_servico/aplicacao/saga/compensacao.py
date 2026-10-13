@@ -27,11 +27,10 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Iterable, Mapping, Sequence
     from uuid import UUID
 
     from src.ordem_servico.aplicacao.saga.modelo import DadosDoContrato
-    from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 _M = MotivoCompensacao
@@ -145,36 +144,43 @@ CORRIDA_DO_PIVOT: Final = Transicao(
 )
 
 
-def inicio(saga: Saga, motivo: MotivoCompensacao) -> Transicao:
-    """A compensacao comeca: o plano de agora, com a primeira dele enviada."""
-    em_voo = saga.comando_em_voo
-    plano = plano_de_compensacao(
-        saga.passos_concluidos, em_voo["tipo"] if em_voo else None, motivo
-    )
+def inicio_da_compensacao(
+    passos_concluidos: Iterable[str],
+    comando_em_voo: str | None,
+    motivo: MotivoCompensacao,
+) -> Transicao:
+    """A compensacao comeca: o plano de agora, com a primeira dele enviada.
+
+    ``passos_concluidos`` e ``comando_em_voo`` (o tipo do comando com prazo que
+    espera resposta) sao o que a saga ja fez.
+    """
+    plano = plano_de_compensacao(passos_concluidos, comando_em_voo, motivo)
     return Transicao(
         EtapaSaga.COMPENSANDO, comando=plano[0], motivo=motivo.value, plano=plano
     )
 
 
-def resposta(saga: Saga, tipo: str) -> Transicao:
+def resposta_da_compensacao(
+    tipo: str, plano_restante: Sequence[str], motivo: str | None
+) -> Transicao:
     """A resposta da compensacao pendente: a seguinte sai, ou a saga termina.
 
-    O ``EstornoDePagamentoFalhou`` para a sequencia: o compensado fica
-    compensado, o resto como estava, e a pendente segue no plano para a
-    retomada (RFC-004 secao 4.7).
+    ``plano_restante`` comeca na pendente. O ``EstornoDePagamentoFalhou`` para a
+    sequencia: o compensado fica compensado, o resto como estava, e a pendente
+    segue no plano para a retomada (RFC-004 secao 4.7).
     """
-    plano = tuple(Comando(c) for c in saga.plano_compensacao)
+    plano = tuple(Comando(c) for c in plano_restante)
     if tipo == "EstornoDePagamentoFalhou":
         return Transicao(
             EtapaSaga.FALHA_NA_COMPENSACAO,
-            motivo=saga.motivo,
+            motivo=motivo,
             plano=plano,
             falha=ESTORNO_RECUSADO,
         )
     if len(plano) == 1:
-        return Transicao(EtapaSaga.COMPENSADA, motivo=saga.motivo)
+        return Transicao(EtapaSaga.COMPENSADA, motivo=motivo)
     return Transicao(
-        EtapaSaga.COMPENSANDO, comando=plano[1], motivo=saga.motivo, plano=plano[1:]
+        EtapaSaga.COMPENSANDO, comando=plano[1], motivo=motivo, plano=plano[1:]
     )
 
 
