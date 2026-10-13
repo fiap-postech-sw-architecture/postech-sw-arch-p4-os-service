@@ -83,7 +83,9 @@ audit:
 #
 # O log do uvicorn sai em JSON desde a primeira linha ("Started server
 # process"): o `configurar_logging` roda na fabrica do app, que o uvicorn importa
-# antes do servidor subir. O smoke falha se aparecer linha de texto puro dele.
+# antes do servidor subir. O smoke falha se aparecer linha de texto puro dele, ou
+# o access log dele (a API sobe com --no-access-log): o acesso de cada requisicao
+# sai do middleware, como `http_request` com o request_id.
 #
 # O compose sobe a API com ENVIRONMENT=development (a guarda de producao
 # recusa os segredos de demonstracao), entao o que a imagem faz em producao e
@@ -153,7 +155,11 @@ smoke:
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
 	&& { ! printf '%s\n' "$$logs" | grep -Eq '^(INFO|WARNING|ERROR|CRITICAL): ' \
 		|| { echo "smoke: o uvicorn escreveu log em texto puro" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON, imagem de producao, relay e consumidor prontos" \
+	&& { ! printf '%s\n' "$$logs" | grep -q '"logger": "uvicorn.access"' \
+		|| { echo "smoke: o uvicorn escreveu o access log dele" >&2; false; }; } \
+	&& { printf '%s\n' "$$logs" | grep '"event": "http_request"' | grep -q '"request_id": "' \
+		|| { echo "smoke: o access log estruturado (http_request com request_id) nao saiu" >&2; false; }; } \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay e consumidor prontos" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
