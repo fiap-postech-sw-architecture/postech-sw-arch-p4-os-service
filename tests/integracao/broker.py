@@ -16,9 +16,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self
-from uuid import uuid4
 
 import pika
 from pika.exceptions import AMQPError
@@ -236,23 +234,6 @@ def subir_broker() -> tuple[DockerContainer, Broker]:
     )
     assert codigo == 0, saida.decode()
     return container, broker
-
-
-def envelope_de_evento(
-    tipo: str,
-    *,
-    mensagem_id: Any = None,
-    correlation_id: Any = None,
-    **dados: Any,
-) -> dict[str, Any]:
-    """Evento valido do catalogo: o exemplo do platform com id e OS novos."""
-    exemplo = json.loads((CONTRATOS / "exemplos" / f"{tipo}.json").read_text())
-    ordem_id = str(correlation_id or uuid4())
-    exemplo["id"] = str(mensagem_id or uuid4())
-    exemplo["correlation_id"] = ordem_id
-    exemplo["ocorrido_em"] = datetime.now(UTC).isoformat()
-    exemplo["dados"] = {**exemplo["dados"], "ordem_id": ordem_id, **dados}
-    return exemplo
 
 
 class EsperasRegistradas(threading.Event):

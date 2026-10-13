@@ -8,8 +8,10 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm.exc import StaleDataError
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.infraestrutura import metricas_da_saga
 from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
 
 if TYPE_CHECKING:
@@ -86,3 +88,32 @@ class OrdemDeServicoSQLAlchemyRepository:
         if not incluir_encerradas:
             stmt = stmt.where(_t.c.status.notin_(_ESTADOS_ENCERRADOS))
         return self._session.scalar(stmt) or 0
+
+
+class SagaSQLAlchemyRepository:
+    """``SagaRepository`` sobre a ``Session`` da transacao (API ou mensagem)."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def obter(self, ordem_id: UUID) -> Saga | None:
+        return self._session.get(Saga, ordem_id)
+
+    def salvar(self, saga: Saga) -> None:
+        """Faz flush com lock otimista; os fatos viram metrica no commit.
+
+        O flush leva o ``traceparent`` do span em curso (a requisicao da
+        abertura, o consumo do evento) para a saga (ADR-043, no ``before_flush``
+        do mapeamento). Versao divergente vira ``ConflitoDeConcorrenciaException``.
+        """
+        ordem_id = saga.ordem_id
+        self._session.add(saga)
+        try:
+            self._session.flush()
+        except StaleDataError:
+            raise ConflitoDeConcorrenciaException(
+                mensagem=f"Saga {ordem_id} alterada por outra operacao; releia"
+            ) from None
+        # Metricas so depois do commit: rollback ou conflito descartam os fatos.
+        metricas_da_saga.anotar(self._session, saga.coletar_eventos())
+        saga.limpar_eventos()

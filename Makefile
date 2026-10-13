@@ -70,6 +70,10 @@ audit:
 # o `outbox_pendentes` do /metrics do relay tem de ser um numero: NaN e o banco
 # fora do alcance dele.
 #
+# O /metrics da API tem de trazer `pytstop_saga_coletor_disponivel` em 1: o
+# coletor dos gauges da saga raspa por uma engine propria, ligada no lifespan,
+# e sem ela (ou com o banco fora do alcance dela) a serie sai em 0.
+#
 # O access token do login passa pelo validador independente
 # (scripts/validar_token.py, so PyJWT): JWKS buscado por HTTP, RS256, iss, aud,
 # exp e type, como Billing e Execucao validam. O JWKS publico tem de trazer so
@@ -141,6 +145,9 @@ smoke:
 	&& { $(SMOKE_COMPOSE) exec -T consumidor $(SMOKE_METRICAS) \
 			| grep -q '^# TYPE pytstop_mensagens_consumidas_total counter' \
 		|| { echo "smoke: o /metrics do consumidor nao traz as mensagens consumidas" >&2; false; }; } \
+	&& { curl -fsS --max-time 5 $(SMOKE_URL)/metrics \
+			| grep -Eq '^pytstop_saga_coletor_disponivel 1(\.0)?$$' \
+		|| { echo "smoke: o /metrics da API nao traz o coletor da saga disponivel" >&2; false; }; } \
 	&& logs="$$($(SMOKE_COMPOSE) logs --no-color --no-log-prefix api)" \
 	&& { printf '%s\n' "$$logs" | grep -q '"event": "Started server process' \
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \

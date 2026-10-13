@@ -48,6 +48,7 @@ def _abrir(session: Session) -> OrdemDeServico:
         cliente_id=cliente.id,
         veiculo_id=cliente.veiculos[0].id,
         descricao_problema="Pneu careca",
+        ator="atendente-teste",
     )
 
 
@@ -75,7 +76,7 @@ def test_eventos_internos_da_os_nao_vao_para_a_outbox(session: Session) -> None:
 
     with SQLAlchemyUnitOfWork(session_factory=lambda: session) as uow:
         repo.salvar(ordem)
-        ordem.registrar_diagnostico_iniciado()
+        ordem.registrar_diagnostico_iniciado(ator="consumidor")
         repo.salvar(ordem)
         uow.commit()
 

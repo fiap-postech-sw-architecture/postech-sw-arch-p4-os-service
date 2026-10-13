@@ -25,7 +25,10 @@ _LINK = "https://billing.pytstop.local/publico/orcamentos/tok-secreto"
 
 def test_abrir_ordem_nao_expoe_a_descricao() -> None:
     dto = AbrirOrdemDTO(
-        cliente_id=uuid4(), veiculo_id=uuid4(), descricao_problema=_SEGREDO
+        cliente_id=uuid4(),
+        veiculo_id=uuid4(),
+        descricao_problema=_SEGREDO,
+        ator=str(uuid4()),
     )
     assert "Joao" not in repr(dto)
 
@@ -37,6 +40,7 @@ def test_mudanca_de_status_nao_expoe_o_motivo() -> None:
         para="cancelada",
         origem="atendimento",
         motivo=_SEGREDO,
+        ator=str(uuid4()),
         ocorrido_em=_AGORA,
     )
     assert "Joao" not in repr(dto)
@@ -69,6 +73,8 @@ def test_ordem_nao_expoe_texto_livre_nem_links() -> None:
         criado_em=_AGORA,
         atualizado_em=_AGORA,
         historico=(),
+        etapa="compensando",
+        passos=(),
     )
     texto = repr(dto)
     assert "Joao" not in texto

@@ -1,9 +1,10 @@
 """Routers HTTP do contexto Ordem de Servico (RFC-004 secao 6.1, parte OS).
 
 ``router`` (JWT + papel): abertura, fila por prioridade, consulta, historico,
-cancelamento e entrega. ``router_publico`` (sem token, rate limit por IP):
-acompanhamento por placa + documento. As transicoes da saga (diagnostico,
-orcamento, pagamento, execucao) chegam por mensageria, nao por rota HTTP.
+cancelamento e entrega. ``router_sagas`` (admin): estado da saga para a
+operacao. ``router_publico`` (sem token, rate limit por IP): acompanhamento
+por placa + documento. As transicoes da saga (diagnostico, orcamento,
+pagamento, execucao) chegam por mensageria, nao por rota HTTP.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from src.ordem_servico.interfaces.dependencies import (
     obter_consultar_acompanhamento,
     obter_listar_ordens,
     obter_obter_ordem,
+    obter_obter_saga,
     obter_registrar_entrega,
 )
 from src.ordem_servico.interfaces.schemas import (
@@ -43,6 +45,8 @@ from src.ordem_servico.interfaces.schemas import (
     OrdemDeServicoResponse,
     OrdemListaResponse,
     OrdemResumoResponse,
+    PassoDaSagaResponse,
+    SagaResponse,
 )
 
 _log = structlog.get_logger(__name__)
@@ -70,29 +74,44 @@ router = APIRouter(
     tags=["ordens-de-servico"],
     responses=_RESPOSTAS_AUTENTICADAS,
 )
+router_sagas = APIRouter(
+    prefix="/api/v1/sagas",
+    tags=["sagas"],
+    responses={
+        401: _RESPOSTAS_AUTENTICADAS[401],
+        403: {"description": "Papel sem acesso: so admin."},
+    },
+)
 router_publico = APIRouter(prefix="/api/v1/publico", tags=["publico"])
 
 # Toda rota de OS e do atendente (admin herda); o mecanico nao tem rota no
 # OS Service: trabalha pela fila do Execution Service (ADR-039).
 _Atendente = Annotated[dict[str, object], Depends(exigir_papel(Papel.ATENDENTE))]
+# A saga e consultada pela operacao (runbook da saga, ADR-039).
+_Admin = Annotated[dict[str, object], Depends(exigir_papel(Papel.ADMIN))]
 _Sessao = Annotated[Session, Depends(obter_session)]
 
 
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
-    summary="Abre uma ordem de servico em RECEBIDA",
+    summary="Abre uma ordem de servico em RECEBIDA e inicia a saga",
     responses={404: {"description": "Cliente inativo/inexistente ou veiculo alheio."}},
 )
 def abrir_ordem(
     body: AbrirOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Abre a OS para um cliente ativo e um veiculo dele (atendente ou admin)."""
+    """Abre a OS para um cliente ativo e um veiculo dele (atendente ou admin).
+
+    No mesmo commit, a saga de atendimento nasce em ``aguardando_diagnostico``
+    e o ``SolicitarDiagnostico`` vai para a outbox, rumo a Execucao.
+    """
     resultado = obter_abrir_ordem(session).executar(
         AbrirOrdemDTO(
             cliente_id=body.cliente_id,
             veiculo_id=body.veiculo_id,
             descricao_problema=body.descricao_problema,
+            ator=ator_de(usuario),
         )
     )
     return OrdemDeServicoResponse.model_validate(resultado)
@@ -130,7 +149,10 @@ def listar_ordens(
 def obter_ordem(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Status, resumo do orcamento e do pagamento e timestamps da ordem."""
+    """Status, etapa da saga, resumo do orcamento e do pagamento e timestamps.
+
+    O status e a etapa saem da mesma leitura: nunca divergem.
+    """
     return OrdemDeServicoResponse.model_validate(
         obter_obter_ordem(session).executar(ordem_id)
     )
@@ -144,11 +166,17 @@ def obter_ordem(
 def obter_historico(
     ordem_id: UUID, usuario: _Atendente, session: _Sessao
 ) -> HistoricoResponse:
-    """Mudancas de status da abertura ate agora (de, para, origem, motivo)."""
+    """Mudancas de status (de, para, origem, ator, motivo) e registros da saga.
+
+    Duas listas, cada uma na sua ordem: o instante da mudanca da OS e o do
+    registro da saga vem de leituras de relogio diferentes, e intercala-las
+    poderia mostrar o efeito antes da causa.
+    """
     ordem = obter_obter_ordem(session).executar(ordem_id)
     return HistoricoResponse(
         ordem_id=ordem.id,
         mudancas=[MudancaDeStatusResponse.model_validate(m) for m in ordem.historico],
+        passos=[PassoDaSagaResponse.model_validate(p) for p in ordem.passos],
     )
 
 
@@ -160,9 +188,12 @@ def obter_historico(
 def cancelar_ordem(
     ordem_id: UUID, body: CancelarOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Cancela com motivo; 409 depois do inicio da execucao ou se encerrada."""
-    resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo)
-    _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator_de(usuario))
+    """Cancela com motivo; 409 com a saga em andamento, depois do inicio da
+    execucao ou se encerrada (o cancelamento pela saga vem com as compensacoes).
+    """
+    ator = ator_de(usuario)
+    resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
+    _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator)
     return OrdemDeServicoResponse.model_validate(resultado)
 
 
@@ -176,8 +207,21 @@ def registrar_entrega(
 ) -> OrdemDeServicoResponse:
     """Entrega ao cliente; 409 se a ordem nao estiver FINALIZADA."""
     return OrdemDeServicoResponse.model_validate(
-        obter_registrar_entrega(session).executar(ordem_id)
+        obter_registrar_entrega(session).executar(ordem_id, ator=ator_de(usuario))
     )
+
+
+@router_sagas.get(
+    "/{ordem_id}",
+    summary="Estado da saga de uma ordem (operacao)",
+    responses={404: {"description": "Ordem sem saga."}},
+)
+def obter_saga(ordem_id: UUID, usuario: _Admin, session: _Sessao) -> SagaResponse:
+    """Etapa, motivo, falha, plano restante, comando em voo, reenvios, prazo e passos.
+
+    E a primeira consulta do runbook da saga (RFC-004 secao 4.7).
+    """
+    return SagaResponse.model_validate(obter_obter_saga(session).executar(ordem_id))
 
 
 @router_publico.post(
