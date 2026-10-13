@@ -12,11 +12,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from src.ordem_servico.dominio.ordem_de_servico import (
+from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.dominio.texto_livre import (
     TAMANHO_MAXIMO_DESCRICAO,
     TAMANHO_MAXIMO_MOTIVO,
 )
-from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.interfaces.situacoes import situacao_de
 
 _DESCRICAO_STATUS = (

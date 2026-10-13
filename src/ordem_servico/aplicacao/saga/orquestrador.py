@@ -179,7 +179,9 @@ class OrquestradorDaSaga:
         resumo = ordem.resumo_pagamento
         if resumo is None or resumo.status is StatusPagamento.ESTORNADO:
             return _ignorado(Classificacao.ESTORNO_AUTOMATICO, etapa, contexto)
-        ordem.registrar_estado_do_pagamento(StatusPagamento.ESTORNADO)
+        ordem.registrar_estado_do_pagamento(
+            StatusPagamento.ESTORNADO, ator=ATOR_CONSUMIDOR
+        )
         self._ordens.salvar(ordem)
         _log.info("late payment refunded", etapa=etapa.value, **contexto)
         return Tratamento(Desfecho.PROCESSADA, etapa, etapa)

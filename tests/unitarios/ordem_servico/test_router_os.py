@@ -35,11 +35,11 @@ from src.ordem_servico.aplicacao.use_cases import (
     ObterSaga,
     RegistrarEntrega,
 )
-from src.ordem_servico.dominio.ordem_de_servico import (
+from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.dominio.texto_livre import (
     TAMANHO_MAXIMO_DESCRICAO,
     TAMANHO_MAXIMO_MOTIVO,
 )
-from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import ATOR_ATENDENTE, ordem_em
 from tests.unitarios.fakes import (
     ClientePortFake,
@@ -163,7 +163,7 @@ class TestAbrir:
         assert resp.status_code == 422
         assert resp.json()["erro"]["codigo"] == "VALOR_INVALIDO"
         assert resp.json()["erro"]["mensagem"] == (
-            "descricao do problema tem caractere de controle"
+            "descricao do problema tem caractere de controle ou de formatacao"
         )
 
     def test_admin_abre(self, client_como: Callable[[str], TestClient]) -> None:

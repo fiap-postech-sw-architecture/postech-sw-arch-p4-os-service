@@ -21,13 +21,13 @@ from src.ordem_servico.dominio.events import (
     StatusDaOrdemAlteradoEvent,
 )
 from src.ordem_servico.dominio.historico import OrigemMudanca
-from src.ordem_servico.dominio.ordem_de_servico import (
-    TAMANHO_MAXIMO_DESCRICAO,
-    TAMANHO_MAXIMO_MOTIVO,
-    OrdemDeServico,
-)
+from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.dominio.texto_livre import (
+    TAMANHO_MAXIMO_DESCRICAO,
+    TAMANHO_MAXIMO_MOTIVO,
+)
 from tests.fabricas import (
     ATOR_ATENDENTE,
     ATOR_PROCESSO,
@@ -46,7 +46,9 @@ def _orcamento(ordem: OrdemDeServico) -> None:
 
 
 def _pagamento(ordem: OrdemDeServico) -> None:
-    ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
+    ordem.registrar_estado_do_pagamento(
+        StatusPagamento.SOLICITADO, ator=ATOR_PROCESSO, resumo=resumo_do_pagamento()
+    )
 
 
 def _aguardando_pagamento_sem_resumo() -> OrdemDeServico:
@@ -84,7 +86,9 @@ FATOS: list[tuple[str, Callable[[OrdemDeServico], None], S, S, OM, str]] = [
     ),
     (
         "pagamento_confirmado",
-        lambda o: o.registrar_pagamento_confirmado(ator=ATOR_PROCESSO),
+        lambda o: o.registrar_estado_do_pagamento(
+            StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+        ),
         S.AGUARDANDO_PAGAMENTO,
         S.AGUARDANDO_EXECUCAO,
         OM.BILLING,
@@ -229,6 +233,11 @@ class TestAbertura:
             pytest.param("freio\rrangendo", id="cr-solto"),
             pytest.param("freio\x7frangendo", id="del"),
             pytest.param("freio\x85rangendo", id="c1"),
+            pytest.param("freio\u202erangendo", id="override-bidirecional"),
+            pytest.param("freio\u200brangendo", id="espaco-de-largura-zero"),
+            pytest.param("freio\ufeffrangendo", id="marca-de-ordem-de-bytes"),
+            pytest.param("freio\u2028rangendo", id="separador-de-linha"),
+            pytest.param("freio\u2029rangendo", id="separador-de-paragrafo"),
         ],
     )
     def test_caractere_de_controle_levanta(self, descricao: str) -> None:
@@ -341,7 +350,9 @@ class TestFatosDaSaga:
         ordem.limpar_eventos()
         resumo = resumo_do_pagamento()
 
-        ordem.registrar_pagamento_solicitado(resumo)
+        ordem.registrar_estado_do_pagamento(
+            StatusPagamento.SOLICITADO, ator=ATOR_PROCESSO, resumo=resumo
+        )
 
         assert ordem.resumo_pagamento is resumo
         assert (ordem.status, ordem.historico) == (S.AGUARDANDO_PAGAMENTO, historico)
@@ -379,8 +390,10 @@ class TestFatosDaSaga:
         antes = _fotografia(ordem)
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="confirmado"):
-            ordem.registrar_pagamento_solicitado(
-                resumo_do_pagamento(StatusPagamento.CONFIRMADO)
+            ordem.registrar_estado_do_pagamento(
+                StatusPagamento.SOLICITADO,
+                ator=ATOR_PROCESSO,
+                resumo=resumo_do_pagamento(StatusPagamento.CONFIRMADO),
             )
 
         assert _fotografia(ordem) == antes
@@ -390,7 +403,9 @@ class TestFatosDaSaga:
         solicitado = ordem.resumo_pagamento
         assert solicitado is not None
 
-        ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+        ordem.registrar_estado_do_pagamento(
+            StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+        )
 
         confirmado = ordem.resumo_pagamento
         assert confirmado is not None
@@ -405,7 +420,9 @@ class TestFatosDaSaga:
         antes = _fotografia(ordem)
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+            ordem.registrar_estado_do_pagamento(
+                StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+            )
 
         assert _fotografia(ordem) == antes
 
@@ -439,7 +456,7 @@ class TestFatosDaSaga:
         historico = ordem.historico
         ordem.limpar_eventos()
 
-        ordem.registrar_estado_do_pagamento(novo)
+        ordem.registrar_estado_do_pagamento(novo, ator=ATOR_PROCESSO)
 
         assert atual is not None
         assert ordem.resumo_pagamento == replace(atual, status=novo)
@@ -463,21 +480,35 @@ class TestFatosDaSaga:
         antes = _fotografia(ordem)
 
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
-            ordem.registrar_estado_do_pagamento(estado)
+            ordem.registrar_estado_do_pagamento(estado, ator=ATOR_PROCESSO)
+
+        assert _fotografia(ordem) == antes
+
+    def test_solicitado_sem_o_resumo_levanta_sem_mutar(self) -> None:
+        ordem = _aguardando_pagamento_sem_resumo()
+        antes = _fotografia(ordem)
+
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="so ele"):
+            ordem.registrar_estado_do_pagamento(
+                StatusPagamento.SOLICITADO, ator=ATOR_PROCESSO
+            )
 
         assert _fotografia(ordem) == antes
 
     @pytest.mark.parametrize(
-        "estado", [StatusPagamento.SOLICITADO, StatusPagamento.CONFIRMADO]
+        "estado",
+        [s for s in StatusPagamento if s is not StatusPagamento.SOLICITADO],
     )
-    def test_solicitado_e_confirmado_tem_metodo_proprio(
+    def test_resumo_so_acompanha_o_pagamento_solicitado(
         self, estado: StatusPagamento
     ) -> None:
         ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
         antes = _fotografia(ordem)
 
-        with pytest.raises(ViolacaoRegraDeNegocioException, match=estado.value):
-            ordem.registrar_estado_do_pagamento(estado)
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="so ele"):
+            ordem.registrar_estado_do_pagamento(
+                estado, ator=ATOR_PROCESSO, resumo=resumo_do_pagamento()
+            )
 
         assert _fotografia(ordem) == antes
 
@@ -489,7 +520,9 @@ class TestFatosDaSaga:
         ordem = ordem_em(S.AGUARDANDO_EXECUCAO)
         antes = ordem.resumo_pagamento
 
-        ordem.registrar_estado_do_pagamento(StatusPagamento.CANCELADO)
+        ordem.registrar_estado_do_pagamento(
+            StatusPagamento.CANCELADO, ator=ATOR_PROCESSO
+        )
 
         assert ordem.resumo_pagamento == antes
         assert ordem.status is S.AGUARDANDO_EXECUCAO
@@ -547,6 +580,9 @@ class TestPedidoDeCancelamento:
             pytest.param("   ", "obrigatorio", id="espacos"),
             pytest.param("x" * (TAMANHO_MAXIMO_MOTIVO + 1), "excede", id="longo"),
             pytest.param("desistiu\x00", "caractere de controle", id="nul"),
+            pytest.param("desistiu\u202e", "caractere de controle", id="bidirecional"),
+            pytest.param("des\u200bistiu", "caractere de controle", id="largura-zero"),
+            pytest.param("des\u2028istiu", "caractere de controle", id="separador"),
         ],
     )
     def test_texto_invalido_levanta_sem_mutar(self, motivo: str, erro: str) -> None:

@@ -21,6 +21,7 @@ from src.ordem_servico.aplicacao.saga.resumos_do_billing import (
     resumo_do_pagamento,
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import PRIORIDADE_DO_AGENDAMENTO
+from src.ordem_servico.dominio.resumos import StatusPagamento
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -85,14 +86,20 @@ def _pecas_reservadas(
 def _pagamento_solicitado(
     evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
 ) -> Pedido:
-    ordem.registrar_pagamento_solicitado(resumo_do_pagamento(evento.dados))
+    ordem.registrar_estado_do_pagamento(
+        StatusPagamento.SOLICITADO,
+        ator=ATOR_CONSUMIDOR,
+        resumo=resumo_do_pagamento(evento.dados),
+    )
     return None
 
 
 def _pagamento_confirmado(
     evento: MensagemRecebida, saga: Saga, ordem: OrdemDeServico
 ) -> Pedido:
-    ordem.registrar_pagamento_confirmado(ator=ATOR_CONSUMIDOR)
+    ordem.registrar_estado_do_pagamento(
+        StatusPagamento.CONFIRMADO, ator=ATOR_CONSUMIDOR
+    )
     return Comando.AGENDAR_EXECUCAO, {
         "ordem_id": str(saga.ordem_id),
         "prioridade": PRIORIDADE_DO_AGENDAMENTO,

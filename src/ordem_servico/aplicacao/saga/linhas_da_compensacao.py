@@ -65,7 +65,7 @@ def _falha_de_negocio(
     """
     estado = ESTADO_DO_PAGAMENTO.get(evento.tipo)
     if estado is not None:
-        ordem.registrar_estado_do_pagamento(estado)
+        ordem.registrar_estado_do_pagamento(estado, ator=ATOR_CONSUMIDOR)
     return _compensacao(inicio(saga, MOTIVO_DA_FALHA[evento.tipo]), ordem)
 
 
@@ -82,7 +82,7 @@ def _resposta_da_compensacao(
     """
     estado = ESTADO_DO_PAGAMENTO.get(evento.tipo)
     if estado is not None and ordem.resumo_pagamento is not None:
-        ordem.registrar_estado_do_pagamento(estado)
+        ordem.registrar_estado_do_pagamento(estado, ator=ATOR_CONSUMIDOR)
     transicao = resposta(saga, evento.tipo)
     if transicao.seguinte is EtapaSaga.COMPENSADA:
         # Em compensacao a saga sempre tem o motivo (``conferir_estado``).

@@ -82,7 +82,9 @@ def resumo_do_pagamento(
 
 def solicitar_pagamento(ordem: OrdemDeServico) -> None:
     """``PagamentoSolicitado``: grava o resumo do pagamento, sem mudar o status."""
-    ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
+    ordem.registrar_estado_do_pagamento(
+        StatusPagamento.SOLICITADO, ator=ATOR_PROCESSO, resumo=resumo_do_pagamento()
+    )
 
 
 def aplicar_fato(ordem: OrdemDeServico, para: StatusOrdem) -> None:
@@ -100,7 +102,9 @@ def aplicar_fato(ordem: OrdemDeServico, para: StatusOrdem) -> None:
             ordem.registrar_pecas_reservadas(ator=ATOR_PROCESSO)
             solicitar_pagamento(ordem)
         case StatusOrdem.AGUARDANDO_EXECUCAO:
-            ordem.registrar_pagamento_confirmado(ator=ATOR_PROCESSO)
+            ordem.registrar_estado_do_pagamento(
+                StatusPagamento.CONFIRMADO, ator=ATOR_PROCESSO
+            )
         case StatusOrdem.EM_EXECUCAO:
             ordem.registrar_execucao_iniciada(ator=ATOR_PROCESSO)
         case StatusOrdem.FINALIZADA:

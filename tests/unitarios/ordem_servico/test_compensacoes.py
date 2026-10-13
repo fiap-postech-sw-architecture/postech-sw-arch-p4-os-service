@@ -24,7 +24,7 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
-from tests.fabricas import ordem_em
+from tests.fabricas import ATOR_PROCESSO, ordem_em
 from tests.unitarios.ordem_servico.cenario_da_saga import (
     COMPENSACOES,
     RESPONDE,
@@ -363,7 +363,9 @@ def test_cancelado_casado_conclui_a_compensacao_com_o_resumo_em_qualquer_estado(
         status=S.AGUARDANDO_EXECUCAO if confirmado else S.AGUARDANDO_PAGAMENTO,
     )
     if not confirmado and estado_anterior != "solicitado":
-        cenario.ordem.registrar_estado_do_pagamento(StatusPagamento(estado_anterior))
+        cenario.ordem.registrar_estado_do_pagamento(
+            StatusPagamento(estado_anterior), ator=ATOR_PROCESSO
+        )
 
     tratamento = cenario.orquestrador.tratar(
         evento(
@@ -389,7 +391,9 @@ def test_estornado_casado_conclui_a_compensacao_com_o_resumo_ja_cancelado_ou_est
     cenario = CenarioDaSaga.em_compensacao(
         COMPENSACOES[1:], status=S.AGUARDANDO_PAGAMENTO
     )
-    cenario.ordem.registrar_estado_do_pagamento(StatusPagamento(anterior))
+    cenario.ordem.registrar_estado_do_pagamento(
+        StatusPagamento(anterior), ator=ATOR_PROCESSO
+    )
 
     tratamento = cenario.orquestrador.tratar(
         evento(
