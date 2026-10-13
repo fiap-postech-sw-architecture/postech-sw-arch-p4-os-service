@@ -27,26 +27,16 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # Espera o Job de migracao da mesma versao: o alembic current marca
-        # "(head)" com o banco na ultima revisao desta imagem. Num rollback
-        # (rollout undo, sem descer migracao: ADR-042) o banco esta adiante, e
-        # a revisao que esta imagem nao conhece tambem libera o pod. Enquanto
-        # espera, o log do container diz por que: a revisao anterior, nenhuma
-        # ou o erro de conexao com o banco.
+        # Espera o Job de migracao da mesma versao (src/banco.py): libera o pod
+        # com o banco na ultima revisao desta imagem. Num rollback (rollout
+        # undo, sem descer migracao: ADR-042) o banco esta adiante, e a revisao
+        # que esta imagem nao conhece tambem libera o pod. Enquanto espera, o
+        # log do container diz por que: a revisao anterior, nenhuma ou o erro
+        # de conexao com o banco. So le o banco, com o papel da aplicacao.
         - name: aguarda-migracao
           image: pytstop-os-service
           imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              while :; do
-                saida=$(alembic current 2>&1)
-                printf '%s\n' "$saida" | grep -q -e '(head)' -e "Can't locate revision" && break
-                motivo=$(printf '%s\n' "$saida" | grep -E -e 'Error: ' -e '^[0-9a-z_]+$' | tail -n 1)
-                echo "waiting for the migration Job: ${motivo:-no revision yet}" >&2
-                sleep 2
-              done
+          command: [python, -m, src.banco, aguardar]
           env:
             - name: POSTGRES_APP_PASSWORD
               valueFrom:

@@ -33,17 +33,7 @@ spec:
         - name: aguarda-migracao
           image: pytstop-os-service
           imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              while :; do
-                saida=$(alembic current 2>&1)
-                printf '%s\n' "$saida" | grep -q -e '(head)' -e "Can't locate revision" && break
-                motivo=$(printf '%s\n' "$saida" | grep -E -e 'Error: ' -e '^[0-9a-z_]+$' | tail -n 1)
-                echo "waiting for the migration Job: ${motivo:-no revision yet}" >&2
-                sleep 2
-              done
+          command: [python, -m, src.banco, aguardar]
           env:
             - name: POSTGRES_APP_PASSWORD
               valueFrom:

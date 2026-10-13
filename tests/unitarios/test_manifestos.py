@@ -24,6 +24,7 @@ def test_aguarda_migracao_e_o_mesmo_nos_tres_deployments() -> None:
     ]
 
     assert especificacoes[1:] == [especificacoes[0]] * 2
+    assert especificacoes[0]["command"] == ["python", "-m", "src.banco", "aguardar"]
 
 
 @pytest.mark.parametrize("processo", ["relay", "consumidor"])

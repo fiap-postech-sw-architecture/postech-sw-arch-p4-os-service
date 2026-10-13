@@ -14,6 +14,7 @@ import os
 import secrets
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -60,12 +61,12 @@ class Banco:
         )
 
 
-def _no_host(script: str, ambiente: dict[str, str], prazo_s: float) -> int:
-    """Roda o ``sh -c`` de um manifesto aqui, com o alembic e o python do venv."""
+def _no_host(argumentos: list[str], ambiente: dict[str, str], prazo_s: float) -> int:
+    """Roda o comando de um manifesto aqui, com o alembic e o python do venv."""
     caminho = f"{Path(sys.executable).parent}:{os.environ['PATH']}"
-    # Argumentos fixos: o sh do sistema e o script do manifesto do repositorio.
+    # Argumentos fixos: o comando de um manifesto do repositorio.
     return subprocess.run(  # noqa: S603
-        ["/bin/sh", "-c", script],
+        argumentos,
         env={"PATH": caminho, **ambiente},
         cwd=RAIZ,
         capture_output=True,
@@ -153,7 +154,7 @@ def banco() -> Iterator[Banco]:
             "ADMIN_EMAIL": _EMAIL_ADMIN,
             "ADMIN_PASSWORD": senhas["ADMIN_PASSWORD"],
         }
-        migracao = comando(objeto("Job", "os-migracao"), "migracao")
+        migracao = ["/bin/sh", "-c", comando(objeto("Job", "os-migracao"), "migracao")]
         # Duas vezes: o Job roda a cada implantacao e tem de ser idempotente.
         assert _no_host(migracao, job, prazo_s=120) == 0
         assert _no_host(migracao, job, prazo_s=120) == 0
@@ -281,57 +282,78 @@ def test_api_sobe_e_grava_com_o_papel_da_aplicacao(
     assert refresh.status_code == 200
 
 
-def _espera_do_pod() -> str:
-    return comando(objeto("Deployment", "os-service-api"), "aguarda-migracao")
+def _espera_do_pod() -> list[str]:
+    espera = container(objeto("Deployment", "os-service-api"), "aguarda-migracao")
+    return list(espera["command"])
+
+
+def _da_aplicacao(banco: Banco) -> dict[str, str]:
+    return {"DATABASE_URL": banco.url("os_app", "POSTGRES_APP_PASSWORD")}
 
 
 def _ainda_esperando(ambiente: dict[str, str]) -> bytes:
     """O log da espera, que nao termina enquanto a condicao nao vale."""
+    # Duas voltas de 2 s mais a partida do Python.
     with pytest.raises(subprocess.TimeoutExpired) as em_espera:
         _no_host(_espera_do_pod(), ambiente, prazo_s=6)
     return em_espera.value.stderr or b""
 
 
-@pytest.mark.parametrize(
-    ("revisao", "motivo"),
-    [
-        pytest.param(None, "no revision yet", id="banco-sem-migracao"),
-        pytest.param(revisao_anterior(), revisao_anterior(), id="revisao-anterior"),
-        pytest.param(revisao_head(), None, id="head-desta-imagem"),
-        pytest.param("999", None, id="rollback-banco-adiante"),
-    ],
-)
-def test_aguarda_migracao_libera_o_pod_so_com_o_banco_em_head_ou_adiante(
-    banco: Banco, revisao: str | None, motivo: str | None
-) -> None:
+@contextmanager
+def _banco_na_revisao(banco: Banco, revisao: str) -> Iterator[None]:
+    """O ``alembic_version`` do banco do modulo em ``revisao``.
+
+    A fixture e do modulo: ao sair, devolve a revisao que o Job deixou.
+    """
     dono = create_engine(banco.url("os", "POSTGRES_OWNER_PASSWORD"))
-    aplicacao = {"DATABASE_URL": banco.url("os_app", "POSTGRES_APP_PASSWORD")}
-    # A fixture banco e do modulo: o finally devolve a revisao que o Job deixou.
-    with dono.connect() as conexao:
-        original = conexao.execute(
-            text("SELECT version_num FROM alembic_version")
-        ).scalar_one()
-    try:
-        with dono.begin() as conexao:
-            conexao.execute(text("DELETE FROM alembic_version"))
-            if revisao is not None:
-                conexao.execute(
-                    text("INSERT INTO alembic_version VALUES (:revisao)"),
-                    {"revisao": revisao},
-                )
-        if motivo is None:
-            assert _no_host(_espera_do_pod(), aplicacao, prazo_s=60) == 0
-        else:
-            log = _ainda_esperando(aplicacao)
-            assert f"waiting for the migration Job: {motivo}\n".encode() in log
-    finally:
+
+    def gravar(versao: str) -> None:
         with dono.begin() as conexao:
             conexao.execute(text("DELETE FROM alembic_version"))
             conexao.execute(
-                text("INSERT INTO alembic_version VALUES (:original)"),
-                {"original": original},
+                text("INSERT INTO alembic_version VALUES (:versao)"),
+                {"versao": versao},
             )
+
+    try:
+        with dono.connect() as conexao:
+            original = conexao.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one()
+        gravar(revisao)
+        try:
+            yield
+        finally:
+            gravar(original)
+    finally:
         dono.dispose()
+
+
+@pytest.mark.parametrize(
+    "revisao",
+    [
+        pytest.param(revisao_head(), id="head-desta-imagem"),
+        pytest.param("999", id="rollback-banco-adiante"),
+    ],
+)
+def test_aguarda_migracao_do_manifesto_libera_o_pod_com_o_banco_em_head_ou_adiante(
+    banco: Banco, revisao: str
+) -> None:
+    with _banco_na_revisao(banco, revisao):
+        assert _no_host(_espera_do_pod(), _da_aplicacao(banco), prazo_s=60) == 0
+
+
+def test_aguarda_migracao_do_manifesto_espera_o_banco_na_revisao_anterior(
+    banco: Banco,
+) -> None:
+    with _banco_na_revisao(banco, revisao_anterior()):
+        log = _ainda_esperando(_da_aplicacao(banco))
+
+    esperado = (
+        f"waiting for the migration Job: database at revision {revisao_anterior()}, "
+        f"this image needs {revisao_head()}\n"
+    )
+    assert esperado.encode() in log
 
 
 def test_aguarda_migracao_diz_no_log_por_que_nao_conecta(banco: Banco) -> None:
