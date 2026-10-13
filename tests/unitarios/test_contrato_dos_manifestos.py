@@ -255,3 +255,126 @@ def test_namespace_aplica_o_restricted_em_enforce_warn_e_audit(overlay: str) -> 
         modo: rotulos[f"pod-security.kubernetes.io/{modo}"]
         for modo in ("enforce", "warn", "audit")
     } == dict.fromkeys(("enforce", "warn", "audit"), "restricted")
+
+
+def _rotulos_dos_templates(overlay: str) -> dict[str, dict[str, str]]:
+    """Os rotulos do template de cada workload, pelo nome do objeto."""
+    return {
+        objeto["metadata"]["name"]: objeto["spec"]["template"]["metadata"]["labels"]
+        for tipo in ("Deployment", "StatefulSet", "Job")
+        for objeto in do_render_por_tipo(overlay, tipo)
+    }
+
+
+def _portas_dos_workloads(overlay: str) -> dict[str, set[int]]:
+    """Os ``containerPort`` de cada workload, pelo nome do objeto."""
+    return {
+        nome: {
+            porta["containerPort"]
+            for secao in ("initContainers", "containers")
+            for especificacao in pod.get(secao, [])
+            for porta in especificacao.get("ports", [])
+        }
+        for _, nome, pod in pods(overlay)
+    }
+
+
+def _casa(seletor: dict[str, Any], rotulos: dict[str, str]) -> bool:
+    if not seletor.get("matchLabels", {}).items() <= rotulos.items():
+        return False
+    for expressao in seletor.get("matchExpressions", []):
+        assert expressao["operator"] == "In"
+        if rotulos.get(expressao["key"]) not in expressao["values"]:
+            return False
+    return True
+
+
+def _alvos(overlay: str, politica: dict[str, Any]) -> set[str]:
+    """Os workloads cujo template a politica seleciona."""
+    seletor = politica["spec"]["podSelector"]
+    return {
+        nome
+        for nome, rotulos in _rotulos_dos_templates(overlay).items()
+        if _casa(seletor, rotulos)
+    }
+
+
+def _par(item: dict[str, Any]) -> tuple[str, str]:
+    """(namespace, app) de um item ``from`` com os dois seletores no mesmo item."""
+    assert item.keys() == {"namespaceSelector", "podSelector"}
+    return (
+        item["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+        item["podSelector"]["matchLabels"]["app"],
+    )
+
+
+_KONG = ("pytstop-plataforma", "kong")
+_PROMETHEUS = ("pytstop-plataforma", "prometheus")
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_namespace_nega_toda_entrada_e_so_as_politicas_nomeadas_liberam(
+    overlay: str,
+) -> None:
+    politicas = {
+        p["metadata"]["name"]: p for p in do_render_por_tipo(overlay, "NetworkPolicy")
+    }
+
+    assert set(politicas) == {"nega-entrada", "api", "metricas-dos-processos", "banco"}
+    nega = politicas["nega-entrada"]["spec"]
+    assert nega == {"podSelector": {}, "policyTypes": ["Ingress"]}
+    assert all(p["spec"]["policyTypes"] == ["Ingress"] for p in politicas.values())
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_politica_da_api_libera_so_kong_prometheus_e_as_apis_dos_outros_servicos(
+    overlay: str,
+) -> None:
+    politica = do_render(overlay, "NetworkPolicy", "api")
+
+    assert _alvos(overlay, politica) == {"os-service-api"}
+    (regra,) = politica["spec"]["ingress"]
+    # Namespace e pod no mesmo item (E): em itens separados seria OU, e qualquer
+    # pod do namespace do Kong, ou qualquer pod chamado kong, passaria.
+    assert [_par(item) for item in regra["from"]] == [
+        _KONG,
+        _PROMETHEUS,
+        ("pytstop-billing", "billing-service-api"),
+        ("pytstop-execucao", "execution-service-api"),
+    ]
+    assert regra["ports"] == [{"port": 8000, "protocol": "TCP"}]
+    assert 8000 in _portas_dos_workloads(overlay)["os-service-api"]
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_politica_dos_processos_libera_so_o_prometheus_na_porta_das_metricas(
+    overlay: str,
+) -> None:
+    politica = do_render(overlay, "NetworkPolicy", "metricas-dos-processos")
+
+    assert _alvos(overlay, politica) == {"os-service-relay", "os-service-consumidor"}
+    (regra,) = politica["spec"]["ingress"]
+    assert [_par(item) for item in regra["from"]] == [_PROMETHEUS]
+    assert regra["ports"] == [{"port": 9100, "protocol": "TCP"}]
+    portas = _portas_dos_workloads(overlay)
+    assert 9100 in portas["os-service-relay"]
+    assert 9100 in portas["os-service-consumidor"]
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_politica_do_banco_libera_o_namespace_no_5432_e_so_o_prometheus_no_exporter(
+    overlay: str,
+) -> None:
+    politica = do_render(overlay, "NetworkPolicy", "banco")
+
+    assert _alvos(overlay, politica) == {"os-postgres"}
+    banco, metricas = politica["spec"]["ingress"]
+    # Os pods do proprio namespace: sem namespaceSelector, que de {} liberaria
+    # qualquer pod de qualquer namespace.
+    assert banco == {
+        "from": [{"podSelector": {}}],
+        "ports": [{"port": 5432, "protocol": "TCP"}],
+    }
+    assert [_par(item) for item in metricas["from"]] == [_PROMETHEUS]
+    assert metricas["ports"] == [{"port": 9187, "protocol": "TCP"}]
+    assert {5432, 9187} <= _portas_dos_workloads(overlay)["os-postgres"]
