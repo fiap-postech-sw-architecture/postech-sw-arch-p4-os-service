@@ -53,3 +53,31 @@ def test_entrypoint_passa_o_prefixo_da_borda_ao_uvicorn(
         "--root-path",
         prefixo,
     ]
+
+
+@pytest.mark.parametrize("prefixo", ["os", "/os/", "/", "//", "os/"])
+def test_entrypoint_recusa_root_path_mal_escrito_antes_de_subir_o_servidor(
+    tmp_path: Path, prefixo: str
+) -> None:
+    # Sem a barra inicial, ou com a final, o servico subiria com o Swagger
+    # bloqueado pelo CSP e sem erro no log.
+    gravados = tmp_path / "argumentos"
+    falso = tmp_path / "uvicorn"
+    falso.write_text(f"#!/bin/sh\nprintf 'subiu' > '{gravados}'\n")
+    falso.chmod(0o755)
+
+    # Argumentos fixos (o bash e o script do repositorio).
+    resultado = subprocess.run(  # noqa: S603
+        ["/bin/bash", str(_ENTRYPOINT)],
+        env={"PATH": f"{tmp_path}:{os.environ['PATH']}", "ROOT_PATH": prefixo},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert resultado.returncode == 64
+    assert "ROOT_PATH must be empty or start with / and not end with /" in (
+        resultado.stderr
+    )
+    assert not gravados.exists()

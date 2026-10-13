@@ -3,6 +3,17 @@ set -e
 
 echo ">>> pytstop-os-service | commit ${PYTSTOP_GIT_SHA:0:12} | ${PYTSTOP_GIT_DATE:-unknown}"
 
+# ROOT_PATH e o prefixo da borda: vazio, ou comeca com / e nao termina com /.
+# Sem a barra inicial (os) o servico sobe, mas o Swagger busca o openapi.json
+# fora do prefixo e o CSP bloqueia a pagina, sem erro nenhum no log.
+case "${ROOT_PATH:-}" in
+  "" | /*[!/]) ;;
+  *)
+    echo "ROOT_PATH must be empty or start with / and not end with /: '${ROOT_PATH}'" >&2
+    exit 64
+    ;;
+esac
+
 # Migracao e seed ligados por env no compose (container unico, sem corrida).
 # No Kubernetes a migracao roda num Job dedicado antes do rollout, entao o
 # ConfigMap deixa RUN_MIGRATIONS_ON_STARTUP=false e este bloco vira no-op.
