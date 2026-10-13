@@ -211,8 +211,8 @@ print-trivy-version:
 # servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
 # carrega no kind, aplica o overlay kind de uma vez e espera o banco, o Job de
 # migracao e os Deployments, nessa ordem. PLATFORM e o clone do platform, por
-# padrao o vizinho deste; o script entra no platform com o contrato de
-# implantacao dos servicos (README do platform, "Contrato com os servicos").
+# padrao o vizinho deste; o script e o contrato de implantacao dos servicos estao
+# no platform (README dele, "Contrato com os servicos").
 PLATFORM ?= ../postech-sw-arch-p4-platform
 
 kind-deploy:
