@@ -15,10 +15,12 @@ import pytest
 
 from tests.manifestos import (
     OVERLAYS,
+    RAIZ,
     containers,
     do_render,
     do_render_por_tipo,
     expandir_ambiente,
+    literais_do_servico,
     pods,
 )
 
@@ -445,3 +447,28 @@ def test_overlay_dimensiona_a_api_e_o_disco_do_banco(
     )
     (volume,) = banco["spec"]["volumeClaimTemplates"]
     assert volume["spec"]["resources"]["requests"]["storage"] == disco_do_banco
+
+
+def test_toda_variavel_do_configmap_e_lida_pelo_codigo() -> None:
+    # Uma variavel renomeada no codigo passa no make manifests (o kubeconform so
+    # confere o schema) e so cairia no deploy.
+    literais = literais_do_servico()
+    for overlay in OVERLAYS:
+        literais |= literais_do_servico(
+            RAIZ / "k8s/overlays" / overlay / "kustomization.yaml"
+        )
+    codigo = "\n".join(
+        arquivo.read_text()
+        for pasta in ("src", "scripts")
+        for arquivo in (RAIZ / pasta).rglob("*.py")
+    )
+    entrypoint = (RAIZ / "entrypoint.sh").read_text()
+
+    sem_leitor = [
+        variavel
+        for variavel in literais
+        if f'"{variavel}"' not in codigo and "${" + variavel not in entrypoint
+    ]
+
+    assert len(literais) > 19
+    assert sem_leitor == []
