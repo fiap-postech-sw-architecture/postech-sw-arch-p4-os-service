@@ -66,6 +66,25 @@ _RESPOSTA_409: dict[int | str, dict[str, Any]] = {
     }
 }
 
+
+def _erro(descricao: str, codigo: str, mensagem: str) -> dict[str, Any]:
+    """Resposta de erro documentada, com o envelope de exemplo."""
+    return {
+        "description": descricao,
+        "content": {
+            "application/json": {
+                "example": {
+                    "erro": {
+                        "codigo": codigo,
+                        "mensagem": mensagem,
+                        "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11",
+                    }
+                }
+            }
+        },
+    }
+
+
 router = APIRouter(
     prefix="/api/v1/ordens-de-servico",
     tags=["ordens-de-servico"],
@@ -182,13 +201,32 @@ def obter_historico(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Pede o cancelamento: a saga desfaz os passos e cancela a ordem",
     responses={
-        **_RESPOSTA_404,
-        409: {
+        202: {
             "description": (
-                "Cancelamento recusado: execucao ja iniciada (o pivot), ordem ja "
-                "cancelada ou escrita concorrente que voltou nas tres leituras."
+                "Cancelamento aceito: a OS mantem o status e a saga entra em "
+                "`compensando`. O pedido repetido, com a compensacao em curso ou "
+                "parada, tambem responde 202, sem efeito."
             )
         },
+        404: _erro(
+            "Ordem inexistente (ou sem saga, o que uma OS aberta nao deveria ser).",
+            "ENTIDADE_NAO_ENCONTRADA",
+            "Ordem de servico 5f0c7a52-3d0e-4c39-9d76-0f2b8f4f6a11 nao encontrada",
+        ),
+        409: _erro(
+            "`TRANSICAO_STATUS_INVALIDA`: execucao ja iniciada (o ponto sem "
+            "retorno) ou ordem ja cancelada. `CONFLITO_DE_CONCORRENCIA`: escrita "
+            "concorrente que voltou nas tres leituras.",
+            "TRANSICAO_STATUS_INVALIDA",
+            "Cancelamento recusado: execução já iniciada",
+        ),
+        422: _erro(
+            "`VALOR_INVALIDO`: motivo vazio, longo demais ou com caractere de "
+            "controle ou de formatacao. O corpo fora do schema (sem `motivo`, campo "
+            "extra) sai no formato de validacao de schema, `{detail, id_requisicao}`.",
+            "VALOR_INVALIDO",
+            "motivo de cancelamento e obrigatorio",
+        ),
     },
 )
 def cancelar_ordem(

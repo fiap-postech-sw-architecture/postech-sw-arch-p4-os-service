@@ -57,7 +57,10 @@ class AbrirOrdemRequest(BaseModel):
 class CancelarOrdemRequest(BaseModel):
     """Corpo de ``POST /api/v1/ordens-de-servico/{id}/cancelamento``."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"motivo": "Cliente vendeu o veiculo"}]},
+    )
 
     # Sem min_length nem max_length: o vazio, o tamanho e os caracteres que nao se
     # leem valem no dominio, e todos voltam no mesmo 422 (envelope VALOR_INVALIDO);
@@ -116,7 +119,13 @@ class OrdemDeServicoResponse(_ComSituacao):
     pagamento: ResumoPagamentoResponse | None = Field(
         description="Resumo do pagamento solicitado ao Billing (None antes dele)."
     )
-    motivo_cancelamento: str | None
+    motivo_cancelamento: str | None = Field(
+        description=(
+            "Texto do pedido de cancelamento, guardado ja no 202: a OS segue com o "
+            "status que tinha e so fica cancelada quando a saga termina de desfazer "
+            "os passos. Volta a null se o inicio da execucao vencer o pedido."
+        )
+    )
     versao: int = Field(description="Versao do lock otimista (muda a cada escrita).")
     criado_em: datetime
     atualizado_em: datetime

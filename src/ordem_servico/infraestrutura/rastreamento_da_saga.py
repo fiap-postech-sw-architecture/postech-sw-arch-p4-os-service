@@ -1,11 +1,11 @@
 """Span das acoes que mexem na saga por fora do consumidor (ADR-043).
 
-O cancelamento, e depois a retomada e o prazo, chegam com trace proprio (a
-requisicao do atendente, o ciclo do processo de prazos). Cada um abre o span da
-acao como filho do contexto que a saga guardou na ultima transicao
-(``sagas.traceparent``), com span link para o que o disparou: os comandos que a
-acao grava na outbox, e o contexto que a propria saga passa a guardar, seguem
-no trace da saga. A camada de aplicacao so conhece o ``SpanDaSaga``.
+O cancelamento chega com trace proprio, o da requisicao do atendente. A acao
+abre o span ``saga cancelamento`` como filho do contexto que a saga guardou na
+ultima transicao (``sagas.traceparent``), com span link para a requisicao: os
+comandos que ela grava na outbox, e o contexto que a propria saga passa a
+guardar, seguem no trace da saga. A camada de aplicacao so conhece o
+``SpanDaSaga``.
 """
 
 from __future__ import annotations
