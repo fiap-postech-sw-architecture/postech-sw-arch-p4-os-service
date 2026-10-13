@@ -20,6 +20,7 @@ from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.documento import normalizar_cnpj
 from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
+    DomainException,
     TransicaoStatusInvalidaException,
 )
 from src.compartilhado.dominio.placa import Placa
@@ -55,6 +56,7 @@ from src.ordem_servico.dominio.exceptions import (
 )
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+from src.ordem_servico.dominio.texto_livre import motivo_de_cancelamento
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -288,6 +290,10 @@ CANCELAMENTO_RECUSADO: Final = "Cancelamento recusado: execução já iniciada"
 ORDEM_JA_CANCELADA: Final = "Ordem já cancelada"
 # Leituras do pedido quando o consumidor grava a mesma OS ou saga no meio.
 _LEITURAS_DO_CANCELAMENTO: Final = 3
+# Desfecho do pedido na trilha de auditoria: a compensacao comecou agora, ou ja
+# estava em curso ou parada e o pedido nao mudou nada.
+CANCELAMENTO_ACEITO: Final = "aceito"
+CANCELAMENTO_REPETIDO: Final = "repetido"
 
 
 class CancelarOrdem:
@@ -318,7 +324,10 @@ class CancelarOrdem:
 
         Conflito de versao (o consumidor gravou a mesma OS ou saga no meio):
         rele e decide de novo, ate tres leituras (*reread value*, RFC-004 secao
-        4.5), porque a etapa pode ter mudado, e com ela a resposta.
+        4.5), porque a etapa pode ter mudado, e com ela a resposta. Todo
+        desfecho, aceito ou recusado, vai para a trilha de auditoria com o
+        ``ator`` e o ``correlation_id`` (a ordem), nunca o texto do motivo
+        (ADR-039).
 
         Raises:
             OrdemNaoEncontradaException: ordem inexistente (404).
@@ -330,6 +339,31 @@ class CancelarOrdem:
             ValorInvalidoException: motivo vazio, longo demais ou com
                 caractere de controle (422).
         """
+        try:
+            # O texto vale antes de qualquer leitura ou efeito, tambem no pedido
+            # repetido, que depois nao o grava.
+            texto = motivo_de_cancelamento(motivo)
+            dto, resultado = self._com_releituras(ordem_id, texto, ator)
+        except DomainException as exc:
+            _log.warning(
+                "order cancellation refused",
+                correlation_id=str(ordem_id),
+                ator=ator,
+                resultado=exc.codigo,
+            )
+            raise
+        _log.info(
+            "order cancellation requested",
+            correlation_id=str(ordem_id),
+            ator=ator,
+            resultado=resultado,
+            etapa=dto.etapa,
+        )
+        return dto
+
+    def _com_releituras(
+        self, ordem_id: UUID, motivo: str, ator: str
+    ) -> tuple[OrdemDeServicoDTO, str]:
         leitura = 1
         while True:
             try:
@@ -339,8 +373,10 @@ class CancelarOrdem:
                     raise
                 leitura += 1
 
-    def _cancelar(self, ordem_id: UUID, motivo: str, ator: str) -> OrdemDeServicoDTO:
-        """Uma leitura e a decisao sobre ela, numa transacao."""
+    def _cancelar(
+        self, ordem_id: UUID, motivo: str, ator: str
+    ) -> tuple[OrdemDeServicoDTO, str]:
+        """Uma leitura e a decisao sobre ela, numa transacao: o DTO e o desfecho."""
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
             # Lida na mesma transacao: nada fica aberto depois do commit.
@@ -349,7 +385,7 @@ class CancelarOrdem:
                 raise SagaNaoEncontradaException(ordem_id)
             if saga.etapa in ETAPAS_EM_COMPENSACAO:
                 # A compensacao ja comecou: o pedido repetido nao muda nada.
-                return _ordem_dto(ordem, saga)
+                return _ordem_dto(ordem, saga), CANCELAMENTO_REPETIDO
             # O comando e o contexto que a saga passa a guardar nascem no span
             # do cancelamento, filho do trace dela (ADR-043).
             with self._contexto.span("saga cancelamento", saga.traceparent):
@@ -358,7 +394,7 @@ class CancelarOrdem:
                 self._repo.salvar(ordem)
                 self._sagas.salvar(saga)
                 self._uow.commit()
-        return _ordem_dto(ordem, saga)
+        return _ordem_dto(ordem, saga), CANCELAMENTO_ACEITO
 
     def _compensar(
         self, ordem: OrdemDeServico, saga: Saga, motivo: str, ator: str

@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID  # noqa: TC003
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 # Imports de runtime (nao TYPE_CHECKING): o FastAPI avalia as annotations
@@ -48,8 +47,6 @@ from src.ordem_servico.interfaces.schemas import (
     PassoDaSagaResponse,
     SagaResponse,
 )
-
-_log = structlog.get_logger(__name__)
 
 # Respostas documentadas no OpenAPI (Any: e o tipo do parametro `responses`
 # do FastAPI). 401 e 403 valem para toda rota autenticada do router.
@@ -207,14 +204,8 @@ def cancelar_ordem(
     execução já iniciada"); ordem ja cancelada, 409 ("Ordem já cancelada").
     Toda OS tem saga desde a abertura: sem ela, 404.
     """
-    ator = ator_de(usuario)
-    resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
-    # Auditoria (ADR-039): quem, a acao e o alvo; o texto do motivo nunca.
-    _log.info(
-        "order cancellation requested",
-        ordem_id=str(ordem_id),
-        ator=ator,
-        etapa=resultado.etapa,
+    resultado = obter_cancelar_ordem(session).executar(
+        ordem_id, body.motivo, ator=ator_de(usuario)
     )
     return OrdemDeServicoResponse.model_validate(resultado)
 

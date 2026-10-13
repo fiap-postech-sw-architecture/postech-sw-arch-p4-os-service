@@ -33,7 +33,7 @@ from src.ordem_servico.dominio.resumos import (
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.dominio.texto_livre import (
     TAMANHO_MAXIMO_DESCRICAO,
-    TAMANHO_MAXIMO_MOTIVO,
+    motivo_de_cancelamento,
     texto_obrigatorio,
 )
 
@@ -211,9 +211,7 @@ class OrdemDeServico(AggregateRoot, LeituraDaOrdem):
         ate la o texto fica aqui, ao alcance da eliminacao de dados da LGPD.
         """
         _maquina.validar_transicao(self._status, _S.CANCELADA)
-        self._motivo_cancelamento = texto_obrigatorio(
-            motivo, "motivo de cancelamento", TAMANHO_MAXIMO_MOTIVO
-        )
+        self._motivo_cancelamento = motivo_de_cancelamento(motivo)
         self._atualizado_em = datetime.now(UTC)
 
     def cancelar(self, motivo: str, origem: OrigemMudanca, *, ator: str) -> None:

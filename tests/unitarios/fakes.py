@@ -10,6 +10,7 @@ espelhando o contrato da ``SQLAlchemyUnitOfWork`` real). Quem nao afere
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -110,6 +111,18 @@ class RepoEmMemoria:
         return 42
 
 
+class RepoDoBanco(RepoEmMemoria):
+    """Cada leitura traz a OS do banco: o rollback desfez a tentativa anterior."""
+
+    def __init__(self, *ordens: OrdemDeServico, conflito: bool = False) -> None:
+        super().__init__(*ordens, conflito=conflito)
+        self.leituras = 0
+
+    def obter_por_id(self, ordem_id: UUID) -> OrdemDeServico | None:
+        self.leituras += 1
+        return deepcopy(super().obter_por_id(ordem_id))
+
+
 class ConsultaAcompanhamentoEspia:
     """Registra cada consulta: entrada invalida tem de deixar ``chamadas`` vazia."""
 
@@ -157,6 +170,13 @@ class SagasEmMemoria:
             raise ConflitoDeConcorrenciaException()
         self.sagas[saga.ordem_id] = saga
         self.salvas.append(saga)
+
+
+class SagasDoBanco(SagasEmMemoria):
+    """Cada leitura traz a saga do banco, sem as mudancas da tentativa desfeita."""
+
+    def obter(self, ordem_id: UUID) -> Saga | None:
+        return deepcopy(super().obter(ordem_id))
 
 
 class ConsultaDaOrdemEmMemoria:

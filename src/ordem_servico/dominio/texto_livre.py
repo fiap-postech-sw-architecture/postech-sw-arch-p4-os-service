@@ -43,3 +43,8 @@ def texto_obrigatorio(valor: str, rotulo: str, maximo: int) -> str:
         msg = f"{rotulo} tem caractere de controle ou de formatacao"
         raise ValorInvalidoException(msg)
     return texto
+
+
+def motivo_de_cancelamento(valor: str) -> str:
+    """O motivo do cancelamento: o texto do pedido do atendente, validado."""
+    return texto_obrigatorio(valor, "motivo de cancelamento", TAMANHO_MAXIMO_MOTIVO)

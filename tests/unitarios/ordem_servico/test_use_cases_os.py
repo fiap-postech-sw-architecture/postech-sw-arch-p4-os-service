@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
+import structlog.testing
 
 from src.compartilhado.dominio.cnpj import CNPJ
 from src.compartilhado.dominio.cpf import CPF
@@ -25,7 +25,6 @@ from src.ordem_servico.aplicacao.dtos import (
 )
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.modelo import SagaNaoEncontradaException
-from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.use_cases import (
     CANCELAMENTO_RECUSADO,
     ORDEM_JA_CANCELADA,
@@ -42,7 +41,6 @@ from src.ordem_servico.dominio.exceptions import (
     OrdemNaoEncontradaException,
     VeiculoNaoEncontradoException,
 )
-from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.fabricas import (
     ATOR_ATENDENTE,
@@ -58,7 +56,9 @@ from tests.unitarios.fakes import (
     ConsultaAcompanhamentoEspia,
     ConsultaDaOrdemEmMemoria,
     FakeUnitOfWork,
+    RepoDoBanco,
     RepoEmMemoria,
+    SagasDoBanco,
     SagasEmMemoria,
 )
 from tests.unitarios.ordem_servico.cenario_da_saga import (
@@ -66,6 +66,8 @@ from tests.unitarios.ordem_servico.cenario_da_saga import (
     PRAZO,
     CenarioDaSaga,
 )
+
+USE_CASES = "src.ordem_servico.aplicacao.use_cases"
 
 
 def _dto() -> AbrirOrdemDTO:
@@ -342,21 +344,8 @@ class TestCancelarOrdem:
     def test_conflito_que_volta_nas_tres_leituras_levanta_sem_commit(self) -> None:
         cenario = CenarioDaSaga.em("aguardando_decisao")
 
-        class _SempreEmConflito(RepoEmMemoria):
-            """Cada leitura traz a OS do banco: o rollback desfez a anterior."""
-
-            leituras = 0
-
-            def obter_por_id(self, ordem_id: UUID) -> OrdemDeServico | None:
-                self.leituras += 1
-                return deepcopy(super().obter_por_id(ordem_id))
-
-        class _SagasDoBanco(SagasEmMemoria):
-            def obter(self, ordem_id: UUID) -> Saga | None:
-                return deepcopy(super().obter(ordem_id))
-
-        repo, uow = _SempreEmConflito(cenario.ordem, conflito=True), FakeUnitOfWork()
-        sagas = _SagasDoBanco(cenario.saga)
+        repo, uow = RepoDoBanco(cenario.ordem, conflito=True), FakeUnitOfWork()
+        sagas = SagasDoBanco(cenario.saga)
 
         with pytest.raises(ConflitoDeConcorrenciaException):
             _cancelar_ordem(repo, uow, sagas).executar(
@@ -367,6 +356,26 @@ class TestCancelarOrdem:
         assert repo.leituras == 3
         assert not uow.committed
         assert uow.rolled_back
+
+    def test_conflito_que_volta_nas_tres_leituras_audita_uma_vez_com_o_codigo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(f"{USE_CASES}._log", structlog.get_logger())
+        cenario = CenarioDaSaga.em("aguardando_decisao")
+        repo = RepoDoBanco(cenario.ordem, conflito=True)
+        sagas = SagasDoBanco(cenario.saga)
+
+        with (
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(ConflitoDeConcorrenciaException),
+        ):
+            _cancelar_ordem(repo, FakeUnitOfWork(), sagas).executar(
+                cenario.ordem_id, "x", ator=ATOR_ATENDENTE
+            )
+
+        assert [(log["event"], log["resultado"], log["ator"]) for log in logs] == [
+            ("order cancellation refused", "CONFLITO_DE_CONCORRENCIA", ATOR_ATENDENTE)
+        ]
 
     def test_inexistente_levanta_404(self) -> None:
         with pytest.raises(OrdemNaoEncontradaException):

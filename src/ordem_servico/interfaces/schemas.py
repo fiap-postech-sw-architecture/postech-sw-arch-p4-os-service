@@ -58,10 +58,16 @@ class CancelarOrdemRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Sem min_length nem max_length: o vazio, o tamanho e os caracteres que nao se
+    # leem valem no dominio, e todos voltam no mesmo 422 (envelope VALOR_INVALIDO);
+    # o OpenAPI anuncia os limites.
     motivo: str = Field(
-        min_length=1,
-        max_length=TAMANHO_MAXIMO_MOTIVO,
-        description="Motivo do cancelamento (obrigatorio).",
+        description=(
+            f"Motivo do cancelamento, de 1 a {TAMANHO_MAXIMO_MOTIVO} caracteres, "
+            "sem caractere de controle: o atendente o le na tela e a LGPD o "
+            "alcanca."
+        ),
+        json_schema_extra={"minLength": 1, "maxLength": TAMANHO_MAXIMO_MOTIVO},
     )
 
 
