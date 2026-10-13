@@ -13,7 +13,7 @@ GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch typecheck security test check audit \
-	smoke compose-up compose-down manifests kind-deploy
+	smoke compose-up compose-down manifests print-trivy-version kind-deploy
 
 lock-check:
 	uv lock --check
@@ -166,7 +166,9 @@ smoke:
 # do `make manifests` do platform.
 KUBERNETES_VERSION := 1.35.0
 KUBECONFORM_IMAGE := ghcr.io/yannh/kubeconform:v0.8.0
-TRIVY_IMAGE := aquasec/trivy:0.72.0
+# Fonte unica da versao do trivy: o security.yml instala a de print-trivy-version.
+TRIVY_VERSION := 0.72.0
+TRIVY_IMAGE := aquasec/trivy:$(TRIVY_VERSION)
 KUBECONFORM := docker run --rm -i $(KUBECONFORM_IMAGE) -strict -summary \
 	-output text -kubernetes-version $(KUBERNETES_VERSION) -reject Secret
 TRIVY_CONFIG := docker run --rm -i \
@@ -184,6 +186,9 @@ manifests:
 		printf '%s\n' "$$manifestos" | $(KUBECONFORM) -; \
 		printf '%s\n' "$$manifestos" | $(TRIVY_CONFIG); \
 	done
+
+print-trivy-version:
+	@echo $(TRIVY_VERSION)
 
 # Implantacao no kind do platform (README, "Implantacao"), com a plataforma
 # de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do

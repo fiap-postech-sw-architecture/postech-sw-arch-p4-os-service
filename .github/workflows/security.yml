@@ -67,19 +67,30 @@ jobs:
   trivy:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Build da imagem de runtime
         run: docker build -t "${GITHUB_REPOSITORY#*/}:scan-${GITHUB_SHA}" .
+      # A versao e a do Makefile (TRIVY_VERSION), a mesma do make manifests.
       - name: Instala trivy
-        run: >-
-          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/v0.72.0/contrib/install.sh
-          | sh -s -- -b /usr/local/bin v0.72.0
+        run: |
+          versao="$(make -s print-trivy-version)"
+          curl -sSfL "https://raw.githubusercontent.com/aquasecurity/trivy/v${versao}/contrib/install.sh" \
+            | sh -s -- -b /usr/local/bin "v${versao}"
       - name: trivy (HIGH e CRITICAL com correcao disponivel)
         run: >-
           trivy image --severity HIGH,CRITICAL --ignore-unfixed --no-progress
           --exit-code 1 "${GITHUB_REPOSITORY#*/}:scan-${GITHUB_SHA}"
-        env:
-          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db
+      # As imagens de terceiros dos manifestos (o PostgreSQL e o exporter): so o
+      # relatorio no summary, sem reprovar o job, porque a correcao depende de
+      # um build novo do fornecedor. Nem o achado nem a falha da varredura (pull
+      # recusado, tag removida, banco do trivy fora) reprovam: a falha vira
+      # aviso no summary (scripts/ci/relatorio-trivy-terceiros.sh, com teste em
+      # tests/unitarios/test_scripts_ci.py). O risco aceito e a politica de subir
+      # a versao estao no README, em Implantacao.
+      - name: trivy das imagens de terceiros dos manifestos (relatorio)
+        run: scripts/ci/relatorio-trivy-terceiros.sh
