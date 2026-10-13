@@ -9,16 +9,21 @@ container, a NetworkPolicy e a configuracao de cada overlay. Sem cluster; o
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from tests.manifestos import (
     OVERLAYS,
     containers,
+    do_render,
     do_render_por_tipo,
     expandir_ambiente,
+    pods,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 _BANCO = "os-postgres.pytstop-os.svc.cluster.local:5432/os"
 _API = ("Deployment", "os-service-api", "api")
@@ -178,3 +183,75 @@ def test_configmap_do_servico_so_chega_aos_processos_que_o_leem(overlay: str) ->
         assert len(nomes) == 1
         assert nomes[0] in existentes
         assert nomes[0].startswith("os-service-")
+
+
+def _efetivo(campo: str, especificacao: dict[str, Any], pod: dict[str, Any]) -> Any:
+    """O valor do container, ou o do pod quando o container nao o define."""
+    contexto = especificacao.get("securityContext", {})
+    if campo in contexto:
+        return contexto[campo]
+    return pod.get("securityContext", {}).get(campo)
+
+
+def _violacoes_do_restricted(
+    chave: tuple[str, str, str], especificacao: dict[str, Any], pod: dict[str, Any]
+) -> Iterator[str]:
+    contexto = especificacao.get("securityContext", {})
+    onde = "/".join(chave)
+    if contexto.get("allowPrivilegeEscalation") is not False:
+        yield f"{onde}: allowPrivilegeEscalation deve ser false"
+    if contexto.get("capabilities") != {"drop": ["ALL"]}:
+        yield f"{onde}: capabilities deve ser drop [ALL]"
+    if contexto.get("readOnlyRootFilesystem") is not True:
+        yield f"{onde}: readOnlyRootFilesystem deve ser true"
+    if contexto.get("privileged"):
+        yield f"{onde}: privileged"
+    if _efetivo("runAsNonRoot", especificacao, pod) is not True:
+        yield f"{onde}: runAsNonRoot deve ser true"
+    usuario = _efetivo("runAsUser", especificacao, pod)
+    if not isinstance(usuario, int) or usuario == 0:
+        yield f"{onde}: runAsUser deve ser um uid numerico diferente de 0"
+    seccomp = _efetivo("seccompProfile", especificacao, pod)
+    if seccomp != {"type": "RuntimeDefault"}:
+        yield f"{onde}: seccompProfile deve ser RuntimeDefault"
+    for tipo in ("requests", "limits"):
+        recursos = especificacao.get("resources", {}).get(tipo, {})
+        if not {"cpu", "memory"} <= recursos.keys():
+            yield f"{onde}: resources.{tipo} deve ter cpu e memory"
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_todo_container_cumpre_o_pod_security_restricted(overlay: str) -> None:
+    violacoes = [
+        violacao
+        for chave, especificacao, pod in containers(overlay)
+        for violacao in _violacoes_do_restricted(chave, especificacao, pod)
+    ]
+
+    assert violacoes == []
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_nenhum_pod_monta_o_token_da_service_account_nem_usa_a_rede_do_no(
+    overlay: str,
+) -> None:
+    pods_do_servico = list(pods(overlay))
+    sem_a_regra = [
+        f"{tipo}/{nome}"
+        for tipo, nome, pod in pods_do_servico
+        if pod.get("automountServiceAccountToken") is not False
+        or any(pod.get(campo) for campo in ("hostNetwork", "hostPID", "hostIPC"))
+    ]
+
+    assert len(pods_do_servico) == 5
+    assert sem_a_regra == []
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_namespace_aplica_o_restricted_em_enforce_warn_e_audit(overlay: str) -> None:
+    rotulos = do_render(overlay, "Namespace", "pytstop-os")["metadata"]["labels"]
+
+    assert {
+        modo: rotulos[f"pod-security.kubernetes.io/{modo}"]
+        for modo in ("enforce", "warn", "audit")
+    } == dict.fromkeys(("enforce", "warn", "audit"), "restricted")
