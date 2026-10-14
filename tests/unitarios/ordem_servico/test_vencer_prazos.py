@@ -9,14 +9,12 @@ reivindica a saga e a guarda da outbox tem os testes no PostgreSQL.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 import pytest
 from structlog.testing import capture_logs
 
-from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.prazos import (
     ATOR_PRAZOS,
@@ -26,80 +24,23 @@ from src.ordem_servico.aplicacao.saga.prazos import (
 )
 from src.ordem_servico.aplicacao.saga.vencer_prazos import (
     ResultadoDoCiclo,
-    VencerPrazos,
 )
-from tests.unitarios.fakes import PresencaFake, TransacaoDosPrazosFake
 from tests.unitarios.ordem_servico.cenario_da_saga import (
     FEITO,
     PLANO_DA_RFC,
     CenarioDaSaga,
 )
+from tests.unitarios.ordem_servico.ciclo_dos_prazos import MAXIMO, PRAZO, Prazos
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-PRAZO = timedelta(seconds=120)
-MAXIMO = 5
 ETAPAS = (
     "aguardando_orcamento",
     "aguardando_reserva",
     "aguardando_pagamento",
     "aguardando_agendamento",
 )
-
-
-class RelogioManual:
-    """O relogio do ``prazos``: so anda quando o teste manda."""
-
-    def __init__(self, agora: datetime) -> None:
-        self.agora = agora
-
-    def __call__(self) -> datetime:
-        return self.agora
-
-
-class Prazos:
-    """O ``VencerPrazos`` real sobre o cenario, com o que o teste observa."""
-
-    def __init__(
-        self,
-        cenario: CenarioDaSaga,
-        *,
-        ha_consumidor: bool = True,
-        maximo: int = MAXIMO,
-        span: Any = None,
-    ) -> None:
-        self.cenario = cenario
-        self.relogio = RelogioManual(cenario.saga.atualizada_em)
-        self.transacao = TransacaoDosPrazosFake(cenario.ordens, cenario.sagas)
-        self.presenca = PresencaFake(ha_consumidor=ha_consumidor)
-        contexto = ContextoDeEnvio(PRAZO, self.relogio)
-        if span is not None:
-            contexto = ContextoDeEnvio(PRAZO, self.relogio, span)
-        self.caso_de_uso = VencerPrazos(
-            abrir=lambda: self.transacao,
-            presenca=self.presenca,
-            contexto=contexto,
-            max_reenvios=maximo,
-        )
-
-    @property
-    def saga(self) -> Any:
-        return self.cenario.saga
-
-    def vencer(self, ao_tratar: Any = None) -> ResultadoDoCiclo:
-        """Um ciclo no instante em que o prazo da saga vence."""
-        if self.saga.prazo_resposta_em is not None:
-            self.relogio.agora = max(self.relogio.agora, self.saga.prazo_resposta_em)
-        return (
-            self.caso_de_uso.executar(ao_tratar)
-            if ao_tratar
-            else self.caso_de_uso.executar()
-        )
-
-    @property
-    def comandos(self) -> list[tuple[str, dict[str, Any], UUID, UUID | None]]:
-        return self.transacao.comandos
 
 
 def _em(etapa: str) -> Prazos:

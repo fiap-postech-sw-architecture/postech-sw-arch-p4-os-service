@@ -216,12 +216,22 @@ class TransacaoDosPrazosFake(FakeUnitOfWork):
     que nao desfazem sozinhos: os testes de rollback conferem a outbox e o commit.
     """
 
-    def __init__(self, ordens: RepoEmMemoria, sagas: SagasEmMemoria) -> None:
+    def __init__(
+        self,
+        ordens: RepoEmMemoria,
+        sagas: SagasEmMemoria,
+        outbox: FakeUnitOfWork | None = None,
+    ) -> None:
         super().__init__()
         self.ordens = ordens
         self.sagas = sagas
         self.commits = 0
         self.rollbacks = 0
+        if outbox is not None:
+            # A mesma outbox do orquestrador: os comandos de todos os processos
+            # juntos, na ordem em que saem.
+            self.comandos = outbox.comandos
+            self.envelopes = outbox.envelopes
 
     def __enter__(self) -> TransacaoDosPrazosFake:
         return self
