@@ -48,6 +48,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     ETAPAS_FINAIS,
     ETAPAS_NAO_FINAIS,
 )
+from src.ordem_servico.infraestrutura.envio_em_voo import ULTIMO_ENVIO
 from src.ordem_servico.infraestrutura.mapping import sagas_table
 from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 
@@ -206,16 +207,15 @@ def _ao_encerrar(sessao: Session, transacao: SessionTransaction) -> None:
         sessao.info.pop(_FATOS, None)
 
 
-# O maior atraso do prazo tecnico (RFC-004 secao 9, D91): a saga com prazo cujo
+# O maior atraso do prazo tecnico (RFC-004 secao 9): a saga com prazo cujo
 # envio mais recente (o ultimo de ``mensagem_ids``) a outbox ja entregou, e a
 # entrega mais o prazo ja passou. A mesma condicao com que o processo ``prazos``
 # reivindica a saga; pendente ou ``dead`` nao conta (quem acusa e a outbox
 # parada), nem a saga parada em ``falha_na_compensacao`` (sem prazo). Zero sem
 # atraso.
 _ATRASO_DO_PRAZO: Final = text(
-    "SELECT COALESCE(EXTRACT(EPOCH FROM max(now() - (o.entregue_em + :prazo))), 0) "
-    "FROM sagas s JOIN outbox o ON o.mensagem_id = "
-    "CAST(s.comando_em_voo->'mensagem_ids'->>-1 AS uuid) "
+    "SELECT COALESCE(EXTRACT(EPOCH FROM max(now() - (o.entregue_em + :prazo))), 0) "  # noqa: S608  # nosec B608 - so constantes
+    f"FROM sagas s JOIN outbox o ON o.mensagem_id = {ULTIMO_ENVIO} "
     "WHERE s.prazo_resposta_em <= now() AND o.status = 'entregue' "
     "AND o.entregue_em + :prazo <= now()"
 )

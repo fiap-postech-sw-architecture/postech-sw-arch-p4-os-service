@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 
-from src.compartilhado.infraestrutura.database import criar_session_factory
+from src.compartilhado.infraestrutura.database import BANCO_FORA, criar_session_factory
 from src.compartilhado.infraestrutura.mensageria.processo import (
     Sinalizador,
     instalar_sinais,
@@ -57,6 +57,7 @@ def main() -> None:
                     prazo, span=span_da_saga(criar_tracer("prazos"))
                 ),
                 max_reenvios=maximo,
+                banco_fora=BANCO_FORA,
             ),
             presenca=presenca,
             sinal=sinal,

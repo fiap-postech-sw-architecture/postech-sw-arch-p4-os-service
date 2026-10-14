@@ -16,10 +16,10 @@ from uuid import UUID, uuid4
 import pytest
 from prometheus_client import REGISTRY, CollectorRegistry
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
 
 from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura.database import BANCO_FORA
 from src.compartilhado.infraestrutura.outbox_mapping import gravar_comando
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
@@ -159,6 +159,34 @@ def _semear_e_comitar(
     return ordem_id
 
 
+def _corromper_o_ultimo_id(
+    session_factory: sessionmaker[Session], ordem_id: UUID, mensagem_ids: str
+) -> None:
+    """Grava ``mensagem_ids`` (JSON) na saga: o dado que nao e uuid, por exemplo."""
+    with session_factory() as sess:
+        sess.execute(
+            text(
+                "UPDATE sagas SET comando_em_voo = "
+                "jsonb_set(comando_em_voo, '{mensagem_ids}', CAST(:ids AS jsonb)) "
+                "WHERE ordem_id = :id"
+            ),
+            {"ids": mensagem_ids, "id": ordem_id},
+        )
+        sess.commit()
+
+
+# Linhas com `mensagem_ids` que nao terminam num uuid: nenhuma pode derrubar a
+# consulta do ciclo nem a do gauge, e nenhuma casa com linha da outbox.
+IDS_INVALIDOS = [
+    pytest.param('["nao-e-uuid"]', id="texto"),
+    pytest.param('[""]', id="vazio"),
+    pytest.param("[]", id="lista-vazia"),
+    pytest.param("[123]", id="numero"),
+    pytest.param("[null]", id="nulo"),
+    pytest.param('["12345678-1234-1234-1234-12345678901z"]', id="quase-uuid"),
+]
+
+
 def _reivindicar(
     session_factory: sessionmaker[Session],
     agora: datetime = T0,
@@ -277,6 +305,38 @@ class TestConsultaDasVencidas:
 
         assert (primeira, segunda, terceira, nenhuma) == (antiga, meio, recente, None)
 
+    @pytest.mark.parametrize("ids", IDS_INVALIDOS)
+    def test_dado_invalido_no_ultimo_envio_nao_derruba_a_consulta(
+        self, session_factory: sessionmaker[Session], ids: str
+    ) -> None:
+        entregue = [_entregue(T0 - timedelta(hours=1))]
+        estragada = _semear_e_comitar(
+            session_factory, entregue, prazo_em=T0 - timedelta(minutes=5)
+        )
+        boa = _semear_e_comitar(
+            session_factory, entregue, prazo_em=T0 - timedelta(minutes=1)
+        )
+        _corromper_o_ultimo_id(session_factory, estragada, ids)
+
+        # A estragada, de prazo mais antigo, nao casa com linha e a consulta segue.
+        assert _reivindicar(session_factory) == boa
+
+    def test_o_uuid_em_maiuscula_casa_com_a_linha_da_outbox(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        ordem_id = _semear_e_comitar(session_factory, [_entregue(T0 - PRAZO)])
+        with session_factory() as sess:
+            (ids,) = sess.execute(
+                text(
+                    "SELECT comando_em_voo->'mensagem_ids' FROM sagas "
+                    "WHERE ordem_id = :id"
+                ),
+                {"id": ordem_id},
+            ).one()
+        _corromper_o_ultimo_id(session_factory, ordem_id, f'["{ids[-1].upper()}"]')
+
+        assert _reivindicar(session_factory) == ordem_id
+
     def test_a_saga_vem_carregada_e_travada_para_a_transacao(
         self, session_factory: sessionmaker[Session]
     ) -> None:
@@ -350,6 +410,7 @@ def _prazos(
         presenca=PresencaFake(ha_consumidor=ha_consumidor),
         contexto=ContextoDeEnvio(PRAZO, lambda: agora),
         max_reenvios=maximo,
+        banco_fora=BANCO_FORA,
     )
 
 
@@ -417,8 +478,12 @@ class TestCicloNoBanco:
         antes = _contador("pytstop_saga_reenvios_total", comando="GerarOrcamento")
         linhas_antes = _linhas_da_outbox(engine, ordem_id)
 
-        with outbox_recusando_no_commit(engine), pytest.raises(SQLAlchemyError):
-            _prazos(session_factory, T0).executar()
+        # O banco recusa o commit (nao e banco fora): a saga fica de fora do ciclo
+        # e a transacao desfaz tudo, o comando e a saga juntos.
+        with outbox_recusando_no_commit(engine):
+            resultado = _prazos(session_factory, T0).executar()
+
+        assert resultado == ResultadoDoCiclo(recusadas=1)
 
         saga = _saga(session_factory, ordem_id)
         assert (saga.reenvios, saga.versao) == (0, 2)
@@ -465,6 +530,24 @@ class TestCicloNoBanco:
             _contador("pytstop_saga_compensacoes_total", motivo="prazo_tecnico")
             == compensacoes + 1
         )
+
+    def test_saga_com_dado_invalido_na_frente_nao_trava_as_outras(
+        self, engine: Engine, session_factory: sessionmaker[Session]
+    ) -> None:
+        entregue = [_entregue(T0 - timedelta(hours=1))]
+        estragada = _semear_e_comitar(
+            session_factory, entregue, prazo_em=T0 - timedelta(minutes=5)
+        )
+        boa = _semear_e_comitar(
+            session_factory, entregue, prazo_em=T0 - timedelta(minutes=1)
+        )
+        _corromper_o_ultimo_id(session_factory, estragada, '["nao-e-uuid"]')
+
+        resultado = _prazos(session_factory, T0).executar()
+
+        assert resultado == ResultadoDoCiclo(reenviadas=1)
+        assert _saga(session_factory, boa).reenvios == 1
+        assert _saga(session_factory, estragada).reenvios == 0
 
     def test_nada_vence_sem_consumidor_nem_com_o_envio_pendente(
         self, engine: Engine, session_factory: sessionmaker[Session]
@@ -590,6 +673,7 @@ class TestRelogioDoBanco:
             presenca=PresencaFake(),
             contexto=ContextoDeEnvio(PRAZO, lambda: datetime.now(UTC) + desvio),
             max_reenvios=MAXIMO,
+            banco_fora=BANCO_FORA,
         )
 
         resultado = ciclo.executar()
@@ -613,6 +697,7 @@ class TestRelogioDoBanco:
             presenca=PresencaFake(),
             contexto=ContextoDeEnvio(PRAZO, lambda: datetime.now(UTC)),
             max_reenvios=MAXIMO,
+            banco_fora=BANCO_FORA,
         )
 
         assert ciclo.executar() == ResultadoDoCiclo(reenviadas=1)
@@ -660,7 +745,7 @@ def _gauge(engine: Engine) -> float:
 
 
 class TestGaugeDoPrazoVencido:
-    """``pytstop_saga_prazo_vencido_segundos`` (D91): so o que o ``prazos`` trataria."""
+    """``pytstop_saga_prazo_vencido_segundos``: so o que o ``prazos`` trataria."""
 
     def _agora(self, session_factory: sessionmaker[Session]) -> datetime:
         with session_factory() as sess:
@@ -726,6 +811,26 @@ class TestGaugeDoPrazoVencido:
         )
 
         assert _gauge(engine) == 0
+
+    @pytest.mark.parametrize("ids", IDS_INVALIDOS)
+    def test_dado_invalido_no_ultimo_envio_nao_derruba_o_coletor(
+        self, engine: Engine, session_factory: sessionmaker[Session], ids: str
+    ) -> None:
+        agora = self._agora(session_factory)
+        estragada = _semear_e_comitar(
+            session_factory,
+            [_entregue(agora - timedelta(hours=1))],
+            prazo_em=agora - timedelta(minutes=5),
+        )
+        _corromper_o_ultimo_id(session_factory, estragada, ids)
+        _semear_e_comitar(
+            session_factory,
+            [_entregue(agora - PRAZO - timedelta(seconds=90))],
+            prazo_em=agora - timedelta(minutes=1),
+        )
+
+        # O gauge segue disponivel (o helper confere) e mede a saga boa.
+        assert 90 <= _gauge(engine) <= 120
 
     def test_o_ultimo_envio_decide_e_a_saga_parada_nao_conta(
         self, engine: Engine, session_factory: sessionmaker[Session]

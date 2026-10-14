@@ -8,15 +8,19 @@ reivindica a saga e a guarda da outbox tem os testes no PostgreSQL.
 
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
+from sqlalchemy.exc import DataError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 from structlog.testing import capture_logs
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.compartilhado.infraestrutura.database import BANCO_FORA
 from src.ordem_servico.aplicacao.saga import vencer_prazos
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.prazos import (
@@ -296,6 +300,92 @@ class TestIsolamentoDasSagas:
         assert recusa["log_level"] == "error"
         assert "nao-e-uuid" not in str(logs)
 
+    @pytest.mark.parametrize(
+        ("estragar", "erro"),
+        [
+            pytest.param(
+                lambda em_voo: em_voo.pop("dados"), "KeyError", id="sem-dados"
+            ),
+            pytest.param(
+                lambda em_voo: em_voo.update(tipo="placa-ABC1D23"),
+                "ValueError",
+                id="tipo-desconhecido",
+            ),
+        ],
+    )
+    def test_comando_guardado_fora_do_contrato_nao_trava_as_outras_sagas(
+        self, estragar: Any, erro: str
+    ) -> None:
+        ruim, boa = self._duas_sagas()
+        estragar(ruim.saga._comando_em_voo)
+        ruim.saga._prazo_resposta_em = ruim.saga.atualizada_em
+        boa.saga._prazo_resposta_em = boa.saga.atualizada_em + timedelta(seconds=1)
+        ruim.relogio.agora = boa.saga.prazo_resposta_em + timedelta(minutes=5)
+
+        with capture_logs() as logs:
+            resultado = ruim.caso_de_uso.executar()
+
+        # A de prazo mais antigo falha primeiro e a outra, atras dela, e tratada.
+        assert resultado == ResultadoDoCiclo(reenviadas=1, recusadas=1)
+        assert boa.saga.reenvios == 1
+        recusa = next(e for e in logs if e["event"] == "saga deadline refused")
+        assert recusa["correlation_id"] == str(ruim.saga.ordem_id)
+        assert recusa["erro"] == erro
+        # So o tipo e o arquivo:linha, nunca a mensagem da excecao.
+        assert re.fullmatch(r"[a-z_]+\.py:\d+", recusa["onde"])
+        assert "motivo" not in recusa
+        assert "ABC1D23" not in str(logs)
+
+    def test_erro_do_banco_que_se_repetiria_nao_trava_as_outras_sagas(self) -> None:
+        ruim, boa = self._duas_sagas()
+        ruim = Prazos(ruim.cenario, banco_fora=BANCO_FORA)
+        ruim.saga._prazo_resposta_em = ruim.saga.atualizada_em
+        boa.saga._prazo_resposta_em = boa.saga.atualizada_em + timedelta(seconds=1)
+        ruim.relogio.agora = boa.saga.prazo_resposta_em + timedelta(minutes=5)
+        sagas = ruim.cenario.sagas
+        salvar = sagas.salvar
+
+        def _salvar(saga: Any) -> None:
+            if saga.ordem_id == ruim.saga.ordem_id:
+                raise DataError("UPDATE sagas ...", {}, Exception("dado-do-cliente"))
+            salvar(saga)
+
+        sagas.salvar = _salvar  # type: ignore[method-assign]
+
+        with capture_logs() as logs:
+            resultado = ruim.caso_de_uso.executar()
+
+        assert resultado == ResultadoDoCiclo(reenviadas=1, recusadas=1)
+        assert boa.saga.reenvios == 1
+        recusa = next(e for e in logs if e["event"] == "saga deadline refused")
+        assert recusa["erro"] == "DataError"
+        assert "dado-do-cliente" not in str(logs)
+
+    @pytest.mark.parametrize(
+        "erro",
+        [
+            pytest.param(OperationalError("COMMIT", {}, Exception("fora")), id="rede"),
+            pytest.param(InterfaceError("COMMIT", {}, Exception("fora")), id="conexao"),
+            pytest.param(PoolTimeout("sem conexao livre"), id="pool"),
+        ],
+    )
+    def test_banco_fora_depois_de_reivindicar_sobe_e_nao_recusa_a_saga(
+        self, erro: Exception
+    ) -> None:
+        prazos = Prazos(CenarioDaSaga.em("aguardando_orcamento"), banco_fora=BANCO_FORA)
+
+        def _cai_o_banco(saga: Any) -> None:
+            raise erro
+
+        prazos.cenario.sagas.salvar = _cai_o_banco  # type: ignore[method-assign]
+
+        # O banco fora nao e defeito da saga: o ciclo falha, a transacao desfaz e
+        # o laco do processo tenta de novo no ciclo seguinte.
+        with pytest.raises(type(erro)):
+            prazos.vencer()
+
+        assert (prazos.transacao.commits, prazos.transacao.rollbacks) == (0, 1)
+
     def test_conflito_de_versao_deixa_a_saga_para_o_proximo_ciclo(self) -> None:
         prazos = _em("aguardando_orcamento")
         prazos.cenario.sagas.provocar_conflito()
@@ -310,10 +400,17 @@ class TestIsolamentoDasSagas:
         prazos.saga._reenvios = MAXIMO
         prazos.cenario.ordens.ordens.clear()
 
-        resultado = prazos.vencer()
+        with capture_logs() as logs:
+            resultado = prazos.vencer()
 
         assert resultado == ResultadoDoCiclo(recusadas=1)
         assert prazos.comandos == []
+        # O dominio recusa com etapa e tipo, sem dado de cliente: o motivo vai ao log.
+        recusa = next(e for e in logs if e["event"] == "saga deadline refused")
+        assert (recusa["erro"], recusa["motivo"]) == (
+            "InvarianteDaSagaError",
+            "saga sem a OS dela",
+        )
 
     def test_erro_do_banco_sobe_para_o_laco_do_processo(self) -> None:
         prazos = _em("aguardando_orcamento")
@@ -397,8 +494,9 @@ class TestErroQueSobeAoLaco:
     def test_conflito_antes_de_reivindicar_alguma_saga_sobe_sem_recusar_ninguem(
         self,
     ) -> None:
-        # Sem saga reivindicada nao ha a quem recusar: o erro vai ao laco do
-        # processo, que o loga e tenta no ciclo seguinte.
+        # Sem saga reivindicada nao ha a quem recusar: o erro sobe ao laco do
+        # processo, que so trata o erro de banco; qualquer outro derruba o
+        # processo, e o Kubernetes o reinicia.
         prazos = _em("aguardando_orcamento")
 
         def _conflita(*_: Any, **__: Any) -> None:

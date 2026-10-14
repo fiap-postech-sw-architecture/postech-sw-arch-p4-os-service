@@ -45,6 +45,7 @@ from prometheus_client import Counter
 from sqlalchemy import event, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.compartilhado.aplicacao.diagnostico import onde
 from src.compartilhado.aplicacao.mensageria import (
     ContratoInvalidoError,
     Desfecho,
@@ -60,7 +61,6 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     INTERVALO_DE_LIMPEZA_S,
     Agenda,
     Sinalizador,
-    onde,
 )
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,

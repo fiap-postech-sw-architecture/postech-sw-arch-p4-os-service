@@ -12,6 +12,7 @@ from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura import metricas_da_saga
+from src.ordem_servico.infraestrutura.envio_em_voo import ULTIMO_ENVIO
 from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
 
 if TYPE_CHECKING:
@@ -48,9 +49,8 @@ _PRIORIDADE_ENCERRADAS: Final = 9
 # A linha da saga fica travada ate o fim da transacao e a travada por outra
 # replica e pulada.
 _SQL_VENCIDA: Final = text(
-    "SELECT s.ordem_id FROM sagas s "
-    "JOIN outbox o ON o.mensagem_id = "
-    "CAST(s.comando_em_voo->'mensagem_ids'->>-1 AS uuid) "
+    "SELECT s.ordem_id FROM sagas s "  # noqa: S608  # nosec B608 - so constantes
+    f"JOIN outbox o ON o.mensagem_id = {ULTIMO_ENVIO} "
     "WHERE s.prazo_resposta_em <= :agora AND o.status = 'entregue' "
     "AND o.entregue_em + :prazo <= :agora "
     "AND s.ordem_id NOT IN :ignorar "

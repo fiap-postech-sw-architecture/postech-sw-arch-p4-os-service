@@ -479,7 +479,7 @@ O processo `prazos` (`python -m src.prazos`, a mesma imagem) roda a cada `PRAZOS
 | Esgotado em etapa linear (`aguardando_orcamento`, `_reserva`, `_pagamento` ou `_agendamento`) | inicia a compensação com `motivo=prazo_tecnico` e o passo em voo no plano (as linhas "prazo técnico esgotado" da tabela da RFC 4.4), envia a primeira e zera o contador; registro `prazo_esgotado` |
 | Esgotado em `compensando` | a saga vai a `falha_na_compensacao` com `falha=reenvios_esgotados`; nenhum comando sai, o comando em voo fica sem prazo e o plano segue com a pendente primeiro; registro `prazo_esgotado` |
 | Saga parada em `falha_na_compensacao`, esperas humanas, sagas encerradas | nada: não têm `prazo_resposta_em` |
-| Dado que o domínio recusa (comando guardado fora do contrato, estado incoerente) | a saga fica de fora do ciclo, `saga deadline refused` em erro com o `correlation_id` e o tipo da exceção, e o prazo vencido continua acusando no gauge |
+| Saga que falha por defeito próprio (o domínio a recusa, o comando guardado está fora do contrato, um erro do banco que se repetiria a cada ciclo) | a saga fica de fora do resto do ciclo e as outras seguem: `saga deadline refused` em erro com o `correlation_id`, o tipo da exceção e o `arquivo:linha` (a mensagem só para a recusa do domínio, que traz etapa e tipo, sem dado de cliente), e o prazo vencido continua acusando no gauge. Só o banco fora (conexão recusada ou caída, pool sem conexão) falha o ciclo inteiro, e o laço tenta de novo no seguinte |
 
 O ator dos registros é `prazos`. Com os padrões (120 s, 5 reenvios, ciclo de 30 s), o original e os cinco reenvios dão ao participante 12 minutos (6 x 120 s) e o limite real chega a cerca de 15 (6 x (120 + 30 + a latência do relay)).
 

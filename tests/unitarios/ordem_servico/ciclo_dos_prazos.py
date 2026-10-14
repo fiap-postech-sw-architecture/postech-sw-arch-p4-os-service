@@ -46,6 +46,7 @@ class Prazos:
         ha_consumidor: bool = True,
         prontas: int = 0,
         maximo: int = MAXIMO,
+        banco_fora: tuple[type[Exception], ...] = (),
         span: Any = None,
         na_outbox_do_cenario: bool = False,
     ) -> None:
@@ -69,6 +70,7 @@ class Prazos:
             presenca=self.presenca,
             contexto=contexto,
             max_reenvios=maximo,
+            banco_fora=banco_fora,
         )
 
     @property

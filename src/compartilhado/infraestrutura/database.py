@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, unquote, urlsplit
 
 from sqlalchemy import MetaData, create_engine
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as TimeoutDoPool
 from sqlalchemy.orm import sessionmaker
 
 if TYPE_CHECKING:
@@ -14,6 +16,12 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 metadata = MetaData()
+
+# O banco fora do alcance: conexao recusada ou caida e pool sem conexao livre. Os
+# processos de fundo (notificador, prazos) deixam essa falha subir ao laco, que
+# tenta de novo no ciclo seguinte; qualquer outro erro do SQLAlchemy (dado
+# invalido, SQL recusado, restricao) se repetiria igual e e da linha ou da saga.
+BANCO_FORA: Final = (OperationalError, InterfaceError, TimeoutDoPool)
 
 # Ambientes em que a URL do banco pode ser montada das variaveis POSTGRES_*
 # (compose e dev local); qualquer outro exige DATABASE_URL explicita.

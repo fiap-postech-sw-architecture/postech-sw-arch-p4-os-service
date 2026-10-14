@@ -24,10 +24,10 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import structlog
-from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
-from sqlalchemy.exc import TimeoutError as TimeoutDoPool
+from sqlalchemy.exc import SQLAlchemyError
 
-from src.compartilhado.infraestrutura.database import criar_session_factory
+from src.compartilhado.aplicacao.diagnostico import onde
+from src.compartilhado.infraestrutura.database import BANCO_FORA, criar_session_factory
 from src.compartilhado.infraestrutura.escuta import EscutaDeCanal
 from src.compartilhado.infraestrutura.mensageria.outbox import ATRASOS_S
 from src.compartilhado.infraestrutura.mensageria.processo import (
@@ -35,7 +35,6 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     INTERVALO_DE_LIMPEZA_S,
     Agenda,
     Sinalizador,
-    onde,
 )
 from src.ordem_servico.aplicacao.emails import MontarEmail
 from src.ordem_servico.aplicacao.ports import FalhaEnvioEmailError
@@ -67,10 +66,9 @@ _log = structlog.get_logger(__name__)
 # longe do heartbeat por linha.
 _LEASE_PADRAO_S: Final = 60
 _POLL_PADRAO_S: Final = 5.0
-# O banco fora do alcance: conexao recusada ou caida e pool sem conexao livre.
-# Qualquer outro erro do SQLAlchemy numa linha (dado invalido, SQL recusado,
-# restricao) se repetiria a cada tentativa: conta como falha da linha.
-_BANCO_FORA: Final = (OperationalError, InterfaceError, TimeoutDoPool)
+# Qualquer erro do SQLAlchemy numa linha que nao seja o banco fora (BANCO_FORA:
+# dado invalido, SQL recusado, restricao) se repetiria a cada tentativa: conta
+# como falha da linha.
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +181,7 @@ class Notificador:
         except FalhaEnvioEmailError as exc:
             # A mensagem e so o nome da excecao de origem (o endereco nao sai).
             self._falhou(linha, str(exc), contexto)
-        except _BANCO_FORA:
+        except BANCO_FORA:
             # Banco fora na leitura: nao e falha da linha, que volta com o lease.
             raise
         except Exception as exc:  # noqa: BLE001  # a linha falha, o laco segue
@@ -204,7 +202,7 @@ class Notificador:
     ) -> None:
         try:
             marcada = self._fila.marcar_entregue(linha)
-        except _BANCO_FORA:
+        except BANCO_FORA:
             # Enviada e sem a marca (banco fora): nao gasta tentativa. A linha
             # volta quando o lease vencer e o e-mail pode sair de novo. Outro erro
             # do SQL na marca sobe ao ciclo (log de erro, fora de pronto).
@@ -232,7 +230,7 @@ class Notificador:
             desfecho = self._fila.registrar_falha(
                 linha, f"falha ao enviar o e-mail ({erro})"
             )
-        except _BANCO_FORA:
+        except BANCO_FORA:
             _log.warning(
                 "notification failure not recorded; it returns after the lease",
                 **contexto,

@@ -19,6 +19,7 @@ from prometheus_client import CollectorRegistry
 from sqlalchemy import text
 from structlog.testing import capture_logs
 
+from src.compartilhado.infraestrutura.database import BANCO_FORA
 from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.consumidor import montar_despachante
@@ -80,6 +81,7 @@ def _processo_dos_prazos(
         presenca=presenca,
         contexto=ContextoDeEnvio(prazo, span=span_da_saga(rastreador.tracer)),
         max_reenvios=maximo,
+        banco_fora=BANCO_FORA,
     )
     return ProcessoDosPrazos(
         vencer=vencer, presenca=presenca, sinal=sinal, intervalo_s=INTERVALO_S

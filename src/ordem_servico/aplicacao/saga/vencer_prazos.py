@@ -25,14 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from src.compartilhado.aplicacao.mensageria import ContratoInvalidoError
-from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
-from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
-from src.ordem_servico.aplicacao.saga.contexto_de_envio import RelogioDefasadoError
+from src.compartilhado.aplicacao.diagnostico import onde
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
     GatilhoDeProcesso,
@@ -48,14 +45,15 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from contextlib import AbstractContextManager
-    from datetime import datetime
     from uuid import UUID
 
-    from src.ordem_servico.aplicacao.ports import PresencaDoConsumidor, SagaRepository
+    from src.ordem_servico.aplicacao.ports import (
+        AbrirTransacao,
+        PresencaDoConsumidor,
+        TransacaoDosPrazos,
+    )
     from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
     from src.ordem_servico.aplicacao.saga.saga import Saga
-    from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 _log = structlog.get_logger(__name__)
 
@@ -69,45 +67,10 @@ DESVIO_MAXIMO_DO_RELOGIO: Final = timedelta(seconds=5)
 # repartida em ciclos, com a fila do consumidor conferida a cada saga.
 SAGAS_POR_CICLO: Final = 100
 
-# O que recusa a saga de vez: o estado dela, o comando guardado ou o relogio desta
-# replica. Repetir no mesmo ciclo nao muda nada: a saga fica de fora dele, o
-# erro vai para o log e o gauge de prazo vencido mantem o alerta de saga parada.
-_RECUSAS: Final = (
-    TransicaoDaSagaInvalidaError,
-    InvarianteDaSagaError,
-    RelogioDefasadoError,
-    ContratoInvalidoError,
-    ConflitoDeConcorrenciaException,
-)
-
-
-class TransacaoDosPrazos(PublicadorDeComandos, Protocol):
-    """Uma transacao do processo ``prazos``: os repositorios, a outbox e o commit.
-
-    Aberta e fechada pelo ``with``: o fim sem ``commit`` desfaz a saga, o
-    comando e o que mais a transacao gravou.
-    """
-
-    @property
-    def ordens(self) -> OrdemDeServicoRepository:
-        """Os repositorios da OS sobre a transacao."""
-        pass
-
-    @property
-    def sagas(self) -> SagaRepository:
-        """Os repositorios da saga sobre a transacao."""
-        pass
-
-    def agora_do_banco(self) -> datetime:
-        """O relogio do banco (``clock_timestamp()``), o que grava o ``entregue_em``."""
-        pass
-
-    def commit(self) -> None:
-        """Comita a saga e os comandos gravados na outbox, juntos."""
-        pass
-
-
-type AbrirTransacao = Callable[[], AbstractContextManager[TransacaoDosPrazos]]
+# As recusas do dominio dizem so a etapa e o tipo do comando, sem dado de cliente:
+# o log leva a mensagem delas. De qualquer outro erro da saga so o tipo e o
+# ``arquivo:linha`` vao ao log.
+_RECUSAS_DO_DOMINIO: Final = (TransicaoDaSagaInvalidaError, InvarianteDaSagaError)
 
 
 class Vencimento(StrEnum):
@@ -142,11 +105,13 @@ class VencerPrazos:
         presenca: PresencaDoConsumidor,
         contexto: ContextoDeEnvio,
         max_reenvios: int,
+        banco_fora: tuple[type[Exception], ...],
     ) -> None:
         self._abrir = abrir
         self._presenca = presenca
         self._contexto = contexto
         self._max_reenvios = max_reenvios
+        self._banco_fora = banco_fora
 
     def executar(
         self,
@@ -158,8 +123,10 @@ class VencerPrazos:
 
         ``ao_tratar`` roda a cada saga: e o heartbeat do processo (a liveness
         tolera 120 s). ``parar`` e o SIGTERM do processo: visto entre duas sagas,
-        o ciclo termina a que esta em curso e sai. Erro de banco sobe para o laco
-        do processo; a saga que o dominio recusa fica de fora do resto do ciclo.
+        o ciclo termina a que esta em curso e sai. O banco fora sobe para o laco
+        do processo; a saga que falha por outro motivo (o dominio a recusa, o
+        comando guardado esta fora do contrato, um erro do banco que se repetiria)
+        fica de fora do resto do ciclo, e as outras seguem.
         """
         if self._relogio_fora_do_banco():
             return ResultadoDoCiclo(pausado=True)
@@ -239,13 +206,25 @@ class VencerPrazos:
                     sagas.salvar(saga)
                     transacao.commit()
                 return vencimento
-        except _RECUSAS as exc:
+        except self._banco_fora:
+            # Banco fora nao e defeito da saga: o ciclo falha e o laco tenta de novo.
+            raise
+        except Exception as exc:  # a saga com defeito sai do ciclo, as outras seguem
             if ordem_id is None:
                 raise
+            # Repetir no mesmo ciclo nao muda nada, e a saga de prazo mais antigo
+            # seria sempre a primeira: ela fica de fora dele, o erro vai ao log e o
+            # gauge de prazo vencido mantem o alerta de saga parada.
+            detalhe = (
+                {"motivo": str(exc)}
+                if isinstance(exc, _RECUSAS_DO_DOMINIO)
+                else {"onde": onde(exc)}
+            )
             _log.error(
                 "saga deadline refused",
                 correlation_id=str(ordem_id),
                 erro=type(exc).__name__,
+                **detalhe,
             )
             recusadas.add(ordem_id)
             return Vencimento.RECUSADA

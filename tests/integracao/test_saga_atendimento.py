@@ -27,6 +27,7 @@ from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
     TransicaoStatusInvalidaException,
 )
+from src.compartilhado.infraestrutura.database import BANCO_FORA
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.outbox_mapping import (
     outbox_table,
@@ -296,6 +297,7 @@ class Atendimento:
             presenca=self.presenca,
             contexto=ContextoDeEnvio(_PRAZO),
             max_reenvios=_MAX_REENVIOS,
+            banco_fora=BANCO_FORA,
         ).executar()
         self.barramento.levar_a_outbox()
 

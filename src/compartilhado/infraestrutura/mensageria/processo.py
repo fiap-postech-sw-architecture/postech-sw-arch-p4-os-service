@@ -13,7 +13,6 @@ import os
 import signal
 import tempfile
 import time
-import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -186,18 +185,6 @@ def preparar_sem_broker(processo: str) -> Engine:
     url_do_banco = resolver_database_url()
     _recusar_senha_de_demonstracao(("DATABASE_URL", url_do_banco, SENHA_DO_BANCO_DEMO))
     return _abrir_banco(url_do_banco)
-
-
-def onde(exc: BaseException) -> str:
-    """Arquivo e linha em que a excecao nasceu, para o log (sem a mensagem dela).
-
-    A mensagem de uma excecao pode trazer dado da mensagem (placa, texto livre):
-    os logs de falha levam so o tipo e este ``arquivo:linha``.
-    """
-    quadros = traceback.extract_tb(exc.__traceback__)
-    if not quadros:
-        return "desconhecido"
-    return f"{quadros[-1].filename.rsplit('/', 1)[-1]}:{quadros[-1].lineno}"
 
 
 def subir_metricas() -> int:

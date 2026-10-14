@@ -6,7 +6,8 @@ Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento`` e
 ``ConsultaDaOrdem`` em ``consultas.py`` (query services de leitura, fora do
 repositorio do agregado), ``SagaRepository`` em ``repository.py`` e
 ``PresencaDoConsumidor`` em ``presenca_do_consumidor.py`` (a unica que fala com
-o broker, para a camada de aplicacao nao importar o cliente AMQP).
+o broker, para a camada de aplicacao nao importar o cliente AMQP) e
+``TransacaoDosPrazos`` em ``transacao_dos_prazos.py``.
 """
 
 from __future__ import annotations
@@ -14,8 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
+
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Callable, Collection
+    from contextlib import AbstractContextManager
     from datetime import datetime, timedelta
     from uuid import UUID
 
@@ -29,6 +33,7 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
+    from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 
 class ClientePort(Protocol):
@@ -144,6 +149,35 @@ class PresencaDoConsumidor(Protocol):
         (RFC-004 secao 4.6): quem acusa a demora e o alerta de saga parada.
         """
         pass
+
+
+class TransacaoDosPrazos(PublicadorDeComandos, Protocol):
+    """Uma transacao do processo ``prazos``: os repositorios, a outbox e o commit.
+
+    Aberta e fechada pelo ``with``: o fim sem ``commit`` desfaz a saga, o
+    comando e o que mais a transacao gravou.
+    """
+
+    @property
+    def ordens(self) -> OrdemDeServicoRepository:
+        """Os repositorios da OS sobre a transacao."""
+        pass
+
+    @property
+    def sagas(self) -> SagaRepository:
+        """Os repositorios da saga sobre a transacao."""
+        pass
+
+    def agora_do_banco(self) -> datetime:
+        """O relogio do banco (``clock_timestamp()``), o que grava o ``entregue_em``."""
+        pass
+
+    def commit(self) -> None:
+        """Comita a saga e os comandos gravados na outbox, juntos."""
+        pass
+
+
+type AbrirTransacao = Callable[[], AbstractContextManager[TransacaoDosPrazos]]
 
 
 class PublicadorDeNotificacoes(Protocol):
