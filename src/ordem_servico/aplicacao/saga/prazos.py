@@ -111,26 +111,33 @@ def conferir_reenvio(
     raise TransicaoDaSagaInvalidaError(msg)
 
 
-def transicao_do_reenvio(saga: LeituraDaSaga) -> Transicao:
+def _plano(saga: LeituraDaSaga) -> tuple[Comando, ...]:
+    """O plano de compensacao da saga como comandos."""
+    return tuple(Comando(c) for c in saga.plano_compensacao)
+
+
+def transicao_do_reenvio(saga: LeituraDaSaga, maximo: int) -> Transicao:
     """O reenvio: a mesma etapa, o mesmo motivo e o mesmo plano, com o comando de novo.
 
     Raises:
         TransicaoDaSagaInvalidaError: sem prazo de resposta (esperas humanas,
-            saga parada ou encerrada).
+            saga parada ou encerrada), ou com os ``maximo`` reenvios ja feitos.
     """
     comando, _ = comando_a_reenviar(saga)
     if saga.prazo_resposta_em is None:
         msg = f"reenvio sem prazo de resposta na etapa {saga.etapa.value}"
         raise TransicaoDaSagaInvalidaError(msg)
+    if saga.reenvios >= maximo:
+        msg = f"reenvio alem do maximo de {maximo} na etapa {saga.etapa.value}"
+        raise TransicaoDaSagaInvalidaError(msg)
     return Transicao(
-        saga.etapa,
-        comando=comando,
-        motivo=saga.motivo,
-        plano=tuple(Comando(c) for c in saga.plano_compensacao),
+        saga.etapa, comando=comando, motivo=saga.motivo, plano=_plano(saga)
     )
 
 
-def transicao_do_esgotamento(saga: LeituraDaSaga, agora: datetime) -> Transicao:
+def transicao_do_esgotamento(
+    saga: LeituraDaSaga, agora: datetime, maximo: int
+) -> Transicao:
     """O prazo esgotado: a compensacao por ``prazo_tecnico`` ou a falha dela.
 
     Em etapa linear com comando em voo, inicia a compensacao com o passo em voo
@@ -140,11 +147,14 @@ def transicao_do_esgotamento(saga: LeituraDaSaga, agora: datetime) -> Transicao:
 
     Raises:
         TransicaoDaSagaInvalidaError: sem prazo de resposta (esperas humanas,
-            saga parada ou encerrada), ou instante sem fuso ou que volta antes
-            do ultimo registro.
+            saga parada ou encerrada), com menos de ``maximo`` reenvios feitos,
+            ou instante sem fuso ou que volta antes do ultimo registro.
     """
     if saga.prazo_resposta_em is None or saga.comando_em_voo is None:
         msg = f"prazo esgotado sem prazo de resposta na etapa {saga.etapa.value}"
+        raise TransicaoDaSagaInvalidaError(msg)
+    if saga.reenvios < maximo:
+        msg = f"prazo esgotado com {saga.reenvios} de {maximo} reenvios feitos"
         raise TransicaoDaSagaInvalidaError(msg)
     if not instante_valido(saga, agora):
         msg = "prazo esgotado num instante sem fuso ou anterior ao ultimo registro"
@@ -159,7 +169,7 @@ def transicao_do_esgotamento(saga: LeituraDaSaga, agora: datetime) -> Transicao:
         return Transicao(
             EtapaSaga.FALHA_NA_COMPENSACAO,
             motivo=saga.motivo,
-            plano=tuple(Comando(c) for c in saga.plano_compensacao),
+            plano=_plano(saga),
             falha=REENVIOS_ESGOTADOS,
         )
     msg = f"prazo esgotado na etapa {saga.etapa.value}"
@@ -167,7 +177,7 @@ def transicao_do_esgotamento(saga: LeituraDaSaga, agora: datetime) -> Transicao:
 
 
 def compensacao_do_esgotamento(
-    saga: LeituraDaSaga, agora: datetime
+    saga: LeituraDaSaga, agora: datetime, maximo: int
 ) -> ComandoParaEnviar | None:
     """A primeira compensacao do prazo esgotado, pronta para enviar.
 
@@ -175,7 +185,7 @@ def compensacao_do_esgotamento(
     (``transicao_do_esgotamento``). E o ``envio`` que ``Saga.esgotar_prazo``
     pede, com os ``dados`` que ela confere; nada muda.
     """
-    transicao = transicao_do_esgotamento(saga, agora)
+    transicao = transicao_do_esgotamento(saga, agora, maximo)
     if transicao.comando is None:
         return None
     dados = dados_da_compensacao(
@@ -200,7 +210,7 @@ def transicao_da_retomada(saga: LeituraDaSaga, agora: datetime) -> Transicao:
     if not instante_valido(saga, agora):
         msg = "retomada num instante sem fuso ou anterior ao ultimo registro"
         raise TransicaoDaSagaInvalidaError(msg)
-    plano = tuple(Comando(c) for c in saga.plano_compensacao)
+    plano = _plano(saga)
     return Transicao(
         EtapaSaga.COMPENSANDO, comando=plano[0], motivo=saga.motivo, plano=plano
     )

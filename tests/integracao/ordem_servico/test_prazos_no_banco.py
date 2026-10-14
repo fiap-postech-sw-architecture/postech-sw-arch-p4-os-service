@@ -133,6 +133,7 @@ def _semear(
             ),
             agora=quando,
             ator="prazos",
+            maximo=MAXIMO,
         )
     sagas.salvar(saga)
     for mensagem_id, (status, entregue_em) in zip(ids, envios, strict=True):

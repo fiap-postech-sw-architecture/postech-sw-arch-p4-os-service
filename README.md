@@ -489,6 +489,8 @@ O ator dos registros é `prazos`. Com os padrões (120 s, 5 reenvios, ciclo de 3
 | `SAGA_MAX_REENVIOS` | 5 | reenvios (0 ou mais) antes de compensar, ou de parar a compensação |
 | `PRAZOS_INTERVALO_SEGUNDOS` | 30 | intervalo entre os ciclos, de 0,1 a 300 s; o alerta "Saga parada" usa 60 s, duas vezes o padrão |
 
+O limite é do agregado, não só do ciclo: `Saga.reenviar` recusa o reenvio depois do `SAGA_MAX_REENVIOS` e `Saga.esgotar_prazo`, o esgotamento antes dos reenvios todos.
+
 A janela de reenvio (720 s) tem de passar da soma dos atrasos de retry do consumidor (1 + 5 + 15 + 60 + 300 = 381 s): senão a saga desistiria de um passo cuja resposta ainda está na fila de retry. `test_configuracao_dos_prazos.py` confere a relação a partir do TTL das filas de retry do `definitions.json`, dos padrões do código, do compose e dos três overlays. Os reenvios saem depois e podem ainda estar no retry quando a saga desiste; o efeito deles é desfeito pela compensação do passo em voo ou descartado pela lápide do participante.
 
 **Falha na compensação.** Entra em `falha_na_compensacao` o `EstornoDePagamentoFalhou` (`falha=estorno_recusado`) ou a compensação sem resposta depois dos reenvios (`falha=reenvios_esgotados`). A sequência para: o compensado fica compensado, o resto fica como estava, a OS mantém o status, o alerta "Saga parada" dispara, e a resposta que chega atrasada é ignorada (salvo o `ExecucaoIniciada` com o `CancelarExecucao` parado, que devolve a saga a `em_execucao`). O operador segue o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md), resolve a causa e retoma.

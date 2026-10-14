@@ -242,7 +242,9 @@ class VencerPrazos:
                 correlation_id=saga.ordem_id,
                 agora=agora,
             )
-            saga.reenviar(envio, agora=agora, ator=ATOR_PRAZOS)
+            saga.reenviar(
+                envio, agora=agora, ator=ATOR_PRAZOS, maximo=self._max_reenvios
+            )
             _log.info(
                 "saga command resent",
                 comando=comando,
@@ -253,7 +255,7 @@ class VencerPrazos:
         agora = self._contexto.instante_do_passo(
             saga, tipo=GatilhoDeProcesso.PRAZO_ESGOTADO
         )
-        primeira = compensacao_do_esgotamento(saga, agora)
+        primeira = compensacao_do_esgotamento(saga, agora, self._max_reenvios)
         compensacao = (
             self._contexto.enviar(
                 transacao, primeira, correlation_id=saga.ordem_id, agora=agora
@@ -261,7 +263,9 @@ class VencerPrazos:
             if primeira is not None
             else None
         )
-        saga.esgotar_prazo(agora=agora, ator=ATOR_PRAZOS, envio=compensacao)
+        saga.esgotar_prazo(
+            agora=agora, ator=ATOR_PRAZOS, maximo=self._max_reenvios, envio=compensacao
+        )
         parada = saga.etapa is EtapaSaga.FALHA_NA_COMPENSACAO
         (_log.warning if parada else _log.info)(
             "saga deadline exhausted",

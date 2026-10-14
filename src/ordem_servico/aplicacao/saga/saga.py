@@ -203,60 +203,64 @@ class Saga(MudancaDaSaga):
         )
         self._mudar(transicao, pedido, envio)
 
-    def reenviar(self, envio: Envio, *, agora: datetime, ator: str) -> None:
+    def reenviar(
+        self, envio: Envio, *, agora: datetime, ator: str, maximo: int
+    ) -> None:
         """O prazo do comando em voo venceu: ele sai de novo, com id novo.
 
         O ``envio`` e o mesmo comando com os mesmos ``dados`` (a mesma chave de
         negocio). O id novo passa a casar a resposta, o prazo recomeca e o
-        contador sobe (RFC-004 secao 4.6); a etapa nao muda.
+        contador sobe (RFC-004 secao 4.6); a etapa nao muda. Os reenvios vao ate
+        ``maximo`` (``SAGA_MAX_REENVIOS``): o seguinte e recusado.
 
         Raises:
-            TransicaoDaSagaInvalidaError: sem comando em voo, envio que nao e o
-                dele, prazo invalido ou instante que volta; nada muda.
+            TransicaoDaSagaInvalidaError: sem comando em voo, ``maximo`` de
+                reenvios ja feito, envio que nao e o dele, prazo invalido ou
+                instante que volta; nada muda.
         """
-        transicao = transicao_do_reenvio(self)
+        transicao = transicao_do_reenvio(self, maximo)
         anteriores = conferir_reenvio(self, envio, agora)["mensagem_ids"]
         conferir_prazo(envio, agora)
-        tipo = envio.tipo.value
-        self._registrar_evento(
-            ComandoReenviadoEvent(agregado_id=self.id, comando=tipo, ocorrido_em=agora)
-        )
         reenvio = Gatilho(GatilhoDeProcesso.REENVIO.value, None, agora, ator)
         complemento = Complemento(anteriores, reenvio=self._reenvios + 1)
         self._mudar(transicao, reenvio, envio, complemento)
+        self._registrar_evento(
+            ComandoReenviadoEvent(
+                agregado_id=self.id, comando=envio.tipo.value, ocorrido_em=agora
+            )
+        )
 
     def esgotar_prazo(
         self,
         *,
         agora: datetime,
         ator: str,
+        maximo: int,
         envio: Envio | None = None,
     ) -> None:
         """O ultimo reenvio ficou sem resposta (RFC-004 secoes 4.6 e 4.7).
 
-        Em etapa linear a compensacao comeca por ``prazo_tecnico``, com o passo
-        em voo no plano, e o ``envio`` e a primeira compensacao dele; em
-        ``compensando`` a saga vai a ``falha_na_compensacao`` (``reenvios_esgotados``)
-        e nenhum comando sai.
+        So esgota o prazo quem ja fez os ``maximo`` reenvios. Em etapa linear a
+        compensacao comeca por ``prazo_tecnico``, com o passo em voo no plano, e
+        o ``envio`` e a primeira compensacao dele; em ``compensando`` a saga vai
+        a ``falha_na_compensacao`` (``reenvios_esgotados``) e nenhum comando sai.
 
         Raises:
-            TransicaoDaSagaInvalidaError: sem prazo de resposta, envio que nao e
-                o da transicao ou instante que volta; nada muda.
+            TransicaoDaSagaInvalidaError: sem prazo de resposta, menos de
+                ``maximo`` reenvios feitos, envio que nao e o da transicao ou
+                instante que volta; nada muda.
         """
-        transicao = transicao_do_esgotamento(self, agora)
+        transicao = transicao_do_esgotamento(self, agora, maximo)
         conferir_envio(
             transicao, envio, ordem_id=self.id, itens=self._itens, marcos=SEM_RECURSOS
         )
         conferir_prazo(envio, agora)
-        self._registrar_evento(
-            PrazoEsgotadoEvent(
-                agregado_id=self.id,
-                comando=cast("str", self.tipo_do_comando_em_voo),
-                ocorrido_em=agora,
-            )
-        )
+        comando = cast("str", self.tipo_do_comando_em_voo)
         esgotado = Gatilho(GatilhoDeProcesso.PRAZO_ESGOTADO.value, None, agora, ator)
         self._mudar(transicao, esgotado, envio)
+        self._registrar_evento(
+            PrazoEsgotadoEvent(agregado_id=self.id, comando=comando, ocorrido_em=agora)
+        )
 
     def retomar(self, envio: Envio, *, agora: datetime, ator: str) -> None:
         """O operador retoma a compensacao parada (RFC-004 secao 4.7).
