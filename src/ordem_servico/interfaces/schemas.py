@@ -40,6 +40,15 @@ class _ComSituacao(BaseModel):
         return situacao_de(StatusOrdem(self.status))
 
 
+# O que a validacao do texto livre recusa (dominio/texto_livre.py), incluindo o
+# falso positivo conhecido que o README ("Texto livre") explica e mantem.
+_SEM_CARACTERE_OCULTO = (
+    "sem caractere de controle ou de formatacao (override bidirecional, espaco de "
+    "largura zero, separador de linha e, como efeito colateral, o emoji composto "
+    "por juncao de largura zero, o hifen condicional e a marca de direcao)"
+)
+
+
 class AbrirOrdemRequest(BaseModel):
     """Corpo de ``POST /api/v1/ordens-de-servico``."""
 
@@ -50,7 +59,10 @@ class AbrirOrdemRequest(BaseModel):
     descricao_problema: str = Field(
         min_length=1,
         max_length=TAMANHO_MAXIMO_DESCRICAO,
-        description="Problema relatado pelo cliente na recepcao.",
+        description=(
+            "Problema relatado pelo cliente na recepcao, de 1 a "
+            f"{TAMANHO_MAXIMO_DESCRICAO} caracteres, {_SEM_CARACTERE_OCULTO}."
+        ),
     )
 
 
@@ -68,8 +80,7 @@ class CancelarOrdemRequest(BaseModel):
     motivo: str = Field(
         description=(
             f"Motivo do cancelamento, de 1 a {TAMANHO_MAXIMO_MOTIVO} caracteres, "
-            "sem caractere de controle: o atendente o le na tela e a LGPD o "
-            "alcanca."
+            f"{_SEM_CARACTERE_OCULTO}: o atendente o le na tela e a LGPD o alcanca."
         ),
         json_schema_extra={"minLength": 1, "maxLength": TAMANHO_MAXIMO_MOTIVO},
     )

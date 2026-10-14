@@ -828,6 +828,23 @@ def test_openapi_do_cancelamento_diz_o_que_cada_resposta_significa() -> None:
     assert pedido["properties"]["motivo"]["maxLength"] == TAMANHO_MAXIMO_MOTIVO
 
 
+@pytest.mark.parametrize(
+    ("esquema", "campo"),
+    [
+        ("AbrirOrdemRequest", "descricao_problema"),
+        ("CancelarOrdemRequest", "motivo"),
+    ],
+)
+def test_openapi_diz_o_que_o_texto_livre_recusa(esquema: str, campo: str) -> None:
+    esquemas = TestClient(criar_app()).get("/openapi.json").json()["components"]
+
+    descricao = esquemas["schemas"][esquema]["properties"][campo]["description"]
+
+    assert "caractere de controle ou de formatacao" in descricao
+    assert "emoji composto" in descricao
+    assert "hifen condicional" in descricao
+
+
 def test_openapi_diz_o_novo_significado_do_motivo_de_cancelamento() -> None:
     esquemas = TestClient(criar_app()).get("/openapi.json").json()["components"]
     campo = esquemas["schemas"]["OrdemDeServicoResponse"]["properties"][
