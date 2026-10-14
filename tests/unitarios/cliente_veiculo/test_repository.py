@@ -123,13 +123,12 @@ class TestClienteSQLAlchemyRepository:
         veiculo_b = MagicMock()
         cliente = MagicMock(veiculos=[veiculo_a, veiculo_b])
         session.get.return_value = cliente
-        session.execute.return_value.scalars.return_value.all.return_value = [
-            uuid4(),
-            uuid4(),
-        ]
+        ids = [uuid4(), uuid4()]
+        session.execute.return_value.scalars.return_value.all.return_value = ids
         repo = ClienteSQLAlchemyRepository(session=session)
 
-        repo.anonimizar_dados(uuid4())
+        # Devolve os ids dos veiculos: a Execucao e avisada por comando.
+        assert repo.anonimizar_dados(uuid4()) == ids
 
         session.expire.assert_any_call(veiculo_a)
         session.expire.assert_any_call(veiculo_b)
@@ -141,6 +140,6 @@ class TestClienteSQLAlchemyRepository:
         session.execute.return_value.scalars.return_value.all.return_value = []
         repo = ClienteSQLAlchemyRepository(session=session)
 
-        repo.anonimizar_dados(uuid4())
+        assert repo.anonimizar_dados(uuid4()) == []
 
         session.expire.assert_not_called()

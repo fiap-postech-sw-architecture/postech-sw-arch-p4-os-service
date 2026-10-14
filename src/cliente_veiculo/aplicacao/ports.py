@@ -30,3 +30,13 @@ class OrdemDeServicoPort(Protocol):
         conter dado pessoal. Roda na mesma transacao da anonimizacao do cliente.
         """
         pass
+
+    def anonimizar_comandos_do_cliente_na_outbox(self, cliente_id: UUID) -> None:
+        """Tira a placa e a descricao do problema dos comandos ja gravados na outbox.
+
+        O envelope do ``SolicitarDiagnostico`` leva os dois, e a linha fica na
+        outbox (pendente, entregue ou ``dead``) ate a retencao: o erasure troca
+        a placa por um marcador valido no contrato e a descricao por
+        ``[removido]``. Mesma transacao da anonimizacao do cliente.
+        """
+        pass

@@ -100,7 +100,7 @@ class ClienteSQLAlchemyRepository:
             )
         return bool(self._session.scalar(select(condicao)))
 
-    def anonimizar_dados(self, cliente_id: UUID) -> None:
+    def anonimizar_dados(self, cliente_id: UUID) -> list[UUID]:
         # Bypass SQLAlchemy ORM event listeners via raw UPDATE.
         # The before_update listener recalculates _documento_numero and
         # _documento_hash from _documento on every flush, so any ORM-level
@@ -159,6 +159,7 @@ class ClienteSQLAlchemyRepository:
             for veiculo in cliente.veiculos:
                 self._session.expire(veiculo)
             self._session.expire(cliente)
+        return list(veiculo_ids)
 
     def salvar_consentimento(self, consentimento: ConsentimentoCliente) -> None:
         self._session.add(consentimento)
