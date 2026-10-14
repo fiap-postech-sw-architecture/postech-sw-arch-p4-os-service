@@ -6,6 +6,7 @@ from sqlalchemy import exists, func, select, update
 
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
+from src.cliente_veiculo.dominio.contato import CONTATO_ANONIMIZADO
 from src.cliente_veiculo.infraestrutura.mapping import (
     clientes_table,
     consentimentos_table,
@@ -115,7 +116,7 @@ class ClienteSQLAlchemyRepository:
             .where(clientes_table.c.id == cliente_id)
             .values(
                 nome="ANONIMIZADO",
-                contato="anonimizado@anonimizado.local",
+                contato=CONTATO_ANONIMIZADO,
                 documento="ANONIMIZADO",
                 documento_hash=f"ANONIMIZADO:{cliente_id}",
                 ativo=False,

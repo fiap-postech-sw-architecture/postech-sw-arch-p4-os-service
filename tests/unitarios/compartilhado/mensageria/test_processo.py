@@ -147,6 +147,52 @@ def test_preparar_aceita_senha_real_em_producao(
     engine.dispose()
 
 
+def test_preparar_sem_broker_nao_le_nem_exige_a_url_do_broker(
+    ambiente_de_boot: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ambiente_de_boot.delenv("RABBITMQ_URL")
+
+    engine = processo.preparar_sem_broker("notificador")
+
+    try:
+        assert engine.url.drivername == "sqlite"
+        assert "pytstop-os-service notificador | commit" in capsys.readouterr().out
+    finally:
+        engine.dispose()
+
+
+def test_preparar_sem_broker_da_o_mesmo_pool_e_os_mesmos_timeouts(
+    ambiente_de_boot: pytest.MonkeyPatch,
+) -> None:
+    chamadas: list[dict[str, object]] = []
+    ambiente_de_boot.setattr(
+        processo, "criar_engine", lambda url, **kwargs: chamadas.append(kwargs)
+    )
+
+    processo.preparar_sem_broker("notificador")
+
+    assert chamadas == [
+        {
+            "pool_size": 2,
+            "max_overflow": 2,
+            "opcoes": "-c statement_timeout=15000 -c lock_timeout=10000",
+        }
+    ]
+
+
+def test_preparar_sem_broker_recusa_a_senha_do_banco_de_demonstracao_em_producao(
+    ambiente_de_boot: pytest.MonkeyPatch,
+) -> None:
+    ambiente_de_boot.setenv("ENVIRONMENT", "production")
+    ambiente_de_boot.setenv(
+        "DATABASE_URL",
+        "postgresql://pytstop:pytstop@postgres:5432/os",  # gitleaks:allow
+    )
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL usa a senha de demonstracao"):
+        processo.preparar_sem_broker("notificador")
+
+
 def test_subir_metricas_usa_a_porta_do_ambiente(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

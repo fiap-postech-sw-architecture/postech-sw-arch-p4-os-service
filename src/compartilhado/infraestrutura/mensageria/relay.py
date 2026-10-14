@@ -24,9 +24,7 @@ abre span.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import select
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final
@@ -42,7 +40,7 @@ from src.compartilhado.infraestrutura.ambiente import (
     inteiro_do_ambiente,
     numero_do_ambiente,
 )
-from src.compartilhado.infraestrutura.database import tempo_de_conexao
+from src.compartilhado.infraestrutura.escuta import EscutaDeCanal
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.mensageria.outbox import (
@@ -96,14 +94,6 @@ _LEASE_PADRAO_S: Final = 60
 # da linha (statement_timeout de 15 s): abaixo disso, outra replica publicaria
 # de novo cada linha presa num alarme.
 _LEASE_MINIMO_S: Final = 45
-# Keepalives TCP da conexao dedicada de LISTEN: um peer que sumiu em silencio
-# e detectado em cerca de 60 s, em vez de deixar o relay surdo ao NOTIFY.
-_KEEPALIVES: Final = {
-    "keepalives": 1,
-    "keepalives_idle": 30,
-    "keepalives_interval": 10,
-    "keepalives_count": 3,
-}
 
 
 class _BrokerIndisponivelError(Exception):
@@ -382,62 +372,15 @@ class Relay:
                 self._broker.esperar(parar)
 
 
-class EscutaDaOutbox:
-    """Conexao dedicada de ``LISTEN`` do canal da outbox, fora do pool do engine.
+class EscutaDaOutbox(EscutaDeCanal):
+    """O ``LISTEN`` do canal da outbox (``outbox_novo``): acorda o relay na hora.
 
-    O ``NOTIFY`` da gravacao acorda o relay na hora; o poll de seguranca cobre
-    o que se perder. Com o banco fora ou a conexao caida, o relay segue pelo
-    poll e a conexao e reaberta na espera seguinte.
+    O poll de seguranca cobre o que se perder; com o banco fora ou a conexao
+    caida, o relay segue pelo poll (``EscutaDeCanal``).
     """
 
     def __init__(self, engine: Engine) -> None:
-        self._engine = engine
-        self._conexao: Any = None  # conexao psycopg2 (sem tipos)
-
-    def esperar(self, parar: threading.Event, poll_s: float) -> None:
-        """Espera um ``NOTIFY`` ou o poll de seguranca."""
-        if self._conexao is None:
-            self._conexao = self._abrir()
-        if self._conexao is None:
-            parar.wait(poll_s)
-            return
-        try:
-            prontos, _, _ = select.select([self._conexao], [], [], poll_s)
-            if prontos:
-                self._conexao.poll()
-                # Um drain cobre todas as notificacoes acumuladas.
-                self._conexao.notifies.clear()
-        except (self._engine.dialect.loaded_dbapi.Error, OSError):
-            _log.warning("listen connection lost; polling until it is back")
-            self.fechar()
-
-    def fechar(self) -> None:
-        """Fecha a conexao; best-effort, ela pode ja estar morta."""
-        if self._conexao is not None:
-            with contextlib.suppress(Exception):
-                self._conexao.close()
-        self._conexao = None
-
-    def _abrir(self) -> Any:  # noqa: ANN401  # conexao psycopg2
-        """Conexao de ``LISTEN`` com keepalives, ou None se o banco falhar."""
-        try:
-            argumentos, parametros = self._engine.dialect.create_connect_args(
-                self._engine.url
-            )
-            parametros.update(_KEEPALIVES)
-            # Sem o connect_timeout do engine, um banco inalcancavel prenderia o
-            # laco no timeout de TCP do sistema e o heartbeat venceria.
-            parametros.setdefault("connect_timeout", tempo_de_conexao())
-            escuta = self._engine.dialect.loaded_dbapi.connect(
-                *argumentos, **parametros
-            )
-            escuta.autocommit = True
-            with escuta.cursor() as cursor:
-                cursor.execute(f"LISTEN {CANAL_NOTIFY}")
-        except (self._engine.dialect.loaded_dbapi.Error, OSError):
-            _log.warning("listen connection unavailable; polling")
-            return None
-        return escuta
+        super().__init__(engine, CANAL_NOTIFY)
 
 
 class DesfechoDaLinha:
