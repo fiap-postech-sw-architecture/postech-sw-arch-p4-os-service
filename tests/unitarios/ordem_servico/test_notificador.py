@@ -357,6 +357,54 @@ def test_enviado_sem_a_marca_por_banco_fora_nao_gasta_tentativa(
     )
 
 
+@pytest.mark.parametrize("tipo", [DataError, ProgrammingError, IntegrityError])
+def test_erro_do_sql_que_nao_e_queda_na_marca_de_entregue_sobe_ao_ciclo(
+    cenario: Cenario, tipo: type[Exception]
+) -> None:
+    # Sem a marca, o e-mail ja enviado volta a cada lease: nao pode ser um aviso
+    # calado de "banco fora" a cada minuto; o ciclo loga o erro e sai de pronto.
+    cenario.fila.marcar = _erro_do_sql(tipo)
+    (cenario.pasta / "notificador-pronto").touch()
+    prontos: list[bool] = []
+    cenario.escuta.ao_esperar = lambda _n: prontos.append(
+        (cenario.pasta / "notificador-pronto").exists()
+    )
+
+    with capture_logs() as logs:
+        cenario.entregar(_linha())
+
+    assert len(cenario.smtp.enviados) == 1
+    assert (
+        _log(logs, "notification sent but not marked; it returns after the lease") == []
+    )
+    (ciclo,) = _log(logs, "notification cycle failed")
+    assert (ciclo["log_level"], ciclo["erro"]) == ("error", tipo.__name__)
+    # Sem laco apertado: o ciclo acabou, o laco esperou o poll e saiu de pronto.
+    assert cenario.escuta.esperas == 1
+    assert prontos == [False]
+    assert cenario.fila.falhas == []
+
+
+@pytest.mark.parametrize("tipo", [DataError, ProgrammingError, IntegrityError])
+def test_erro_do_sql_que_nao_e_queda_ao_registrar_a_falha_sobe_ao_ciclo(
+    cenario: Cenario, tipo: type[Exception]
+) -> None:
+    cenario.smtp.erro = FalhaEnvioEmailError("TimeoutError")
+    cenario.fila.registrar = _erro_do_sql(tipo)
+
+    with capture_logs() as logs:
+        cenario.entregar(_linha())
+
+    assert (
+        _log(logs, "notification failure not recorded; it returns after the lease")
+        == []
+    )
+    (ciclo,) = _log(logs, "notification cycle failed")
+    assert (ciclo["log_level"], ciclo["erro"]) == ("error", tipo.__name__)
+    assert cenario.escuta.esperas == 1
+    assert "clientes" not in repr(logs)
+
+
 def test_envio_que_passou_do_lease_avisa(cenario: Cenario) -> None:
     cenario.fila.marcar = False
 

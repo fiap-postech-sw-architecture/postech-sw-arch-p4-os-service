@@ -204,9 +204,10 @@ class Notificador:
     ) -> None:
         try:
             marcada = self._fila.marcar_entregue(linha)
-        except SQLAlchemyError:
+        except _BANCO_FORA:
             # Enviada e sem a marca (banco fora): nao gasta tentativa. A linha
-            # volta quando o lease vencer e o e-mail pode sair de novo.
+            # volta quando o lease vencer e o e-mail pode sair de novo. Outro erro
+            # do SQL na marca sobe ao ciclo (log de erro, fora de pronto).
             _log.warning(
                 "notification sent but not marked; it returns after the lease",
                 **contexto,
@@ -231,7 +232,7 @@ class Notificador:
             desfecho = self._fila.registrar_falha(
                 linha, f"falha ao enviar o e-mail ({erro})"
             )
-        except SQLAlchemyError:
+        except _BANCO_FORA:
             _log.warning(
                 "notification failure not recorded; it returns after the lease",
                 **contexto,
