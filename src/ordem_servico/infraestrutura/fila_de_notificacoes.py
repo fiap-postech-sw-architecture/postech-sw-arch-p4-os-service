@@ -9,7 +9,8 @@ AMQP, e uma linha por vez:
    e o token da replica que reivindicou.
 2. O desfecho (``entregue``, nova tentativa ou ``dead``) so e gravado com o
    token ainda igual (fencing): a replica que perdeu a linha nunca sobrescreve a
-   marcacao de outra.
+   marcacao de outra. E o ``MarcacaoComFencing`` da outbox, o mesmo codigo: so o
+   claim e a linha reivindicada sao desta fila.
 
 Nenhuma transacao fica aberta durante o envio: o SMTP leva ate 5 s por operacao
 do socket. Uma linha por claim cabe no lease de 60 s, sem renovacao. A ordem
@@ -21,23 +22,22 @@ de tentativas sao os da outbox. Todo tempo e do relogio do banco.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal
 
 from sqlalchemy import text
 
 from src.compartilhado.infraestrutura.mensageria.outbox import (
     ATRASOS_S,
-    atraso_depois_da_falha,
+    MarcacaoComFencing,
 )
-from src.compartilhado.infraestrutura.outbox_mapping import apagar_em_lotes
 from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
 from src.ordem_servico.dominio.status import StatusOrdem
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from datetime import datetime, timedelta
 
-    from sqlalchemy import Engine, TextClause
+    from sqlalchemy import Engine
 
 _SQL_CLAIM: Final = text(
     "SELECT n.id, n.ordem_id, n.modelo, n.status_da_ordem, n.motivo, n.tentativas "
@@ -60,35 +60,6 @@ _SQL_LEASE: Final = text(
     "UPDATE notificacoes SET proxima_tentativa_em = now() + :lease WHERE id = :id "
     "RETURNING proxima_tentativa_em"
 )
-# Fencing (o `WHERE` de cada marcacao): a linha segue `pendente` e com o lease
-# que esta replica gravou.
-_SQL_ENTREGUE: Final = text(
-    "UPDATE notificacoes SET situacao = 'entregue', entregue_em = clock_timestamp(), "
-    "ultimo_erro = NULL "
-    "WHERE id = :id AND situacao = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
-_SQL_NOVA_TENTATIVA: Final = text(
-    "UPDATE notificacoes SET tentativas = :tentativas, "
-    "proxima_tentativa_em = clock_timestamp() + :atraso, ultimo_erro = :erro "
-    "WHERE id = :id AND situacao = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
-_SQL_DEAD: Final = text(
-    "UPDATE notificacoes SET situacao = 'dead', tentativas = :tentativas, "
-    "ultimo_erro = :erro "
-    "WHERE id = :id AND situacao = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
-# Retencao da outbox: entregue por 7 dias e dead por 30, esta contada do fim do
-# ultimo lease (gravado a menos de um lease da morte, e coberto pelo indice).
-_SQL_LIMPEZA_ENTREGUES: Final = text(
-    "DELETE FROM notificacoes WHERE id IN (SELECT id FROM notificacoes "
-    "WHERE situacao = 'entregue' AND entregue_em < now() - interval '7 days' "
-    "LIMIT :lote)"
-)
-_SQL_LIMPEZA_DEAD: Final = text(
-    "DELETE FROM notificacoes WHERE id IN (SELECT id FROM notificacoes "
-    "WHERE situacao = 'dead' AND proxima_tentativa_em < now() - interval '30 days' "
-    "LIMIT :lote)"
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +81,9 @@ class FilaDeNotificacoes:
 
     def __init__(self, engine: Engine, atrasos: Sequence[float] = ATRASOS_S) -> None:
         self._engine = engine
-        self._atrasos = atrasos
+        self._marcacao = MarcacaoComFencing(
+            engine, tabela="notificacoes", situacao="situacao", atrasos=atrasos
+        )
 
     def reivindicar(self, lease: timedelta) -> LinhaDeNotificacao | None:
         """A proxima linha vencida, segura pelo ``lease``; ``None`` sem nenhuma."""
@@ -134,7 +107,8 @@ class FilaDeNotificacoes:
         )
 
     def marcar_entregue(self, linha: LinhaDeNotificacao) -> bool:
-        return self._marcar(_SQL_ENTREGUE, linha)
+        """Marca a linha ``entregue``; False se ela nao e mais desta replica."""
+        return self._marcacao.entregue(linha)
 
     def registrar_falha(
         self, linha: LinhaDeNotificacao, motivo: str
@@ -145,28 +119,8 @@ class FilaDeNotificacoes:
         a mensagem de uma falha de SMTP pode trazer o endereco do destinatario.
         ``perdida``: a linha nao e mais desta replica, e nada foi gravado.
         """
-        tentativas = linha.tentativas + 1
-        parametros = {"tentativas": tentativas, "erro": motivo}
-        atraso = atraso_depois_da_falha(tentativas, self._atrasos)
-        if atraso is None:
-            return "dead" if self._marcar(_SQL_DEAD, linha, **parametros) else "perdida"
-        gravada = self._marcar(
-            _SQL_NOVA_TENTATIVA, linha, **parametros, atraso=timedelta(seconds=atraso)
-        )
-        return "nova_tentativa" if gravada else "perdida"
+        return self._marcacao.falha(linha, motivo)
 
     def limpar(self, *, entre_lotes: Callable[[], None]) -> int:
         """Apaga, em lotes, as entregues ha mais de 7 dias e as dead ha mais de 30."""
-        return sum(
-            apagar_em_lotes(self._engine.begin, sql, entre_lotes=entre_lotes)
-            for sql in (_SQL_LIMPEZA_ENTREGUES, _SQL_LIMPEZA_DEAD)
-        )
-
-    def _marcar(
-        self, sql: TextClause, linha: LinhaDeNotificacao, **parametros: object
-    ) -> bool:
-        with self._engine.begin() as conexao:
-            alteradas: int = conexao.execute(
-                sql, {"id": linha.id, "lease_ate": linha.lease_ate, **parametros}
-            ).rowcount
-        return alteradas == 1
+        return self._marcacao.limpar(entre_lotes=entre_lotes)

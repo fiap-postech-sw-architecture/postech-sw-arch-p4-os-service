@@ -13,7 +13,8 @@ curta:
    (token igual): o publish tem o lease inteiro.
 3. O desfecho (``entregue``, nova tentativa ou ``dead``) so e gravado com o
    token ainda igual (fencing): a replica que perdeu a linha nunca sobrescreve
-   a marcacao de outra.
+   a marcacao de outra. Esse passo e o ``MarcacaoComFencing``, o mesmo da fila
+   de e-mails (``notificacoes``).
 
 O lease cobre o publish bloqueado (30 s). Um publish que passe dele (broker
 mudo, ate cerca de 70 s) pode sair tambem pela replica que reivindicar a linha
@@ -31,7 +32,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -61,45 +62,16 @@ _SQL_LEASE: Final = text(
     "UPDATE outbox SET proxima_tentativa_em = now() + :lease WHERE id = ANY(:ids) "
     "RETURNING id, proxima_tentativa_em"
 )
-# Fencing (o `WHERE` de cada marcacao): a linha segue `pendente` e com o lease
-# que esta replica gravou.
+# Fencing (o `WHERE`): a linha segue `pendente` e com o lease que esta replica
+# gravou.
 _SQL_RENOVAR: Final = text(
     "UPDATE outbox SET proxima_tentativa_em = clock_timestamp() + :lease "
     "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate "
     "RETURNING proxima_tentativa_em"
 )
-_SQL_ENTREGUE: Final = text(
-    "UPDATE outbox SET status = 'entregue', entregue_em = clock_timestamp(), "
-    "ultimo_erro = NULL "
-    "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
-_SQL_NOVA_TENTATIVA: Final = text(
-    "UPDATE outbox SET tentativas = :tentativas, "
-    "proxima_tentativa_em = clock_timestamp() + :atraso, ultimo_erro = :erro "
-    "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
-_SQL_DEAD: Final = text(
-    "UPDATE outbox SET status = 'dead', tentativas = :tentativas, "
-    "ultimo_erro = :erro "
-    "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
 _SQL_LIBERAR: Final = text(
     "UPDATE outbox SET proxima_tentativa_em = now() "
     "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate"
-)
-# Retencao: entregue por 7 dias (RFC-004 secao 5.4) e dead por 30, a janela de
-# operacao para o redrive; pendente nunca expira.
-_SQL_LIMPEZA_ENTREGUES: Final = text(
-    "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status = 'entregue' "
-    "AND entregue_em < now() - interval '7 days' LIMIT :lote)"
-)
-# A janela conta da morte da linha, e nao da criacao: com o broker ou o relay
-# fora, a linha fica `pendente` por dias sem gastar tentativa e so morre depois.
-# Na `dead`, `proxima_tentativa_em` e o fim do ultimo lease, gravado a menos de
-# um lease da morte (e coberto pelo indice do claim).
-_SQL_LIMPEZA_DEAD: Final = text(
-    "DELETE FROM outbox WHERE id IN (SELECT id FROM outbox WHERE status = 'dead' "
-    "AND proxima_tentativa_em < now() - interval '30 days' LIMIT :lote)"
 )
 _SQL_CONTAGEM: Final = text("SELECT count(*) FROM outbox WHERE status = :status")
 
@@ -115,6 +87,130 @@ def atraso_depois_da_falha(
     if tentativas > len(atrasos):
         return None
     return atrasos[tentativas - 1]
+
+
+class _Reivindicada(Protocol):
+    """O que a marcacao precisa de uma linha reivindicada."""
+
+    @property
+    def id(self) -> int: ...
+
+    @property
+    def tentativas(self) -> int: ...
+
+    @property
+    def lease_ate(self) -> datetime: ...
+
+
+class MarcacaoComFencing:
+    """O desfecho de uma linha reivindicada numa fila com lease, com fencing.
+
+    Compartilhado pela outbox e pela fila de e-mails: o fencing, a politica de
+    tentativas e a retencao ficam num lugar so, e uma correcao vale para as duas.
+    Cada marcacao (entregue, nova tentativa, ``dead``) so grava se a linha segue
+    ``pendente`` e com o lease que esta replica gravou, e devolve False quando
+    ela deixou de ser desta replica.
+
+    ``tabela`` e ``situacao`` (a coluna de situacao: ``status`` na outbox,
+    ``situacao`` nas notificacoes) sao constantes de quem monta a marcacao, nunca
+    entrada de usuario: entram no SQL por formatacao.
+    """
+
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        tabela: str,
+        situacao: str,
+        atrasos: Sequence[float] = ATRASOS_S,
+    ) -> None:
+        self._engine = engine
+        self._atrasos = atrasos
+        fencing = (
+            f"WHERE id = :id AND {situacao} = 'pendente' "
+            "AND proxima_tentativa_em = :lease_ate"
+        )
+        self._sql_entregue = text(
+            f"UPDATE {tabela} SET {situacao} = 'entregue', "  # noqa: S608  # nosec B608
+            f"entregue_em = clock_timestamp(), ultimo_erro = NULL {fencing}"
+        )
+        self._sql_nova_tentativa = text(
+            f"UPDATE {tabela} SET tentativas = :tentativas, "  # noqa: S608  # nosec B608
+            "proxima_tentativa_em = clock_timestamp() + :atraso, "
+            f"ultimo_erro = :erro {fencing}"
+        )
+        self._sql_dead = text(
+            f"UPDATE {tabela} SET {situacao} = 'dead', "  # noqa: S608  # nosec B608
+            f"tentativas = :tentativas, ultimo_erro = :erro {fencing}"
+        )
+        # Retencao: entregue por 7 dias (RFC-004 secao 5.4) e dead por 30, a
+        # janela de operacao para o redrive; pendente nunca expira. A janela do
+        # `dead` conta da morte da linha, e nao da criacao: com o broker (ou o
+        # SMTP) fora, a linha fica `pendente` por dias sem gastar tentativa e so
+        # morre depois. Na `dead`, `proxima_tentativa_em` e o fim do ultimo
+        # lease, gravado a menos de um lease da morte (e coberto pelo indice do
+        # claim).
+        self._sql_limpeza = (
+            text(
+                f"DELETE FROM {tabela} WHERE id IN (SELECT id FROM {tabela} "  # noqa: S608  # nosec B608
+                f"WHERE {situacao} = 'entregue' "
+                "AND entregue_em < now() - interval '7 days' LIMIT :lote)"
+            ),
+            text(
+                f"DELETE FROM {tabela} WHERE id IN (SELECT id FROM {tabela} "  # noqa: S608  # nosec B608
+                f"WHERE {situacao} = 'dead' "
+                "AND proxima_tentativa_em < now() - interval '30 days' LIMIT :lote)"
+            ),
+        )
+
+    def entregue(self, linha: _Reivindicada) -> bool:
+        """Marca a linha ``entregue``; False se ela nao e mais desta replica."""
+        return self._marcar(self._sql_entregue, linha)
+
+    def falha(
+        self, linha: _Reivindicada, motivo: str
+    ) -> Literal["dead", "nova_tentativa", "perdida"]:
+        """Conta a tentativa: volta depois do atraso da tabela ou vira ``dead``.
+
+        ``motivo`` vai para ``ultimo_erro`` e e texto fixo: a mensagem da excecao
+        de origem pode trazer dado pessoal. ``perdida``: a linha nao e mais desta
+        replica, e nada foi gravado.
+        """
+        tentativas = linha.tentativas + 1
+        parametros = {"tentativas": tentativas, "erro": motivo}
+        atraso = atraso_depois_da_falha(tentativas, self._atrasos)
+        if atraso is None:
+            gravada = self._marcar(self._sql_dead, linha, **parametros)
+            return "dead" if gravada else "perdida"
+        gravada = self._marcar(
+            self._sql_nova_tentativa,
+            linha,
+            **parametros,
+            atraso=timedelta(seconds=atraso),
+        )
+        return "nova_tentativa" if gravada else "perdida"
+
+    def dead(self, linha: _Reivindicada, motivo: str) -> bool:
+        """``dead`` sem nova tentativa (a linha que nenhuma tentativa conserta)."""
+        return self._marcar(
+            self._sql_dead, linha, tentativas=linha.tentativas + 1, erro=motivo
+        )
+
+    def limpar(self, *, entre_lotes: Callable[[], None]) -> int:
+        """Apaga, em lotes, as entregues ha mais de 7 dias e as dead ha mais de 30."""
+        return sum(
+            apagar_em_lotes(self._engine.begin, sql, entre_lotes=entre_lotes)
+            for sql in self._sql_limpeza
+        )
+
+    def _marcar(
+        self, sql: TextClause, linha: _Reivindicada, **parametros: object
+    ) -> bool:
+        with self._engine.begin() as conexao:
+            alteradas: int = conexao.execute(
+                sql, {"id": linha.id, "lease_ate": linha.lease_ate, **parametros}
+            ).rowcount
+        return alteradas == 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +241,9 @@ class Outbox:
 
     def __init__(self, engine: Engine, atrasos: Sequence[float] = ATRASOS_S) -> None:
         self._engine = engine
-        self._atrasos = atrasos
+        self._marcacao = MarcacaoComFencing(
+            engine, tabela="outbox", situacao="status", atrasos=atrasos
+        )
 
     def reivindicar(self, lote: int, lease: timedelta) -> list[LinhaDaOutbox]:
         """Ate ``lote`` linhas vencidas, em ordem por OS, seguras pelo ``lease``."""
@@ -176,7 +274,7 @@ class Outbox:
         return dataclasses.replace(linha, lease_ate=renovada)
 
     def marcar_entregue(self, linha: LinhaDaOutbox) -> bool:
-        return self._marcar(_SQL_ENTREGUE, linha)
+        return self._marcacao.entregue(linha)
 
     def registrar_falha(
         self, linha: LinhaDaOutbox, motivo: str
@@ -187,21 +285,11 @@ class Outbox:
         carrega o corpo da mensagem (placa, texto livre). ``perdida``: a linha
         nao e mais desta replica, e nada foi gravado.
         """
-        tentativas = linha.tentativas + 1
-        parametros = {"tentativas": tentativas, "erro": motivo}
-        atraso = atraso_depois_da_falha(tentativas, self._atrasos)
-        if atraso is None:
-            return "dead" if self._marcar(_SQL_DEAD, linha, **parametros) else "perdida"
-        gravada = self._marcar(
-            _SQL_NOVA_TENTATIVA, linha, **parametros, atraso=timedelta(seconds=atraso)
-        )
-        return "nova_tentativa" if gravada else "perdida"
+        return self._marcacao.falha(linha, motivo)
 
     def marcar_dead(self, linha: LinhaDaOutbox, motivo: str) -> bool:
         """``dead`` sem nova tentativa (envelope que nenhuma tentativa conserta)."""
-        return self._marcar(
-            _SQL_DEAD, linha, tentativas=linha.tentativas + 1, erro=motivo
-        )
+        return self._marcacao.dead(linha, motivo)
 
     def liberar(self, linhas: Sequence[LinhaDaOutbox]) -> None:
         """Devolve as linhas ja, sem esperar o lease (o broker caiu)."""
@@ -213,10 +301,7 @@ class Outbox:
 
     def limpar(self, *, entre_lotes: Callable[[], None]) -> int:
         """Apaga, em lotes, as entregues ha mais de 7 dias e as dead ha mais de 30."""
-        return sum(
-            apagar_em_lotes(self._engine.begin, sql, entre_lotes=entre_lotes)
-            for sql in (_SQL_LIMPEZA_ENTREGUES, _SQL_LIMPEZA_DEAD)
-        )
+        return self._marcacao.limpar(entre_lotes=entre_lotes)
 
     def contar(self, status: str) -> float:
         """Linhas com o ``status`` (gauge do /metrics); NaN com o banco fora."""
@@ -226,12 +311,3 @@ class Outbox:
         except SQLAlchemyError:
             return float("nan")
         return float(total)
-
-    def _marcar(
-        self, sql: TextClause, linha: LinhaDaOutbox, **parametros: object
-    ) -> bool:
-        with self._engine.begin() as conexao:
-            alteradas: int = conexao.execute(
-                sql, {"id": linha.id, "lease_ate": linha.lease_ate, **parametros}
-            ).rowcount
-        return alteradas == 1
