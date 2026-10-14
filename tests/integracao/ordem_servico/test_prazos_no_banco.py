@@ -184,6 +184,18 @@ class TestConsultaDasVencidas:
         [
             pytest.param([PENDENTE], T0 - timedelta(minutes=1), id="pendente"),
             pytest.param([MORTO], T0 - timedelta(minutes=1), id="dead"),
+            # Linha que nao esta entregue nao vence, ainda que traga uma hora de
+            # entrega (a condicao e o status, nao a hora): a guarda e explicita.
+            pytest.param(
+                [("pendente", T0 - timedelta(hours=1))],
+                T0 - timedelta(minutes=1),
+                id="pendente-com-hora-de-entrega",
+            ),
+            pytest.param(
+                [("dead", T0 - timedelta(hours=1))],
+                T0 - timedelta(minutes=1),
+                id="dead-com-hora-de-entrega",
+            ),
             pytest.param(
                 [_entregue(T0 - PRAZO + timedelta(seconds=1))],
                 T0 - timedelta(minutes=1),
@@ -596,6 +608,14 @@ class TestGaugeDoPrazoVencido:
         [
             pytest.param([PENDENTE], id="comando-pendente-na-outbox"),
             pytest.param([MORTO], id="comando-morto"),
+            pytest.param(
+                [("pendente", datetime(2026, 1, 1, tzinfo=UTC))],
+                id="pendente-com-hora-de-entrega",
+            ),
+            pytest.param(
+                [("dead", datetime(2026, 1, 1, tzinfo=UTC))],
+                id="dead-com-hora-de-entrega",
+            ),
         ],
     )
     def test_pendente_ou_morto_nao_conta(

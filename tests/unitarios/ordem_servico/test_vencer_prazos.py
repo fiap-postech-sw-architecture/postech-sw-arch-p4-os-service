@@ -94,9 +94,10 @@ class TestReenvio:
         assert saga.reenvios == 1
         assert saga.prazo_resposta_em == prazos.relogio.agora + PRAZO
         passo = saga.passos[-1]
+        # O ator e o nome do processo, literal: o historico e o runbook o citam.
         assert (passo["gatilho"], passo["ator"], passo["reenvio"]) == (
             "reenvio",
-            ATOR_PRAZOS,
+            "prazos",
             1,
         )
         assert (prazos.transacao.commits, prazos.transacao.rollbacks) == (1, 0)
