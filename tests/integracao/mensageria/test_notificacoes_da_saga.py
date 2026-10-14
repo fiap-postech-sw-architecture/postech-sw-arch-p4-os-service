@@ -10,6 +10,7 @@ comando nem resposta da saga (RFC-004 secao 7.2; ADR-036).
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -99,11 +100,28 @@ def processos(
 
 
 def _assuntos(mailpit: Mailpit, quantidade: int) -> list[str]:
-    """Os assuntos, na ordem em que os e-mails chegaram ao Mailpit."""
+    """Os assuntos, na ordem em que os e-mails chegaram ao Mailpit.
+
+    O `Created` vem sem os zeros finais da fracao (``.71Z`` e ``.712Z``): como
+    texto, ``.71Z`` ficaria depois de ``.712Z``; por isso a ordem e a do instante.
+    """
     mensagens = sorted(
-        mailpit.esperar(quantidade, prazo_s=30), key=lambda m: m["Created"]
+        mailpit.esperar(quantidade, prazo_s=30),
+        key=lambda m: datetime.fromisoformat(m["Created"]),
     )
     return [m["Subject"].split(": ", 1)[1] for m in mensagens]
+
+
+def test_assuntos_seguem_o_instante_e_nao_o_texto_do_created() -> None:
+    class CaixaFalsa:
+        def esperar(self, quantidade: int, *, prazo_s: float) -> list[dict[str, str]]:
+            # Da mais nova para a mais antiga; ".71Z" (710 ms) vem antes de ".712Z".
+            return [
+                {"Created": "2026-10-14T03:27:00.712Z", "Subject": "x: Entregue"},
+                {"Created": "2026-10-14T03:27:00.71Z", "Subject": "x: Finalizada"},
+            ]
+
+    assert _assuntos(CaixaFalsa(), 2) == ["Finalizada", "Entregue"]
 
 
 def test_um_email_por_mudanca_de_situacao_do_abrir_ate_a_entrega(
