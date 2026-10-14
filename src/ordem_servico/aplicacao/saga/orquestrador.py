@@ -34,6 +34,7 @@ from src.compartilhado.dominio.exceptions import (
     TransicaoStatusInvalidaException,
     ViolacaoRegraDeNegocioException,
 )
+from src.ordem_servico.aplicacao.notificacoes import registrar_transicao
 from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import RelogioDefasadoError
 from src.ordem_servico.aplicacao.saga.linhas_da_compensacao import (
@@ -58,7 +59,10 @@ if TYPE_CHECKING:
 
     from src.compartilhado.aplicacao.mensageria import MensagemRecebida
     from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
-    from src.ordem_servico.aplicacao.ports import SagaRepository
+    from src.ordem_servico.aplicacao.ports import (
+        PublicadorDeNotificacoes,
+        SagaRepository,
+    )
     from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
         ComandoParaEnviar,
         ContextoDeEnvio,
@@ -93,11 +97,13 @@ class OrquestradorDaSaga:
         ordens: OrdemDeServicoRepository,
         sagas: SagaRepository,
         publicador: PublicadorDeComandos,
+        notificacoes: PublicadorDeNotificacoes,
         contexto: ContextoDeEnvio,
     ) -> None:
         self._ordens = ordens
         self._sagas = sagas
         self._publicador = publicador
+        self._notificacoes = notificacoes
         self._contexto = contexto
 
     def tratar(self, evento: MensagemRecebida) -> Tratamento:
@@ -132,9 +138,18 @@ class OrquestradorDaSaga:
             return self._estorno_automatico(ordem, etapa, contexto)
         if classificacao is not Classificacao.PROCESSAR:
             return _ignorado(classificacao, etapa, contexto)
+        status_antes = ordem.status
         self._aplicar(evento, saga, ordem, marcos)
         self._ordens.salvar(ordem)
         self._sagas.salvar(saga)
+        # O e-mail da transicao vai no mesmo commit (RFC-004 secao 7.2).
+        registrar_transicao(
+            self._notificacoes,
+            ordem,
+            status_antes=status_antes,
+            abriu_o_checkout=evento.tipo == "PagamentoSolicitado",
+            motivo=saga.motivo,
+        )
         # A saga parada na compensacao pede atencao (alerta "Saga parada"): aviso,
         # com a causa. O texto do motivo do provedor nunca vai ao log.
         parada = saga.etapa is EtapaSaga.FALHA_NA_COMPENSACAO

@@ -33,6 +33,9 @@ from src.ordem_servico.aplicacao.saga.tratamento import (
     EventoAdiantadoError,
     EventoRecusadoError,
 )
+from src.ordem_servico.infraestrutura.notificacoes_mapping import (
+    NotificacoesSQLAlchemy,
+)
 from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
@@ -64,6 +67,7 @@ def tratar_evento_da_saga(
         ordens=OrdemDeServicoSQLAlchemyRepository(session=transacao.session),
         sagas=SagaSQLAlchemyRepository(session=transacao.session),
         publicador=transacao,
+        notificacoes=NotificacoesSQLAlchemy(transacao.session),
         contexto=ContextoDeEnvio(prazo_resposta),
     )
     try:

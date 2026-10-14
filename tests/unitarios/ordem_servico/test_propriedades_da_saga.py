@@ -398,7 +398,10 @@ class Simulacao:
                 cenario.cancelar()
             else:
                 RegistrarEntrega(
-                    cenario.ordens, FakeUnitOfWork(), cenario.sagas
+                    cenario.ordens,
+                    FakeUnitOfWork(),
+                    cenario.sagas,
+                    cenario.notificacoes,
                 ).executar(cenario.ordem_id, ator=ATOR_ATENDENTE)
         except TransicaoStatusInvalidaException:
             assert _foto(cenario) == antes

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
     from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
+    from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -80,4 +81,17 @@ class SagaRepository(Protocol):
             ConflitoDeConcorrenciaException: outra transacao gravou a mesma
                 saga desde a leitura.
         """
+        pass
+
+
+class PublicadorDeNotificacoes(Protocol):
+    """Grava o pedido de e-mail na transacao em curso, sem comita-la.
+
+    Ao lado do ``publicar_comando``: a linha entra no commit da transicao (o
+    consumidor, com ``mensagens_processadas``; a API, com a UoW) e o processo
+    ``notificador`` a entrega depois (RFC-004 secao 7.2).
+    """
+
+    def registrar(self, notificacao: Notificacao) -> None:
+        """Grava o pedido; o commit e de quem chama."""
         pass

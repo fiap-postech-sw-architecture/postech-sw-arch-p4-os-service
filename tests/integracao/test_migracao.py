@@ -30,6 +30,7 @@ _TABELAS = {
     "outbox",
     "mensagens_processadas",
     "sagas",
+    "notificacoes",
 }
 
 
@@ -114,5 +115,54 @@ def test_migracao_da_saga_desiste_do_lock_em_segundos(banco_vazio: str) -> None:
             assert time.monotonic() - inicio < 15
         alembic(banco_vazio)
         assert "sagas" in inspect(eng).get_table_names()
+    finally:
+        eng.dispose()
+
+
+def test_notificacoes_sem_dado_pessoal_e_com_os_indices_do_claim(
+    engine: Engine,
+) -> None:
+    inspetor = inspect(engine)
+    colunas = {c["name"] for c in inspetor.get_columns("notificacoes")}
+    indices = {
+        i["name"]: i["column_names"] for i in inspetor.get_indexes("notificacoes")
+    }
+
+    assert colunas == {
+        "id",
+        "ordem_id",
+        "modelo",
+        "status_da_ordem",
+        "motivo",
+        "criada_em",
+        "situacao",
+        "tentativas",
+        "proxima_tentativa_em",
+        "entregue_em",
+        "ultimo_erro",
+    }
+    assert indices == {
+        "ix_notificacoes_claim": ["situacao", "proxima_tentativa_em"],
+        "ix_notificacoes_ordem": ["ordem_id", "id", "situacao"],
+    }
+
+
+def test_migracao_das_notificacoes_desiste_do_lock_em_segundos(
+    banco_vazio: str,
+) -> None:
+    # Uma escrita longa em ordens_de_servico segura o lock que a chave
+    # estrangeira da 004 pede: a migracao falha em segundos (o Job tenta de
+    # novo), sem enfileirar as escritas da app atras dela.
+    eng = create_engine(banco_vazio)
+    try:
+        alembic(banco_vazio, "003")
+        with eng.connect() as escrita, escrita.begin():
+            escrita.execute(text("LOCK TABLE ordens_de_servico IN ROW EXCLUSIVE MODE"))
+            inicio = time.monotonic()
+            with pytest.raises(OperationalError, match="lock"):
+                alembic(banco_vazio)
+            assert time.monotonic() - inicio < 15
+        alembic(banco_vazio)
+        assert "notificacoes" in inspect(eng).get_table_names()
     finally:
         eng.dispose()
