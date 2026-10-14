@@ -13,11 +13,11 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 ## O que já existe
 
 - OS da fase 4: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
-- Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, o consumidor conduz o caminho feliz até `FINALIZADA`, e as falhas de negócio e o cancelamento levam as compensações, uma por vez, até a OS `CANCELADA` ou até a falha da compensação, com a etapa visível na OS e na rota de operação ([seção abaixo](#saga)).
-- API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409), `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
+- Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, o consumidor conduz o caminho feliz até `FINALIZADA`, e as falhas de negócio e o cancelamento levam as compensações, uma por vez, até a OS `CANCELADA` ou até a falha da compensação, com a etapa visível na OS e na rota de operação. O processo `prazos` reenvia o comando sem resposta, compensa o passo que esgota os reenvios e para a compensação sem resposta em `falha_na_compensacao`, de onde o admin a retoma ([seção abaixo](#saga)).
+- API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409), `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` e `POST /api/v1/sagas/{ordem_id}/compensacao` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
 - Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
 - Manifestos Kubernetes em `k8s/`, com o PostgreSQL do serviço, o Job de migração e a borda no Kong ([Implantação](#implantação)).
-- Ainda não: o processo `prazos` (reenvio por prazo técnico e a retomada da compensação parada, `POST /api/v1/sagas/{ordem_id}/compensacao`), o e-mail ao cliente e a anonimização do veículo na Execução, desenhados na RFC-004. Sem o `prazos` uma compensação parada não tem saída: a compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
+- Ainda não: o e-mail ao cliente e a anonimização do veículo na Execução, desenhados na RFC-004. A compensação só vai para o cluster junto com o processo `prazos`, que já está nos manifestos ([Implantação e DLQ](#implantação-e-dlq)).
 
 ## Autenticação
 
@@ -167,10 +167,10 @@ Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como
 
 ### Observabilidade, saúde e encerramento
 
-- Spans: `publish <tipo>` (PRODUCER, filho do span que gravou a outbox) e `process <tipo>` (CONSUMER, filho da publicação), com `correlation_id` como atributo e o status de erro só com o tipo da exceção; os laços ociosos não abrem span. O SDK do OpenTelemetry fica sempre ligado no relay e no consumidor, e `OTEL_ENABLED=true` liga a exportação OTLP (o protocolo do OpenTelemetry) para o Jaeger. O recurso leva `service.name` (de `OTEL_SERVICE_NAME`) e `pytstop.processo` (`api`, `relay` ou `consumidor`).
+- Spans: `publish <tipo>` (PRODUCER, filho do span que gravou a outbox) e `process <tipo>` (CONSUMER, filho da publicação), com `correlation_id` como atributo e o status de erro só com o tipo da exceção; os laços ociosos não abrem span. O SDK do OpenTelemetry fica sempre ligado no relay e no consumidor, e `OTEL_ENABLED=true` liga a exportação OTLP (o protocolo do OpenTelemetry) para o Jaeger. O recurso leva `service.name` (de `OTEL_SERVICE_NAME`) e `pytstop.processo` (`api`, `relay`, `consumidor` ou `prazos`).
 - Logs JSON com `correlation_id`, `trace_id` e `span_id`, sem dados pessoais nem texto livre: o envelope não vai para o log, e do cliente AMQP só sai o nível ERROR (em WARNING ele imprime o corpo da mensagem devolvida).
 - Métricas no `/metrics` de cada processo (porta `METRICS_PORT`, 9100): `pytstop_mensagens_publicadas_total{tipo}`, `pytstop_mensagens_consumidas_total{tipo,resultado}`, `pytstop_reconexoes_ao_broker_total{processo}` (para o alerta de processo preso reconectando), `outbox_pendentes` e `outbox_dead`.
-- Saúde: cada processo toca `/tmp/<processo>-heartbeat` a cada volta do laço, a cada linha do lote do relay e entre os lotes da limpeza (liveness), e mantém `/tmp/<processo>-pronto` enquanto está conectado ao broker (readiness). Broker fora, inclusive com o nome dele sem resolução no DNS (o Service headless sem pod pronto) e o broker que aceita a conexão TCP e não responde o AMQP no prazo do cliente (15 s), tira o processo de pronto sem reiniciá-lo, e ele reconecta com backoff; a tentativa que falha toca o heartbeat de novo, porque a resolução do nome não tem prazo no cliente AMQP. Falta de descritores, certificado TLS recusado e erro de disco no arquivo de saúde não são broker fora: derrubam o processo, para o Kubernetes reiniciá-lo e o defeito aparecer. A sonda de liveness tolera 90 s sem heartbeat: com o broker mudo um publish fica até cerca de 70 s preso antes de o heartbeat AMQP (30 s) derrubar a conexão, e com o broker em alarme até 30 s. No SIGTERM o processo termina a mensagem em curso e fecha as conexões; no consumidor, as demais seguem na fila.
+- Saúde: cada processo toca `/tmp/<processo>-heartbeat` a cada volta do laço, a cada linha do lote do relay e entre os lotes da limpeza (liveness), e mantém `/tmp/<processo>-pronto` enquanto está conectado ao broker (readiness). Broker fora, inclusive com o nome dele sem resolução no DNS (o Service headless sem pod pronto) e o broker que aceita a conexão TCP e não responde o AMQP no prazo do cliente (15 s), tira o processo de pronto sem reiniciá-lo, e ele reconecta com backoff; a tentativa que falha toca o heartbeat de novo, porque a resolução do nome não tem prazo no cliente AMQP. Falta de descritores, certificado TLS recusado e erro de disco no arquivo de saúde não são broker fora: derrubam o processo, para o Kubernetes reiniciá-lo e o defeito aparecer. A sonda de liveness tolera 90 s sem heartbeat (120 s no `prazos`): com o broker mudo um publish fica até cerca de 70 s preso antes de o heartbeat AMQP (30 s) derrubar a conexão, e com o broker em alarme até 30 s. No SIGTERM o processo termina a mensagem em curso e fecha as conexões; no consumidor, as demais seguem na fila.
 - Banco: relay e consumidor usam um pool de 2 + 2 conexões e sessões com `statement_timeout` de 15 s e `lock_timeout` de 10 s, abaixo da janela do heartbeat do broker (o handler roda na thread da conexão AMQP).
 
 ### Configuração
@@ -178,13 +178,15 @@ Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como
 | Variável | Padrão | Uso |
 |---|---|---|
 | `RABBITMQ_URL` | obrigatória | URL AMQP com o usuário `os`; fora de `development` e `test`, a senha de demonstração é recusada no boot (a do Postgres também) |
-| `METRICS_PORT` | 9100 | porta do `/metrics` do relay e do consumidor |
+| `METRICS_PORT` | 9100 | porta do `/metrics` do relay, do consumidor e do `prazos` |
 | `OUTBOX_POLL_SEGUNDOS` | 5 | poll de segurança do relay, de 0,1 a 15 s (o laço ocioso atende o heartbeat AMQP) |
 | `OUTBOX_LOTE` | 10 | linhas por lote do relay (1 ou mais) |
 | `OUTBOX_LEASE_SEGUNDOS` | 60 | lease de cada linha reivindicada (45 ou mais: cobre o publish bloqueado por alarme do broker, de até 30 s, e a marcação da linha) |
 | `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `false`, `http://jaeger:4317` | exportação OTLP dos spans |
 | `OTEL_SERVICE_NAME` | `pytstop-os-service` | `service.name` dos spans |
-| `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | prazo técnico gravado pela saga no envio de cada comando com resposta automática (1 ou mais; [seção Saga](#saga)). Tem de ser o mesmo valor na API (a primeira compensação do cancelamento), no consumidor e no processo `prazos`; no compose é um ponto só (`x-saga`) |
+| `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | prazo técnico gravado pela saga no envio de cada comando com resposta automática (1 ou mais; [seção Saga](#saga)). Tem de ser o mesmo valor na API (a primeira compensação do cancelamento e a retomada), no consumidor e no processo `prazos`; no compose é um ponto só (`x-saga`) |
+| `SAGA_MAX_REENVIOS` | 5 | reenvios do mesmo comando (0 ou mais) antes de compensar ou de parar a compensação; só o `prazos` lê ([Prazos, falha na compensação e retomada](#prazos-falha-na-compensação-e-retomada)) |
+| `PRAZOS_INTERVALO_SEGUNDOS` | 30 | intervalo entre os ciclos do `prazos`, de 0,1 a 300 s |
 | `ROOT_PATH` | vazio | prefixo da API atrás do gateway (`/os` no cluster); o `entrypoint.sh` o passa ao uvicorn como `--root-path` e recusa, no boot, valor sem a barra inicial ou com a barra final |
 
 Valor fora da faixa aborta o boot com a variável e o valor na mensagem.
@@ -455,19 +457,71 @@ Com a OS recém-aberta (sem resposta dos participantes ainda), a resposta é `{"
 - **Auditoria (ADR-039).** Cada pedido deixa uma linha de log com `correlation_id` (a OS), `ator` (o `sub` de quem pediu) e `resultado`: `order cancellation requested` com `aceito` ou `repetido` (e a `etapa`), ou `order cancellation refused` com o código do erro. Nunca o texto do motivo. O `sub` fica também no registro `cancelamento_solicitado` da saga e no `ator` da mudança `cancelada` do histórico. Só o que chega ao caso de uso é auditado: o corpo fora do schema (422 de schema) e as falhas inesperadas (500, como o relógio defasado ou a invariante da saga violada) saem apenas pelo log genérico da requisição ou do erro, sem `ator` nem `correlation_id`.
 - **Cliente com OS em andamento.** Enquanto a OS tem compensação em andamento ela segue ativa, e a desativação e o apagamento do cliente respondem 409 até a saga terminar (`existe_os_ativa_para_cliente` só libera a OS entregue ou cancelada).
 
+### Prazos, falha na compensação e retomada
+
+Termos desta seção:
+
+- **Prazo técnico:** quanto o OS espera a resposta automática de um comando (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado`, `AgendarExecucao` e as cinco compensações) antes de reenviá-lo. `SolicitarDiagnostico` e as esperas humanas (o mecânico, a decisão do orçamento, o checkout aberto, o início da execução) não têm prazo técnico: quem expira o orçamento e o pagamento é o Billing.
+- **Envio mais recente:** o último id de `comando_em_voo.mensagem_ids`, o do original, de um reenvio ou da retomada. O prazo conta dele.
+- **Reenvio:** o mesmo `tipo` e os mesmos `dados` (a mesma chave de negócio, então o participante não repete o efeito e republica o desfecho que já registrou), com `id` novo e `causation_id` nulo. O id novo entra em `mensagem_ids`: a resposta ao original, a qualquer reenvio e à retomada continua casando pelo `causation_id`.
+
+O processo `prazos` (`python -m src.prazos`, a mesma imagem) roda a cada `PRAZOS_INTERVALO_SEGUNDOS`, uma transação por saga ([RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seções 4.6 e 4.7):
+
+1. Confere o consumidor: uma declaração passiva de `os.eventos` (o usuário `os` já lê a fila) devolve o número de consumidores. Com zero, ou com o broker fora, o ciclo não reenvia nem esgota prazo, só avisa em log (`saga deadlines paused`): a resposta pode estar esperando na fila, e quando o consumidor volta a saga segue de onde estava. O `/metrics` e o alerta "Saga parada" seguem vendo o prazo vencido.
+2. Reivindica a saga de prazo vencido mais antiga com `FOR UPDATE SKIP LOCKED` (`SagaRepository.reivindicar_vencida`). O prazo só corre depois que o comando sai da outbox: a saga só vence se a linha do envio mais recente está `entregue` e `entregue_em + SAGA_PRAZO_RESPOSTA_SEGUNDOS` já passou. Linha `pendente` (relay ou broker fora) ou `dead` não vence e não gasta reenvio; quem acusa é o alerta de outbox parada. O `prazo_resposta_em` que a saga grava no envio é só o limite inferior que o índice parcial `ix_sagas_prazo` usa para achar as candidatas.
+3. Lê a OS e a saga, decide e comita a saga e o comando na outbox juntos. Duas réplicas nunca tratam a mesma saga; o consumidor que leu a saga antes perde na conferência da `versao`, volta pela fila de retry, relê e segue: a resposta ao comando original continua válida, e a repetida que o reenvio provoca chega depois e é ignorada.
+
+| Situação | O que o `prazos` faz |
+|---|---|
+| Prazo vencido, `reenvios < SAGA_MAX_REENVIOS` | reenvia o comando em voo, `reenvios + 1`, prazo novo, registro `reenvio` (campo `reenvio` com o número, 1 a 5) |
+| Esgotado em etapa linear (`aguardando_orcamento`, `_reserva`, `_pagamento` ou `_agendamento`) | inicia a compensação com `motivo=prazo_tecnico` e o passo em voo no plano (as linhas "prazo técnico esgotado" da tabela da RFC 4.4), envia a primeira e zera o contador; registro `prazo_esgotado` |
+| Esgotado em `compensando` | a saga vai a `falha_na_compensacao` com `falha=reenvios_esgotados`; nenhum comando sai, o comando em voo fica sem prazo e o plano segue com a pendente primeiro; registro `prazo_esgotado` |
+| Saga parada em `falha_na_compensacao`, esperas humanas, sagas encerradas | nada: não têm `prazo_resposta_em` |
+| Dado que o domínio recusa (comando guardado fora do contrato, estado incoerente, relógio desta réplica mais de 60 s atrás) | a saga fica de fora do ciclo, `saga deadline refused` em erro com o `correlation_id` e o tipo da exceção, e o prazo vencido continua acusando no gauge |
+
+O ator dos registros é `prazos`. Com os padrões (120 s, 5 reenvios, ciclo de 30 s), o original e os cinco reenvios dão ao participante 12 minutos (6 x 120 s) e o limite real chega a cerca de 15 (6 x (120 + 30 + a latência do relay)).
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | espera pela resposta, contada da saída da outbox; o mesmo valor na API, no consumidor e no `prazos` |
+| `SAGA_MAX_REENVIOS` | 5 | reenvios (0 ou mais) antes de compensar, ou de parar a compensação |
+| `PRAZOS_INTERVALO_SEGUNDOS` | 30 | intervalo entre os ciclos, de 0,1 a 300 s; o alerta "Saga parada" usa 60 s, duas vezes o padrão |
+
+A janela de reenvio (720 s) tem de passar da soma dos atrasos de retry do consumidor (1 + 5 + 15 + 60 + 300 = 381 s): senão a saga desistiria de um passo cuja resposta ainda está na fila de retry. `test_configuracao_dos_prazos.py` confere a relação a partir do TTL das filas de retry do `definitions.json`, dos padrões do código, do compose e dos três overlays. Os reenvios saem depois e podem ainda estar no retry quando a saga desiste; o efeito deles é desfeito pela compensação do passo em voo ou descartado pela lápide do participante.
+
+**Falha na compensação.** Entra em `falha_na_compensacao` o `EstornoDePagamentoFalhou` (`falha=estorno_recusado`) ou a compensação sem resposta depois dos reenvios (`falha=reenvios_esgotados`). A sequência para: o compensado fica compensado, o resto fica como estava, a OS mantém o status, o alerta "Saga parada" dispara, e a resposta que chega atrasada é ignorada (salvo o `ExecucaoIniciada` com o `CancelarExecucao` parado, que devolve a saga a `em_execucao`). O operador segue o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md), resolve a causa e retoma.
+
+`POST /api/v1/sagas/{ordem_id}/compensacao` (admin) reenvia a compensação pendente, o comando guardado em `comando_em_voo`, com `id` novo, que se soma a `mensagem_ids` (os ids do original e dos reenvios ficam: a resposta tardia ao original ainda conclui a compensação), `reenvios = 0` e prazo novo; limpa a `falha`, volta a saga a `compensando`, grava o registro `retomada` com o `sub` do admin e segue o plano até `compensada`:
+
+| Etapa | Resposta |
+|---|---|
+| `falha_na_compensacao` | **202** com a saga (`SagaResponse`, a mesma do `GET`), `etapa: "compensando"`, `falha: null`, `reenvios: 0` e o prazo novo |
+| Qualquer outra | **409** `TRANSICAO_STATUS_INVALIDA`, "Retomada recusada: a saga não está em falha na compensação" |
+| Conflito de versão com o consumidor (a corrida do pivot gravou a saga no meio) | **409** `CONFLITO_DE_CONCORRENCIA`; o operador repete o pedido |
+| OS inexistente ou sem saga | **404** `ENTIDADE_NAO_ENCONTRADA` |
+| Outro papel, sem token | **403** `ACESSO_NEGADO`, **401** `NAO_AUTENTICADO` |
+
+```bash
+curl -s -X POST localhost:8000/api/v1/sagas/$ORDEM_ID/compensacao \
+  -H "Authorization: Bearer $TOKEN" | jq '{etapa, falha, reenvios, plano_compensacao}'
+```
+
+Cada retomada deixa uma linha de log com `correlation_id`, `ator` e `resultado` (`saga resumed`, ou `saga resume refused` com o código do erro), sem os `dados` do comando, e o span `saga retomada` é filho do contexto que a saga guardou, com link para a requisição.
+
 ### Implantação e DLQ
 
-- **Ordem.** A API, o relay e o consumidor sobem juntos (no cluster, o mesmo `kubectl apply -k` aplica os três) ou o consumidor antes: a compensação que a API inicia é respondida na `os.eventos`, e uma réplica do consumidor de versão anterior, sem tratador para a falha de negócio e para a resposta de compensação, a recusa com o motivo `sem_tratador_nesta_versao`. Durante o rollout, as respostas que uma réplica antiga consumir vão para a DLQ.
+- **Ordem.** A API, o relay, o consumidor e o `prazos` sobem juntos (no cluster, o mesmo `kubectl apply -k` aplica os quatro) ou o consumidor antes: a compensação que a API inicia é respondida na `os.eventos`, e uma réplica do consumidor de versão anterior, sem tratador para a falha de negócio e para a resposta de compensação, a recusa com o motivo `sem_tratador_nesta_versao`. Durante o rollout, as respostas que uma réplica antiga consumir vão para a DLQ.
 - **Redrive depois da versão nova, em todas as réplicas.** Antes disso a versão antiga recusa as mesmas mensagens de novo e o prazo de 7 dias recomeça. No clone do platform, `make redrive FILA=os.eventos`; se a implantação conviveu com réplicas antigas, repita-o no fim. O teste `test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova` mostra a ordem com o shovel do platform.
 - **Inspecione a DLQ antes.** O redrive devolve a fila inteira, sem filtrar por motivo: anote o `type`, o `message_id`, o `user_id` e o `correlation_id` de cada mensagem, como o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md) manda.
 - **Rollback.** Não volte a imagem com saga em `compensando` ou em `falha_na_compensacao`: a réplica anterior que tentar mudar essa saga viola a invariante dela, que exige prazo junto do comando em voo (`ValueError`, e a mensagem vai para a DLQ com `erro_no_handler`), e manda a resposta da compensação para a DLQ com `sem_tratador_nesta_versao`. Se voltar, faça o redrive depois de implantar de novo.
-- **Compensação sem o processo `prazos`.** O reenvio por prazo e a retomada (`POST /api/v1/sagas/{ordem_id}/compensacao`) vêm com o processo `prazos`, que ainda não existe. Sem ele, um participante que nunca responde deixa a saga em `compensando` sem reenvio nem alerta de prazo, e a saga em `falha_na_compensacao` dispara o alerta "Saga parada" cujo procedimento termina na retomada. Por isso a compensação só vai para o cluster junto com o processo `prazos`; até lá ela vale no compose local.
+- **O processo `prazos` junto com a compensação.** O reenvio por prazo e a retomada (`POST /api/v1/sagas/{ordem_id}/compensacao`) vêm com o `prazos`: sem ele, um participante que nunca responde deixa a saga em `compensando` sem reenvio nem alerta de prazo, e a saga em `falha_na_compensacao` dispara o alerta "Saga parada" cujo procedimento termina na retomada. Por isso a versão que compensa e o `prazos` vão juntos para o cluster (os manifestos têm os dois), e o `make smoke` confere que o `prazos` fica pronto.
 
 ### Consulta e operação
 
 - `GET /api/v1/ordens-de-servico/{id}`: a etapa da saga ao lado do status.
 - `GET /api/v1/ordens-de-servico/{id}/historico`: as mudanças de status (`mudancas`), com o ator de cada uma (`sub` do JWT ou o processo `consumidor`), e os registros da saga (`passos`: gatilho, etapa antes e depois, comando enviado e ator), em duas listas, cada uma na sua ordem.
-- `GET /api/v1/sagas/{ordem_id}` (admin): etapa, motivo, falha, plano de compensação restante, comando em voo (tipo e hora do envio), reenvios, prazo e registros; é a primeira consulta do [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md).
+- `GET /api/v1/sagas/{ordem_id}` (admin): etapa, motivo, falha, plano de compensação restante, comando em voo (tipo e hora do envio), reenvios, prazo e registros (o `reenvio` traz o número, 1 a `SAGA_MAX_REENVIOS`, só no registro de reenvio); é a primeira consulta do [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md).
+- `POST /api/v1/sagas/{ordem_id}/compensacao` (admin): a retomada da compensação parada ([Prazos, falha na compensação e retomada](#prazos-falha-na-compensação-e-retomada)).
 
 ```bash
 curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq
@@ -540,14 +594,17 @@ O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_
 - **Trace.**
   - O span da requisição de abertura é a raiz do trace da saga: a outbox guarda o contexto, o relay publica como filho, e o `process <tipo>` do consumidor ganha `pytstop.saga.etapa`, `pytstop.saga.etapa_nova` e `pytstop.saga.desfecho` (`processada`, `ignorada`, `adiantada` ou `recusada`, com o motivo no status de erro), mais `pytstop.saga.falha` quando o evento leva a saga a `falha_na_compensacao`.
   - A saga guarda o `traceparent` da última transição. O cancelamento chega com trace próprio (a requisição do atendente): o caso de uso abre o span `saga cancelamento` como filho desse contexto, com span link para a requisição, e a primeira compensação e o novo `traceparent` da saga nascem nele, de modo que a compensação segue no trace da saga.
-  - O span `saga cancelamento` fica com status de erro (o tipo da exceção, sem a mensagem) só numa falha inesperada; as recusas de negócio (404, 409, 422) não o marcam.
+  - O `prazos` e a retomada fazem o mesmo: abrem `saga prazo` (um por saga tratada, o ciclo ocioso não abre span) e `saga retomada` como filhos do contexto da saga, e o reenvio sai no trace dela.
+  - Os spans `saga cancelamento`, `saga prazo` e `saga retomada` ficam com status de erro (o tipo da exceção, sem a mensagem) só numa falha inesperada; as recusas de negócio (404, 409, 422) não os marcam.
 - **Métricas** ([ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md)).
-  - Contadores e histograma, contados só depois do commit da transação raiz (rollback, conflito de versão, commit que falha, savepoint liberado e savepoint desfeito não contam, e a retry não conta duas vezes): `pytstop_saga_iniciadas_total` (API), `pytstop_saga_finalizadas_total{resultado}` (`concluida` ou `compensada`), `pytstop_saga_compensacoes_total{motivo}` (quem inicia a compensação: o consumidor nas falhas de negócio e a API no cancelamento; os oito códigos) e `pytstop_saga_etapa_duracao_segundos{etapa}` (quem tira a saga da etapa).
-  - Gauges `pytstop_saga_ativas{etapa}` e `pytstop_saga_etapa_mais_antiga_segundos{etapa}`: o coletor da API os calcula numa consulta por raspagem (só com `API_METRICS_ENABLED=true`, que liga o `/metrics` da API), numa conexão própria, fora do pool das requisições, com 2 s de prazo para a consulta e 1 s para esperar um lock.
-  - Se a consulta falha, os dois gauges ficam ausentes (nunca zero), `pytstop_saga_coletor_falhas_total` conta a falha e `pytstop_saga_coletor_disponivel` vai a 0, para o alerta "Saga parada" não ficar mudo com o coletor quebrado. As séries de rótulo fechado nascem em zero em cada processo.
-- **Logs** JSON em inglês, com `correlation_id`, `etapa` e `tipo`.
+  - Contadores e histograma, contados só depois do commit da transação raiz (rollback, conflito de versão, commit que falha, savepoint liberado e savepoint desfeito não contam, e a retry não conta duas vezes): `pytstop_saga_iniciadas_total` (API), `pytstop_saga_finalizadas_total{resultado}` (`concluida` ou `compensada`), `pytstop_saga_compensacoes_total{motivo}` (quem inicia a compensação: o consumidor nas falhas de negócio e a API no cancelamento; os oito códigos) e `pytstop_saga_etapa_duracao_segundos{etapa}` (quem tira a saga da etapa). O `prazos` soma `pytstop_saga_reenvios_total{comando}` e `pytstop_saga_prazos_esgotados_total{comando}` (os nove comandos com prazo) e inicia a compensação `prazo_tecnico` na contagem de compensações.
+  - Gauges `pytstop_saga_ativas{etapa}`, `pytstop_saga_etapa_mais_antiga_segundos{etapa}` e `pytstop_saga_prazo_vencido_segundos`: o coletor da API os calcula em duas consultas por raspagem (só com `API_METRICS_ENABLED=true`, que liga o `/metrics` da API), numa conexão própria, fora do pool das requisições, com 2 s de prazo para cada consulta e 1 s para esperar um lock. O de prazo vencido é o maior `agora - (entregue_em + SAGA_PRAZO_RESPOSTA_SEGUNDOS)` da linha da outbox do envio mais recente de cada saga com prazo, só entre as entregues, e 0 sem atraso: comando `pendente` ou `dead` na outbox não conta, nem a saga parada em `falha_na_compensacao`. Como o coletor só lê o banco, ele acusa o prazo vencido também com o `prazos` fora do ar ou em pausa (o alerta "Saga parada" usa `max(pytstop_saga_prazo_vencido_segundos) > 60`).
+  - Se a consulta falha, os três gauges ficam ausentes (nunca zero), `pytstop_saga_coletor_falhas_total` conta a falha e `pytstop_saga_coletor_disponivel` vai a 0, para o alerta "Saga parada" não ficar mudo com o coletor quebrado. As séries de rótulo fechado nascem em zero em cada processo.
+- **Logs** JSON em inglês, com `correlation_id`, `etapa` e `tipo` (o `comando` nos do `prazos`).
   - `saga started`, `saga transition` (com o `motivo` da compensação; em aviso e com a `falha` quando a saga para na compensação), `saga event ignored` (com a classificação), `saga event ahead`, `late payment refunded` (o estorno automático) e `saga clock behind last record` (com a defasagem em segundos).
   - O pedido de cancelamento audita em `order cancellation requested` e `order cancellation refused`, com o `ator` e o `resultado`, sem texto livre, placa nem links.
+  - O `prazos` loga `saga command resent` (com o número do `reenvio`), `saga deadline exhausted` (em aviso e com a `falha` quando a saga para), `saga deadline refused`, `saga deadlines paused: the os.eventos consumer is away`, `os.eventos has no consumer` e `deadline cycle done` (só com trabalho). Nunca os `dados` do comando.
+  - A retomada audita em `saga resumed` e `saga resume refused`, com o `ator` e o `resultado`.
 
 ### Testes da saga
 
@@ -562,7 +619,12 @@ O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_
   - Cada roteiro escolhe uma falha de negócio (ou nenhuma), se o provedor recusa o estorno, se o cliente paga depois de a cobrança ser encerrada e se o estorno automático chega antes da resposta ao `EstornarPagamento` (a ordem trocada entre duas réplicas do consumidor).
   - Só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada, a OS fica cancelada se e só se a saga está compensada, a compensação seguinte só sai depois da resposta da anterior (o estorno nunca antes da execução cancelada), o gatilho de todo registro é do vocabulário, o plano é o da tabela da RFC e nada vai para a DLQ.
   - Uma guarda confere que o gerador produz de fato obsoletos, repetidos, adiantados, estornos automáticos, a ordem trocada e eventos fora do fluxo.
-- **BDD de componente.** `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ; os passos ficam em `tests/integracao/test_saga_atendimento.py`, ao lado das fixtures do banco. Cobre o caminho feliz, o adiantado, o repetido e o obsoleto, cada falha de negócio, o cancelamento em cada etapa (plano da RFC, passo em voo e ordem das compensações), repetido, recusado depois do início e com a OS já cancelada, a corrida do pivot nos dois sentidos, o estorno recusado, a resposta atrasada e o estorno automático.
+- **Prazos** (a matriz abaixo roda no `make test`).
+  - Unitários: o reenvio de 1 a 5 em cada etapa técnica, o esgotamento em cada uma e em `compensando`, a retomada e tudo o que cada uma recusa sem mudar nada (`test_prazos_da_saga.py`); o ciclo do `VencerPrazos` com relógio manual, sem consumidor e com a saga que o domínio recusa (`test_vencer_prazos.py`); a retomada pelo caso de uso e pela rota (`test_retomar_compensacao.py`, `test_router_os.py`); a configuração: a soma dos atrasos de retry (381 s) contra a janela de reenvio (720 s), no código, no compose e nos três overlays (`test_configuracao_dos_prazos.py`); os manifestos do `prazos` (`test_contrato_dos_manifestos.py`, `test_manifestos.py`).
+  - Propriedade (`test_propriedades_dos_prazos.py`): em mil sementes, participantes mudos, lentos, que perdem o envio ou que recusam o estorno, com o consumidor do OS fora por uma janela, cancelamento e retomada em pontos aleatórios; o par etapa e status fica na tabela, o prazo existe se e só se há comando com prazo em voo, os reenvios nunca passam do máximo, o ciclo pausado não muda nada, cada reenvio é do mesmo comando e só sai depois do prazo, o esgotamento só vem com os reenvios gastos e com participante mudo a saga nunca conclui.
+  - PostgreSQL real (`tests/integracao/ordem_servico/test_prazos_no_banco.py`): a consulta com `SKIP LOCKED` (linha pendente, `dead`, entregue há pouco, último envio, ordem, saga travada por outra transação), a transação única com a falha forçada no commit, duas réplicas em threads sobre doze sagas, o consumidor que perde na versão, o gauge de prazo vencido nos dois sentidos e os 12 minutos com os padrões (relógio controlado, ciclo de 30 s, compensação em 720 s, falha em 1440 s e retomada).
+  - RabbitMQ real (`tests/integracao/mensageria/test_prazos_com_broker.py`): participante mudo (cinco reenvios com id novo e os mesmos dados, depois a compensação), duas réplicas do `prazos`, estorno recusado, falha e retomada (resposta ao reenvio e ao original), `os.eventos` sem consumidor e relay parado sem gastar reenvio, dois consumidores com a resposta tardia ao original e a presença do consumidor.
+- **BDD de componente.** `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ; os passos ficam em `tests/integracao/test_saga_atendimento.py`, ao lado das fixtures do banco. Cobre o caminho feliz, o adiantado, o repetido e o obsoleto, cada falha de negócio, o cancelamento em cada etapa (plano da RFC, passo em voo e ordem das compensações), repetido, recusado depois do início e com a OS já cancelada, a corrida do pivot nos dois sentidos, o estorno recusado, a resposta atrasada e o estorno automático. O prazo anda no banco (o prazo gravado e a entrega recuam 121 s a cada "o prazo de resposta vence") e o `prazos` roda um ciclo: cobre o reenvio até o máximo em cada etapa técnica e a compensação por prazo técnico, a resposta ao original depois do reenvio, o consumidor fora, o relay parado, a falha na compensação, a retomada (inclusive depois do estorno recusado e com a resposta ao envio original) e a retomada recusada fora da falha.
 - **Integração** (`tests/integracao/mensageria/test_saga_com_broker.py`): relay, consumidor e RabbitMQ reais com participantes falsos.
   - O caminho feliz até `ENTREGUE` num trace só (com a árvore de spans conferida), o adiantado passando pela retry, a reentrega do mesmo evento sem repetir o comando, as recusas na DLQ com o motivo e a placa e a descrição só no comando da Execução.
   - A transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga e o comando desfaz tudo, inclusive o registro da mensagem.
@@ -571,7 +633,7 @@ O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_
 
 ## Como rodar local
 
-Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/); o `make test` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`). O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, as migrações, o admin de demonstração, o relay e o consumidor; o `make compose-down` derruba tudo e apaga os volumes.
+Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/); o `make test` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`). O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, as migrações, o admin de demonstração, o relay, o consumidor e o `prazos`; o `make compose-down` derruba tudo e apaga os volumes.
 
 ```bash
 make compose-up
@@ -588,9 +650,7 @@ TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
 curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN"
 ```
 
-Fora do compose (API, relay e consumidor no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`). A API sobe em `http://127.0.0.1:8000`; o relay e o consumidor ficam cada um num terminal, com o mesmo `.env` (o `METRICS_PORT` do consumidor tem de ser outro que o do relay):
-
-A API sobe em `http://127.0.0.1:8000`. O relay e o consumidor rodam cada um em outro terminal, com o mesmo `.env` e, no consumidor, um `METRICS_PORT` diferente do relay:
+Fora do compose (API, relay, consumidor e `prazos` no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`). A API sobe em `http://127.0.0.1:8000`; o relay, o consumidor e o `prazos` rodam cada um em outro terminal, com o mesmo `.env` e um `METRICS_PORT` diferente em cada um:
 
 ```bash
 docker run -d --name os-postgres -p 127.0.0.1:5432:5432 \
@@ -600,6 +660,7 @@ uv run alembic upgrade head && uv run python scripts/seed_admin.py
 uv run python -m src.main
 uv run python -m src.relay
 uv run python -m src.consumidor
+uv run python -m src.prazos
 ```
 
 ## Implantação
@@ -609,12 +670,12 @@ Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (loca
 | Objeto | O que é |
 |---|---|
 | Deployment e HPA `os-service-api` | A API na porta 8000, com o `/metrics` na mesma porta; o HPA, por CPU (70%), vai de 1 a 2 réplicas no `kind`, a 1 no `kind-ci` e a 3 no `k3s` |
-| Deployments `os-service-relay` e `os-service-consumidor` | Relay e consumidor, uma réplica cada, com o `/metrics` na 9100 |
+| Deployments `os-service-relay`, `os-service-consumidor` e `os-service-prazos` | Relay, consumidor e prazos da saga, uma réplica cada, com o `/metrics` na 9100 |
 | StatefulSet e Service headless `os-postgres` | PostgreSQL 16.15 com volume de 1Gi (5Gi no `k3s`) e o `postgres_exporter` como sidecar, na 9187 |
 | Job `os-migracao` | `alembic upgrade head` e a semente do admin, antes dos Deployments |
 | Service `os-service` | O endereço interno da API, o do `JWKS_URL` de Billing e Execução |
 | `borda.yaml` | Os Services e Ingress do Kong, os mesmos objetos do [exemplo do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/k8s/exemplos/borda-os-service.yaml) com o cabeçalho deste repositório: `/os/api/v1`, `/os/docs`, `/os/openapi.json` e o JWKS pela borda, e `/os/api/v1/admin` e `/os/metrics` respondendo 404 sem chegar ao serviço |
-| NetworkPolicy | Nega toda entrada no namespace e libera só a API para o Kong, o Prometheus e as APIs de Billing e Execução (que leem o JWKS), relay e consumidor para o Prometheus, o PostgreSQL para os pods do namespace e o exporter para o Prometheus |
+| NetworkPolicy | Nega toda entrada no namespace e libera só a API para o Kong, o Prometheus e as APIs de Billing e Execução (que leem o JWKS), relay, consumidor e prazos para o Prometheus, o PostgreSQL para os pods do namespace e o exporter para o Prometheus |
 
 Todo pod roda sem root (uid 1001; 999 no banco e 65534 no exporter), sem escalar privilégio, sem capability, com seccomp `RuntimeDefault`, raiz somente leitura (`/tmp` em `emptyDir`) e sem token de ServiceAccount. O `make manifests` valida os três overlays com o kubeconform, contra os schemas do Kubernetes 1.35 e com `Secret` reprovado, e com o `trivy config`, sem achado HIGH nem CRITICAL; o job `build` do CI o roda em todo PR.
 
@@ -641,8 +702,8 @@ O overlay `kind` também pode ser aplicado sem o script: a tag `dev` dele é a d
 - **Init do banco que falha:** a imagem roda o init uma vez por volume. Se ele falhar no meio, o volume fica sem os papéis, o StatefulSet fica pronto (o `pg_isready` não autentica) e o Job falha na autenticação do `os`. Apague o PVC e o pod do banco para o init rodar de novo, o que apaga os dados: `kubectl --context kind-pytstop-p4 -n pytstop-os delete pvc dados-os-postgres-0 --wait=false` e `kubectl --context kind-pytstop-p4 -n pytstop-os delete pod os-postgres-0`.
 - **Migração e rollout:** o script do platform aplica tudo de uma vez e espera o banco, o Job (com o papel `os`) e os Deployments, nessa ordem. Os pods dos processos sobem junto e esperam, no initContainer `aguarda-migracao` (`python -m src.banco aguardar`), o banco chegar à última revisão do Alembic da imagem, com o motivo da espera no log dele (a revisão em que o banco está, nenhuma ou o erro de conexão): ele só lê o `alembic_version`, com o papel `os_app`, e não prepara o banco. No rolling update, os pods novos esperam a migração da versão deles enquanto os antigos seguem servindo.
 - **Rollback:** `kubectl rollout undo`, sem descer migração (migrações em expandir e contrair, ADR-042). Com o banco adiante da imagem, a revisão que ela não conhece também libera o pod.
-- **Processo `prazos`:** os manifestos têm a API, o relay e o consumidor; o `prazos` ainda não existe, e a compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
-- **Sondas:** a API tem liveness em `/api/v1/saude` e readiness em `/api/v1/saude/pronto`; relay e consumidor, sem curl na imagem, têm liveness pela idade do heartbeat (até 90 s) e readiness pelo arquivo de pronto, os de `/tmp` (seção [Observabilidade, saúde e encerramento](#observabilidade-saúde-e-encerramento)). A sonda de startup dá 1 min ao boot de cada processo e 2 min ao primeiro init do banco.
+- **Processo `prazos`:** `k8s/base/prazos.yaml`, com o mesmo molde do relay e do consumidor (mesma imagem, `python -m src.prazos`, o initContainer `aguarda-migracao`, o Secret do banco e o do RabbitMQ, e sem a `ENCRYPTION_KEY`, que só a API recebe). Uma réplica: duas não se atropelam (`SKIP LOCKED`), mas uma basta para o intervalo de 30 s. `SAGA_PRAZO_RESPOSTA_SEGUNDOS`, `SAGA_MAX_REENVIOS` e `PRAZOS_INTERVALO_SEGUNDOS` vêm do ConfigMap `os-service`. O encerramento dá 30 s à saga em curso. A compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
+- **Sondas:** a API tem liveness em `/api/v1/saude` e readiness em `/api/v1/saude/pronto`; relay, consumidor e prazos, sem curl na imagem, têm liveness pela idade do heartbeat (até 90 s; 120 s no `prazos`, onde a startup é a mesma) e readiness pelo arquivo de pronto, os de `/tmp` (seção [Observabilidade, saúde e encerramento](#observabilidade-saúde-e-encerramento)). A sonda de startup dá 1 min ao boot de cada processo e 2 min ao primeiro init do banco.
 - **Imagens de terceiros:** o job `trivy` do workflow Security reprova a imagem do serviço com HIGH ou CRITICAL corrigíveis. As duas que o serviço põe no cluster, `postgres:16.15` e `postgres-exporter:v0.20.1`, só têm relatório no summary do job, sem reprovar, porque a correção depende de um build novo do fornecedor (`scripts/ci/relatorio-trivy-terceiros.sh`; a falha da varredura em si, como um pull recusado, vira aviso). O risco aceito, medido com o trivy 0.72.0: a `postgres:16.15` tem 1 CRITICAL e 24 HIGH, todos no binário Go `gosu`, que o pod, já como uid 999, não executa, e a chave de teste `ssl-cert-snakeoil` do Debian, que o PostgreSQL daqui não usa (sem SSL); o exporter tem 16 HIGH na biblioteca padrão do Go do próprio binário, e sua porta 9187 só chega ao Prometheus. A política é subir a versão quando o fornecedor publicar um build corrigido, junto da tabela de versões do platform.
 
 ### Troca de senha e de chave
@@ -709,7 +770,7 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
 - `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
-- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay e o consumidor prontos (`/metrics` respondendo, `outbox_pendentes` numérico, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`); depois, `down -v`.
+- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor e o `prazos` prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`); depois, `down -v`.
 
 ```bash
 make check
