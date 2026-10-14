@@ -859,11 +859,13 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 
 - `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
 - `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
+- `make lint-workflows`: actionlint, com o shellcheck da imagem nos scripts dos `run:`, em todos os workflows (a imagem é a `rhysd/actionlint:1.7.12`, a mesma do `lint-scripts` do platform). Entra no `make check` e no job `lint`.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
 - `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`) e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
 make check
+make lint-workflows
 make manifests
 make audit
 make smoke
@@ -872,6 +874,75 @@ make smoke
 `make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
 No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira.
+
+## CD
+
+O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) roda a cada push na `main`, depois do merge de cada PR, e sob demanda (`workflow_dispatch`). O CI e a varredura de segurança não rodam duas vezes: o `cd.yml` chama o `ci.yml` e o `security.yml` como workflows reutilizáveis, e o PR continua rodando os dois pelo próprio gatilho. Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório): o GitHub guarda um único run pendente por grupo, então o push seguinte substitui o pendente e aquele commit fica sem CD. O run que sobra testa o estado mais novo da `main`.
+
+### Jobs
+
+| Job | O que faz | Depende de | Prazo | Permissões do job |
+|---|---|---|---|---|
+| `ci` | Chama o `ci.yml`: `lint`, `type-check`, `security`, `test`, `sonarqube` e `build` | | | `contents: read` |
+| `security-scan` | Chama o `security.yml`: `pip-audit`, `gitleaks` e `trivy` | | | `contents: read` |
+| `image` | Constrói a imagem uma vez e a publica em `ghcr.io/<organização>/pytstop-os-service:<sha do commit>`, com SBOM em SPDX e proveniência (`provenance: mode=max`). Confere o digest com um `docker pull`, salva o tar `linux/amd64` e o SBOM | `ci`, `security-scan` | 30 min | `contents: read`, `packages: write` |
+| `deploy-kind` | Sobe a plataforma e os três serviços num kind do runner, roda o smoke de cada namespace e o E2E da saga (abaixo) | `image` | 45 min | `contents: read`, `actions: read` |
+| `deploy-k3s` | Implanta no k3s da Azure o mesmo digest que passou no kind. Só roda com `K3S_HABILITADO` igual a `true` (abaixo) | `image`, `deploy-kind` | 20 min | `contents: read`, `id-token: write`, `packages: read` |
+| `k3s-skipped` | O oposto: com a variável desligada, registra o aviso de que o k3s não foi implantado | `deploy-kind` | 5 min | nenhuma |
+
+O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`; só o `deploy-k3s` pede o token de identidade da Azure.
+
+### O que o `deploy-kind` faz, na ordem
+
+1. Escolhe os commits do platform e dos dois serviços vizinhos ([abaixo](#commits-do-platform-e-dos-vizinhos)) e faz o checkout de cada um, mais o deste repositório, sem guardar a credencial do GitHub.
+2. Baixa o artefato `imagem`, o tar da imagem que o `image` acabou de publicar: o E2E testa a mesma imagem que vai ao GHCR e ao k3s.
+3. `scripts/ci/deploy-kind.sh` do platform: kind e kubectl com versão e sha256 fixados, `make kind-up` e `make deploy` no overlay `kind-ci`, que gera os Secrets no run. Nada de segredo vem do GitHub.
+4. `scripts/ci/implantar-servicos.sh --overlay kind-ci`: este serviço entra pelo tar (`kind load image-archive`); o Billing e a Execução são construídos do código no commit escolhido. Aplica o overlay `kind-ci` de cada serviço e espera o banco, o Job de migração e os Deployments, nessa ordem. O contrato está no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#contrato-com-os-serviços).
+5. `scripts/ci/smoke-servicos.sh`: por namespace, o Job completo, os rollouts, a saúde e o Swagger pela borda, o `/metrics` fora da borda, o `up` de cada pod e o `pg_up` ou `mongodb_up` no Prometheus e a NetworkPolicy do banco. A tabela `Service | Stage | Result` vai para o summary e o passo reprova nomeando o serviço.
+6. `make -C platform e2e`: o BDD da saga pela borda (hoje, 13 cenários), com o resumo e os relatórios.
+7. Sempre, mesmo com falha: o resumo de minutos por etapa e memória (`scripts/medir-kind.sh`) no summary e o upload do artefato `e2e-kind`. Com falha ou cancelamento (inclusive o do `timeout-minutes`): `scripts/ci/diagnostico.sh`, que despeja pods, eventos e logs de todos os namespaces com o cluster ainda de pé.
+
+O job fica verde só se o E2E passar.
+
+### Commits do platform e dos vizinhos
+
+O primeiro passo do `deploy-kind` escolhe o commit de cada um dos três repositórios e escreve a tabela no summary, com a origem de cada commit. Este serviço é sempre o commit do run.
+
+1. O commit do input do dispatch, se houver.
+2. Senão, o commit do último run verde do `cd.yml` daquele repositório, na `main` e disparado por push (`gh api repos/<organização>/<repositório>/actions/workflows/cd.yml/runs` com `branch=main`, `event=push` e `status=success`). O platform e os vizinhos entram assim, e não pelo último commit da `main`: uma `main` quebrada de um vizinho não derruba o CD dos outros, e o vermelho fica no CD de quem a quebrou.
+3. Senão, a `main` HEAD do repositório, com um `::warning::` nomeando o repositório. É o caso de um repositório sem nenhum CD verde ainda, o que inclui o repositório que ainda não tem o `cd.yml` (a API responde 404). Qualquer outra falha da API, como o limite de requisições, reprova o passo, em vez de cair na `main` calado.
+
+### Artefatos e summary
+
+| Artefato | Conteúdo | Retenção |
+|---|---|---|
+| `imagem` | `imagem.tar`, a imagem `linux/amd64` sem os manifestos de atestado (com eles, o `kind load` falha por digest ausente no image store do containerd) | 1 dia |
+| `sbom-os-service` | O SBOM em SPDX da imagem publicada (`docker buildx imagetools inspect --format '{{ json .SBOM }}'`) | 90 dias |
+| `e2e-kind` | `platform/reports/`: o `resumo.md`, o JUnit e o Cucumber JSON do E2E e o trace do caminho feliz | 90 dias |
+
+O summary do run traz, em ordem: os commits usados, a imagem (referência, digest e número de pacotes do SBOM), as tabelas do smoke e do E2E e os minutos por etapa e a memória do nó do kind.
+
+### Reexecutar com commits fixos
+
+O `workflow_dispatch` aceita `sha_platform`, `sha_billing_service` e `sha_execution_service`, todos opcionais, cada um com 40 caracteres hexadecimais minúsculos (um SHA abreviado, em maiúsculas, um nome de ramo ou qualquer outra coisa reprova o passo antes de qualquer checkout). O `sha_os_service` existe para os quatro workflows de CD terem as mesmas entradas e só aceita vazio ou o commit do run: este serviço é sempre o commit que iniciou o workflow. Os valores entram nos passos só por variável de ambiente, nunca dentro de um script.
+
+```bash
+BILLING=$(gh api repos/fiap-postech-sw-architecture/postech-sw-arch-p4-billing-service/commits/main --jq .sha)
+gh workflow run cd.yml --ref main -f sha_billing_service="$BILLING"
+gh run watch
+```
+
+### Dois serviços que mudam contrato juntos
+
+O CD de cada serviço usa o outro no último CD verde. Se o OS e o Billing mudam o mesmo contrato de forma incompatível, o CD de cada um sobe a versão nova com a antiga do outro e fica vermelho, e o último verde de nenhum dos dois avança. O `workflow_dispatch` prova a combinação nova: no OS, `sha_billing_service` com o commit novo do Billing, e no Billing, `sha_os_service` com o commit novo do OS. Com o k3s ligado, o mesmo run implanta o digest dela. Mas esse run não vira "último CD verde", porque a consulta olha só os runs disparados por push. Para o impasse acabar, um dos dois precisa de um push verde com o vizinho antigo, ou seja, de um PR que aceite os dois formatos; depois o outro muda, e o primeiro retira o formato antigo (expandir e contrair, [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md)). Entrar em duas etapas desde o começo evita o impasse.
+
+### k3s e `K3S_HABILITADO`
+
+`K3S_HABILITADO` é uma variável da organização. Diferente de `true` (ou ausente), que é o estado de hoje, o `deploy-k3s` fica de fora e o `k3s-skipped` registra um `::notice::` no run: o deploy validado é o do kind. Com `true`, o `deploy-k3s` roda no environment `producao` (só a `main`), entra na Azure por OIDC com as variáveis da organização `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` e `AZURE_SUBSCRIPTION_ID` (nenhum segredo) e chama `scripts/ci/deploy-k3s.sh` do platform, no mesmo commit do platform usado no kind, com a imagem e o digest que passaram no E2E. Esse script ainda não existe no platform: ligar a variável antes dele faz o job reprovar dizendo isso, em vez de um erro de arquivo no meio do log.
+
+### Conferir o workflow sem empurrar
+
+O `cd.yml` só roda no GitHub, depois do merge ou no dispatch. Antes disso: `make lint-workflows` (actionlint e shellcheck) e `uv run pytest tests/unitarios/test_cd.py`, que lê o YAML (jobs, dependências, permissões mínimas por job, `concurrency`, entradas do dispatch, nenhuma expressão dentro de `run:`, actions de terceiro por SHA de commit, artefatos e retenções, `if` do resumo e do diagnóstico) e executa o passo que escolhe os commits com um `gh` falso.
 
 ## Repositórios da fase 4
 
