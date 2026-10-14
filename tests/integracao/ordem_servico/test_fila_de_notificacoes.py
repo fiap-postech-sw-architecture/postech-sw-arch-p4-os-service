@@ -21,6 +21,7 @@ from src.ordem_servico.infraestrutura.fila_de_notificacoes import FilaDeNotifica
 from src.ordem_servico.infraestrutura.notificacoes_mapping import (
     NotificacoesSQLAlchemy,
 )
+from tests.integracao.broker import esperar_ate
 from tests.integracao.seed_helpers import (
     criar_cliente_com_veiculo,
     criar_ordem_recebida,
@@ -70,6 +71,31 @@ def _linhas(engine: Engine) -> list[Any]:
                     "tentativas, ultimo_erro, entregue_em FROM notificacoes ORDER BY id"
                 )
             ).all()
+        )
+
+
+def _esperar_o_lease(engine: Engine, linha_id: int) -> None:
+    """Espera o relogio do banco passar do fim do lease da linha (com prazo)."""
+
+    def vencido() -> bool:
+        with engine.connect() as conexao:
+            return bool(
+                conexao.execute(
+                    text(
+                        "SELECT proxima_tentativa_em <= now() FROM notificacoes "
+                        "WHERE id = :id"
+                    ),
+                    {"id": linha_id},
+                ).scalar_one()
+            )
+
+    esperar_ate(vencido, prazo_s=5)
+
+
+def _com_tentativas(engine: Engine, tentativas: int) -> None:
+    with engine.begin() as conexao:
+        conexao.execute(
+            text("UPDATE notificacoes SET tentativas = :n"), {"n": tentativas}
         )
 
 
@@ -150,29 +176,63 @@ def test_reivindica_a_linha_mais_antiga_e_nao_a_entrega_de_novo_dentro_do_lease(
     assert fila.reivindicar(_LEASE) is None
 
 
-def test_marcar_entregue_so_vale_com_o_lease_da_replica(
-    engine: Engine, session_factory: sessionmaker[Session]
+@pytest.mark.parametrize(
+    "tentativas",
+    [pytest.param(0, id="nova-tentativa"), pytest.param(4, id="dead")],
+)
+def test_marcar_so_vale_com_o_lease_da_replica(
+    engine: Engine, session_factory: sessionmaker[Session], tentativas: int
 ) -> None:
     ordem_id = _ordem(session_factory)
     _gravar(session_factory, ordem_id)
+    # Com 4 tentativas a proxima falha e a quinta: o caminho do `dead`.
+    _com_tentativas(engine, tentativas)
     fila = FilaDeNotificacoes(engine)
     lenta = fila.reivindicar(timedelta(milliseconds=200))
     assert lenta is not None
-    esperar = threading.Event()
-    esperar.wait(0.4)
+    _esperar_o_lease(engine, lenta.id)
     outra = fila.reivindicar(_LEASE)
 
     assert outra is not None
     # A replica lenta perdeu a linha: nada do que ela grava vale (fencing).
     assert fila.marcar_entregue(lenta) is False
     assert fila.registrar_falha(lenta, "x") == "perdida"
+    (intacta,) = _linhas(engine)
+    assert (intacta.situacao, intacta.tentativas, intacta.ultimo_erro) == (
+        "pendente",
+        tentativas,
+        None,
+    )
     assert fila.marcar_entregue(outra) is True
     (linha,) = _linhas(engine)
     assert (linha.situacao, linha.tentativas, linha.entregue_em is not None) == (
         "entregue",
-        0,
+        tentativas,
         True,
     )
+
+
+@pytest.mark.parametrize("desfecho", ["entregue", "dead"])
+def test_linha_finalizada_nao_volta_a_ser_reivindicada_quando_o_lease_vence(
+    engine: Engine, session_factory: sessionmaker[Session], desfecho: str
+) -> None:
+    ordem_id = _ordem(session_factory)
+    _gravar(session_factory, ordem_id)
+    _com_tentativas(engine, 4)
+    fila = FilaDeNotificacoes(engine)
+    # Lease curto: o fim dele e o `proxima_tentativa_em` que a linha guarda.
+    linha = fila.reivindicar(timedelta(milliseconds=200))
+    assert linha is not None
+    if desfecho == "entregue":
+        assert fila.marcar_entregue(linha) is True
+    else:
+        assert fila.registrar_falha(linha, "x") == "dead"
+    _esperar_o_lease(engine, linha.id)
+
+    # Vencida no relogio, mas so a `pendente` e reivindicada: sem o filtro, cada
+    # e-mail entregue (ou `dead`) seria reenviado a cada lease.
+    assert fila.reivindicar(_LEASE) is None
+    assert [linha.situacao for linha in _linhas(engine)] == [desfecho]
 
 
 def test_ordem_por_os_so_vale_entre_os_e_mails_da_mesma_os(
@@ -228,22 +288,26 @@ def test_atrasos_e_dead_na_quinta_falha_sem_bloquear_os_seguintes(
     assert segunda.situacao == "pendente"
 
 
-def test_pedido_de_modelo_desconhecido_espera_o_notificador_da_versao_nova(
-    engine: Engine, session_factory: sessionmaker[Session]
+# Cada coluna que o claim filtra, com um valor que so a versao seguinte conhece.
+_ATUALIZAR_O_PRIMEIRO_DA_OS_A = {
+    "modelo": "UPDATE notificacoes SET modelo = 'futuro' "
+    "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'",
+    "status": "UPDATE notificacoes SET status_da_ordem = 'futuro' "
+    "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'",
+}
+
+
+@pytest.mark.parametrize("coluna", list(_ATUALIZAR_O_PRIMEIRO_DA_OS_A))
+def test_pedido_desconhecido_espera_o_notificador_da_versao_nova(
+    engine: Engine, session_factory: sessionmaker[Session], coluna: str
 ) -> None:
     os_a, os_b = _ordem(session_factory), _ordem(session_factory)
     _gravar(session_factory, os_a)
     _gravar(session_factory, os_a, status=StatusOrdem.AGUARDANDO_EXECUCAO)
     _gravar(session_factory, os_b)
     with engine.begin() as conexao:
-        # Um modelo que so a versao seguinte conhece, no primeiro pedido da OS A.
-        conexao.execute(
-            text(
-                "UPDATE notificacoes SET modelo = 'futuro' "
-                "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'"
-            ),
-            {"id": os_a},
-        )
+        # Um valor que so a versao seguinte conhece, no primeiro pedido da OS A.
+        conexao.execute(text(_ATUALIZAR_O_PRIMEIRO_DA_OS_A[coluna]), {"id": os_a})
     fila = FilaDeNotificacoes(engine)
 
     linha = fila.reivindicar(_LEASE)
@@ -253,7 +317,9 @@ def test_pedido_de_modelo_desconhecido_espera_o_notificador_da_versao_nova(
     assert linha is not None
     assert linha.notificacao.ordem_id == os_b
     assert fila.reivindicar(_LEASE) is None
-    assert sorted(linha.situacao for linha in _linhas(engine)) == ["pendente"] * 3
+    assert [(n.situacao, n.tentativas) for n in _linhas(engine)] == [
+        ("pendente", 0)
+    ] * 3
 
 
 def test_linha_travada_por_outra_replica_nao_trava_o_claim(
