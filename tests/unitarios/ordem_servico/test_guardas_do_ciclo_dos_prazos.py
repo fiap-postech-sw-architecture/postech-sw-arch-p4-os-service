@@ -211,3 +211,39 @@ class TestFilaDoConsumidor:
         assert resultado == ResultadoDoCiclo(pausado=True, reenviadas=3)
         assert len(prazos.comandos) == 3
         assert prazos.transacao.commits == 3
+
+
+class TestSigtermEntreSagas:
+    def test_o_sinal_na_terceira_vencida_nao_deixa_tratar_a_quarta(self) -> None:
+        prazos = _varias(10)
+        tratadas: list[None] = []
+        parar = {"sinal": False}
+
+        def _ao_tratar() -> None:
+            tratadas.append(None)
+            parar["sinal"] = len(tratadas) == 3
+
+        resultado = prazos.caso_de_uso.executar(
+            _ao_tratar, parar=lambda: parar["sinal"]
+        )
+
+        # A que estava em curso termina e comita; as outras ficam para o ciclo
+        # que o proximo processo roda.
+        assert resultado == ResultadoDoCiclo(reenviadas=3)
+        assert len(prazos.comandos) == 3
+        assert prazos.transacao.commits == 3
+
+    def test_com_o_sinal_ja_ligado_nenhuma_saga_e_tratada(self) -> None:
+        prazos = _varias(3)
+
+        resultado = prazos.caso_de_uso.executar(parar=lambda: True)
+
+        assert resultado == ResultadoDoCiclo()
+        assert (prazos.comandos, prazos.transacao.commits) == ([], 0)
+
+    def test_sem_o_sinal_o_ciclo_trata_todas(self) -> None:
+        prazos = _varias(5)
+
+        assert prazos.caso_de_uso.executar(parar=lambda: False) == ResultadoDoCiclo(
+            reenviadas=5
+        )

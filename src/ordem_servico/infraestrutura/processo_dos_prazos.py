@@ -3,7 +3,9 @@
 O ``VencerPrazos`` faz o ciclo; aqui ficam o ritmo, a saude e o encerramento,
 como no relay e no consumidor: o heartbeat e tocado a cada volta, a cada saga
 tratada e a cada fatia da espera (a liveness do Kubernetes olha a idade dele), e
-o arquivo de pronto existe enquanto o broker esta de pe. Banco fora nao derruba o
+o arquivo de pronto existe enquanto o broker esta de pe. O SIGTERM e visto entre
+duas sagas e entre as fatias da espera: o processo termina a saga em curso, que
+comita ou desfaz inteira, e sai. Banco fora nao derruba o
 processo: o ciclo falha, vai para o log, e o seguinte tenta de novo. O laco
 ocioso nao abre span: so a saga tratada abre o dela (ADR-043).
 """
@@ -58,7 +60,9 @@ class ProcessoDosPrazos:
             while not parar.is_set():
                 self._sinal.bater()
                 try:
-                    ciclo = self._vencer.executar(self._depois_de_cada_saga)
+                    ciclo = self._vencer.executar(
+                        self._depois_de_cada_saga, parar=parar.is_set
+                    )
                 except SQLAlchemyError:
                     # Banco fora (failover, blip do pool): o proximo ciclo
                     # tenta de novo; derrubar o processo so reiniciaria o pod.

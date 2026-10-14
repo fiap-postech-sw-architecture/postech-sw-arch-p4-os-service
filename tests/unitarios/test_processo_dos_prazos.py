@@ -127,10 +127,12 @@ class _Ciclo:
         self._resultados = list(resultados)
         self.chamadas = 0
         self.tratadas: list[Any] = []
+        self.paradas: list[Any] = []
 
-    def executar(self, ao_tratar: Any) -> ResultadoDoCiclo:
+    def executar(self, ao_tratar: Any, *, parar: Any) -> ResultadoDoCiclo:
         self.chamadas += 1
         self.tratadas.append(ao_tratar)
+        self.paradas.append(parar)
         ao_tratar()
         resultado = self._resultados.pop(0)
         if not self._resultados:
@@ -198,6 +200,8 @@ def test_cada_saga_tratada_atende_o_broker_alem_de_tocar_o_heartbeat(
     processo.executar(parar)
 
     assert ciclo.tratadas == [processo._depois_de_cada_saga]
+    # O ciclo recebe o SIGTERM do processo, para sair entre duas sagas.
+    assert ciclo.paradas == [parar.is_set]
     # Uma vez pelo ciclo simulado; a espera nao rodou (o `parar` ja estava ligado).
     assert presenca.manter.call_count == 1
     assert sinal.heartbeat.exists()

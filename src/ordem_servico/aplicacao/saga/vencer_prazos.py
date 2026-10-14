@@ -14,7 +14,8 @@ Antes de tudo o ciclo confere o relogio do processo contra o do banco (acima de
 pronta nela (o consumidor voltou e ainda nao drenou as respostas) ou com o
 broker fora, a resposta pode estar esperando, e o ciclo nao reenvia nem esgota
 prazo, so avisa; a fila que muda no meio do ciclo interrompe o resto. O ciclo
-trata no maximo ``SAGAS_POR_CICLO`` sagas, e o ciclo seguinte segue dali. A saga
+trata no maximo ``SAGAS_POR_CICLO`` sagas, e o ciclo seguinte segue dali; o
+SIGTERM e visto entre duas sagas. A saga
 trabalhada por outra replica (``SKIP LOCKED``) fica para ela; o consumidor que
 leu a saga antes perde na conferencia da ``versao`` e volta pela fila de retry.
 """
@@ -148,20 +149,24 @@ class VencerPrazos:
         self._max_reenvios = max_reenvios
 
     def executar(
-        self, ao_tratar: Callable[[], None] = lambda: None
+        self,
+        ao_tratar: Callable[[], None] = lambda: None,
+        *,
+        parar: Callable[[], bool] = lambda: False,
     ) -> ResultadoDoCiclo:
         """Vence as sagas de prazo vencido, ate ``SAGAS_POR_CICLO``.
 
         ``ao_tratar`` roda a cada saga: e o heartbeat do processo (a liveness
-        tolera 120 s). Erro de banco sobe para o laco do processo; a saga que o
-        dominio recusa fica de fora do resto do ciclo.
+        tolera 120 s). ``parar`` e o SIGTERM do processo: visto entre duas sagas,
+        o ciclo termina a que esta em curso e sai. Erro de banco sobe para o laco
+        do processo; a saga que o dominio recusa fica de fora do resto do ciclo.
         """
         if self._relogio_fora_do_banco():
             return ResultadoDoCiclo(pausado=True)
         recusadas: set[UUID] = set()
         vencimentos: list[Vencimento] = []
         pausado = False
-        while len(vencimentos) < SAGAS_POR_CICLO:
+        while len(vencimentos) < SAGAS_POR_CICLO and not parar():
             if not self._fila_em_dia():
                 pausado = True
                 break
