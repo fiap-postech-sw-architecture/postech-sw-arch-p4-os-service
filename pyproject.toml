@@ -32,27 +32,26 @@ dependencies = [
     "referencing>=0.37.0",
     "rfc3339-validator>=0.1.4",
     "pyyaml>=6.0.3",
-    # Contexto W3C pela outbox e pelo AMQP e metricas do relay e do consumidor:
-    # sempre ligados (a exportacao OTLP continua no extra `otel`). Mesmo par de
-    # versoes do extra.
-    "opentelemetry-sdk>=1.42,<1.43",
+    # Contexto W3C pela outbox e pelo AMQP, spans da API (FastAPI e SQLAlchemy) e
+    # dos tres processos (SQLAlchemy) e metricas: sempre instalados (a exportacao
+    # OTLP continua no extra `otel`). O SDK 1.42.x exige a semantic-conventions
+    # 0.63bx, entao as instrumentacoes seguem em 0.63bx; atualizar os tres juntos,
+    # em milestones.
+    "opentelemetry-sdk>=1.45.1,<1.46",
+    "opentelemetry-instrumentation-fastapi>=0.66b1,<0.67",
+    "opentelemetry-instrumentation-sqlalchemy>=0.66b1,<0.67",
     "prometheus-client>=0.26.0",
 ]
 
 [project.optional-dependencies]
-# Exportacao OTLP, instrumentacao da API e o exportador das metricas da API
-# para o Prometheus. Fora do grupo `dev` de proposito: o codigo que consome
-# estes pacotes (observability.py / metrics.py) importa lazy com
-# try/ImportError, entao flag ligada sem o extra degrada para warning + no-op.
-# A imagem Docker instala o extra.
+# Exportacao OTLP/gRPC (o grpcio e pesado), so com OTEL_ENABLED=true. Fora do
+# grupo `dev` de proposito: o codigo que o consome (observability.py) importa
+# lazy com try/ImportError, entao flag ligada sem o extra degrada para warning e
+# o servico segue sem exportar. A imagem Docker instala o extra. Mesmo par de
+# versoes do SDK (dependencia principal).
 otel = [
-    # Par compativel: SDK 1.42.x (dependencia principal) <-> instrumentation
-    # 0.63bx (o sdk exige semantic-conventions ==0.63bx). Atualizar juntos, em
-    # milestones.
-    "opentelemetry-exporter-otlp-proto-grpc>=1.42,<1.43",
-    "opentelemetry-instrumentation-fastapi>=0.63b1,<0.64",
-    "opentelemetry-instrumentation-sqlalchemy>=0.63b1,<0.64",
-    "opentelemetry-exporter-prometheus>=0.63b1,<0.64",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.45.1,<1.46",
+    "opentelemetry-exporter-prometheus>=0.66b1,<0.67",
 ]
 
 [dependency-groups]
