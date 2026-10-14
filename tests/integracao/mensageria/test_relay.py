@@ -465,6 +465,32 @@ def test_linha_com_envelope_fora_do_contrato_vira_dead_e_o_relay_segue(
 
 
 @pytest.mark.usefixtures("session_factory")
+def test_reservar_pecas_com_sku_fora_do_formato_do_billing_vira_dead_sem_publicar(
+    engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
+) -> None:
+    # Uma linha gravada antes do sku estrito (ou por um bug) que ainda esteja
+    # pendente: o relay valida o envelope contra o contrato de hoje e nao a publica.
+    ordem_id = uuid4()
+    envelope = json.loads((CONTRATOS / "exemplos/ReservarPecas.json").read_text())
+    envelope["dados"]["pecas"][0]["sku"] = "pec_vela.2"
+    antiga = _inserir(
+        engine,
+        correlation_id=ordem_id,
+        routing_key="comando.execucao.reservar_pecas",
+        envelope=json.dumps(envelope),
+    )
+    valida = _inserir(engine)
+
+    with EmSegundoPlano(_relay(engine, broker, rastreador, tmp_path)):
+        esperar_ate(lambda: _status(engine, valida) == "entregue")
+        esperar_ate(lambda: _status(engine, antiga) == "dead")
+
+    linha = _detalhes(engine, antiga)
+    assert (linha.tentativas, linha.ultimo_erro) == (1, "envelope fora do contrato")
+    assert broker.contar(_FILA) == 1
+
+
+@pytest.mark.usefixtures("session_factory")
 def test_publish_em_exchange_inexistente_conta_tentativa_e_o_relay_segue(
     engine: Engine, broker: Broker, rastreador: Rastreador, tmp_path: Path
 ) -> None:
