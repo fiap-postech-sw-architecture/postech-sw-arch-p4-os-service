@@ -24,7 +24,8 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import structlog
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as TimeoutDoPool
 
 from src.compartilhado.infraestrutura.database import criar_session_factory
 from src.compartilhado.infraestrutura.escuta import EscutaDeCanal
@@ -66,6 +67,10 @@ _log = structlog.get_logger(__name__)
 # longe do heartbeat por linha.
 _LEASE_PADRAO_S: Final = 60
 _POLL_PADRAO_S: Final = 5.0
+# O banco fora do alcance: conexao recusada ou caida e pool sem conexao livre.
+# Qualquer outro erro do SQLAlchemy numa linha (dado invalido, SQL recusado,
+# restricao) se repetiria a cada tentativa: conta como falha da linha.
+_BANCO_FORA: Final = (OperationalError, InterfaceError, TimeoutDoPool)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +183,7 @@ class Notificador:
         except FalhaEnvioEmailError as exc:
             # A mensagem e so o nome da excecao de origem (o endereco nao sai).
             self._falhou(linha, str(exc), contexto)
-        except SQLAlchemyError:
+        except _BANCO_FORA:
             # Banco fora na leitura: nao e falha da linha, que volta com o lease.
             raise
         except Exception as exc:  # noqa: BLE001  # a linha falha, o laco segue

@@ -17,7 +17,14 @@ from uuid import uuid4
 
 import pytest
 import structlog
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import (
+    DataError,
+    IntegrityError,
+    InterfaceError,
+    OperationalError,
+    ProgrammingError,
+)
+from sqlalchemy.exc import TimeoutError as TimeoutDoPool
 from structlog.testing import capture_logs
 
 from src.compartilhado.infraestrutura.mensageria.outbox import ATRASOS_S
@@ -286,8 +293,22 @@ def test_falha_inesperada_conta_tentativa_com_o_nome_da_excecao_e_o_lugar(
     assert "segredo" not in repr(logs)
 
 
-def test_banco_fora_na_leitura_nao_e_falha_da_linha(cenario: Cenario) -> None:
-    cenario.montagem.resultado = _banco_fora()
+def _erro_do_sql(tipo: type[Exception]) -> Exception:
+    return tipo("SELECT contato FROM clientes", {}, Exception("x"))
+
+
+@pytest.mark.parametrize(
+    "erro",
+    [
+        pytest.param(_banco_fora(), id="operacional"),
+        pytest.param(_erro_do_sql(InterfaceError), id="interface"),
+        pytest.param(TimeoutDoPool("pool sem conexao livre"), id="pool"),
+    ],
+)
+def test_banco_fora_na_leitura_nao_e_falha_da_linha(
+    cenario: Cenario, erro: Exception
+) -> None:
+    cenario.montagem.resultado = erro
 
     with capture_logs() as logs:
         cenario.entregar(_linha())
@@ -296,7 +317,28 @@ def test_banco_fora_na_leitura_nao_e_falha_da_linha(cenario: Cenario) -> None:
     assert cenario.fila.falhas == []
     assert cenario.fila.entregues == []
     (ciclo,) = _log(logs, "notification cycle failed")
-    assert ciclo["erro"] == "OperationalError"
+    assert ciclo["erro"] == type(erro).__name__
+
+
+@pytest.mark.parametrize("tipo", [DataError, ProgrammingError, IntegrityError])
+def test_erro_do_sql_que_nao_e_queda_conta_tentativa_da_linha(
+    cenario: Cenario, tipo: type[Exception]
+) -> None:
+    # Dado invalido, SQL recusado ou restricao se repetem a cada tentativa: sem
+    # contar, a linha nunca iria a `dead` e seguraria os e-mails da mesma OS.
+    cenario.montagem.resultado = _erro_do_sql(tipo)
+    linha = _linha()
+
+    with capture_logs() as logs:
+        cenario.entregar(linha)
+
+    assert cenario.fila.falhas == [
+        (linha, f"falha ao enviar o e-mail ({tipo.__name__})")
+    ]
+    assert _log(logs, "notification cycle failed") == []
+    (registro,) = _log(logs, "notification send failed; retry scheduled")
+    assert registro["erro"] == tipo.__name__
+    assert "clientes" not in repr(logs)
 
 
 def test_enviado_sem_a_marca_por_banco_fora_nao_gasta_tentativa(
