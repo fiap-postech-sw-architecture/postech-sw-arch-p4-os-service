@@ -202,6 +202,90 @@ def test_todo_pattern_dos_schemas_termina_em_fim_de_texto_sem_quebra_de_linha() 
     assert [p for p in patterns if not p.endswith(r"(?![\s\S])")] == []
 
 
+# O codigo dos itens do diagnostico e do GerarOrcamento aceita mais que o SKU do
+# ReservarPecas (so o formato do Billing: maiusculas e digitos separados por
+# hifens, ate 50 caracteres). O OS monta o ReservarPecas com os codigos do
+# diagnostico, entao o comando que ele grava pode ser recusado pelo contrato.
+_FORA_DO_FORMATO_DO_BILLING = [
+    "pec_vela.2",
+    "pec-vela",
+    "PEC_VELA",
+    "PEC.VELA",
+    "PEC--VELA",
+    "PEC-VELA-",
+]
+
+
+@pytest.mark.parametrize("codigo", _FORA_DO_FORMATO_DO_BILLING)
+def test_codigo_fora_do_formato_do_billing_passa_no_diagnostico_e_no_orcamento(
+    codigo: str,
+) -> None:
+    diagnostico = _exemplo("DiagnosticoConcluido")
+    diagnostico["dados"]["itens"][1]["codigo"] = codigo
+    gerar = _exemplo("GerarOrcamento")
+    gerar["dados"]["itens"][1]["codigo"] = codigo
+
+    catalogo().validar(diagnostico)
+    catalogo().validar(gerar)
+
+
+@pytest.mark.parametrize("sku", _FORA_DO_FORMATO_DO_BILLING)
+def test_sku_fora_do_formato_do_billing_e_recusado_ao_montar_o_reservar_pecas(
+    sku: str,
+) -> None:
+    from datetime import UTC, datetime
+
+    ordem_id = uuid4()
+
+    with pytest.raises(ContratoInvalidoError) as erro:
+        catalogo().montar_envelope(
+            "ReservarPecas",
+            {"ordem_id": ordem_id, "pecas": [{"sku": sku, "quantidade": 1}]},
+            correlation_id=ordem_id,
+            causation_id=None,
+            ocorrido_em=datetime.now(UTC),
+        )
+
+    assert (erro.value.caminho, erro.value.regra) == (
+        "$.dados.pecas[0].sku",
+        "pattern",
+    )
+
+
+@pytest.mark.parametrize("sku", ["PEC-OLEO-5W30", "A", "9", "A" * 50])
+def test_sku_no_formato_do_billing_e_aceito_ate_50_caracteres(sku: str) -> None:
+    from datetime import UTC, datetime
+
+    ordem_id = uuid4()
+
+    envelope = catalogo().montar_envelope(
+        "ReservarPecas",
+        {"ordem_id": ordem_id, "pecas": [{"sku": sku, "quantidade": 1}]},
+        correlation_id=ordem_id,
+        causation_id=None,
+        ocorrido_em=datetime.now(UTC),
+    )
+
+    assert envelope["dados"]["pecas"] == [{"sku": sku, "quantidade": 1}]
+
+
+def test_sku_de_51_caracteres_e_recusado() -> None:
+    from datetime import UTC, datetime
+
+    ordem_id = uuid4()
+
+    with pytest.raises(ContratoInvalidoError) as erro:
+        catalogo().montar_envelope(
+            "ReservarPecas",
+            {"ordem_id": ordem_id, "pecas": [{"sku": "A" * 51, "quantidade": 1}]},
+            correlation_id=ordem_id,
+            causation_id=None,
+            ocorrido_em=datetime.now(UTC),
+        )
+
+    assert erro.value.regra == "maxLength"
+
+
 def test_placa_invalida_nao_aparece_no_erro() -> None:
     envelope = _exemplo("SolicitarDiagnostico")
     envelope["dados"]["veiculo"]["placa"] = "ABC-1234"
