@@ -629,6 +629,55 @@ def test_fora_de_ordem_e_compensacao_nao_quebram_a_saga(semente: int) -> None:
             pytest.fail(f"saga parada em {saga.etapa}")
 
 
+# O e-mail de cada status em que a OS entra (RFC-004 secao 3), escrito aqui e nao
+# importado do modulo testado: a abertura (recebida) e o aguardando pagamento nao
+# tem e-mail, porque o do checkout vem no PagamentoSolicitado.
+_EMAIL_DO_STATUS: Final = {
+    S.EM_DIAGNOSTICO: "situacao",
+    S.AGUARDANDO_APROVACAO: "orcamento",
+    S.AGUARDANDO_EXECUCAO: "situacao",
+    S.EM_EXECUCAO: "situacao",
+    S.FINALIZADA: "situacao",
+    S.ENTREGUE: "situacao",
+    S.CANCELADA: "cancelamento",
+}
+
+
+@pytest.mark.parametrize("semente", SEMENTES)
+def test_cada_mudanca_de_status_pede_um_e_mail_e_so_um(semente: int) -> None:
+    """Fora de ordem, repetido e atrasado: um pedido por transicao, nunca dois.
+
+    O esperado sai do historico da OS (uma linha por transicao) e do registro do
+    ``PagamentoSolicitado`` na saga, e o pedido do cancelamento leva o codigo.
+    """
+    cenario = _simular(semente).cenario
+    ordem, saga = cenario.ordem, cenario.saga
+
+    esperados = Counter(
+        (_EMAIL_DO_STATUS[m.para], m.para)
+        for m in ordem.historico
+        if m.para in _EMAIL_DO_STATUS
+    )
+    esperados[("pagamento", S.AGUARDANDO_PAGAMENTO)] = sum(
+        p["gatilho"] == "PagamentoSolicitado" for p in saga.passos
+    )
+    registrados = Counter(
+        (n.modelo.value, n.status) for n in cenario.notificacoes.registradas
+    )
+
+    assert +registrados == +esperados
+    assert {n.ordem_id for n in cenario.notificacoes.registradas} <= {ordem.id}
+    codigos = [
+        n.motivo for n in cenario.notificacoes.registradas if n.status is S.CANCELADA
+    ]
+    assert codigos == ([saga.motivo] if ordem.status is S.CANCELADA else [])
+    assert all(
+        n.motivo is None
+        for n in cenario.notificacoes.registradas
+        if n.status is not S.CANCELADA
+    )
+
+
 def test_gerador_produz_cada_situacao_da_classificacao_e_cada_roteiro() -> None:
     # Guarda do gerador: nas mil sementes, as entregas caem em cada situacao da
     # RFC-004 secoes 4.4 e 4.5 que a propriedade promete exercitar, e cada
