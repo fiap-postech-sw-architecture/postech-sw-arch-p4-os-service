@@ -920,6 +920,8 @@ O primeiro passo do `deploy-kind` escolhe o commit de cada um dos três reposit�
 | `sbom-os-service` | O SBOM em SPDX da imagem publicada (`docker buildx imagetools inspect --format '{{ json .SBOM }}'`) | 90 dias |
 | `e2e-kind` | `platform/reports/`: o `resumo.md`, o JUnit e o Cucumber JSON do E2E e o trace do caminho feliz | 90 dias |
 
+O `docker/build-push-action` ainda anexa o registro do build (`*.dockerbuild`), que o abre no Docker Desktop.
+
 O summary do run traz, em ordem: os commits usados, a imagem (referência, digest e número de pacotes do SBOM), as tabelas do smoke e do E2E e os minutos por etapa e a memória do nó do kind.
 
 ### Reexecutar com commits fixos
