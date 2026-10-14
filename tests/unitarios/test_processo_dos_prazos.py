@@ -261,8 +261,11 @@ def test_sigterm_no_meio_da_espera_devolve_o_laco_antes_da_fatia_acabar(
     processo, _, _ = _processo(tmp_path, ciclo, intervalo_s=3600)
     laco = threading.Thread(target=processo.executar, args=(parar,))
     laco.start()
-    while ciclo.chamadas == 0:  # o primeiro ciclo ja rodou: o laco esta na espera
-        pass
+    fim = time.monotonic() + 5
+    # O primeiro ciclo ja rodou: o laco esta na espera.
+    while ciclo.chamadas == 0 and time.monotonic() < fim:
+        time.sleep(0.001)
+    assert ciclo.chamadas == 1
     parar.set()
 
     laco.join(timeout=2)
@@ -391,6 +394,7 @@ def _presenca(
         pytest.param(0, 0, False, id="sem-consumidor"),
         pytest.param(1, 0, True, id="um-consumidor"),
         pytest.param(3, 0, True, id="tres-consumidores"),
+        pytest.param(1, 1, False, id="um-consumidor-e-uma-mensagem-pronta"),
         pytest.param(1, 7, False, id="com-consumidor-e-mensagens-prontas"),
         pytest.param(0, 7, False, id="sem-consumidor-e-mensagens-prontas"),
     ],

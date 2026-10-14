@@ -180,7 +180,7 @@ def test_um_email_por_mudanca_de_situacao_do_abrir_ate_a_entrega(
         assert dado not in publico
 
 
-def test_smtp_fora_nao_atrasa_a_saga_nem_orelay_de_teste(
+def test_smtp_fora_nao_atrasa_a_saga_nem_o_relay(
     processos: Atendimento,
     engine: Engine,
     session_factory: sessionmaker[Session],
