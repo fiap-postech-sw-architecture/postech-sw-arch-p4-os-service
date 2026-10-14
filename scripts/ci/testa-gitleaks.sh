@@ -3,9 +3,10 @@
 # na maquina local, com o gitleaks do PATH): a URL do PostgreSQL (postgresql://,
 # postgres:// e com driver) com a senha que o make deploy gera reprova num
 # manifesto, a URL do AMQP (amqp:// e amqps://) reprova em qualquer arquivo, a
-# forma dos manifestos ($(POSTGRES_APP_PASSWORD)) passa, e senha apagada no
-# commit seguinte ainda reprova no historico. Sem ele, uma regra que nao casa
-# mais nada passaria verde.
+# forma dos manifestos ($(POSTGRES_APP_PASSWORD)) passa, a senha de demonstracao
+# passa so no docker-compose.yml (em k8s/ reprova), e senha apagada no commit
+# seguinte ainda reprova no historico. Sem ele, uma regra que nao casa mais nada
+# passaria verde.
 set -euo pipefail
 
 raiz=$(cd "$(dirname "$0")/../.." && pwd)
@@ -28,6 +29,13 @@ amqp "$(openssl rand -hex 24)" > "$dir/scripts/amqp-senha-gerada.sh"
 postgres '$(POSTGRES_APP_PASSWORD)' > "$dir/k8s/postgres-expansao-do-pod.yaml"
 postgres 's3nh4-de-mentira' > "$dir/tests/postgres-de-mentira.py"
 { amqp pytstop-os-demo-2026 | sed 's/$/  # gitleaks:allow/'; } > "$dir/compose-com-marcador.yml"
+# A senha de demonstracao passa so no docker-compose.yml, mesmo sem o marcador, e so
+# ela (a gerada no mesmo arquivo reprova); num manifesto reprova, na URL do AMQP e
+# na do PostgreSQL.
+amqp pytstop-os-demo-2026 > "$dir/docker-compose.yml"
+amqp "$(openssl rand -hex 24)" >> "$dir/docker-compose.yml"
+amqp pytstop-os-demo-2026 > "$dir/k8s/amqp-demo.yaml"
+postgres pytstop-os-demo-2026 > "$dir/k8s/postgres-demo.yaml"
 # A senha de mentira do teste do boot dos processos passa so naquele arquivo, e
 # so ela: a gerada no mesmo arquivo, e a de mentira em outro, reprovam.
 teste="$dir/tests/unitarios/compartilhado/mensageria/test_processo.py"
@@ -38,7 +46,7 @@ amqp outra-senha > "$dir/tests/outra-senha.py"
 (cd "$dir" && gitleaks dir . --config "$raiz/.gitleaks.toml" --no-banner --redact --exit-code 0 \
   --report-format json --report-path "$dir/achados.json")
 achados=$(jq -r '[.[] | .RuleID + " " + .File] | sort | join(", ")' "$dir/achados.json")
-esperado="pytstop-url-amqp-com-senha k8s/amqp-senha-gerada.yaml, pytstop-url-amqp-com-senha k8s/amqps-senha-gerada.yaml, pytstop-url-amqp-com-senha scripts/amqp-senha-gerada.sh, pytstop-url-amqp-com-senha tests/outra-senha.py, pytstop-url-amqp-com-senha tests/unitarios/compartilhado/mensageria/test_processo.py, pytstop-url-postgres-com-senha k8s/postgres-curto-senha-gerada.yaml, pytstop-url-postgres-com-senha k8s/postgres-driver-senha-gerada.yaml, pytstop-url-postgres-com-senha k8s/postgres-senha-gerada.yaml"
+esperado="pytstop-url-amqp-com-senha docker-compose.yml, pytstop-url-amqp-com-senha k8s/amqp-demo.yaml, pytstop-url-amqp-com-senha k8s/amqp-senha-gerada.yaml, pytstop-url-amqp-com-senha k8s/amqps-senha-gerada.yaml, pytstop-url-amqp-com-senha scripts/amqp-senha-gerada.sh, pytstop-url-amqp-com-senha tests/outra-senha.py, pytstop-url-amqp-com-senha tests/unitarios/compartilhado/mensageria/test_processo.py, pytstop-url-postgres-com-senha k8s/postgres-curto-senha-gerada.yaml, pytstop-url-postgres-com-senha k8s/postgres-demo.yaml, pytstop-url-postgres-com-senha k8s/postgres-driver-senha-gerada.yaml, pytstop-url-postgres-com-senha k8s/postgres-senha-gerada.yaml"
 if [ "$achados" != "$esperado" ]; then
   echo "gitleaks found [$achados], expected [$esperado]" >&2
   exit 1
@@ -58,4 +66,4 @@ if gitleaks git "$repo" --log-opts="HEAD" --config "$raiz/.gitleaks.toml" --no-b
   echo "gitleaks passed a password committed and deleted in the next commit" >&2
   exit 1
 fi
-echo "gitleaks rules hold: generated passwords flagged (postgresql, postgres, driver and amqp, amqps), the pod expansion, the marked demo password and the test password allowed only where the config says, deleted password still flagged in history"
+echo "gitleaks rules hold: generated passwords flagged (postgresql, postgres, driver and amqp, amqps), the pod expansion, the marked demo password and the test password allowed only where the config says, the demo password allowed only in docker-compose.yml (flagged in k8s/), deleted password still flagged in history"

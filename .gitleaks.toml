@@ -28,6 +28,16 @@ condition = "AND"
 paths = ['''^tests/unitarios/compartilhado/mensageria/test_processo\.py$''']
 regexes = ['''^outra-senha$''']
 
+# As senhas de demonstracao do RabbitMQ (pytstop-<componente>-demo-2026) so valem
+# no compose, como no platform. Em qualquer outro arquivo a URL com elas reprova
+# (so o marcador gitleaks:allow na linha a libera): um manifesto de k8s/ nao pode
+# levar senha, nem a de demonstracao.
+[[rules.allowlists]]
+description = "Senhas de demonstracao do compose"
+condition = "AND"
+paths = ['''^docker-compose\.yml$''']
+regexes = ['''^pytstop-[a-z-]+-demo-2026$''']
+
 # A do PostgreSQL so vale em k8s/: os testes montam URLs de banco com senha de
 # mentira (postgresql://os:s3nh4@db), que a regra nao distingue da gerada.
 [[rules]]
@@ -44,13 +54,11 @@ paths = [
   # Senhas ficticias que exercitam as regras de validacao do seed de admin.
   '''^tests/unitarios/scripts/test_seed_admin\.py$''',
 ]
-# Copias do platform em contratos/ (mesma regra do .gitleaks.toml de la): JSON
-# nao aceita comentario, entao a regra vale para a linha inteira.
-# - senhas pytstop-<componente>-demo-2026 do RabbitMQ de desenvolvimento;
-# - link de decisao e checkout dos exemplos de contrato, que apontam para
-#   http://localhost e carregam um token ilustrativo.
+# Copias do platform em contratos/ (mesma regra do .gitleaks.toml de la): o link
+# de decisao e o checkout dos exemplos de contrato apontam para http://localhost
+# e carregam um token ilustrativo. JSON nao aceita comentario, entao a regra vale
+# para a linha inteira.
 regexTarget = "line"
 regexes = [
-  '''pytstop-[a-z-]+-demo-2026''',
   '''"(link_decisao|checkout_url)": "http://localhost/''',
 ]
