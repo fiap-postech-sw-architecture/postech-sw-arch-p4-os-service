@@ -8,7 +8,11 @@ from typing import Any
 
 import yaml
 
+from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
+
 COMPOSE = Path(__file__).parents[2] / "docker-compose.yml"
+# O temporario do container: TMPDIR nao e definido na imagem.
+_TMP_DO_CONTAINER = Path("/tmp")  # noqa: S108  # o /tmp do container, nao deste processo
 
 
 def _servicos() -> dict[str, Any]:
@@ -30,3 +34,36 @@ def test_prazo_de_resposta_da_saga_e_o_mesmo_na_api_e_no_consumidor() -> None:
         r"^\s+SAGA_PRAZO_RESPOSTA_SEGUNDOS:", COMPOSE.read_text(), re.MULTILINE
     )
     assert len(definicoes) == 1
+
+
+def test_notificador_so_enxerga_o_banco_e_o_smtp() -> None:
+    # Sem broker e sem a chave de cifragem: o contato do e-mail sai em claro, por
+    # projecao de duas colunas, e quem so envia e-mail nao decifra o documento.
+    ambiente = _servicos()["notificador"]["environment"]
+
+    assert ambiente["SMTP_HOST"] == "mailpit"
+    assert ambiente["SMTP_PORT"] == "1025"
+    assert not {"RABBITMQ_URL", "ENCRYPTION_KEY", "JWT_PRIVATE_KEY"} & ambiente.keys()
+
+
+def test_notificador_roda_o_modulo_da_imagem_e_espera_o_mailpit() -> None:
+    servicos = _servicos()
+    notificador = servicos["notificador"]
+
+    assert notificador["command"] == ["python", "-m", "src.notificador"]
+    assert notificador["image"] == servicos["relay"]["image"]
+    assert notificador["depends_on"]["mailpit"] == {"condition": "service_healthy"}
+    # Mesma sonda dos outros processos: o pronto e o heartbeat dele.
+    sonda = notificador["healthcheck"]["test"][-1]
+    sinal = Sinalizador("notificador", _TMP_DO_CONTAINER)
+    assert str(sinal.pronto) in sonda
+    assert str(sinal.heartbeat) in sonda
+
+
+def test_mailpit_usa_a_mesma_imagem_do_platform_e_so_publica_a_caixa_no_loopback() -> (
+    None
+):
+    mailpit = _servicos()["mailpit"]
+
+    assert mailpit["image"] == "axllent/mailpit:v1.31.4"
+    assert mailpit["ports"] == ["127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"]

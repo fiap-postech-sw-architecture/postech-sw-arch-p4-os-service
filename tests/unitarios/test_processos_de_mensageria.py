@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 import src.consumidor as processo_consumidor
+import src.notificador as processo_notificador
 import src.relay as processo_relay
 from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
@@ -20,6 +21,9 @@ from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
     EventoRecusadoError,
     Tratamento,
+)
+from src.ordem_servico.infraestrutura.notificacoes_mapping import (
+    NotificacoesSQLAlchemy,
 )
 
 if TYPE_CHECKING:
@@ -102,6 +106,10 @@ def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
 
     assert desfecho is tratamento.desfecho
     assert falso.montado_com["publicador"] is transacao
+    # O e-mail da transicao vai na sessao da mensagem: o mesmo commit.
+    notificacoes = falso.montado_com["notificacoes"]
+    assert isinstance(notificacoes, NotificacoesSQLAlchemy)
+    assert notificacoes._session is transacao.session
     assert falso.montado_com["contexto"].prazo_resposta == timedelta(seconds=9)
     (span,) = rastreador.spans()
     assert span.attributes == {
@@ -292,3 +300,46 @@ def test_prazo_tecnico_invalido_aborta_o_boot_e_fecha_o_banco(
 
     assert _Processo.criados == []
     boot_falso["engine"].dispose.assert_called_once()
+
+
+def test_main_do_notificador_sobe_so_com_o_banco_e_o_smtp_e_fecha_o_banco(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock()
+    registro: list[str] = []
+    _Processo.criados = []
+    monkeypatch.setattr(processo_notificador, "instalar_sinais", lambda parar: None)
+    monkeypatch.setattr(
+        processo_notificador,
+        "preparar_sem_broker",
+        lambda nome: registro.append(nome) or engine,
+    )
+    monkeypatch.setattr(processo_notificador, "subir_metricas", lambda: 9100)
+    monkeypatch.setattr(processo_notificador, "Notificador", _Processo)
+    monkeypatch.setenv("SMTP_HOST", "mailpit")
+    monkeypatch.delenv("RABBITMQ_URL", raising=False)
+
+    processo_notificador.main()
+
+    (notificador,) = _Processo.criados
+    assert registro == ["notificador"]
+    assert notificador.executou
+    assert notificador.kwargs["engine"] is engine
+    assert notificador.kwargs["email"]._host == "mailpit"
+    engine.dispose.assert_called_once()
+
+
+def test_main_do_notificador_fecha_o_banco_se_o_smtp_esta_mal_configurado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = MagicMock()
+    monkeypatch.setattr(processo_notificador, "instalar_sinais", lambda parar: None)
+    monkeypatch.setattr(
+        processo_notificador, "preparar_sem_broker", lambda nome: engine
+    )
+    monkeypatch.setenv("SMTP_PORT", "nao-numerica")
+
+    with pytest.raises(RuntimeError, match="SMTP_PORT"):
+        processo_notificador.main()
+
+    engine.dispose.assert_called_once()

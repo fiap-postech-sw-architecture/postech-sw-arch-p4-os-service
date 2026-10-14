@@ -71,7 +71,7 @@ audit:
 # volumes, inclusive em falha (depois de mostrar os logs). Projeto e portas
 # proprios para nao derrubar a stack do compose-up.
 #
-# Relay e consumidor sobem da mesma imagem com o RabbitMQ do compose (a
+# Relay, consumidor e notificador sobem da mesma imagem com o RabbitMQ do compose (a
 # topologia do platform e o usuario `os`) e tem de ficar saudaveis (healthcheck
 # conferido no `docker inspect`, nao so o `up --wait`): conectados ao broker
 # depois da declaracao passiva do que usam e com o heartbeat em dia. O consumidor
@@ -79,6 +79,10 @@ audit:
 # (numa fila quorum o `list_queues` mostra 0 consumidores mesmo com um ativo), e
 # o `outbox_pendentes` do /metrics do relay tem de ser um numero: NaN e o banco
 # fora do alcance dele.
+#
+# O notificador (sem broker nem chave de cifragem) tem de entregar um e-mail ao
+# Mailpit: o smoke abre uma OS pela API, grava um pedido na tabela `notificacoes`
+# e le a caixa de entrada pela API do Mailpit. O log dele nao leva o endereco.
 #
 # O /metrics da API tem de trazer `pytstop_saga_coletor_disponivel` em 1: o
 # coletor dos gauges da saga raspa por uma engine propria, ligada no lifespan,
@@ -105,8 +109,10 @@ audit:
 APP_IMAGE ?= pytstop-os-service:dev
 SMOKE_PORT ?= 18000
 SMOKE_URL := http://127.0.0.1:$(SMOKE_PORT)
+SMOKE_MAILPIT_PORT ?= 18025
+SMOKE_MAILPIT := http://127.0.0.1:$(SMOKE_MAILPIT_PORT)
 SMOKE_COMPOSE := APP_PORT=$(SMOKE_PORT) APP_IMAGE=$(APP_IMAGE) \
-	RABBITMQ_PORT=18674 RABBITMQ_UI_PORT=18675 \
+	RABBITMQ_PORT=18674 RABBITMQ_UI_PORT=18675 MAILPIT_UI_PORT=$(SMOKE_MAILPIT_PORT) \
 	$(DOCKER_COMPOSE) -p pytstop-os-smoke
 SMOKE_METRICAS := python -c "import urllib.request; \
 	print(urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=5).read().decode())"
@@ -149,6 +155,10 @@ smoke:
 		|| { echo "smoke: o relay nao ficou pronto" >&2; false; }; } \
 	&& { [ "$$(docker inspect -f '{{.State.Health.Status}}' "$$($(SMOKE_COMPOSE) ps -q consumidor)")" = healthy ] \
 		|| { echo "smoke: o consumidor nao ficou pronto" >&2; false; }; } \
+	&& { [ "$$(docker inspect -f '{{.State.Health.Status}}' "$$($(SMOKE_COMPOSE) ps -q notificador)")" = healthy ] \
+		|| { echo "smoke: o notificador nao ficou pronto" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T notificador $(SMOKE_METRICAS) | grep -q '^python_info' \
+		|| { echo "smoke: o /metrics do notificador nao respondeu" >&2; false; }; } \
 	&& { $(SMOKE_COMPOSE) exec -T relay $(SMOKE_METRICAS) | grep -Eq '^outbox_pendentes [0-9]' \
 		|| { echo "smoke: o /metrics do relay nao traz outbox_pendentes (ou o banco esta fora: NaN)" >&2; false; }; } \
 	&& { $(SMOKE_COMPOSE) exec -T rabbitmq rabbitmqctl -q list_consumers queue_name prefetch_count \
@@ -160,6 +170,24 @@ smoke:
 	&& { curl -fsS --max-time 5 $(SMOKE_URL)/metrics \
 			| grep -Eq '^pytstop_saga_coletor_disponivel 1(\.0)?$$' \
 		|| { echo "smoke: o /metrics da API nao traz o coletor da saga disponivel" >&2; false; }; } \
+	&& cliente="$$(jq -n '{nome: "Maria Smoke", documento: "21249722519", tipo_documento: "cpf", contato: "Maria Smoke - maria.smoke@pytstop.dev"}' \
+		| curl -fsS --max-time 10 -X POST $(SMOKE_URL)/api/v1/clientes -H "Authorization: Bearer $$access" \
+			-H 'Content-Type: application/json' -d @- | jq -er '.id')" \
+	&& veiculo="$$(jq -n '{placa: "SMK1A23", marca: "Fiat", modelo: "Uno", ano: 2020}' \
+		| curl -fsS --max-time 10 -X POST "$(SMOKE_URL)/api/v1/clientes/$$cliente/veiculos" \
+			-H "Authorization: Bearer $$access" -H 'Content-Type: application/json' -d @- | jq -er '.id')" \
+	&& ordem="$$(jq -n --arg c "$$cliente" --arg v "$$veiculo" '{cliente_id: $$c, veiculo_id: $$v, descricao_problema: "Barulho no motor"}' \
+		| curl -fsS --max-time 10 -X POST $(SMOKE_URL)/api/v1/ordens-de-servico -H "Authorization: Bearer $$access" \
+			-H 'Content-Type: application/json' -d @- | jq -er '.id')" \
+	&& $(SMOKE_COMPOSE) exec -T postgres psql -q -v ON_ERROR_STOP=1 -U pytstop -d os \
+		-c "INSERT INTO notificacoes (ordem_id, modelo, status_da_ordem) VALUES ('$$ordem', 'situacao', 'em_diagnostico')" \
+	&& { entregue=0; for tentativa in $$(seq 1 30); do \
+		if curl -fsS --max-time 5 $(SMOKE_MAILPIT)/api/v1/messages \
+			| jq -e '.total == 1 and .messages[0].To[0].Address == "maria.smoke@pytstop.dev" and (.messages[0].Subject | test("Em diagnóstico"))' >/dev/null; \
+		then entregue=1; break; fi; sleep 1; done; \
+		[ "$$entregue" = 1 ] || { echo "smoke: o notificador nao entregou o e-mail ao Mailpit" >&2; false; }; } \
+	&& { ! $(SMOKE_COMPOSE) logs --no-color --no-log-prefix notificador | grep -Eq 'maria[.]smoke|Maria Smoke' \
+		|| { echo "smoke: o log do notificador traz endereco ou nome do cliente" >&2; false; }; } \
 	&& logs="$$($(SMOKE_COMPOSE) logs --no-color --no-log-prefix api)" \
 	&& { printf '%s\n' "$$logs" | grep -q '"event": "Started server process' \
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
@@ -169,7 +197,7 @@ smoke:
 		|| { echo "smoke: o uvicorn escreveu o access log dele" >&2; false; }; } \
 	&& { printf '%s\n' "$$logs" | grep '"event": "http_request"' | grep -q '"request_id": "' \
 		|| { echo "smoke: o access log estruturado (http_request com request_id) nao saiu" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay e consumidor prontos" \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay, consumidor e notificador prontos, e-mail entregue ao Mailpit" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
@@ -219,8 +247,8 @@ PLATFORM ?= ../postech-sw-arch-p4-platform
 kind-deploy:
 	$(PLATFORM)/scripts/ci/implantar-servicos.sh --overlay kind os-service=$(CURDIR)
 
-# Stack local do servico: API, relay e consumidor + PostgreSQL 16 e RabbitMQ
-# (migracoes e admin seed no boot).
+# Stack local do servico: API, relay, consumidor e notificador + PostgreSQL 16,
+# RabbitMQ e Mailpit (migracoes e admin seed no boot).
 compose-up:
 	$(DOCKER_COMPOSE) up -d --build --wait
 

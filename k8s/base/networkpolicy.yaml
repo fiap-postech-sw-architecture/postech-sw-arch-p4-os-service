@@ -49,7 +49,7 @@ spec:
         - port: 8000
           protocol: TCP
 ---
-# Relay e consumidor: so o Prometheus, no /metrics.
+# Relay, consumidor e notificador: so o Prometheus, no /metrics.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -59,7 +59,7 @@ spec:
     matchExpressions:
       - key: processo
         operator: In
-        values: [relay, consumidor]
+        values: [relay, consumidor, notificador]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -99,4 +99,49 @@ spec:
               app: prometheus
       ports:
         - port: 9187
+          protocol: TCP
+---
+# Notificador: unico processo que disca para um servico de terceiro configuravel
+# (o SMTP). Alem da entrada de todos (as politicas acima), a saida fica restrita
+# ao que ele usa: o DNS, o banco do servico e o Mailpit da plataforma na 1025.
+# Nao fala com o broker nem com o Jaeger. A regra de entrada no Mailpit e do
+# platform.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notificador-saida
+spec:
+  podSelector:
+    matchLabels:
+      app: os-service-notificador
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app: os-postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-plataforma
+          podSelector:
+            matchLabels:
+              app: mailpit
+      ports:
+        - port: 1025
           protocol: TCP
