@@ -4,7 +4,9 @@ Definidas no contexto consumidor e implementadas na infraestrutura:
 ``ClientePort`` em ``adapters.py`` (Anti-Corruption Layer: consulta o contexto
 Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento`` e
 ``ConsultaDaOrdem`` em ``consultas.py`` (query services de leitura, fora do
-repositorio do agregado) e ``SagaRepository`` em ``repository.py``.
+repositorio do agregado), ``SagaRepository`` em ``repository.py`` e
+``PresencaDoConsumidor`` em ``presenca_do_consumidor.py`` (a unica que fala com
+o broker, para a camada de aplicacao nao importar o cliente AMQP).
 """
 
 from __future__ import annotations
@@ -12,6 +14,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+    from datetime import datetime, timedelta
     from uuid import UUID
 
     from src.compartilhado.dominio.documento import Documento
@@ -79,5 +83,35 @@ class SagaRepository(Protocol):
         Raises:
             ConflitoDeConcorrenciaException: outra transacao gravou a mesma
                 saga desde a leitura.
+        """
+        pass
+
+    def reivindicar_vencida(
+        self, agora: datetime, prazo: timedelta, *, ignorar: Collection[UUID] = ()
+    ) -> Saga | None:
+        """A saga de prazo vencido mais antiga, travada para esta transacao.
+
+        So vence a saga cujo envio mais recente (o ultimo de
+        ``comando_em_voo.mensagem_ids``) ja saiu da outbox: a linha esta
+        entregue e ``entregue_em + prazo <= agora``. Envio pendente ou ``dead``
+        nao conta (RFC-004 secao 4.6). Duas replicas nunca recebem a mesma saga
+        (``FOR UPDATE SKIP LOCKED``): a travada fica de fora da consulta da outra
+        ate o commit ou o rollback. ``ignorar`` tira da consulta as sagas que
+        falharam neste ciclo.
+
+        Returns:
+            A saga travada, ou ``None`` quando nenhuma venceu.
+        """
+        pass
+
+
+class PresencaDoConsumidor(Protocol):
+    """Se o consumidor do OS esta de pe: a resposta pode estar esperando na fila."""
+
+    def ha_consumidor(self) -> bool:
+        """``False`` com ``os.eventos`` sem consumidor ou com o broker fora.
+
+        Nos dois casos o ``prazos`` nao reenvia nem esgota prazo no ciclo
+        (RFC-004 secao 4.6): quem acusa a demora e o alerta de saga parada.
         """
         pass
