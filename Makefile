@@ -1,6 +1,6 @@
 # Gates do OS Service, os mesmos comandos do CI. `make check` espelha os jobs
 # lint, type-check, security e test: uv.lock em dia, lint, formato, contratos
-# de camada, tipos, seguranca e testes (unitarios + integracao com
+# de camada, workflows, tipos, seguranca e testes (unitarios + integracao com
 # testcontainers) com gate de cobertura (.coveragerc). `make manifests` e
 # `make smoke` sao o job build e `make audit` e o pip-audit do workflow
 # Security. `make kind-deploy` implanta o servico no kind do platform.
@@ -12,8 +12,9 @@ GIT_SHA  := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
-.PHONY: lock-check lint format lint-arch typecheck security test check audit \
-	smoke compose-up compose-down manifests print-trivy-version kind-deploy
+.PHONY: lock-check lint format lint-arch lint-workflows typecheck security test \
+	check audit smoke compose-up compose-down manifests print-trivy-version \
+	kind-deploy
 
 lock-check:
 	uv lock --check
@@ -28,6 +29,13 @@ format:
 
 lint-arch:
 	$(PY) lint-imports
+
+# actionlint nos workflows, com o shellcheck que a imagem traz rodando nos
+# scripts dos `run:` (mesma imagem do make lint-scripts do platform).
+ACTIONLINT_IMAGE := rhysd/actionlint:1.7.12
+
+lint-workflows:
+	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo $(ACTIONLINT_IMAGE)
 
 # Os testes dos manifestos, do aguardar e dos papeis do banco entram no mesmo
 # mypy strict de src (a lista cresce; os demais testes ainda nao passam nele).
@@ -52,7 +60,7 @@ test:
 	$(PY) pytest --cov-report=xml:coverage.xml --cov-report=html:htmlcov \
 		--junitxml=reports/junit.xml
 
-check: lock-check lint lint-arch typecheck security test
+check: lock-check lint lint-arch lint-workflows typecheck security test
 	@echo "All checks passed"
 
 # CVE nas dependencias de runtime, com os extras que a imagem instala: o
