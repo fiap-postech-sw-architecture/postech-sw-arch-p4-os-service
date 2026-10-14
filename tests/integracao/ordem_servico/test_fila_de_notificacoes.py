@@ -256,6 +256,36 @@ def test_pedido_de_modelo_desconhecido_espera_o_notificador_da_versao_nova(
     assert sorted(linha.situacao for linha in _linhas(engine)) == ["pendente"] * 3
 
 
+def test_linha_travada_por_outra_replica_nao_trava_o_claim(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    os_a, os_b = _ordem(session_factory), _ordem(session_factory)
+    _gravar(session_factory, os_a)
+    _gravar(session_factory, os_b)
+    reivindicadas: list[Any] = []
+
+    with engine.connect() as outra, outra.begin():
+        # Outra replica no meio do claim da linha mais antiga.
+        outra.execute(
+            text("SELECT id FROM notificacoes ORDER BY id LIMIT 1 FOR UPDATE")
+        )
+        claim = threading.Thread(
+            target=lambda: reivindicadas.append(
+                FilaDeNotificacoes(engine).reivindicar(_LEASE)
+            )
+        )
+        claim.start()
+        claim.join(timeout=10)
+        # Sem o SKIP LOCKED o claim esperaria o lock da outra replica.
+        travou = claim.is_alive()
+    claim.join(timeout=10)
+
+    assert not travou
+    (linha,) = reivindicadas
+    assert linha is not None
+    assert linha.notificacao.ordem_id == os_b
+
+
 def test_duas_replicas_nunca_pegam_a_mesma_linha(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:

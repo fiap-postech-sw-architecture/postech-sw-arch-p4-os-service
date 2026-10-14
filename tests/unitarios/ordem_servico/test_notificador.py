@@ -296,6 +296,8 @@ def test_ciclo_que_chega_ao_fim_marca_pronto_e_o_encerramento_desmarca(
     # Encerrado: fora de pronto, e a linha foi entregue antes.
     assert not (tmp_path / "notificador-pronto").exists()
     assert len(_fila(notificador).entregues) == 1
+    # A limpeza das linhas antigas e do ciclo (uma vez por intervalo).
+    assert _fila(notificador).limpezas == 1
 
 
 def test_banco_fora_no_ciclo_tira_de_pronto_loga_sem_o_sql_e_segue(

@@ -23,8 +23,9 @@ from src.cliente_veiculo.infraestrutura.adapters import (
 from src.cliente_veiculo.interfaces.dependencies import obter_excluir_dados
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
 from src.compartilhado.dominio.placa import Placa
-from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
+from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS, catalogo
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
+from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import obter_abrir_ordem
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
@@ -45,6 +46,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integracao
 
 _PLACA = "QZX7W42"
+_SQL_ORCAMENTO = text(
+    "SELECT envelope FROM outbox WHERE envelope ->> 'tipo' = 'GerarOrcamento'"
+)
 _DESCRICAO = "Barulho estranho vindo do motor"
 _ATENDENTE = "4c2f8f8e-1b8e-4d5a-9a9e-3f1d2c7b6a55"
 
@@ -218,6 +222,31 @@ def test_outbox_do_cliente_perde_a_placa_e_a_descricao_em_qualquer_situacao(
             {"id": titular.ordem_id},
         ).scalar_one()
     assert status == situacao
+
+
+def test_comando_de_outro_tipo_da_mesma_os_nao_e_tocado(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    titular = Titular(session_factory, _PLACA)
+    exemplo = json.loads((CONTRATOS / "exemplos/GerarOrcamento.json").read_text())
+    with SQLAlchemyUnitOfWork(session_factory) as uow:
+        uow.publicar_comando(
+            "GerarOrcamento",
+            {**exemplo["dados"], "ordem_id": titular.ordem_id},
+            correlation_id=titular.ordem_id,
+        )
+        uow.commit()
+    _encerrar(engine, titular.ordem_id)
+    with engine.connect() as conexao:
+        antes = conexao.execute(_SQL_ORCAMENTO).scalar_one()
+
+    _excluir(session_factory, titular.cliente_id)
+
+    with engine.connect() as conexao:
+        depois = conexao.execute(_SQL_ORCAMENTO).scalar_one()
+    # Sem placa nem descricao a trocar: nada ganha campo novo.
+    assert depois == antes
+    catalogo().validar(depois)
 
 
 def test_outbox_de_outro_cliente_nao_e_tocada(
