@@ -307,29 +307,34 @@ def test_sem_comando_o_script_recusa(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("job", "ferramenta", "titulo"),
+    ("job", "ferramenta", "titulo", "reprova_com"),
     [
-        ("pip-audit", "uvx pip-audit", "dependencias de runtime"),
-        ("trivy", "trivy image", "HIGH e CRITICAL com correcao"),
+        ("pip-audit", "uvx pip-audit", "dependencias de runtime", "--strict"),
+        ("trivy", "trivy image", "HIGH e CRITICAL com correcao", "--exit-code 1"),
     ],
 )
 def test_o_security_yml_registra_o_pip_audit_e_o_trivy_no_summary(
-    job: str, ferramenta: str, titulo: str
+    job: str, ferramenta: str, titulo: str, reprova_com: str
 ) -> None:
     """O titulo do trivy diz o filtro do passo: sem ele, "sem achado" leria como
-    "sem CVE nenhuma"."""
+    "sem CVE nenhuma". As flags que fazem o passo reprovar (o trivy sai 0 com
+    achado sem ``--exit-code 1``) e a falta de ``continue-on-error`` seguem
+    valendo com o script na frente."""
     fluxo = yaml.safe_load(
         (RAIZ / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
     )
-    comandos = [
-        " ".join(passo["run"].split())
+    passos = [
+        passo
         for passo in fluxo["jobs"][job]["steps"]
         if ferramenta in passo.get("run", "")
     ]
+    assert len(passos) == 1
+    comando = " ".join(passos[0]["run"].split())
 
-    assert len(comandos) == 1
-    assert comandos[0].startswith("scripts/ci/registra-no-summary.sh ")
-    assert titulo in comandos[0].split(ferramenta)[0]
+    assert comando.startswith("scripts/ci/registra-no-summary.sh ")
+    assert titulo in comando.split(ferramenta)[0]
+    assert reprova_com in comando.split(ferramenta)[1]
+    assert not passos[0].get("continue-on-error")
 
 
 PADRAO = "../postech-sw-arch-p4-platform"
