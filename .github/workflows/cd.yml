@@ -156,6 +156,7 @@ jobs:
   # vizinhos, construidos do codigo, nos commits do ultimo CD verde de cada um.
   deploy-kind:
     needs: image
+    if: ${{ !cancelled() && needs.image.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -319,7 +320,7 @@ jobs:
   # o aviso. O platform entra no commit usado no kind.
   deploy-k3s:
     needs: [image, deploy-kind]
-    if: vars.K3S_HABILITADO == 'true' && github.event_name != 'pull_request'
+    if: ${{ !cancelled() && needs.deploy-kind.result == 'success' && vars.K3S_HABILITADO == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: producao
@@ -354,7 +355,7 @@ jobs:
 
   k3s-skipped:
     needs: deploy-kind
-    if: vars.K3S_HABILITADO != 'true'
+    if: ${{ !cancelled() && needs.deploy-kind.result == 'success' && vars.K3S_HABILITADO != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}

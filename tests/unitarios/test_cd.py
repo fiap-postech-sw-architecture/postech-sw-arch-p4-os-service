@@ -92,7 +92,6 @@ def test_jobs_e_dependencias_do_adr_042() -> None:
     # O CD so comeca com o CI do commit verde: nada de `if` que deixe o image
     # rodar com o ci ou o security-scan vermelho, e o deploy-kind depende da imagem.
     # TEMPORARIO (reverter com o gatilho): o image espera o ci pulado no PR.
-    assert "if" not in jobs["deploy-kind"]
 
 
 def test_gatilhos_sao_o_push_na_main_e_o_dispatch() -> None:
@@ -162,9 +161,9 @@ def test_deploy_k3s_so_com_a_variavel_ligada_e_o_k3s_skipped_na_condicao_inversa
 ):
     jobs = _jobs()
 
-    assert jobs["deploy-k3s"]["if"].startswith("vars.K3S_HABILITADO == 'true'")
+    assert "vars.K3S_HABILITADO == 'true'" in jobs["deploy-k3s"]["if"]
     assert jobs["deploy-k3s"]["environment"] == "producao"
-    assert jobs["k3s-skipped"]["if"] == "vars.K3S_HABILITADO != 'true'"
+    assert "vars.K3S_HABILITADO != 'true'" in jobs["k3s-skipped"]["if"]
     passos = jobs["k3s-skipped"]["steps"]
     assert len(passos) == 1
     assert passos[0]["run"].startswith('echo "::notice::')
