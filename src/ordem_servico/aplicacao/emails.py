@@ -51,14 +51,6 @@ _EMAIL: Final = re.compile(
 _BRASILIA: Final = timezone(timedelta(hours=-3), "BRT")
 
 
-class FalhaEnvioEmailError(Exception):
-    """O servidor SMTP nao aceitou o e-mail (conexao, prazo ou protocolo).
-
-    A mensagem da excecao de origem pode trazer o endereco do destinatario:
-    quem a trata registra so o nome da classe.
-    """
-
-
 @dataclass(frozen=True, slots=True)
 class Email:
     """Um e-mail pronto para o SMTP; destinatario e corpo sao dados pessoais."""

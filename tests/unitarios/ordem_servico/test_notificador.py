@@ -21,8 +21,9 @@ from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
 from src.compartilhado.infraestrutura.mensageria.outbox import ATRASOS_S
-from src.ordem_servico.aplicacao.emails import Email, FalhaEnvioEmailError
+from src.ordem_servico.aplicacao.emails import Email
 from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
+from src.ordem_servico.aplicacao.ports import FalhaEnvioEmailError
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura import notificador as modulo
 from src.ordem_servico.infraestrutura.email_adapter import TIMEOUT_SEGUNDOS

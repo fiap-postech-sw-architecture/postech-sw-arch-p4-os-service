@@ -36,7 +36,8 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     Sinalizador,
     onde,
 )
-from src.ordem_servico.aplicacao.emails import FalhaEnvioEmailError, MontarEmail
+from src.ordem_servico.aplicacao.emails import MontarEmail
+from src.ordem_servico.aplicacao.ports import FalhaEnvioEmailError
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
 from src.ordem_servico.infraestrutura.fila_de_notificacoes import FilaDeNotificacoes
 from src.ordem_servico.infraestrutura.notificacoes_mapping import CANAL_NOTIFICACAO

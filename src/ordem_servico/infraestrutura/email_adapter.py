@@ -23,7 +23,7 @@ from email.message import EmailMessage
 from typing import Final
 
 from src.compartilhado.infraestrutura.ambiente import inteiro_do_ambiente
-from src.ordem_servico.aplicacao.emails import FalhaEnvioEmailError
+from src.ordem_servico.aplicacao.ports import FalhaEnvioEmailError
 
 TIMEOUT_SEGUNDOS: Final = 5
 _PORTA_PADRAO: Final = 1025

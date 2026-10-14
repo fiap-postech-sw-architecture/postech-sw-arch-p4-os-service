@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from src.ordem_servico.aplicacao.emails import FalhaEnvioEmailError
+from src.ordem_servico.aplicacao.ports import FalhaEnvioEmailError
 from src.ordem_servico.infraestrutura.email_adapter import SmtpEmailAdapter
 
 

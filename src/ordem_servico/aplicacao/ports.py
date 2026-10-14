@@ -110,6 +110,14 @@ class PublicadorDeNotificacoes(Protocol):
         pass
 
 
+class FalhaEnvioEmailError(Exception):
+    """O servidor SMTP nao aceitou o e-mail (conexao, prazo ou protocolo).
+
+    A mensagem da excecao de origem pode trazer o endereco do destinatario:
+    quem a trata registra so o nome da classe.
+    """
+
+
 class EmailPort(Protocol):
     """Envio de um e-mail de texto (SMTP; Mailpit na demonstracao)."""
 
