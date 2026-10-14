@@ -640,8 +640,9 @@ def test_configmap_nao_traz_flag_para_o_metrics_da_api(overlay: str) -> None:
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
 def test_configmap_fixa_os_prazos_do_exportador_de_spans(overlay: str) -> None:
-    # Com o Jaeger fora do ar o SDK espera o exportador ate o prazo dele; os
-    # padroes (30 s e 10 s) deixavam a API sair so no SIGKILL do grace period (30 s).
+    # Com o Jaeger fora do ar e a fila cheia, o SDK espera o exportador em cada
+    # lote: o prazo padrao do OTLP (10 s) fez a API levar 30,5 s para sair, mais
+    # que o grace period do pod (30 s); com 2 s, 8,1 s (medido no container).
     configuracao = _configmap_do_servico(overlay)
 
     assert configuracao["OTEL_ENABLED"] == "true"
@@ -690,7 +691,7 @@ def test_overlay_dimensiona_a_api_e_o_disco_do_banco(
 
 # Lidas pelo SDK do OpenTelemetry, e nao pelo codigo do servico: os nomes saem das
 # constantes do proprio SDK, e um erro de digitacao no ConfigMap deixaria o padrao
-# dele (30 s para encerrar a API) valendo sem aviso.
+# dele (10 s por lote no OTLP, 30,5 s para encerrar a API) valendo sem aviso.
 LIDAS_PELO_SDK = frozenset({OTEL_BSP_EXPORT_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT})
 
 

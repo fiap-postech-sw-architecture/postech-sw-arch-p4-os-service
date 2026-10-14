@@ -117,8 +117,9 @@ def test_api_nao_tem_flag_para_o_metrics() -> None:
 
 
 def test_api_e_os_processos_com_span_exportam_com_o_mesmo_prazo() -> None:
-    # Com o Jaeger fora do ar o SDK espera o exportador ate o prazo dele: o padrao
-    # (30 s e 10 s) deixava a API sair so no SIGKILL do grace period.
+    # Com o Jaeger fora do ar e a fila cheia, o SDK espera o exportador em cada
+    # lote: o prazo padrao do OTLP (10 s) fez a API levar 30,5 s para sair, mais
+    # que o grace period do pod; com 2 s, 8,1 s (medido no container).
     servicos = _servicos()
 
     prazos = {

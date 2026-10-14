@@ -27,9 +27,10 @@ x-saga: &saga
   PRAZOS_INTERVALO_SEGUNDOS: ${PRAZOS_INTERVALO_SEGUNDOS:-30}
 
 # Exportacao dos spans (a API, o relay, o consumidor e o prazos). Com o Jaeger
-# fora do ar o SDK espera o exportador ate estes prazos (os padroes sao 30 s e
-# 10 s): sem eles a API levava os 30 s do grace period do pod para sair. Aqui a
-# exportacao fica desligada; o kind a liga.
+# fora do ar e a fila cheia, o SDK espera o exportador em cada lote de 512 spans:
+# com o prazo padrao do OTLP (10 s) a API levou 30,5 s para sair, e com 2 s, 8,1 s.
+# O SDK 1.45 ainda nao usa o OTEL_BSP_EXPORT_TIMEOUT. Aqui a exportacao fica
+# desligada; o kind a liga.
 x-otel: &otel
   OTEL_ENABLED: ${OTEL_ENABLED:-false}
   OTEL_BSP_EXPORT_TIMEOUT: "2000"
