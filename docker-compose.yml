@@ -39,10 +39,11 @@ x-notificador: &notificador
   SMTP_PORT: "1025"
   SMTP_FROM: ${SMTP_FROM:-oficina@pytstop.local}
 
-# Relay, consumidor e notificador: sistema de arquivos so leitura (o /tmp dos arquivos de
-# saude e um tmpfs), sem capabilities nem escalada de privilegio e com teto de
-# memoria, CPU e processos. Cada um usa ate 4 conexoes com o banco (pool de
-# 2 + 2), e o relay e o notificador mais 1, a do LISTEN.
+# Relay, consumidor, notificador e Mailpit: sistema de arquivos so leitura (o /tmp
+# dos arquivos de saude, e do banco do Mailpit, e um tmpfs), sem capabilities nem
+# escalada de privilegio e com teto de memoria, CPU e processos. Cada processo da
+# OS usa ate 4 conexoes com o banco (pool de 2 + 2), e o relay e o notificador mais
+# 1, a do LISTEN.
 x-processo-endurecido: &processo-endurecido
   read_only: true
   tmpfs:
@@ -177,10 +178,15 @@ services:
 
   # Mailpit: o SMTP de demonstracao e a caixa de entrada web, a mesma imagem do
   # platform. Portas so no loopback e fora das do compose do platform
-  # (1025/8025), para os dois conviverem.
+  # (1025/8025), para os dois conviverem. A caixa guarda os links de decisao e de
+  # pagamento dos e-mails e a UI nao tem autenticacao: endurecido como os
+  # processos e rodando como nobody, como no manifesto do platform (a imagem nao
+  # define usuario).
   mailpit:
     image: axllent/mailpit:v1.31.4
     restart: unless-stopped
+    user: "65534:65534"
+    <<: *processo-endurecido
     ports:
       - "127.0.0.1:${MAILPIT_SMTP_PORT:-1026}:1025"
       - "127.0.0.1:${MAILPIT_UI_PORT:-8026}:8025"

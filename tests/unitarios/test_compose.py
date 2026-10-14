@@ -69,3 +69,19 @@ def test_mailpit_usa_a_imagem_do_platform_e_publica_so_no_loopback() -> None:
         "127.0.0.1:${MAILPIT_SMTP_PORT:-1026}:1025",
         "127.0.0.1:${MAILPIT_UI_PORT:-8026}:8025",
     ]
+
+
+def test_mailpit_e_os_processos_rodam_endurecidos() -> None:
+    # A caixa de entrada guarda os links de decisao e de pagamento e a UI nao pede
+    # login: o Mailpit tem o mesmo endurecimento dos processos, como nobody (a
+    # imagem nao define usuario) e com o /tmp, onde ele guarda o banco, em tmpfs.
+    servicos = _servicos()
+
+    for nome in ("relay", "consumidor", "notificador", "mailpit"):
+        servico = servicos[nome]
+        assert servico["read_only"] is True, nome
+        assert servico["tmpfs"] == ["/tmp"], nome  # noqa: S108
+        assert servico["cap_drop"] == ["ALL"], nome
+        assert servico["security_opt"] == ["no-new-privileges:true"], nome
+        assert {"mem_limit", "cpus", "pids_limit"} <= servico.keys(), nome
+    assert servicos["mailpit"]["user"] == "65534:65534"
