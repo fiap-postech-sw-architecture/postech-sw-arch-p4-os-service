@@ -607,6 +607,20 @@ class TestGaugeDoPrazoVencido:
 
         assert _gauge(engine) == 0
 
+    def test_prazo_gravado_no_futuro_ainda_nao_conta(
+        self, engine: Engine, session_factory: sessionmaker[Session]
+    ) -> None:
+        # O `prazos` so reivindica a saga depois do `prazo_resposta_em` que ela
+        # gravou: o gauge mede o que ele trataria, e nao mais que isso.
+        agora = self._agora(session_factory)
+        _semear_e_comitar(
+            session_factory,
+            [_entregue(agora - timedelta(hours=1))],
+            prazo_em=agora + timedelta(minutes=1),
+        )
+
+        assert _gauge(engine) == 0
+
     def test_o_ultimo_envio_decide_e_a_saga_parada_nao_conta(
         self, engine: Engine, session_factory: sessionmaker[Session]
     ) -> None:

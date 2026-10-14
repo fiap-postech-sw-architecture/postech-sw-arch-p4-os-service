@@ -489,6 +489,26 @@ class TestEsgotarSemPrazo:
         with pytest.raises(TransicaoDaSagaInvalidaError, match="sem prazo"):
             saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
 
+    def test_prazo_gravado_numa_etapa_que_nao_compensa_e_recusado(self) -> None:
+        # Estado que o agregado nao produz (prazo em `em_execucao`): recusa em vez
+        # de compensar uma etapa que ja passou do pivot.
+        saga = saga_em(
+            "em_execucao",
+            _comando_em_voo={
+                "tipo": "GerarOrcamento",
+                "dados": {},
+                "mensagem_ids": [str(uuid4())],
+                "enviado_em": AGORA.isoformat(),
+            },
+            _prazo_resposta_em=AGORA + PRAZO_S,
+        )
+        antes = foto_da_saga(saga)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="em_execucao"):
+            saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
+
+        assert foto_da_saga(saga) == antes
+
     def test_saga_parada_nao_esgota_de_novo(self) -> None:
         saga = _saga_parada(("EstornarPagamento",), falha=REENVIOS_ESGOTADOS)
 

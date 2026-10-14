@@ -11,12 +11,14 @@ from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
 from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
     TransicaoStatusInvalidaException,
 )
+from src.ordem_servico.aplicacao import use_cases
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
@@ -31,6 +33,13 @@ from tests.unitarios.fakes import FakeUnitOfWork
 from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
 
 PLANO = ("EstornarPagamento", "LiberarReserva", "CancelarOrcamento")
+
+
+@pytest.fixture(autouse=True)
+def _logger_do_modulo_sem_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    # O logger de modulo fica em cache depois do primeiro uso (outro teste da
+    # suite), e o `capture_logs` nao o alcancaria.
+    monkeypatch.setattr(use_cases, "_log", structlog.get_logger())
 
 
 def _retomada(cenario: CenarioDaSaga) -> tuple[RetomarCompensacao, FakeUnitOfWork]:

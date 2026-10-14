@@ -213,7 +213,7 @@ class Saga(MudancaDaSaga):
             TransicaoDaSagaInvalidaError: sem comando em voo, envio que nao e o
                 dele, prazo invalido ou instante que volta; nada muda.
         """
-        transicao = transicao_do_reenvio(self, agora)
+        transicao = transicao_do_reenvio(self)
         anteriores = conferir_reenvio(self, envio, agora)["mensagem_ids"]
         conferir_prazo(envio, agora)
         tipo = envio.tipo.value

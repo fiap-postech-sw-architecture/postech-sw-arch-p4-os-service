@@ -13,8 +13,11 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
+from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
+from src.ordem_servico.aplicacao.saga import vencer_prazos
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.prazos import (
     ATOR_PRAZOS,
@@ -34,6 +37,14 @@ from tests.unitarios.ordem_servico.ciclo_dos_prazos import MAXIMO, PRAZO, Prazos
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+
+@pytest.fixture(autouse=True)
+def _logger_do_modulo_sem_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    # O logger de modulo fica em cache depois do primeiro uso (outro teste da
+    # suite), e o `capture_logs` nao o alcancaria.
+    monkeypatch.setattr(vencer_prazos, "_log", structlog.get_logger())
+
 
 ETAPAS = (
     "aguardando_orcamento",
@@ -375,3 +386,20 @@ class TestSpanELog:
         esgotada = next(e for e in logs if e["event"] == "saga deadline exhausted")
         assert esgotada["log_level"] == "warning"
         assert esgotada["falha"] == REENVIOS_ESGOTADOS
+
+
+class TestErroQueSobeAoLaco:
+    def test_conflito_antes_de_reivindicar_alguma_saga_sobe_sem_recusar_ninguem(
+        self,
+    ) -> None:
+        # Sem saga reivindicada nao ha a quem recusar: o erro vai ao laco do
+        # processo, que o loga e tenta no ciclo seguinte.
+        prazos = _em("aguardando_orcamento")
+
+        def _conflita(*_: Any, **__: Any) -> None:
+            raise ConflitoDeConcorrenciaException
+
+        prazos.cenario.sagas.reivindicar_vencida = _conflita  # type: ignore[method-assign,assignment]
+
+        with pytest.raises(ConflitoDeConcorrenciaException):
+            prazos.vencer()

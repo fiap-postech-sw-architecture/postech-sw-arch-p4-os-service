@@ -100,7 +100,7 @@ def conferir_reenvio(
     raise TransicaoDaSagaInvalidaError(msg)
 
 
-def transicao_do_reenvio(saga: LeituraDaSaga, agora: datetime) -> Transicao:
+def transicao_do_reenvio(saga: LeituraDaSaga) -> Transicao:
     """O reenvio: a mesma etapa, o mesmo motivo e o mesmo plano, com o comando de novo.
 
     Raises:
