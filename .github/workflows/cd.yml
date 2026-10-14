@@ -4,9 +4,9 @@ name: CD
 # e a mesma varredura de seguranca do PR (workflows reutilizaveis), a imagem
 # construida uma vez e publicada no GHCR com o SHA do commit como tag, o deploy
 # num kind efemero dentro do runner com a plataforma e os tres servicos,
-# validado pelo smoke de cada namespace e pelo E2E BDD da saga, e o deploy do
-# mesmo digest no k3s da Azure quando a variavel da organizacao K3S_HABILITADO
-# estiver ligada. README, secao "CD".
+# validado pelo smoke de cada namespace e pelo E2E BDD da saga. O kind do
+# runner e o ambiente Kubernetes do deploy automatizado; o deploy remoto, num
+# cluster persistente, e opcional e vem desligado. README, secao "CD".
 on:
   push:
     # TEMPORARIO: ci/cd so para provar o run real antes do merge (reverter).
@@ -59,7 +59,8 @@ jobs:
       contents: read
 
   # Constroi a imagem uma vez. O deploy-kind carrega o tar daqui (a imagem que
-  # o E2E testa e a que foi para o GHCR), e o deploy-k3s implanta o mesmo digest.
+  # o E2E testa e a que foi para o GHCR), e o deploy-remoto, se ligado, implanta o
+  # mesmo digest.
   image:
     needs: [ci, security-scan]
     runs-on: ubuntu-24.04
@@ -310,18 +311,18 @@ jobs:
         if: failure() || cancelled()
         run: platform/scripts/ci/diagnostico.sh
 
-  # O alvo persistente: o mesmo digest que passou no kind. Desligado enquanto a
-  # variavel da organizacao K3S_HABILITADO nao for true; o k3s-skipped registra
-  # o aviso. O platform entra no commit usado no kind.
-  deploy-k3s:
+  # Opcional e desligado: o ambiente do deploy automatizado e o kind do runner.
+  # Com a variavel DEPLOY_REMOTO_HABILITADO igual a true, o mesmo digest que
+  # passou no kind vai para um cluster persistente que o dono do repositorio
+  # configura (README, secao "CD"). O script e o overlay vem do platform, no
+  # commit usado no kind. Nenhuma credencial de provedor mora neste arquivo.
+  deploy-remoto:
     needs: [image, deploy-kind]
-    if: vars.K3S_HABILITADO == 'true'
+    if: vars.DEPLOY_REMOTO_HABILITADO == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: producao
     permissions:
       contents: read
-      id-token: write
       packages: read
     steps:
       - uses: actions/checkout@v7
@@ -330,29 +331,29 @@ jobs:
           ref: ${{ needs.deploy-kind.outputs.sha_platform }}
           path: platform
           persist-credentials: false
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      # O script do platform (o P7 do plano) leva o token do job, de curta
-      # duracao, como parametro protegido do az vm run-command para o pull da
-      # imagem por digest no no.
-      - name: Deploy no k3s da Azure
+      # O acesso ao cluster entra aqui, antes do deploy: gravar o kubeconfig do
+      # segredo KUBECONFIG_REMOTO num arquivo e exportar KUBECONFIG, ou usar a
+      # action de login do provedor. Sem isso o script nao enxerga o contexto.
+      - name: Acesso ao cluster remoto (a configurar)
+        run: echo "::notice::remote cluster access is not configured in this step, add the kubeconfig (secret KUBECONFIG_REMOTO) or the provider login before the deploy"
+      - name: Deploy no cluster remoto (mesmo digest do kind)
         env:
           GH_TOKEN: ${{ github.token }}
+          CONTEXTO: ${{ vars.DEPLOY_REMOTO_CONTEXTO }}
+          OVERLAY: ${{ vars.DEPLOY_REMOTO_OVERLAY || 'k3s' }}
           IMAGEM: ${{ needs.image.outputs.imagem }}
           DIGEST: ${{ needs.image.outputs.digest }}
         run: |
-          [ -x platform/scripts/ci/deploy-k3s.sh ] \
-            || { echo "::error::platform/scripts/ci/deploy-k3s.sh does not exist in the platform commit used by this run: keep K3S_HABILITADO off until it is merged"; exit 1; }
-          platform/scripts/ci/deploy-k3s.sh --servico "$SERVICO" --imagem "${IMAGEM}@${DIGEST}"
+          [ -x platform/scripts/ci/deploy-remoto.sh ] \
+            || { echo "::error::platform/scripts/ci/deploy-remoto.sh does not exist in the platform commit used by this run: keep DEPLOY_REMOTO_HABILITADO off until it is merged"; exit 1; }
+          platform/scripts/ci/deploy-remoto.sh --contexto "$CONTEXTO" --overlay "$OVERLAY" \
+            --servico "$SERVICO" --imagem "${IMAGEM}@${DIGEST}"
 
-  k3s-skipped:
+  remoto-skipped:
     needs: deploy-kind
-    if: vars.K3S_HABILITADO != 'true'
+    if: vars.DEPLOY_REMOTO_HABILITADO != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
     steps:
-      - run: echo "::notice::k3s deploy is off (organization variable K3S_HABILITADO is not true); the deploy validated in this run is the kind one"
+      - run: echo "::notice::deploy remoto desligado (DEPLOY_REMOTO_HABILITADO); o deploy validado desta execucao e o do kind"

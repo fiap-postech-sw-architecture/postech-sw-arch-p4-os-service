@@ -755,7 +755,7 @@ uv run python -m src.notificador
 
 ## Implantação
 
-Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (local), `kind-ci` (o CD, com uma réplica só da API) e `k3s` (a VM na Azure). Tudo vai para o namespace `pytstop-os`, com Pod Security `restricted`. Nenhum Secret está nos manifestos: os do serviço nascem no `make deploy` do platform ([segredos gerados](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)) e entram por `secretKeyRef` ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)).
+Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (local), `kind-ci` (o CD, com uma réplica só da API) e `k3s` (um cluster persistente genérico; nenhum job de CD o usa por padrão). Tudo vai para o namespace `pytstop-os`, com Pod Security `restricted`. Nenhum Secret está nos manifestos: os do serviço nascem no `make deploy` do platform ([segredos gerados](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)) e entram por `secretKeyRef` ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)).
 
 | Objeto | O que é |
 |---|---|
@@ -877,7 +877,7 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 ## CD
 
-O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) roda a cada push na `main`, depois do merge de cada PR, e sob demanda (`workflow_dispatch`). O CI e a varredura de segurança não rodam duas vezes: o `cd.yml` chama o `ci.yml` e o `security.yml` como workflows reutilizáveis, e o PR continua rodando os dois pelo próprio gatilho. Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório): o GitHub guarda um único run pendente por grupo, então o push seguinte substitui o pendente e aquele commit fica sem CD. O run que sobra testa o estado mais novo da `main`.
+O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) roda a cada push na `main`, depois do merge de cada PR, e sob demanda (`workflow_dispatch`). **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: ele sobe a plataforma e os três serviços, valida o deploy com o E2E de 13 cenários e some com o job; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). O CI e a varredura de segurança não rodam duas vezes: o `cd.yml` chama o `ci.yml` e o `security.yml` como workflows reutilizáveis, e o PR continua rodando os dois pelo próprio gatilho. Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório): o GitHub guarda um único run pendente por grupo, então o push seguinte substitui o pendente e aquele commit fica sem CD. O run que sobra testa o estado mais novo da `main`.
 
 ### Jobs
 
@@ -887,15 +887,15 @@ O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.
 | `security-scan` | Chama o `security.yml`: `pip-audit`, `gitleaks` e `trivy` | | | `contents: read` |
 | `image` | Constrói a imagem uma vez e a publica em `ghcr.io/<organização>/pytstop-os-service:<sha do commit>`, com SBOM em SPDX e proveniência (`provenance: mode=max`). Confere o digest com um `docker pull`, salva o tar `linux/amd64` e o SBOM | `ci`, `security-scan` | 30 min | `contents: read`, `packages: write` |
 | `deploy-kind` | Sobe a plataforma e os três serviços num kind do runner, roda o smoke de cada namespace e o E2E da saga (abaixo) | `image` | 45 min | `contents: read`, `actions: read` |
-| `deploy-k3s` | Implanta no k3s da Azure o mesmo digest que passou no kind. Só roda com `K3S_HABILITADO` igual a `true` (abaixo) | `image`, `deploy-kind` | 20 min | `contents: read`, `id-token: write`, `packages: read` |
-| `k3s-skipped` | O oposto: com a variável desligada, registra o aviso de que o k3s não foi implantado | `deploy-kind` | 5 min | nenhuma |
+| `deploy-remoto` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
+| `remoto-skipped` | O oposto: com a variável desligada, só registra o aviso de que o deploy remoto não rodou | `deploy-kind` | 5 min | nenhuma |
 
-O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`; só o `deploy-k3s` pede o token de identidade da Azure.
+O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`. Nenhum job pede token de identidade, e o arquivo não guarda credencial de provedor nenhum.
 
 ### O que o `deploy-kind` faz, na ordem
 
 1. Escolhe os commits do platform e dos dois serviços vizinhos ([abaixo](#commits-do-platform-e-dos-vizinhos)) e faz o checkout de cada um, mais o deste repositório, sem guardar a credencial do GitHub.
-2. Baixa o artefato `imagem`, o tar da imagem que o `image` acabou de publicar: o E2E testa a mesma imagem que vai ao GHCR e ao k3s.
+2. Baixa o artefato `imagem`, o tar da imagem que o `image` acabou de publicar: o E2E testa a mesma imagem que vai ao GHCR.
 3. `scripts/ci/deploy-kind.sh` do platform: kind e kubectl com versão e sha256 fixados, `make kind-up` e `make deploy` no overlay `kind-ci`, que gera os Secrets no run. Nada de segredo vem do GitHub.
 4. `scripts/ci/implantar-servicos.sh --overlay kind-ci`: este serviço entra pelo tar (`kind load image-archive`); o Billing e a Execução são construídos do código no commit escolhido. Aplica o overlay `kind-ci` de cada serviço e espera o banco, o Job de migração e os Deployments, nessa ordem. O contrato está no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#contrato-com-os-serviços).
 5. `scripts/ci/smoke-servicos.sh`: por namespace, o Job completo, os rollouts, a saúde e o Swagger pela borda, o `/metrics` fora da borda, o `up` de cada pod e o `pg_up` ou `mongodb_up` no Prometheus e a NetworkPolicy do banco. A tabela `Service | Stage | Result` vai para o summary e o passo reprova nomeando o serviço.
@@ -936,11 +936,17 @@ gh run watch
 
 ### Dois serviços que mudam contrato juntos
 
-O CD de cada serviço usa o outro no último CD verde. Se o OS e o Billing mudam o mesmo contrato de forma incompatível, o CD de cada um sobe a versão nova com a antiga do outro e fica vermelho, e o último verde de nenhum dos dois avança. O `workflow_dispatch` prova a combinação nova: no OS, `sha_billing_service` com o commit novo do Billing, e no Billing, `sha_os_service` com o commit novo do OS. Com o k3s ligado, o mesmo run implanta o digest dela. Mas esse run não vira "último CD verde", porque a consulta olha só os runs disparados por push. Para o impasse acabar, um dos dois precisa de um push verde com o vizinho antigo, ou seja, de um PR que aceite os dois formatos; depois o outro muda, e o primeiro retira o formato antigo (expandir e contrair, [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md)). Entrar em duas etapas desde o começo evita o impasse.
+O CD de cada serviço usa o outro no último CD verde. Se o OS e o Billing mudam o mesmo contrato de forma incompatível, o CD de cada um sobe a versão nova com a antiga do outro e fica vermelho, e o último verde de nenhum dos dois avança. O `workflow_dispatch` prova a combinação nova: no OS, `sha_billing_service` com o commit novo do Billing, e no Billing, `sha_os_service` com o commit novo do OS. Com o deploy remoto ligado, o mesmo run implanta o digest dela. Mas esse run não vira "último CD verde", porque a consulta olha só os runs disparados por push. Para o impasse acabar, um dos dois precisa de um push verde com o vizinho antigo, ou seja, de um PR que aceite os dois formatos; depois o outro muda, e o primeiro retira o formato antigo (expandir e contrair, [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md)). Entrar em duas etapas desde o começo evita o impasse.
 
-### k3s e `K3S_HABILITADO`
+### Deploy remoto (opcional)
 
-`K3S_HABILITADO` é uma variável da organização. Diferente de `true` (ou ausente), que é o estado de hoje, o `deploy-k3s` fica de fora e o `k3s-skipped` registra um `::notice::` no run: o deploy validado é o do kind. Com `true`, o `deploy-k3s` roda no environment `producao` (só a `main`), entra na Azure por OIDC com as variáveis da organização `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` e `AZURE_SUBSCRIPTION_ID` (nenhum segredo) e chama `scripts/ci/deploy-k3s.sh` do platform, no mesmo commit do platform usado no kind, com a imagem e o digest que passaram no E2E. Esse script ainda não existe no platform: ligar a variável antes dele faz o job reprovar dizendo isso, em vez de um erro de arquivo no meio do log.
+O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente, que é o estado de hoje), o `deploy-remoto` fica de fora e o `remoto-skipped` registra um `::notice::` no run. Para ligar:
+
+1. Criar as variáveis do repositório (ou da organização) `DEPLOY_REMOTO_HABILITADO` com o valor `true`, `DEPLOY_REMOTO_CONTEXTO` com o nome do contexto do kubeconfig e, se não for o overlay `k3s` dos manifestos, `DEPLOY_REMOTO_OVERLAY`.
+2. Guardar o kubeconfig do cluster no segredo `KUBECONFIG_REMOTO` e, no passo "Acesso ao cluster remoto" do `deploy-remoto`, gravá-lo num arquivo e exportar o `KUBECONFIG` (ou usar a action de login do provedor). O passo vem só com um aviso porque a credencial depende do provedor, e o `cd.yml` não guarda nenhuma.
+3. Ter o script `platform/scripts/ci/deploy-remoto.sh` no platform. Ele chega num PR próprio do platform, com a interface que o job já chama: `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`, no contexto já ativo, com o overlay deste serviço, as imagens por digest do GHCR, a ordem de implantação e o smoke. Enquanto ele não existir no commit do platform usado no run, o job reprova dizendo isso, em vez de um erro de arquivo no meio do log.
+
+O job pede só `contents: read` e `packages: read`, e o platform entra no commit usado no kind.
 
 ### Conferir o workflow sem empurrar
 

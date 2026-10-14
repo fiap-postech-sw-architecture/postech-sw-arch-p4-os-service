@@ -80,15 +80,15 @@ def test_jobs_e_dependencias_do_adr_042() -> None:
         "security-scan",
         "image",
         "deploy-kind",
-        "deploy-k3s",
-        "k3s-skipped",
+        "deploy-remoto",
+        "remoto-skipped",
     ]
     assert jobs["ci"]["uses"] == "./.github/workflows/ci.yml"
     assert jobs["security-scan"]["uses"] == "./.github/workflows/security.yml"
     assert jobs["image"]["needs"] == ["ci", "security-scan"]
     assert jobs["deploy-kind"]["needs"] == "image"
-    assert jobs["deploy-k3s"]["needs"] == ["image", "deploy-kind"]
-    assert jobs["k3s-skipped"]["needs"] == "deploy-kind"
+    assert jobs["deploy-remoto"]["needs"] == ["image", "deploy-kind"]
+    assert jobs["remoto-skipped"]["needs"] == "deploy-kind"
     # O CD so comeca com o CI do commit verde: nada de `if` que deixe o image
     # rodar com o ci ou o security-scan vermelho, e o deploy-kind depende da imagem.
     assert "if" not in jobs["image"]
@@ -132,23 +132,22 @@ def test_permissoes_minimas_por_job() -> None:
         "contents": "read",
         "actions": "read",
     }
-    assert jobs["deploy-k3s"]["permissions"] == {
+    assert jobs["deploy-remoto"]["permissions"] == {
         "contents": "read",
-        "id-token": "write",
         "packages": "read",
     }
-    assert jobs["k3s-skipped"]["permissions"] == {}
-    # So o deploy-k3s pede o token de identidade, e so o image escreve pacote.
+    assert jobs["remoto-skipped"]["permissions"] == {}
+    # Nenhum job pede token de identidade, e so o image escreve pacote.
     escrevem = {
         nome
         for nome, job in jobs.items()
         if "write" in job.get("permissions", {}).values()
     }
-    assert escrevem == {"image", "deploy-k3s"}
+    assert escrevem == {"image"}
 
 
 def test_runner_fixo_e_prazo_em_todo_job_que_roda_passos() -> None:
-    prazos = {"image": 30, "deploy-kind": 45, "deploy-k3s": 20, "k3s-skipped": 5}
+    prazos = {"image": 30, "deploy-kind": 45, "deploy-remoto": 20, "remoto-skipped": 5}
 
     for nome, job in _jobs().items():
         if "uses" in job:
@@ -157,32 +156,60 @@ def test_runner_fixo_e_prazo_em_todo_job_que_roda_passos() -> None:
         assert job["timeout-minutes"] == prazos[nome], nome
 
 
-def test_deploy_k3s_so_com_a_variavel_ligada_e_o_k3s_skipped_na_condicao_inversa() -> (
-    None
-):
+def test_deploy_remoto_vem_desligado_e_o_skipped_na_condicao_inversa() -> None:
     jobs = _jobs()
 
-    assert jobs["deploy-k3s"]["if"] == "vars.K3S_HABILITADO == 'true'"
-    assert jobs["deploy-k3s"]["environment"] == "producao"
-    assert jobs["k3s-skipped"]["if"] == "vars.K3S_HABILITADO != 'true'"
-    passos = jobs["k3s-skipped"]["steps"]
+    assert jobs["deploy-remoto"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO == 'true'"
+    assert jobs["remoto-skipped"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO != 'true'"
+    passos = jobs["remoto-skipped"]["steps"]
     assert len(passos) == 1
-    assert passos[0]["run"].startswith('echo "::notice::')
+    assert passos[0]["run"].startswith('echo "::notice::deploy remoto desligado')
+    assert "DEPLOY_REMOTO_HABILITADO" in passos[0]["run"]
 
 
-def test_deploy_k3s_usa_o_commit_do_platform_do_kind_e_o_digest_da_imagem() -> None:
-    checkout = _passo_que_usa("deploy-k3s", "actions/checkout")
-    deploy = _passos("deploy-k3s")[-1]
+def test_deploy_remoto_nao_tem_segredo_nem_credencial_de_provedor() -> None:
+    job = yaml.safe_dump(_jobs()["deploy-remoto"]).lower()
+    workflow = yaml.safe_dump(_carrega()).lower()
+
+    assert "environment" not in job
+    assert "id-token" not in job
+    assert "secrets." not in job
+    # O unico segredo do workflow e o token do GHCR, no login do image.
+    assert set(re.findall(r"secrets\.(\w+)", workflow)) == {"github_token"}
+    for provedor in (
+        "azure",
+        "aws",
+        "eks",
+        "gcp",
+        "oidc",
+        "producao",
+        "k3s_habilitado",
+    ):
+        assert provedor not in CD.read_text().lower(), provedor
+
+
+def test_deploy_remoto_usa_o_commit_do_platform_do_kind_e_o_digest_da_imagem() -> None:
+    checkout = _passo_que_usa("deploy-remoto", "actions/checkout")
+    deploy = _passos("deploy-remoto")[-1]
 
     assert checkout["with"]["ref"] == "${{ needs.deploy-kind.outputs.sha_platform }}"
     assert _jobs()["deploy-kind"]["outputs"] == {
         "sha_platform": "${{ steps.shas.outputs.sha_platform }}"
     }
-    assert deploy["env"]["DIGEST"] == "${{ needs.image.outputs.digest }}"
-    assert '--imagem "${IMAGEM}@${DIGEST}"' in deploy["run"]
+    # Contexto, overlay, imagem e digest entram por env, nunca dentro do script.
+    assert deploy["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "CONTEXTO": "${{ vars.DEPLOY_REMOTO_CONTEXTO }}",
+        "OVERLAY": "${{ vars.DEPLOY_REMOTO_OVERLAY || 'k3s' }}",
+        "IMAGEM": "${{ needs.image.outputs.imagem }}",
+        "DIGEST": "${{ needs.image.outputs.digest }}",
+    }
+    chamada = 'deploy-remoto.sh --contexto "$CONTEXTO" --overlay "$OVERLAY"'
+    assert chamada in deploy["run"]
+    assert '--servico "$SERVICO" --imagem "${IMAGEM}@${DIGEST}"' in deploy["run"]
     # Sem o script do platform o job reprova nomeando o arquivo, em vez de
     # um "No such file" no meio do log.
-    assert "deploy-k3s.sh does not exist" in deploy["run"]
+    assert "deploy-remoto.sh does not exist" in deploy["run"]
 
 
 # --- imagem ----------------------------------------------------------------
