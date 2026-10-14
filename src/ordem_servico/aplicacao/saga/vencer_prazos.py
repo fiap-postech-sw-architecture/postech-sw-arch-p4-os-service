@@ -72,7 +72,7 @@ SAGAS_POR_CICLO: Final = 100
 _RECUSAS_DO_DOMINIO: Final = (TransicaoDaSagaInvalidaError, InvarianteDaSagaError)
 
 
-class Vencimento(StrEnum):
+class DesfechoDoPrazo(StrEnum):
     """O que o ciclo fez com uma saga de prazo vencido."""
 
     REENVIADA = "reenviada"
@@ -130,21 +130,21 @@ class VencerPrazos:
         if self._relogio_fora_do_banco():
             return ResultadoDoCiclo(pausado=True)
         recusadas: set[UUID] = set()
-        vencimentos: list[Vencimento] = []
+        desfechos: list[DesfechoDoPrazo] = []
         pausado = False
-        while len(vencimentos) < SAGAS_POR_CICLO and not parar():
+        while len(desfechos) < SAGAS_POR_CICLO and not parar():
             if not self._fila_em_dia():
                 pausado = True
                 break
-            vencimento = self._vencer_uma(recusadas)
-            if vencimento is None:
+            desfecho = self._vencer_uma(recusadas)
+            if desfecho is None:
                 break
-            vencimentos.append(vencimento)
+            desfechos.append(desfecho)
             ao_tratar()
         return ResultadoDoCiclo(
             pausado=pausado,
-            reenviadas=vencimentos.count(Vencimento.REENVIADA),
-            esgotadas=vencimentos.count(Vencimento.ESGOTADA),
+            reenviadas=desfechos.count(DesfechoDoPrazo.REENVIADA),
+            esgotadas=desfechos.count(DesfechoDoPrazo.ESGOTADA),
             recusadas=len(recusadas),
         )
 
@@ -184,7 +184,7 @@ class VencerPrazos:
         )
         return True
 
-    def _vencer_uma(self, recusadas: set[UUID]) -> Vencimento | None:
+    def _vencer_uma(self, recusadas: set[UUID]) -> DesfechoDoPrazo | None:
         """Uma saga numa transacao; ``None`` quando nenhuma venceu."""
         ordem_id: UUID | None = None
         try:
@@ -201,10 +201,10 @@ class VencerPrazos:
                 # O comando e o contexto que a saga passa a guardar nascem no span
                 # do prazo, filho do trace dela (ADR-043).
                 with self._contexto.span("saga prazo", saga.traceparent):
-                    vencimento = self._tratar(transacao, saga)
+                    desfecho = self._tratar(transacao, saga)
                     sagas.salvar(saga)
                     transacao.commit()
-                return vencimento
+                return desfecho
         except self._banco_fora:
             # Banco fora nao e defeito da saga: o ciclo falha e o laco tenta de novo.
             raise
@@ -226,9 +226,9 @@ class VencerPrazos:
                 **detalhe,
             )
             recusadas.add(ordem_id)
-            return Vencimento.RECUSADA
+            return DesfechoDoPrazo.RECUSADA
 
-    def _tratar(self, transacao: TransacaoDosPrazos, saga: Saga) -> Vencimento:
+    def _tratar(self, transacao: TransacaoDosPrazos, saga: Saga) -> DesfechoDoPrazo:
         """Reenvia o comando em voo, ou esgota o prazo dele; a transacao comita."""
         etapa, comando = saga.etapa, saga.tipo_do_comando_em_voo
         contexto = {"correlation_id": str(saga.ordem_id), "etapa": etapa.value}
@@ -251,7 +251,7 @@ class VencerPrazos:
                 reenvio=saga.reenvios,
                 **contexto,
             )
-            return Vencimento.REENVIADA
+            return DesfechoDoPrazo.REENVIADA
         agora = self._contexto.instante_do_passo(
             saga, tipo=GatilhoDeProcesso.PRAZO_ESGOTADO
         )
@@ -275,4 +275,4 @@ class VencerPrazos:
             **({"falha": saga.falha} if parada else {}),
             **contexto,
         )
-        return Vencimento.ESGOTADA
+        return DesfechoDoPrazo.ESGOTADA

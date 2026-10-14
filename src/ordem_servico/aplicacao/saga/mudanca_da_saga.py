@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class Complemento:
+class DadosDoRegistro:
     """O que a transicao nao diz e o registro ou o comando em voo levam.
 
     ``anteriores`` sao os ids dos envios que o comando novo herda (o reenvio e a
@@ -54,7 +54,7 @@ class MudancaDaSaga(AggregateRoot, LeituraDaSaga):
         transicao: Transicao,
         gatilho: Gatilho,
         envio: Envio | None,
-        complemento: Complemento = Complemento(),  # noqa: B008  # VO imutavel
+        dados_do_registro: DadosDoRegistro = DadosDoRegistro(),  # noqa: B008  # VO imutavel
     ) -> None:
         """Aplica a transicao ja conferida e anota o registro dela."""
         conferir_gatilho(transicao, gatilho)
@@ -88,17 +88,19 @@ class MudancaDaSaga(AggregateRoot, LeituraDaSaga):
         passo = gatilho.registro(
             len(self._passos) + 1, de, self._etapa, envio, transicao.motivo
         )
-        if complemento.posicao is not None:
-            passo["posicao_na_fila"] = complemento.posicao
-        if complemento.reenvio is not None:
-            passo["reenvio"] = complemento.reenvio
+        if dados_do_registro.posicao is not None:
+            passo["posicao_na_fila"] = dados_do_registro.posicao
+        if dados_do_registro.reenvio is not None:
+            passo["reenvio"] = dados_do_registro.reenvio
         self._passos = [*self._passos, passo]
         if transicao.concluido is not None:
             self._passos_concluidos = [*self._passos_concluidos, transicao.concluido]
-        self._esperar_resposta(envio, complemento)
+        self._esperar_resposta(envio, dados_do_registro)
         self._conferir_invariantes()
 
-    def _esperar_resposta(self, envio: Envio | None, complemento: Complemento) -> None:
+    def _esperar_resposta(
+        self, envio: Envio | None, dados_do_registro: DadosDoRegistro
+    ) -> None:
         """O envio conferido vira o comando em voo; sem ele, nada fica em voo.
 
         Todo comando enviado depois da abertura tem resposta automatica, entao o
@@ -113,10 +115,13 @@ class MudancaDaSaga(AggregateRoot, LeituraDaSaga):
             self._reenvios = 0
         else:
             em_voo = envio.em_voo(self._atualizada_em)
-            em_voo["mensagem_ids"] = [*complemento.anteriores, *em_voo["mensagem_ids"]]
+            em_voo["mensagem_ids"] = [
+                *dados_do_registro.anteriores,
+                *em_voo["mensagem_ids"],
+            ]
             self._comando_em_voo = em_voo
             self._prazo_resposta_em = envio.prazo_resposta_em
-            self._reenvios = complemento.reenvio or 0
+            self._reenvios = dados_do_registro.reenvio or 0
 
     def _conferir_invariantes(self) -> None:
         conferir_estado(self)

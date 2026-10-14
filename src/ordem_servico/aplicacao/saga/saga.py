@@ -28,7 +28,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     itens_do_diagnostico,
 )
 from src.ordem_servico.aplicacao.saga.mudanca_da_saga import (
-    Complemento,
+    DadosDoRegistro,
     MudancaDaSaga,
 )
 from src.ordem_servico.aplicacao.saga.prazos import (
@@ -177,7 +177,7 @@ class Saga(MudancaDaSaga):
         conferir_prazo(envio, agora)
         self._itens = itens
         gatilho = Gatilho(evento.tipo, evento.id, agora, ator)
-        self._mudar(transicao, gatilho, envio, Complemento(posicao=posicao))
+        self._mudar(transicao, gatilho, envio, DadosDoRegistro(posicao=posicao))
 
     def solicitar_cancelamento(
         self, marcos: MarcosDaOrdem, *, agora: datetime, ator: str, envio: Envio
@@ -222,8 +222,8 @@ class Saga(MudancaDaSaga):
         anteriores = conferir_reenvio(self, envio, agora)["mensagem_ids"]
         conferir_prazo(envio, agora)
         reenvio = Gatilho(GatilhoDeProcesso.REENVIO.value, None, agora, ator)
-        complemento = Complemento(anteriores, reenvio=self._reenvios + 1)
-        self._mudar(transicao, reenvio, envio, complemento)
+        dados_do_registro = DadosDoRegistro(anteriores, reenvio=self._reenvios + 1)
+        self._mudar(transicao, reenvio, envio, dados_do_registro)
         self._registrar_evento(
             ComandoReenviadoEvent(
                 agregado_id=self.id, comando=envio.tipo.value, ocorrido_em=agora
@@ -277,4 +277,4 @@ class Saga(MudancaDaSaga):
         anteriores = conferir_reenvio(self, envio, agora)["mensagem_ids"]
         conferir_prazo(envio, agora)
         retomada = Gatilho(GatilhoDeProcesso.RETOMADA.value, None, agora, ator)
-        self._mudar(transicao, retomada, envio, Complemento(anteriores))
+        self._mudar(transicao, retomada, envio, DadosDoRegistro(anteriores))
