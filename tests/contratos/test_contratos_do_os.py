@@ -120,6 +120,88 @@ def test_envelope_fora_do_contrato_diz_onde_sem_o_valor(
         assert str(valor) not in str(erro.value)
 
 
+# Um campo de cada formato que o `$` do pattern deixava aceitar com quebra de
+# linha no fim: o envelope, as datas e horas, o dinheiro, a URL, o codigo dos
+# itens, o SKU da reserva e a placa.
+_COM_QUEBRA_DE_LINHA = [
+    ("SolicitarDiagnostico", ("ocorrido_em",)),
+    ("SolicitarDiagnostico", ("dados", "veiculo", "placa")),
+    ("DiagnosticoIniciado", ("dados", "iniciado_em")),
+    ("DiagnosticoConcluido", ("dados", "concluido_em")),
+    ("DiagnosticoConcluido", ("dados", "itens", 0, "codigo")),
+    ("GerarOrcamento", ("dados", "itens", 0, "codigo")),
+    ("GeracaoDeOrcamentoFalhou", ("dados", "codigos_invalidos", 0)),
+    ("OrcamentoGerado", ("dados", "total")),
+    ("OrcamentoGerado", ("dados", "valido_ate")),
+    ("OrcamentoGerado", ("dados", "link_decisao")),
+    ("OrcamentoGerado", ("dados", "linhas", 0, "codigo")),
+    ("OrcamentoAprovado", ("dados", "decidido_em")),
+    ("OrcamentoRecusado", ("dados", "decidido_em")),
+    ("PagamentoSolicitado", ("dados", "valor")),
+    ("PagamentoSolicitado", ("dados", "expira_em")),
+    ("PagamentoSolicitado", ("dados", "checkout_url")),
+    ("PagamentoConfirmado", ("dados", "valor")),
+    ("PagamentoConfirmado", ("dados", "confirmado_em")),
+    ("PagamentoCancelado", ("dados", "cancelado_em")),
+    ("PagamentoEstornado", ("dados", "estornado_em")),
+    ("ReservarPecas", ("dados", "pecas", 0, "sku")),
+    ("ReservaDePecasFalhou", ("dados", "faltantes", 0, "sku")),
+    ("ExecucaoIniciada", ("dados", "iniciada_em")),
+    ("ExecucaoFinalizada", ("dados", "finalizada_em")),
+    ("ExecucaoFinalizada", ("dados", "pecas_consumidas", 0, "sku")),
+]
+
+
+def _alvo(exemplo: dict[str, Any], caminho: tuple[str | int, ...]) -> Any:
+    no: Any = exemplo
+    for passo in caminho[:-1]:
+        no = no[passo]
+    return no
+
+
+@pytest.mark.parametrize(("tipo", "caminho"), _COM_QUEBRA_DE_LINHA)
+def test_quebra_de_linha_no_fim_do_valor_e_recusada(
+    tipo: str, caminho: tuple[str | int, ...]
+) -> None:
+    """O ``$`` do pattern aceita ``\\n`` no fim e o ``format`` do jsonschema
+    tambem: os patterns terminam em ``(?![\\s\\S])``. A recusa tem de ser do
+    campo, e nao de outro erro qualquer do exemplo."""
+    exemplo = _exemplo(tipo)
+    _alvo(exemplo, caminho)[caminho[-1]] += "\n"
+    esperado = "$" + "".join(
+        f"[{p}]" if isinstance(p, int) else f".{p}" for p in caminho
+    )
+
+    with pytest.raises(ContratoInvalidoError) as erro:
+        catalogo().validar(exemplo)
+
+    assert (erro.value.caminho, erro.value.regra) == (esperado, "pattern")
+
+
+def _patterns(no: Any) -> list[str]:
+    """Todo ``pattern`` do schema, em qualquer profundidade."""
+    if isinstance(no, dict):
+        achados = [no["pattern"]] if isinstance(no.get("pattern"), str) else []
+        return achados + [p for valor in no.values() for p in _patterns(valor)]
+    if isinstance(no, list):
+        return [p for valor in no for p in _patterns(valor)]
+    return []
+
+
+def test_todo_pattern_dos_schemas_termina_em_fim_de_texto_sem_quebra_de_linha() -> None:
+    """O ``$`` aceita ``\\n`` no fim do valor; ``(?![\\s\\S])`` so casa no fim do
+    texto. Cobre os ``pattern`` que os exemplos acima nao exercitam (o tipo do
+    envelope, por exemplo)."""
+    patterns = [
+        p
+        for schema in sorted((CONTRATOS / "schemas").glob("*.schema.json"))
+        for p in _patterns(json.loads(schema.read_text(encoding="utf-8")))
+    ]
+
+    assert len(patterns) >= 26, "nenhum pattern lido: o teste nao prova nada"
+    assert [p for p in patterns if not p.endswith(r"(?![\s\S])")] == []
+
+
 def test_placa_invalida_nao_aparece_no_erro() -> None:
     envelope = _exemplo("SolicitarDiagnostico")
     envelope["dados"]["veiculo"]["placa"] = "ABC-1234"
