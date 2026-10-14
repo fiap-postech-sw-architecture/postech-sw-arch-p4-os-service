@@ -323,6 +323,21 @@ def _contador(nome: str, **labels: str) -> float:
     return REGISTRY.get_sample_value(nome, labels) or 0.0
 
 
+class _TransacaoNoRelogioDoTeste(TransacaoDosPrazosSQLAlchemy):
+    """A transacao real, com o relogio do banco no tempo do teste (``T0``).
+
+    O dado do teste anda no tempo dele, e o ``clock_timestamp()`` do banco de
+    verdade, hoje, destoaria do ``agora`` injetado e o ciclo nao agiria.
+    """
+
+    def __init__(self, session_factory: sessionmaker[Session], agora: datetime) -> None:
+        super().__init__(session_factory)
+        self._agora = agora
+
+    def agora_do_banco(self) -> datetime:
+        return self._agora
+
+
 def _prazos(
     session_factory: sessionmaker[Session],
     agora: datetime,
@@ -331,7 +346,7 @@ def _prazos(
     maximo: int = MAXIMO,
 ) -> VencerPrazos:
     return VencerPrazos(
-        abrir=lambda: TransacaoDosPrazosSQLAlchemy(session_factory),
+        abrir=lambda: _TransacaoNoRelogioDoTeste(session_factory, agora),
         presenca=PresencaFake(ha_consumidor=ha_consumidor),
         contexto=ContextoDeEnvio(PRAZO, lambda: agora),
         max_reenvios=maximo,
@@ -531,6 +546,77 @@ class TestCicloNoBanco:
         assert durante == ResultadoDoCiclo()
         assert _prazos(session_factory, T0).executar() == ResultadoDoCiclo()
         assert _saga(session_factory, ordem_id).reenvios == 0
+
+
+class TestRelogioDoBanco:
+    """O relogio do processo contra o ``clock_timestamp()`` do banco de verdade."""
+
+    def test_agora_do_banco_e_o_clock_timestamp_com_fuso(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        with TransacaoDosPrazosSQLAlchemy(session_factory) as transacao:
+            banco = transacao.agora_do_banco()
+
+        assert banco.tzinfo is not None
+        assert abs(banco - datetime.now(UTC)) < timedelta(seconds=5)
+
+    @pytest.mark.parametrize(
+        ("desvio", "entregue_ha"),
+        [
+            # Adiantado 100 s: o envio entregue ha 20 s pareceria vencido.
+            pytest.param(timedelta(seconds=100), timedelta(seconds=20), id="adiantado"),
+            # Atrasado 100 s: a saga vencida de verdade nao seria achada.
+            pytest.param(
+                -timedelta(seconds=100), timedelta(seconds=200), id="atrasado"
+            ),
+        ],
+    )
+    def test_relogio_do_processo_destoando_do_banco_nao_age(
+        self,
+        engine: Engine,
+        session_factory: sessionmaker[Session],
+        desvio: timedelta,
+        entregue_ha: timedelta,
+    ) -> None:
+        agora = datetime.now(UTC)
+        ordem_id = _semear_e_comitar(
+            session_factory,
+            [_entregue(agora - entregue_ha)],
+            prazo_em=agora - timedelta(seconds=80),
+            enviado_em=agora - entregue_ha,
+        )
+        ciclo = VencerPrazos(
+            abrir=lambda: TransacaoDosPrazosSQLAlchemy(session_factory),
+            presenca=PresencaFake(),
+            contexto=ContextoDeEnvio(PRAZO, lambda: datetime.now(UTC) + desvio),
+            max_reenvios=MAXIMO,
+        )
+
+        resultado = ciclo.executar()
+
+        assert resultado == ResultadoDoCiclo(pausado=True)
+        assert _saga(session_factory, ordem_id).reenvios == 0
+        assert len(_linhas_da_outbox(engine, ordem_id)) == 1
+
+    def test_com_o_relogio_certo_a_mesma_saga_e_reenviada(
+        self, engine: Engine, session_factory: sessionmaker[Session]
+    ) -> None:
+        agora = datetime.now(UTC)
+        ordem_id = _semear_e_comitar(
+            session_factory,
+            [_entregue(agora - timedelta(seconds=200))],
+            prazo_em=agora - timedelta(seconds=80),
+            enviado_em=agora - timedelta(seconds=200),
+        )
+        ciclo = VencerPrazos(
+            abrir=lambda: TransacaoDosPrazosSQLAlchemy(session_factory),
+            presenca=PresencaFake(),
+            contexto=ContextoDeEnvio(PRAZO, lambda: datetime.now(UTC)),
+            max_reenvios=MAXIMO,
+        )
+
+        assert ciclo.executar() == ResultadoDoCiclo(reenviadas=1)
+        assert len(_linhas_da_outbox(engine, ordem_id)) == 2
 
 
 def test_duas_replicas_do_prazos_nunca_tratam_a_mesma_saga(

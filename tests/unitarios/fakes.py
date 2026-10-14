@@ -20,7 +20,7 @@ from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping
+    from collections.abc import Callable, Collection, Mapping
     from types import TracebackType
 
     from src.compartilhado.dominio.documento import Documento
@@ -222,10 +222,14 @@ class TransacaoDosPrazosFake(FakeUnitOfWork):
         ordens: RepoEmMemoria,
         sagas: SagasEmMemoria,
         outbox: FakeUnitOfWork | None = None,
+        *,
+        banco: Callable[[], datetime],
     ) -> None:
         super().__init__()
         self.ordens = ordens
         self.sagas = sagas
+        self._banco = banco
+        self.leituras_do_relogio = 0
         self.commits = 0
         self.rollbacks = 0
         if outbox is not None:
@@ -245,6 +249,10 @@ class TransacaoDosPrazosFake(FakeUnitOfWork):
     ) -> None:
         if exc_type is not None:
             self.rollbacks += 1
+
+    def agora_do_banco(self) -> datetime:
+        self.leituras_do_relogio += 1
+        return self._banco()
 
     def commit(self) -> None:
         super().commit()

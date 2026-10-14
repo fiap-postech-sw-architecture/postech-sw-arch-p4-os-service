@@ -8,7 +8,8 @@ comando sai de novo com id novo (``Saga.reenviar``); esgotados, a etapa linear
 inicia a compensacao por ``prazo_tecnico`` e a compensacao vai a
 ``falha_na_compensacao`` (``Saga.esgotar_prazo``).
 
-Antes de tudo o ciclo confere a presenca do consumidor do OS
+Antes de tudo o ciclo confere o relogio do processo contra o do banco (acima de
+5 s de desvio, nao age) e a presenca do consumidor do OS
 (``PresencaDoConsumidor``): sem consumidor em ``os.eventos`` ou com o broker
 fora a resposta pode estar esperando na fila, e o ciclo nao reenvia nem esgota
 prazo, so avisa. A saga trabalhada por outra replica (``SKIP LOCKED``) fica para
@@ -19,6 +20,7 @@ volta pela fila de retry.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -44,6 +46,7 @@ from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 if TYPE_CHECKING:
     from collections.abc import Callable
     from contextlib import AbstractContextManager
+    from datetime import datetime
     from uuid import UUID
 
     from src.ordem_servico.aplicacao.ports import PresencaDoConsumidor, SagaRepository
@@ -52,6 +55,12 @@ if TYPE_CHECKING:
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 _log = structlog.get_logger(__name__)
+
+# O quanto o relogio do processo pode destoar do relogio do banco, que grava o
+# ``entregue_em`` da outbox. Acima disso o ciclo nao age: o relogio adiantado
+# reenvia e esgota antes da hora, sem volta, e o atrasado deixa de achar as
+# vencidas. Cobre a latencia da consulta e fica longe dos 30 s do ciclo.
+DESVIO_MAXIMO_DO_RELOGIO: Final = timedelta(seconds=5)
 
 # O que recusa a saga de vez: o estado dela, o comando guardado ou o relogio desta
 # replica. Repetir no mesmo ciclo nao muda nada: a saga fica de fora dele, o
@@ -80,6 +89,10 @@ class TransacaoDosPrazos(PublicadorDeComandos, Protocol):
     @property
     def sagas(self) -> SagaRepository:
         """Os repositorios da saga sobre a transacao."""
+        pass
+
+    def agora_do_banco(self) -> datetime:
+        """O relogio do banco (``clock_timestamp()``), o que grava o ``entregue_em``."""
         pass
 
     def commit(self) -> None:
@@ -133,6 +146,8 @@ class VencerPrazos:
         tolera 120 s). Erro de banco sobe para o laco do processo; a saga que o
         dominio recusa fica de fora do resto do ciclo.
         """
+        if self._relogio_fora_do_banco():
+            return ResultadoDoCiclo(pausado=True)
         if not self._presenca.ha_consumidor():
             _log.warning("saga deadlines paused: the os.eventos consumer is away")
             return ResultadoDoCiclo(pausado=True)
@@ -146,6 +161,24 @@ class VencerPrazos:
             esgotadas=vencimentos.count(Vencimento.ESGOTADA),
             recusadas=len(recusadas),
         )
+
+    def _relogio_fora_do_banco(self) -> bool:
+        """Confere o relogio do processo contra o do banco, uma vez por ciclo.
+
+        Adiantado ou atrasado alem de ``DESVIO_MAXIMO_DO_RELOGIO``, o ciclo nao
+        age: o prazo que o ``prazos`` mede e o do relogio do banco.
+        """
+        with self._abrir() as transacao:
+            banco = transacao.agora_do_banco()
+        desvio = abs(self._contexto.relogio() - banco)
+        if desvio <= DESVIO_MAXIMO_DO_RELOGIO:
+            return False
+        _log.error(
+            "clock skew too large: saga deadlines skipped",
+            desvio_s=round(desvio.total_seconds(), 1),
+            limite_s=DESVIO_MAXIMO_DO_RELOGIO.total_seconds(),
+        )
+        return True
 
     def _vencer_uma(self, recusadas: set[UUID]) -> Vencimento | None:
         """Uma saga numa transacao; ``None`` quando nenhuma venceu."""

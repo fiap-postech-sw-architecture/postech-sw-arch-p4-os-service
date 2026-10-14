@@ -50,10 +50,14 @@ class Prazos:
     ) -> None:
         self.cenario = cenario
         self.relogio = RelogioManual(cenario.saga.atualizada_em)
+        # O relogio do banco acompanha o do processo; ``adiantamento`` e quanto o
+        # do processo esta na frente dele (negativo: atrasado).
+        self.adiantamento = timedelta(0)
         self.transacao = TransacaoDosPrazosFake(
             cenario.ordens,
             cenario.sagas,
             cenario.publicador if na_outbox_do_cenario else None,
+            banco=lambda: self.relogio.agora - self.adiantamento,
         )
         self.presenca = PresencaFake(ha_consumidor=ha_consumidor)
         contexto = ContextoDeEnvio(PRAZO, self.relogio)

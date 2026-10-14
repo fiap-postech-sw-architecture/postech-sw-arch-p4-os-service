@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sqlalchemy import text
+
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
@@ -16,6 +18,8 @@ from src.ordem_servico.infraestrutura.repository import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from src.ordem_servico.aplicacao.ports import SagaRepository
     from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
@@ -30,3 +34,10 @@ class TransacaoDosPrazosSQLAlchemy(SQLAlchemyUnitOfWork):
     @property
     def sagas(self) -> SagaRepository:
         return SagaSQLAlchemyRepository(self.session)
+
+    def agora_do_banco(self) -> datetime:
+        """O ``clock_timestamp()`` do banco, o mesmo que grava ``entregue_em``."""
+        banco: datetime = self.session.execute(
+            text("SELECT clock_timestamp()")
+        ).scalar_one()
+        return banco
