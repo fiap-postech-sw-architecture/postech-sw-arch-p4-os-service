@@ -4,6 +4,7 @@ import os
 from collections.abc import AsyncGenerator  # noqa: TC003
 from contextlib import asynccontextmanager
 from importlib.metadata import version
+from typing import TYPE_CHECKING
 
 import uvicorn
 from fastapi import FastAPI
@@ -19,6 +20,9 @@ from src.compartilhado.interfaces.middleware import (
     validar_segredos_no_startup,
 )
 from src.compartilhado.interfaces.router_publico import router as router_publico
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import TracerProvider
 
 
 @asynccontextmanager
@@ -93,17 +97,25 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     configurar_engine_de_metricas(engine_de_metricas)
 
     # Observabilidade OTLP: unico ponto onde app + engine existem
-    # juntos. Default OFF (OTEL_ENABLED ausente/false) — no-op sem custo.
-    configurar_otel(app, engine)
+    # juntos. Default OFF (OTEL_ENABLED ausente/false) — no-op sem custo. O
+    # provider que ele monta e encerrado no fim: o shutdown descarrega o lote de
+    # spans, e o atexit nao roda quando o uvicorn nao e o PID 1.
+    provedor = configurar_otel(app, engine, getattr(app.state, "provedor", None))
     try:
         yield
     finally:
+        if provedor is not None:
+            provedor.shutdown()
         engine.dispose()
         engine_de_metricas.dispose()
 
 
-def criar_app() -> FastAPI:
+def criar_app(provedor: TracerProvider | None = None) -> FastAPI:
     """Fabrica o FastAPI com middleware de seguranca, CORS, rate limiting e handlers.
+
+    ``provedor`` (os testes) e o provider de traces da API no lugar do que o
+    lifespan monta com ``OTEL_ENABLED``: o app o instrumenta, e quem o criou o
+    encerra.
 
     Swagger (`/docs`, `/redoc`, `/openapi.json`) fica ligado em todo ambiente:
     a documentacao da API e entregavel e e publicada na borda (Kong).
@@ -134,6 +146,7 @@ def criar_app() -> FastAPI:
         # lock subir.
         telemetry={"auto_configure": False},
     )
+    application.state.provedor = provedor
 
     # Imports locais: routers so carregam ao fabricar o app (sem instanciacao
     # precoce de dependencias no import do modulo).

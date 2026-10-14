@@ -54,7 +54,7 @@ def main() -> None:
                 abrir=lambda: TransacaoDosPrazosSQLAlchemy(session_factory),
                 presenca=presenca,
                 contexto=ContextoDeEnvio(
-                    prazo, span=span_da_saga(criar_tracer("prazos"))
+                    prazo, span=span_da_saga(criar_tracer("prazos", engine))
                 ),
                 max_reenvios=maximo,
                 banco_fora=BANCO_FORA,

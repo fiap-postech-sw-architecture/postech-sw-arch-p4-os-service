@@ -248,7 +248,14 @@ def boot_falso(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                 or (registro["engine"], registro["parametros"])
             ),
         )
-        monkeypatch.setattr(modulo, "criar_tracer", lambda nome: f"tracer-{nome}")
+        monkeypatch.setattr(
+            modulo,
+            "criar_tracer",
+            lambda nome, engine: (
+                registro.setdefault("tracers", []).append((nome, engine))
+                or f"tracer-{nome}"
+            ),
+        )
         monkeypatch.setattr(modulo, "subir_metricas", lambda: 9100)
     monkeypatch.setattr(processo_relay, "Relay", _Processo)
     monkeypatch.setattr(processo_consumidor, "Consumidor", _Processo)
@@ -266,6 +273,8 @@ def test_main_do_relay_monta_executa_e_fecha_o_banco(
     assert relay.kwargs["engine"] is boot_falso["engine"]
     assert relay.kwargs["parametros"] is boot_falso["parametros"]
     assert relay.kwargs["tracer"] == "tracer-relay"
+    # O banco do processo e o que o tracer instrumenta.
+    assert boot_falso["tracers"] == [("relay", boot_falso["engine"])]
     boot_falso["engine"].dispose.assert_called_once()
 
 
@@ -280,6 +289,7 @@ def test_main_do_consumidor_monta_executa_e_fecha_o_banco(
     (handler,) = set(consumidor.kwargs["despachante"].values())
     assert handler.keywords == {"prazo_resposta": timedelta(seconds=120)}
     assert consumidor.kwargs["tracer"] == "tracer-consumidor"
+    assert boot_falso["tracers"] == [("consumidor", boot_falso["engine"])]
     boot_falso["engine"].dispose.assert_called_once()
 
 

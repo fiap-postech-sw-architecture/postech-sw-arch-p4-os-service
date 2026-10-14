@@ -113,7 +113,7 @@ def main() -> None:
             session_factory=criar_session_factory(engine),
             parametros=parametros,
             despachante=montar_despachante(prazo_de_resposta_da_saga()),
-            tracer=criar_tracer("consumidor"),
+            tracer=criar_tracer("consumidor", engine),
         )
         subir_metricas()
         consumidor.executar(parar)

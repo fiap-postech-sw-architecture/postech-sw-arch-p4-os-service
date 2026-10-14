@@ -60,7 +60,13 @@ def boot_falso(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             or (registro["engine"], registro["parametros"])
         ),
     )
-    monkeypatch.setattr(processo_prazos, "criar_tracer", lambda nome: MagicMock())
+    monkeypatch.setattr(
+        processo_prazos,
+        "criar_tracer",
+        lambda nome, engine: (
+            registro.setdefault("tracers", []).append((nome, engine)) or MagicMock()
+        ),
+    )
     monkeypatch.setattr(processo_prazos, "subir_metricas", lambda: 9100)
     monkeypatch.setattr(processo_prazos, "criar_session_factory", lambda e: MagicMock())
     monkeypatch.setattr(
@@ -75,6 +81,7 @@ def test_main_monta_executa_e_fecha_o_banco(boot_falso: dict[str, Any]) -> None:
 
     (processo,) = _Processo.criados
     assert boot_falso["processos"] == ["prazos"]
+    assert boot_falso["tracers"] == [("prazos", boot_falso["engine"])]
     assert processo.executou
     assert processo.kwargs["intervalo_s"] == 30
     vencer = processo.kwargs["vencer"]

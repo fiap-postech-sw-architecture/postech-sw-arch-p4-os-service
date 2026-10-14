@@ -14,11 +14,12 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from opentelemetry import trace
-from opentelemetry.trace import Link, SpanKind, StatusCode
+from opentelemetry.trace import Link, SpanKind
 
 from src.compartilhado.dominio.exceptions import DomainException
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     contexto_dos_cabecalhos,
+    marcar_falha,
 )
 
 if TYPE_CHECKING:
@@ -57,7 +58,7 @@ def span_da_saga(tracer: Tracer) -> SpanDaSaga:
             except Exception as exc:
                 # Falha inesperada (banco, contrato da outbox, invariante): o
                 # span marca o erro com o tipo, sem a mensagem nem o traceback.
-                span.set_status(StatusCode.ERROR, type(exc).__name__)
+                marcar_falha(span, type(exc).__name__)
                 raise
 
     return abrir

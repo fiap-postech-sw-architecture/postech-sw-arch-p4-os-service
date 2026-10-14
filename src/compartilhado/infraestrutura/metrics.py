@@ -56,7 +56,7 @@ _NOME_METER = "pytstop-os-service"
 # Label de rota para requests que nao casaram rota nenhuma (404 de path
 # desconhecido): agrega tudo num unico valor em vez de explodir a
 # cardinalidade com paths arbitrarios.
-_ROTA_NAO_ROTEADA: Final = "nao_roteada"
+ROTA_NAO_ROTEADA: Final = "nao_roteada"
 
 # Buckets de latencia HTTP: 5ms..5s cobre do hit de cache ao pior
 # caso com lock pessimista, com resolucao suficiente para p50/p90/p99.
@@ -170,7 +170,7 @@ def _rota_template(request: Request) -> str:
     """Path template da rota casada (``APIRoute.path_format``/``Mount.path``)."""
     rota = request.scope.get("route")
     template = getattr(rota, "path_format", None) or getattr(rota, "path", None)
-    return template if isinstance(template, str) else _ROTA_NAO_ROTEADA
+    return template if isinstance(template, str) else ROTA_NAO_ROTEADA
 
 
 def _habilitado() -> bool:

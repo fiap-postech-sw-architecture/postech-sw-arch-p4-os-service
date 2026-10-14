@@ -1,519 +1,273 @@
-"""Unitarios de ``configurar_otel`` (ADR-020, escopo minimo).
+"""``configurar_otel``: o que a API liga no lifespan (ADR-020 do p3, ADR-043).
 
-Contrato coberto:
-
-- flag ``OTEL_ENABLED`` desligada (ausente ou false) -> ``False`` sem efeito
-  algum — nenhum import de OpenTelemetry, nenhum log;
-- flag ligada sem o extra ``otel`` instalado -> ``False`` + warning logado
-  (boot nunca quebra por dependencia ausente);
-- flag ligada com dependencias presentes (stubs em ``sys.modules``) ->
-  ``True`` com FastAPI/SQLAlchemy instrumentados no app/engine certos,
-  ``/api/v1/saude`` excluida e exporter apontando para o endpoint OTLP.
-
-Os stubs simulam os modulos otel em ``sys.modules`` para que a suite rode
-identica com ou sem o extra ``otel`` instalado (o CI o instala; o ``uv sync``
-padrao, nao).
+O provider dos testes e o de producao (``Rastreador``); o engine e um SQLite em
+memoria, que o instrumentador do SQLAlchemy aceita como qualquer outro.
 """
 
 from __future__ import annotations
 
-import atexit
-import sys
-import types
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
 from fastapi import FastAPI
-from structlog.testing import capture_logs
+from fastapi.testclient import TestClient
+from opentelemetry import baggage, trace
+from opentelemetry.propagate import get_global_textmap, set_global_textmap
+from opentelemetry.trace import SpanKind
+from sqlalchemy import create_engine, text
 
 import src.compartilhado.infraestrutura.observability as observability_modulo
+from src.compartilhado.infraestrutura.mensageria.telemetria import PropagadorW3C
 from src.compartilhado.infraestrutura.observability import (
-    _redigir_pii_da_span,
     configurar_otel,
+    instrumentar_banco,
     tracer_da_api,
 )
+from tests.rastreamento import Rastreador
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sqlalchemy import Engine
+
+_PAI = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 
 
 @pytest.fixture(autouse=True)
-def _logger_fresco(monkeypatch: pytest.MonkeyPatch) -> None:
-    # capture_logs nao intercepta loggers ja "bound" e cacheados
-    # (configurar_logging usa cache_logger_on_first_use=True). Um proxy novo
-    # por teste devolve o capture deterministico em qualquer ordem da suite.
+def _estado_global_da_telemetria(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """O que ``configurar_otel`` muda no processo, desfeito ao fim de cada teste."""
     monkeypatch.setattr(
         observability_modulo, "_log", structlog.get_logger("test_observability")
     )
-
-
-def _bloquear_imports_otel(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forca ImportError em qualquer ``import opentelemetry...``.
-
-    Remove modulos otel ja importados (caso o extra esteja instalado e outro
-    teste os tenha carregado) e poe ``None`` na raiz — o import system trata
-    ``None`` em ``sys.modules`` como import proibido e levanta ImportError.
-    """
-    for nome in [
-        m for m in sys.modules if m == "opentelemetry" or m.startswith("opentelemetry.")
-    ]:
-        monkeypatch.delitem(sys.modules, nome)
-    monkeypatch.setitem(sys.modules, "opentelemetry", None)
+    monkeypatch.setattr(observability_modulo, "_tracer_da_api", None)
+    propagador = get_global_textmap()
+    yield
+    set_global_textmap(propagador)
 
 
 @pytest.fixture
-def otel_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Instala stubs dos modulos otel em ``sys.modules`` e devolve o registro
-    de chamadas que eles gravam."""
-    registro: dict = {}
-
-    class ResourceStub:
-        def __init__(self, attributes: dict) -> None:
-            self.attributes = attributes
-
-        @classmethod
-        def create(cls, attributes: dict) -> ResourceStub:
-            registro["resource_attributes"] = attributes
-            return cls(attributes)
-
-    class TracerProviderStub:
-        def __init__(self, resource: ResourceStub) -> None:
-            registro["provider"] = self
-            registro["provider_resource"] = resource
-            self.processors: list = []
-
-        def add_span_processor(self, processor: object) -> None:
-            self.processors.append(processor)
-
-        def get_tracer(self, nome: str) -> object:
-            registro["tracer"] = ("tracer", nome)
-            return registro["tracer"]
-
-        def shutdown(self) -> None:
-            registro["shutdown_chamado"] = True
-
-    class BatchSpanProcessorStub:
-        def __init__(self, exporter: object) -> None:
-            self.exporter = exporter
-            registro["batch_exporter"] = exporter
-
-    class OTLPSpanExporterStub:
-        def __init__(self, endpoint: str, insecure: bool) -> None:
-            registro["endpoint"] = endpoint
-            registro["insecure"] = insecure
-
-    class FastAPIInstrumentorStub:
-        @staticmethod
-        def instrument_app(app: FastAPI, **kwargs: object) -> None:
-            registro["fastapi_app"] = app
-            registro["fastapi_kwargs"] = kwargs
-
-    class SQLAlchemyInstrumentorStub:
-        def instrument(self, **kwargs: object) -> None:
-            registro["sqlalchemy_kwargs"] = kwargs
-
-    simbolos_por_modulo = {
-        "opentelemetry.sdk.resources": {"Resource": ResourceStub},
-        "opentelemetry.sdk.trace": {"TracerProvider": TracerProviderStub},
-        "opentelemetry.sdk.trace.export": {
-            "BatchSpanProcessor": BatchSpanProcessorStub
-        },
-        "opentelemetry.exporter.otlp.proto.grpc.trace_exporter": {
-            "OTLPSpanExporter": OTLPSpanExporterStub
-        },
-        "opentelemetry.instrumentation.fastapi": {
-            "FastAPIInstrumentor": FastAPIInstrumentorStub
-        },
-        "opentelemetry.instrumentation.sqlalchemy": {
-            "SQLAlchemyInstrumentor": SQLAlchemyInstrumentorStub
-        },
-    }
-
-    # Registra cada modulo-alvo e todos os pacotes intermediarios: o import
-    # system resolve pais antes dos filhos em `from a.b.c import d`.
-    instalados: dict[str, types.ModuleType] = {}
-    for caminho, simbolos in simbolos_por_modulo.items():
-        partes = caminho.split(".")
-        for i in range(1, len(partes) + 1):
-            prefixo = ".".join(partes[:i])
-            if prefixo not in instalados:
-                instalados[prefixo] = types.ModuleType(prefixo)
-        for nome, valor in simbolos.items():
-            setattr(instalados[caminho], nome, valor)
-    for caminho, modulo in instalados.items():
-        monkeypatch.setitem(sys.modules, caminho, modulo)
-
-    registro["classes"] = {
-        "exporter": OTLPSpanExporterStub,
-        "batch": BatchSpanProcessorStub,
-        "provider": TracerProviderStub,
-    }
-    # O tracer da API e de processo: um teste nao deixa o dele para o seguinte.
-    monkeypatch.setattr(observability_modulo, "_tracer_da_api", None)
-    return registro
+def engine() -> Iterator[Engine]:
+    eng = create_engine("sqlite://")
+    yield eng
+    eng.dispose()
 
 
-class TestTracerDaApi:
-    def test_sem_a_instrumentacao_e_o_no_op(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr(observability_modulo, "_tracer_da_api", None)
+def _app_que_responde(onde: dict[str, Any]) -> FastAPI:
+    """App com uma rota que guarda o que a requisicao trouxe do contexto."""
+    app = FastAPI()
 
-        with tracer_da_api().start_as_current_span("x") as span:
-            assert not span.get_span_context().is_valid
+    @app.get("/x")
+    def rota() -> dict[str, str]:
+        onde["baggage"] = baggage.get_all()
+        onde["span"] = trace.get_current_span().get_span_context()
+        return {}
 
-    def test_com_a_instrumentacao_e_o_do_provider_dela(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
-    ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-
-        assert configurar_otel(FastAPI(), object()) is True
-
-        assert tracer_da_api() is otel_stubs["tracer"]
-        assert otel_stubs["tracer"] == ("tracer", "pytstop-os-service.api")
+    return app
 
 
 class TestFlagDesligada:
-    def test_flag_ausente_retorna_false_sem_importar_otel(
-        self, monkeypatch: pytest.MonkeyPatch
+    def test_sem_flag_nao_instrumenta_nada(
+        self, monkeypatch: pytest.MonkeyPatch, engine: Engine
     ) -> None:
         monkeypatch.delenv("OTEL_ENABLED", raising=False)
-        # Import bloqueado: se o caminho off tentasse importar otel, o teste
-        # veria o warning de dependencia ausente em vez de silencio.
-        _bloquear_imports_otel(monkeypatch)
+        app = FastAPI()
 
-        with capture_logs() as logs:
-            resultado = configurar_otel(FastAPI(), object())
+        assert configurar_otel(app, engine) is None
 
-        assert resultado is False
-        assert logs == []
+        assert app.middleware_stack is None
+        with tracer_da_api().start_as_current_span("x") as span:
+            assert not span.get_span_context().is_valid
 
-    @pytest.mark.parametrize(
-        "valor",
-        ["false", "False", "0", pytest.param("", id="vazio"), "off"],
-    )
-    def test_valores_desligados_retornam_false(
-        self, monkeypatch: pytest.MonkeyPatch, valor: str
+    @pytest.mark.parametrize("valor", ["false", "False", "0", "", "off"], ids=repr)
+    def test_valores_desligados_nao_instrumentam(
+        self, monkeypatch: pytest.MonkeyPatch, engine: Engine, valor: str
     ) -> None:
         monkeypatch.setenv("OTEL_ENABLED", valor)
-        _bloquear_imports_otel(monkeypatch)
 
-        with capture_logs() as logs:
-            resultado = configurar_otel(FastAPI(), object())
-
-        assert resultado is False
-        assert logs == []
+        assert configurar_otel(FastAPI(), engine) is None
 
 
-class TestFlagLigadaSemDependencias:
-    def test_retorna_false_e_loga_warning(
-        self, monkeypatch: pytest.MonkeyPatch
+class TestFlagLigada:
+    def test_monta_o_provider_da_api_e_o_devolve_para_o_encerramento(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        engine: Engine,
+        otlp_falso: dict[str, Any],
     ) -> None:
         monkeypatch.setenv("OTEL_ENABLED", "true")
-        _bloquear_imports_otel(monkeypatch)
-
-        with capture_logs() as logs:
-            resultado = configurar_otel(FastAPI(), object())
-
-        assert resultado is False
-        warnings = [log for log in logs if log["log_level"] == "warning"]
-        assert len(warnings) == 1
-        assert "otel" in str(warnings[0]).lower()
-        # A mensagem precisa ser acionavel: dizer como instalar o extra.
-        assert "--extra otel" in str(warnings[0])
-
-
-class TestFlagLigadaComDependencias:
-    def test_instrumenta_app_e_engine_e_retorna_true(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
-    ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
-        monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
         monkeypatch.setenv("PYTSTOP_GIT_SHA", "abcdef0123456789")
         app = FastAPI()
-        engine = object()
 
-        resultado = configurar_otel(app, engine)
+        provedor = configurar_otel(app, engine)
 
-        assert resultado is True
-        # Resource identifica o servico e o processo na UI do Jaeger.
-        atributos = otel_stubs["resource_attributes"]
-        assert atributos["service.name"] == "pytstop-os-service"
-        assert atributos["service.version"] == "abcdef012345"  # sha truncado [:12]
-        assert atributos["pytstop.processo"] == "api"
-        # FastAPI instrumentado no app certo, com saude fora do trace.
-        assert otel_stubs["fastapi_app"] is app
-        kwargs_fastapi = otel_stubs["fastapi_kwargs"]
-        assert "saude" in kwargs_fastapi["excluded_urls"]
-        assert kwargs_fastapi["tracer_provider"] is otel_stubs["provider"]
-        # Hook de redacao de PII na query string fica registrado (TD-017).
-        assert kwargs_fastapi["server_request_hook"] is _redigir_pii_da_span
-        # SQLAlchemy instrumentado no engine certo, mesmo provider.
-        kwargs_sqlalchemy = otel_stubs["sqlalchemy_kwargs"]
-        assert kwargs_sqlalchemy["engine"] is engine
-        assert kwargs_sqlalchemy["tracer_provider"] is otel_stubs["provider"]
-        # Pipeline exporter -> batch -> provider montado.
-        assert otel_stubs["endpoint"] == "http://jaeger:4317"
-        assert isinstance(
-            otel_stubs["batch_exporter"], otel_stubs["classes"]["exporter"]
-        )
-        processors = otel_stubs["provider"].processors
-        assert len(processors) == 1
-        assert isinstance(processors[0], otel_stubs["classes"]["batch"])
+        assert provedor is not None
+        recurso = provedor.resource.attributes
+        assert recurso["pytstop.processo"] == "api"
+        assert recurso["service.version"] == "abcdef012345"
+        assert otlp_falso["endpoint"] == "http://jaeger:4317"
+        # O tracer da API (spans a mao do caso de uso) e o do mesmo provider.
+        with tracer_da_api().start_as_current_span("saga cancelamento"):
+            pass
+        provedor.force_flush()
+        (exportado,) = otlp_falso["exportados"]
+        assert exportado.name == "saga cancelamento"
+        assert exportado.resource.attributes["pytstop.processo"] == "api"
+        provedor.shutdown()
+        assert otlp_falso["encerrado"] is True
 
-    def test_registra_shutdown_do_provider_no_atexit(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
+    def test_provider_de_fora_e_usado_e_nao_e_devolvido(
+        self, monkeypatch: pytest.MonkeyPatch, engine: Engine
     ) -> None:
-        """Pod kill/SIGTERM: o BatchSpanProcessor so descarrega a fila no
-        shutdown() do provider — sem o registro no atexit os ultimos spans
-        do processo seriam perdidos."""
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        registrados: list[object] = []
-        monkeypatch.setattr(atexit, "register", registrados.append)
+        # Quem criou o provider e quem o encerra: o lifespan so encerra o que montou.
+        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        rastreador = Rastreador("api")
 
-        assert configurar_otel(FastAPI(), object()) is True
-        assert registrados == [otel_stubs["provider"].shutdown]
+        assert configurar_otel(FastAPI(), engine, rastreador.provedor) is None
 
-    def test_endpoint_http_usa_canal_insecure(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
+        with tracer_da_api().start_as_current_span("saga prazo"):
+            pass
+        assert [s.name for s in rastreador.spans()] == ["saga prazo"]
+
+    def test_instrumenta_o_app_e_o_engine_no_mesmo_provider(
+        self, engine: Engine
     ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+        rastreador = Rastreador("api")
+        app = _app_que_responde({})
+        configurar_otel(app, engine, rastreador.provedor)
 
-        assert configurar_otel(FastAPI(), object()) is True
-        assert otel_stubs["insecure"] is True
+        with TestClient(app) as cliente:
+            cliente.get("/x")
+            with rastreador.tracer.start_as_current_span("fora"):
+                pass
+        servidor = [s for s in rastreador.spans() if s.kind is SpanKind.SERVER]
+        assert [s.name for s in servidor] == ["GET /x"]
 
-    def test_endpoint_https_customizado_usa_tls(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
+    def test_o_comando_de_banco_dentro_da_requisicao_e_filho_dela(
+        self, engine: Engine
     ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector:4317")
-
-        assert configurar_otel(FastAPI(), object()) is True
-        assert otel_stubs["endpoint"] == "https://collector:4317"
-        assert otel_stubs["insecure"] is False
-
-    @pytest.mark.parametrize("valor", ["true", "TRUE", "1", " true "])
-    def test_valores_ligados_ativam_instrumentacao(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict, valor: str
-    ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", valor)
-
-        assert configurar_otel(FastAPI(), object()) is True
-
-    def test_reconstroi_middleware_stack_ja_construido(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
-    ) -> None:
-        """configurar_otel roda no lifespan, DEPOIS de o Starlette construir o
-        middleware_stack (o proprio scope `lifespan` atravessa o stack). O
-        instrumentador do FastAPI so embrulha `build_middleware_stack`; sem o
-        rebuild explicito o middleware OTel nunca entra no caminho HTTP —
-        sintoma real observado: spans de SQLAlchemy presentes, de FastAPI
-        ausentes."""
-        monkeypatch.setenv("OTEL_ENABLED", "true")
+        rastreador = Rastreador("api")
         app = FastAPI()
-        app.middleware_stack = app.build_middleware_stack()
-        stack_pre_instrumentacao = app.middleware_stack
 
-        assert configurar_otel(app, object()) is True
-        assert app.middleware_stack is not None
-        assert app.middleware_stack is not stack_pre_instrumentacao
+        @app.get("/x")
+        def rota() -> dict[str, str]:
+            with engine.connect() as conexao:
+                conexao.execute(text("SELECT 1"))
+            return {}
 
-    def test_nao_constroi_middleware_stack_antes_da_hora(
-        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
-    ) -> None:
-        """App ainda sem stack construido (uso fora do lifespan, ex.: testes):
-        o Starlette constroi lazy no primeiro scope, ja com o patch do
-        instrumentador aplicado — construir aqui seria antecipar estado."""
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        app = FastAPI()
-        assert app.middleware_stack is None
+        configurar_otel(app, engine, rastreador.provedor)
 
-        assert configurar_otel(app, object()) is True
-        assert app.middleware_stack is None
+        TestClient(app).get("/x")
+        TestClient(app).get("/x")
 
-
-class _SpanFake:
-    """Span minimo para exercitar o hook sem o SDK do OpenTelemetry."""
-
-    def __init__(self, *, gravando: bool = True) -> None:
-        self._gravando = gravando
-        self.atributos: dict[str, object] = {}
-
-    def is_recording(self) -> bool:
-        return self._gravando
-
-    def set_attribute(self, chave: str, valor: object) -> None:
-        self.atributos[chave] = valor
-
-
-class TestRedacaoDePII:
-    """TD-017: o hook remove placa/documento da query string dos spans."""
-
-    def test_redige_query_e_mantem_apenas_o_path(self) -> None:
-        span = _SpanFake()
-        scope = {
-            "type": "http",
-            "path": "/api/v1/acompanhamento",
-            "query_string": b"placa=ABC1D23&documento=12345678900",
+        (servidor, servidor_2) = [
+            s for s in rastreador.spans() if s.kind is SpanKind.SERVER
+        ]
+        consultas = [s for s in rastreador.spans() if s.kind is SpanKind.CLIENT]
+        assert {c.parent.span_id for c in consultas if c.parent} == {
+            servidor.get_span_context().span_id,
+            servidor_2.get_span_context().span_id,
         }
 
-        _redigir_pii_da_span(span, scope)
-
-        assert span.atributos["url.query"] == "REDACTED"
-        assert span.atributos["http.target"] == "/api/v1/acompanhamento"
-        assert span.atributos["url.path"] == "/api/v1/acompanhamento"
-        # A PII nao pode sobrar em nenhum atributo escrito.
-        assert "12345678900" not in str(span.atributos.values())
-        assert "ABC1D23" not in str(span.atributos.values())
-
-    def test_span_nao_gravando_e_noop(self) -> None:
-        span = _SpanFake(gravando=False)
-        _redigir_pii_da_span(span, {"path": "/x"})
-        assert span.atributos == {}
-
-    def test_scope_sem_path_redige_so_a_query(self) -> None:
-        span = _SpanFake()
-        _redigir_pii_da_span(span, {"query_string": b"documento=12345678900"})
-        assert span.atributos == {"url.query": "REDACTED"}
-
-    def test_scope_sem_query_nao_marca_redacted(self) -> None:
-        # Sem query string nao ha o que redigir: nenhum atributo url.query
-        # (um REDACTED incondicional sugeriria query onde nunca houve).
-        span = _SpanFake()
-        _redigir_pii_da_span(span, {"path": "/api/v1/saude", "query_string": b""})
-        assert "url.query" not in span.atributos
-        assert span.atributos["url.path"] == "/api/v1/saude"
-
-    def test_scope_vazio_e_noop(self) -> None:
-        span = _SpanFake()
-        _redigir_pii_da_span(span, {})
-        assert span.atributos == {}
-
-    def test_span_none_nao_quebra(self) -> None:
-        # Defensivo: o hook nunca pode derrubar o request por causa do trace.
-        _redigir_pii_da_span(None, {"path": "/x"})
-
-
-class TestTracerDoRelayEDoConsumidor:
-    """``criar_tracer``: o SDK sempre ligado; o OTLP so com OTEL_ENABLED."""
-
-    @pytest.fixture
-    def exportador(self, monkeypatch: pytest.MonkeyPatch) -> dict:
-        """Troca o exporter OTLP por um que guarda os spans e o endpoint."""
-        from opentelemetry.sdk.trace.export import SpanExportResult
-
-        registro: dict = {"spans": [], "finalizadores": []}
-
-        class ExportadorFalso:
-            def __init__(self, endpoint: str, insecure: bool) -> None:
-                registro["endpoint"] = endpoint
-                registro["insecure"] = insecure
-
-            def export(self, spans: list) -> SpanExportResult:
-                registro["spans"].extend(spans)
-                return SpanExportResult.SUCCESS
-
-            def shutdown(self) -> None:
-                pass
-
-            def force_flush(self, timeout_millis: int = 30000) -> bool:
-                return True
-
-        modulo = types.ModuleType("trace_exporter")
-        monkeypatch.setattr(modulo, "OTLPSpanExporter", ExportadorFalso, raising=False)
-        monkeypatch.setitem(
-            sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", modulo
-        )
-        monkeypatch.setattr(atexit, "register", registro["finalizadores"].append)
-        return registro
-
-    def _encerrar(self, exportador: dict) -> None:
-        for finalizar in exportador["finalizadores"]:
-            finalizar()
-
-    def test_sem_flag_o_span_existe_mas_nao_sai_do_processo(
-        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
+    def test_consulta_do_engine_fora_de_requisicao_nao_vira_trace(
+        self, engine: Engine
     ) -> None:
-        monkeypatch.delenv("OTEL_ENABLED", raising=False)
+        rastreador = Rastreador("api")
+        configurar_otel(FastAPI(), engine, rastreador.provedor)
 
-        tracer = observability_modulo.criar_tracer("relay")
-        with tracer.start_as_current_span("publish X") as span:
-            valido = span.get_span_context().is_valid
-        self._encerrar(exportador)
+        with engine.connect() as conexao:
+            conexao.execute(text("SELECT 1"))
 
-        assert valido
-        assert "endpoint" not in exportador
-        assert exportador["spans"] == []
+        assert rastreador.spans() == []
 
-    def test_com_flag_exporta_por_otlp_para_o_endpoint(
-        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
-    ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://jaeger:4317")
-        monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
+    def test_reconstroi_o_middleware_stack_ja_construido(self, engine: Engine) -> None:
+        """``configurar_otel`` roda no lifespan, DEPOIS de o Starlette construir o
+        middleware_stack (o proprio scope `lifespan` atravessa o stack). O
+        instrumentador do FastAPI so embrulha `build_middleware_stack`; sem o
+        rebuild explicito o middleware OTel nunca entra no caminho HTTP — sintoma
+        real observado: spans de SQLAlchemy presentes, de FastAPI ausentes."""
+        rastreador = Rastreador("api")
+        app = _app_que_responde({})
+        app.middleware_stack = app.build_middleware_stack()
+        antes = app.middleware_stack
 
-        tracer = observability_modulo.criar_tracer("consumidor")
-        with tracer.start_as_current_span("process X"):
-            pass
-        self._encerrar(exportador)
+        configurar_otel(app, engine, rastreador.provedor)
 
-        assert (exportador["endpoint"], exportador["insecure"]) == (
-            "http://jaeger:4317",
-            True,
-        )
-        (span,) = exportador["spans"]
-        assert span.name == "process X"
-        assert span.resource.attributes["service.name"] == "pytstop-os-service"
-        assert span.resource.attributes["pytstop.processo"] == "consumidor"
+        assert app.middleware_stack is not antes
+        TestClient(app).get("/x")
+        assert [s.name for s in rastreador.spans()] == ["GET /x"]
 
-    def test_service_name_vem_de_otel_service_name(
-        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
-    ) -> None:
-        # O nome que o platform injeta (o mesmo de Billing e Execucao).
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        monkeypatch.setenv("OTEL_SERVICE_NAME", "os-service")
+    def test_nao_constroi_o_stack_antes_da_hora(self, engine: Engine) -> None:
+        # Fora do lifespan o Starlette constroi o stack no primeiro scope, ja com o
+        # patch do instrumentador: construir aqui seria antecipar estado.
+        app = FastAPI()
+        assert app.middleware_stack is None
 
-        tracer = observability_modulo.criar_tracer("relay")
-        with tracer.start_as_current_span("publish X"):
-            pass
-        self._encerrar(exportador)
+        configurar_otel(app, engine, Rastreador("api").provedor)
 
-        (span,) = exportador["spans"]
-        assert span.resource.attributes["service.name"] == "os-service"
-        assert span.resource.attributes["pytstop.processo"] == "relay"
+        assert app.middleware_stack is None
 
-    @pytest.mark.parametrize(
-        ("valor", "esperado"),
-        [
-            pytest.param(None, "pytstop-os-service", id="ausente"),
-            pytest.param("  ", "pytstop-os-service", id="em-branco"),
-            pytest.param("os-service", "os-service", id="definido"),
-        ],
-    )
-    def test_nome_do_servico_tem_padrao(
-        self, monkeypatch: pytest.MonkeyPatch, valor: str | None, esperado: str
-    ) -> None:
-        if valor is None:
-            monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
-        else:
-            monkeypatch.setenv("OTEL_SERVICE_NAME", valor)
+    def test_segundo_app_no_mesmo_processo_tambem_e_instrumentado(self) -> None:
+        # O instrumentador do SQLAlchemy e um singleton que so instrumenta uma vez:
+        # `instrumentar_banco` desfaz o anterior (os testes montam varios apps).
+        rastreador = Rastreador("api")
+        for _ in range(2):
+            eng = create_engine("sqlite://")
+            instrumentar_banco(eng, rastreador.provedor)
+            with (
+                rastreador.tracer.start_as_current_span("raiz"),
+                eng.connect() as conexao,
+            ):
+                conexao.execute(text("SELECT 1"))
+            eng.dispose()
 
-        atributos = observability_modulo.atributos_do_recurso("api")
+        assert len([s for s in rastreador.spans() if s.kind is SpanKind.CLIENT]) >= 2
 
-        assert atributos["service.name"] == esperado
 
-    def test_com_flag_e_sem_o_extra_avisa_e_segue_sem_exportar(
-        self, monkeypatch: pytest.MonkeyPatch, exportador: dict
-    ) -> None:
-        monkeypatch.setenv("OTEL_ENABLED", "true")
-        monkeypatch.setitem(
-            sys.modules, "opentelemetry.exporter.otlp.proto.grpc.trace_exporter", None
+class TestPropagacao:
+    def test_baggage_do_chamador_nao_entra_no_processo(self, engine: Engine) -> None:
+        visto: dict[str, Any] = {}
+        app = _app_que_responde(visto)
+        configurar_otel(app, engine, Rastreador("api").provedor)
+
+        TestClient(app).get(
+            "/x", headers={"traceparent": _PAI, "baggage": "usuario=CANARIO"}
         )
 
-        with capture_logs() as logs:
-            tracer = observability_modulo.criar_tracer("relay")
-        with tracer.start_as_current_span("publish X"):
-            pass
-        self._encerrar(exportador)
+        assert visto["baggage"] == {}
+        # O traceparent segue valendo: o trace do chamador continua.
+        assert visto["span"].trace_id == int("4bf92f3577b34da6a3ce929d0e0e4736", 16)
 
-        assert [log["log_level"] for log in logs] == ["warning"]
-        assert exportador["spans"] == []
+    def test_propagador_global_e_so_o_w3c(self, engine: Engine) -> None:
+        configurar_otel(FastAPI(), engine, Rastreador("api").provedor)
+
+        assert isinstance(get_global_textmap(), PropagadorW3C)
+
+    def test_tracestate_de_ate_512_caracteres_segue(self, engine: Engine) -> None:
+        visto: dict[str, Any] = {}
+        app = _app_que_responde(visto)
+        configurar_otel(app, engine, Rastreador("api").provedor)
+        tracestate = ",".join(f"k{i:02d}=v{'x' * 12}" for i in range(28))
+        assert len(tracestate) <= 512
+
+        TestClient(app).get(
+            "/x", headers={"traceparent": _PAI, "tracestate": tracestate}
+        )
+
+        assert visto["span"].trace_state.to_header() == tracestate
+
+    def test_tracestate_acima_de_512_caracteres_e_descartado_na_entrada_http(
+        self, engine: Engine
+    ) -> None:
+        visto: dict[str, Any] = {}
+        app = _app_que_responde(visto)
+        configurar_otel(app, engine, Rastreador("api").provedor)
+        tracestate = ",".join(f"k{i:02d}=v{'x' * 12}" for i in range(32))
+        assert len(tracestate) > 512
+
+        TestClient(app).get(
+            "/x", headers={"traceparent": _PAI, "tracestate": tracestate}
+        )
+
+        assert len(visto["span"].trace_state) == 0
+        assert visto["span"].trace_id == int("4bf92f3577b34da6a3ce929d0e0e4736", 16)

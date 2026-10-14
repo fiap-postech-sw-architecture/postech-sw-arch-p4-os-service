@@ -169,5 +169,7 @@ def test_erro_que_escapa_do_span_marca_so_o_tipo() -> None:
 
     (span,) = rastreador.spans()
     assert span.status.status_code is StatusCode.ERROR
-    assert span.status.description == "RuntimeError"
+    assert span.status.description is None
+    assert span.attributes is not None
+    assert span.attributes["pytstop.falha"] == "RuntimeError"
     assert span.events == ()

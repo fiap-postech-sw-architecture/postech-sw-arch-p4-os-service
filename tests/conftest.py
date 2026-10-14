@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import sys
+import types
+from typing import TYPE_CHECKING, Any
+
 import pytest
+from opentelemetry.sdk.trace.export import SpanExportResult
 
 from tests.manifestos import exigir_kubectl
-from tests.rastreamento import Rastreador
+from tests.rastreamento import Rastreador, tudo_que_o_span_leva
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from opentelemetry.sdk.trace import ReadableSpan
+
+MODULO_DO_OTLP = "opentelemetry.exporter.otlp.proto.grpc.trace_exporter"
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +44,35 @@ def kubectl() -> None:
 def rastreador() -> Rastreador:
     """Spans do teste em memoria (InMemorySpanExporter)."""
     return Rastreador()
+
+
+@pytest.fixture
+def otlp_falso(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Troca o exportador OTLP/gRPC por um que guarda o endpoint e cada span."""
+    registro: dict[str, Any] = {"exportados": [], "encerrado": False}
+
+    class ExportadorFalso:
+        def __init__(self, endpoint: str, insecure: bool) -> None:
+            registro["endpoint"] = endpoint
+            registro["insecure"] = insecure
+
+        def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+            registro["exportados"].extend(spans)
+            registro.setdefault("texto", []).extend(
+                tudo_que_o_span_leva(span) for span in spans
+            )
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self) -> None:
+            registro["encerrado"] = True
+
+        def force_flush(self, timeout_millis: int = 30000) -> bool:
+            return True
+
+    modulo = types.ModuleType("trace_exporter")
+    modulo.OTLPSpanExporter = ExportadorFalso  # type: ignore[attr-defined]  # modulo falso
+    monkeypatch.setitem(sys.modules, MODULO_DO_OTLP, modulo)
+    return registro
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

@@ -261,11 +261,59 @@ class TestMain:
                 ),
             ):
                 mock_engine.return_value.dispose = lambda: None
+                mock_otel.return_value = None
                 async with lifespan(app):
                     pass
-                mock_otel.assert_called_once_with(app, mock_engine.return_value)
+                # Sem provider de fora (`criar_app()` sem `provedor`), o lifespan
+                # deixa o `configurar_otel` montar o dele.
+                mock_otel.assert_called_once_with(app, mock_engine.return_value, None)
 
         asyncio.run(_run())
+
+    @pytest.mark.parametrize("de_fora", [False, True], ids=["montado", "de-fora"])
+    def test_lifespan_encerra_so_o_provider_que_o_configurar_otel_montou(
+        self, de_fora: bool
+    ) -> None:
+        """O ``shutdown`` descarrega o lote de spans no fim do lifespan: o
+        ``atexit`` do SDK nao roda quando o uvicorn nao e o PID 1. O provider que
+        veio de fora (os testes) e de quem o criou, e o lifespan o entrega ao
+        ``configurar_otel`` sem encerra-lo."""
+        provedor_de_fora = MagicMock()
+        app = criar_app(provedor_de_fora if de_fora else None)
+        montado = MagicMock()
+
+        async def _run() -> None:
+            with (
+                patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.compartilhado.infraestrutura.database.criar_engine"),
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.infraestrutura.observability.configurar_otel",
+                    return_value=None if de_fora else montado,
+                ) as mock_otel,
+                patch.dict(
+                    os.environ,
+                    {"DATABASE_URL": "postgresql://x:x@localhost:5432/x"},
+                    clear=False,
+                ),
+            ):
+                async with lifespan(app):
+                    montado.shutdown.assert_not_called()
+                assert mock_otel.call_args.args[2] is (
+                    provedor_de_fora if de_fora else None
+                )
+
+        asyncio.run(_run())
+
+        provedor_de_fora.shutdown.assert_not_called()
+        assert montado.shutdown.call_count == (0 if de_fora else 1)
 
     def test_lifespan_liga_a_engine_das_metricas_e_a_descarta_no_fim(self) -> None:
         """Os gauges da saga raspam por uma engine propria (uma conexao, prazos

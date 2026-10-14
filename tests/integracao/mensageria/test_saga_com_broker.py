@@ -493,8 +493,9 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
     assert registrada == 0
     assert atendimento.gatilhos() == gatilhos
     (consumo,) = rastreador.spans(f"process {recusado['tipo']}")
-    assert consumo.status.description == motivo
+    assert consumo.status.description is None
     assert consumo.attributes is not None
+    assert consumo.attributes["pytstop.falha"] == motivo
     saga = {k: v for k, v in consumo.attributes.items() if k.startswith("pytstop.saga")}
     esperado = {"pytstop.saga.desfecho": "recusada"}
     if etapa is not None:

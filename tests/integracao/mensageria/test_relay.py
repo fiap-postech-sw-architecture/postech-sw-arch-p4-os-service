@@ -185,8 +185,9 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
     assert REGISTRY.get_sample_value("outbox_dead") == 1
     assert REGISTRY.get_sample_value("outbox_pendentes") == 0
     (falha, *_) = rastreador.spans("publish SolicitarDiagnostico")
-    assert falha.status.description is not None
-    assert "nenhuma fila" in falha.status.description
+    assert falha.status.description is None
+    assert falha.attributes is not None
+    assert falha.attributes["pytstop.falha"] == "UnroutableError"
     assert broker.contar(_FILA) == 0
 
 

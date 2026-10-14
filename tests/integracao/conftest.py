@@ -17,6 +17,7 @@ from structlog.testing import capture_logs
 
 from src.compartilhado.infraestrutura.logging import configurar_logging
 from src.compartilhado.infraestrutura.mensageria import amqp, consumidor, relay
+from src.compartilhado.infraestrutura.observability import instrumentar_banco
 from src.ordem_servico.aplicacao import emails
 from src.ordem_servico.aplicacao import use_cases as use_cases_os
 from src.ordem_servico.aplicacao.saga import orquestrador
@@ -24,7 +25,7 @@ from src.ordem_servico.infraestrutura import metricas_da_saga, notificador
 from tests.integracao.broker import Broker, subir_broker
 from tests.integracao.mailpit import Mailpit, subir_mailpit
 from tests.integracao.seed_helpers import criar_usuario
-from tests.rastreamento import RegistrosDoLog, Saidas
+from tests.rastreamento import Rastreador, RegistrosDoLog, Saidas
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
@@ -175,6 +176,39 @@ def api_client(engine: Engine) -> Generator[TestClient]:
 
     with ambiente_da_app(engine), TestClient(criar_app()) as client:
         yield client
+
+
+@pytest.fixture
+def api_rastreada(
+    engine: Engine, admin_user: Usuario, rastreador: Rastreador
+) -> Generator[TestClient]:
+    """O app REAL (lifespan, banco efemero) instrumentado pelo provider do teste.
+
+    O provider e o de producao, com os spans em memoria (``rastreador``): o
+    lifespan instrumenta o FastAPI e o engine dele com ele, e quem le os spans e
+    o ``rastreador``. Um app por teste, porque o provider e do teste.
+    """
+    from fastapi.testclient import TestClient
+
+    from src.main import criar_app
+
+    with ambiente_da_app(engine), TestClient(criar_app(rastreador.provedor)) as client:
+        yield client
+
+
+@pytest.fixture
+def engine_rastreado(engine: Engine, rastreador: Rastreador) -> Generator[Engine]:
+    """O engine da sessao de testes instrumentado pelo provider do teste.
+
+    E o engine que o relay, o consumidor e o prazos dos testes usam: cada comando
+    SQL deles vira span no ``rastreador``. Ao fim o instrumentador sai do engine,
+    que os testes seguintes usam sem ele.
+    """
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+    instrumentar_banco(engine, rastreador.provedor)
+    yield engine
+    SQLAlchemyInstrumentor().uninstrument()
 
 
 @pytest.fixture(scope="module")
