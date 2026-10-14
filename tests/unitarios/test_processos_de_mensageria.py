@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import smtplib
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -16,12 +17,14 @@ import src.relay as processo_relay
 from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
+from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.orquestrador import (
     EventoAdiantadoError,
     EventoRecusadoError,
     Tratamento,
 )
+from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.notificacoes_mapping import (
     NotificacoesSQLAlchemy,
 )
@@ -109,7 +112,10 @@ def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
     # O e-mail da transicao vai na sessao da mensagem: o mesmo commit.
     notificacoes = falso.montado_com["notificacoes"]
     assert isinstance(notificacoes, NotificacoesSQLAlchemy)
-    assert notificacoes._session is transacao.session
+    notificacoes.registrar(
+        Notificacao(uuid4(), ModeloDeNotificacao.SITUACAO, StatusOrdem.ENTREGUE)
+    )
+    transacao.session.execute.assert_called_once()
     assert falso.montado_com["contexto"].prazo_resposta == timedelta(seconds=9)
     (span,) = rastreador.spans()
     assert span.attributes == {
@@ -318,6 +324,8 @@ def test_main_do_notificador_sobe_so_com_o_banco_e_o_smtp_e_fecha_o_banco(
     monkeypatch.setattr(processo_notificador, "Notificador", _Processo)
     monkeypatch.setenv("SMTP_HOST", "mailpit")
     monkeypatch.delenv("RABBITMQ_URL", raising=False)
+    smtp = MagicMock()
+    monkeypatch.setattr(smtplib, "SMTP", smtp)
 
     processo_notificador.main()
 
@@ -325,7 +333,9 @@ def test_main_do_notificador_sobe_so_com_o_banco_e_o_smtp_e_fecha_o_banco(
     assert registro == ["notificador"]
     assert notificador.executou
     assert notificador.kwargs["engine"] is engine
-    assert notificador.kwargs["email"]._host == "mailpit"
+    # O adapter montado fala com o SMTP_HOST do ambiente.
+    notificador.kwargs["email"].enviar("maria@cliente.com", "assunto", "corpo")
+    assert smtp.call_args.args[0] == "mailpit"
     engine.dispose.assert_called_once()
 
 

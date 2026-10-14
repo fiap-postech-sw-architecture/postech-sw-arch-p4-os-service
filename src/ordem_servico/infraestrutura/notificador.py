@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import structlog
 from sqlalchemy.exc import SQLAlchemyError
@@ -46,6 +46,7 @@ from src.ordem_servico.infraestrutura.repository import (
 
 if TYPE_CHECKING:
     import threading
+    from collections.abc import Callable
     from pathlib import Path
 
     from sqlalchemy import Engine
@@ -77,21 +78,51 @@ class ConfigNotificador:
     diretorio_de_saude: Path = DIRETORIO_DE_SAUDE
 
 
-class Notificador:
-    """Entrega a tabela ``notificacoes`` por SMTP ate o ``parar`` (SIGTERM)."""
+class _Fila(Protocol):
+    """Os passos do laco sobre a tabela (``FilaDeNotificacoes``)."""
 
-    def __init__(
+    def reivindicar(self, lease: timedelta) -> LinhaDeNotificacao | None: ...
+
+    def marcar_entregue(self, linha: LinhaDeNotificacao) -> bool: ...
+
+    def registrar_falha(
+        self, linha: LinhaDeNotificacao, motivo: str
+    ) -> Literal["dead", "nova_tentativa", "perdida"]: ...
+
+    def limpar(self, *, entre_lotes: Callable[[], None]) -> int: ...
+
+
+class _Escuta(Protocol):
+    """A espera entre os ciclos (``EscutaDeCanal``)."""
+
+    def esperar(self, parar: threading.Event, poll_s: float) -> None: ...
+
+    def fechar(self) -> None: ...
+
+
+class Notificador:
+    """Entrega a tabela ``notificacoes`` por SMTP ate o ``parar`` (SIGTERM).
+
+    A fila, a escuta do ``NOTIFY`` e a montagem do e-mail saem do ``engine`` por
+    padrao; quem testa o laco os injeta.
+    """
+
+    def __init__(  # noqa: PLR0913  # colaboradores, todos por palavra-chave
         self,
         *,
         engine: Engine,
         email: EmailPort,
         config: ConfigNotificador | None = None,
+        fila: _Fila | None = None,
+        escuta: _Escuta | None = None,
+        montar: Callable[[Notificacao], Email | None] | None = None,
     ) -> None:
         self._email = email
         self._config = config or ConfigNotificador()
-        self._fila = FilaDeNotificacoes(engine, self._config.atrasos_s)
-        self._escuta = EscutaDeCanal(engine, CANAL_NOTIFICACAO)
+        self._fila = fila or FilaDeNotificacoes(engine, self._config.atrasos_s)
+        self._escuta = escuta or EscutaDeCanal(engine, CANAL_NOTIFICACAO)
         self._sessoes = criar_session_factory(engine)
+        self._montar = montar or self._montar_no_banco
         self._sinal = Sinalizador("notificador", self._config.diretorio_de_saude)
         self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
 
@@ -154,7 +185,7 @@ class Notificador:
         else:
             self._entregue(linha, contexto, enviado=email is not None)
 
-    def _montar(self, notificacao: Notificacao) -> Email | None:
+    def _montar_no_banco(self, notificacao: Notificacao) -> Email | None:
         """O e-mail do pedido; a transacao de leitura fecha antes do SMTP."""
         with self._sessoes() as sessao:
             return MontarEmail(

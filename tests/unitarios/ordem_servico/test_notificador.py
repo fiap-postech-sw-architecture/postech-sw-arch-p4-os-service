@@ -1,15 +1,16 @@
-"""O laco do ``notificador`` com fila, SMTP e leitura falsos (ADR-036).
+"""O laco do ``notificador`` com fila, SMTP, leitura e escuta falsos (ADR-036).
 
 Cada desfecho de uma linha e do ciclo: o e-mail enviado, fechado sem envio, a
 falha de envio, a falha inesperada, o banco fora e a linha que mudou de dono. A
 fila de verdade (SQL, lease e atrasos) e o SMTP de verdade estao nos testes de
-integracao.
+integracao. O laco recebe as pecas pelo construtor e roda pelo ``executar``.
 """
 
 from __future__ import annotations
 
 import threading
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -19,10 +20,12 @@ import structlog
 from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
 
+from src.compartilhado.infraestrutura.mensageria.outbox import ATRASOS_S
 from src.ordem_servico.aplicacao.emails import Email, FalhaEnvioEmailError
 from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura import notificador as modulo
+from src.ordem_servico.infraestrutura.email_adapter import TIMEOUT_SEGUNDOS
 from src.ordem_servico.infraestrutura.fila_de_notificacoes import LinhaDeNotificacao
 from src.ordem_servico.infraestrutura.notificador import (
     ConfigNotificador,
@@ -34,6 +37,9 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _EMAIL = Email("maria@cliente.com", "Assunto", "Corpo com o link https://x.test/t")
+# Conectar, EHLO, MAIL, RCPT, DATA, fim dos dados e QUIT: cada operacao do envio
+# pode levar o prazo do socket.
+_OPERACOES_DO_ENVIO = 7
 
 
 def _banco_fora() -> OperationalError:
@@ -62,8 +68,11 @@ class FilaFalsa:
         self.registrar: str | Exception = "nova_tentativa"
         self.apagadas = 0
         self.limpezas = 0
+        self.erro_ao_reivindicar: Exception | None = None
 
-    def reivindicar(self, lease: object) -> LinhaDeNotificacao | None:
+    def reivindicar(self, lease: timedelta) -> LinhaDeNotificacao | None:
+        if self.erro_ao_reivindicar is not None:
+            raise self.erro_ao_reivindicar
         return self.linhas.pop(0) if self.linhas else None
 
     def marcar_entregue(self, linha: LinhaDeNotificacao) -> bool:
@@ -88,15 +97,18 @@ class SmtpFalso:
     def __init__(self) -> None:
         self.enviados: list[tuple[str, str, str]] = []
         self.erro: Exception | None = None
+        self.ao_enviar: Callable[[], None] | None = None
 
     def enviar(self, destinatario: str, assunto: str, corpo: str) -> None:
         if self.erro is not None:
             raise self.erro
         self.enviados.append((destinatario, assunto, corpo))
+        if self.ao_enviar is not None:
+            self.ao_enviar()
 
 
 class Montagem:
-    """O que o ``_montar`` devolve (ou levanta) a cada linha."""
+    """O e-mail (ou o erro) que a leitura devolve a cada linha."""
 
     def __init__(self, resultado: Email | Exception | None) -> None:
         self.resultado = resultado
@@ -107,42 +119,98 @@ class Montagem:
         return self.resultado
 
 
+class EscutaFalsa:
+    """No lugar do LISTEN: cada espera fecha um ciclo; a ultima pede a parada."""
+
+    def __init__(self) -> None:
+        self.ciclos = 1
+        self.esperas = 0
+        self.fechada = False
+        self.ao_esperar: Callable[[int], None] | None = None
+
+    def esperar(self, parar: threading.Event, poll_s: float) -> None:
+        self.esperas += 1
+        if self.ao_esperar is not None:
+            self.ao_esperar(self.esperas)
+        if self.esperas >= self.ciclos:
+            parar.set()
+
+    def fechar(self) -> None:
+        self.fechada = True
+
+
+@dataclass
+class Cenario:
+    """O laco e as pecas falsas que ele recebeu."""
+
+    notificador: Notificador
+    fila: FilaFalsa
+    smtp: SmtpFalso
+    montagem: Montagem
+    escuta: EscutaFalsa
+    pasta: Path
+    parar: threading.Event
+
+    def rodar(self, ciclos: int = 1) -> None:
+        """Roda o laco por ``ciclos`` esperas e para."""
+        self.escuta.ciclos = ciclos
+        self.notificador.executar(self.parar)
+
+    def entregar(self, linha: LinhaDeNotificacao) -> None:
+        """Um ciclo com a ``linha`` pronta para ser reivindicada."""
+        self.fila.linhas.append(linha)
+        self.rodar()
+
+
 @pytest.fixture
-def notificador(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Notificador:
+def cenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Cenario:
     # O logger de um modulo ja usado guarda a configuracao da primeira vez.
     monkeypatch.setattr(modulo, "_log", structlog.get_logger())
-    instancia = Notificador(
-        engine=MagicMock(),
-        email=SmtpFalso(),
-        config=ConfigNotificador(poll_s=0.01, diretorio_de_saude=tmp_path),
+    fila, smtp, montagem, escuta = (
+        FilaFalsa(),
+        SmtpFalso(),
+        Montagem(_EMAIL),
+        EscutaFalsa(),
     )
-    instancia._fila = FilaFalsa()  # type: ignore[assignment]
-    instancia._montar = Montagem(_EMAIL)  # type: ignore[method-assign]
-    return instancia
-
-
-def _fila(n: Notificador) -> FilaFalsa:
-    return n._fila  # type: ignore[return-value]
-
-
-def _smtp(n: Notificador) -> SmtpFalso:
-    return n._email  # type: ignore[return-value]
+    notificador = Notificador(
+        engine=MagicMock(),
+        email=smtp,
+        config=ConfigNotificador(poll_s=0.01, diretorio_de_saude=tmp_path),
+        fila=fila,
+        escuta=escuta,
+        montar=montagem,
+    )
+    return Cenario(
+        notificador, fila, smtp, montagem, escuta, tmp_path, threading.Event()
+    )
 
 
 def _log(eventos: list[dict[str, Any]], texto: str) -> list[dict[str, Any]]:
     return [e for e in eventos if e["event"] == texto]
 
 
-def test_envia_o_e_mail_e_marca_a_linha_entregue(notificador: Notificador) -> None:
+def test_padroes_de_producao_do_laco() -> None:
+    # `src/notificador.py` sobe o processo sem config: valem estes padroes.
+    config = ConfigNotificador()
+
+    assert config.poll_s == 5.0
+    assert config.lease == timedelta(seconds=60)
+    assert config.atrasos_s == ATRASOS_S
+    # O lease nao e renovado: tem de cobrir o pior envio, e um SMTP mudo leva o
+    # prazo do socket em cada operacao.
+    assert config.lease.total_seconds() > _OPERACOES_DO_ENVIO * TIMEOUT_SEGUNDOS
+
+
+def test_envia_o_e_mail_e_marca_a_linha_entregue(cenario: Cenario) -> None:
     linha = _linha()
 
     with capture_logs() as logs:
-        notificador._entregar(linha)
+        cenario.entregar(linha)
 
-    assert _smtp(notificador).enviados == [
+    assert cenario.smtp.enviados == [
         (_EMAIL.destinatario, _EMAIL.assunto, _EMAIL.corpo)
     ]
-    assert _fila(notificador).entregues == [linha]
+    assert cenario.fila.entregues == [linha]
     (enviado,) = _log(logs, "notification sent")
     # Log so com a OS, o modelo e o resultado.
     assert set(enviado) == {"event", "log_level", "correlation_id", "modelo"}
@@ -150,16 +218,16 @@ def test_envia_o_e_mail_e_marca_a_linha_entregue(notificador: Notificador) -> No
 
 
 def test_sem_e_mail_a_enviar_fecha_a_linha_sem_chamar_o_smtp(
-    notificador: Notificador,
+    cenario: Cenario,
 ) -> None:
-    notificador._montar = Montagem(None)  # type: ignore[method-assign]
+    cenario.montagem.resultado = None
     linha = _linha()
 
     with capture_logs() as logs:
-        notificador._entregar(linha)
+        cenario.entregar(linha)
 
-    assert _smtp(notificador).enviados == []
-    assert _fila(notificador).entregues == [linha]
+    assert cenario.smtp.enviados == []
+    assert cenario.fila.entregues == [linha]
     assert len(_log(logs, "notification closed without sending")) == 1
     assert _log(logs, "notification sent") == []
 
@@ -183,33 +251,33 @@ def test_sem_e_mail_a_enviar_fecha_a_linha_sem_chamar_o_smtp(
     ],
 )
 def test_falha_de_envio_conta_tentativa_e_o_log_so_leva_o_nome_da_excecao(
-    notificador: Notificador, desfecho: str, nivel: str, evento: str
+    cenario: Cenario, desfecho: str, nivel: str, evento: str
 ) -> None:
-    _smtp(notificador).erro = FalhaEnvioEmailError("ConnectionRefusedError")
-    _fila(notificador).registrar = desfecho
+    cenario.smtp.erro = FalhaEnvioEmailError("ConnectionRefusedError")
+    cenario.fila.registrar = desfecho
     linha = _linha(tentativas=2)
 
     with capture_logs() as logs:
-        notificador._entregar(linha)
+        cenario.entregar(linha)
 
-    assert _fila(notificador).falhas == [
+    assert cenario.fila.falhas == [
         (linha, "falha ao enviar o e-mail (ConnectionRefusedError)")
     ]
-    assert _fila(notificador).entregues == []
+    assert cenario.fila.entregues == []
     (registro,) = _log(logs, evento)
     assert registro["log_level"] == nivel
     assert "maria@cliente.com" not in repr(logs)
 
 
 def test_falha_inesperada_conta_tentativa_com_o_nome_da_excecao_e_o_lugar(
-    notificador: Notificador,
+    cenario: Cenario,
 ) -> None:
-    notificador._montar = Montagem(KeyError("segredo"))  # type: ignore[method-assign]
+    cenario.montagem.resultado = KeyError("segredo")
 
     with capture_logs() as logs:
-        notificador._entregar(_linha())
+        cenario.entregar(_linha())
 
-    ((_, motivo),) = _fila(notificador).falhas
+    ((_, motivo),) = cenario.fila.falhas
     assert motivo == "falha ao enviar o e-mail (KeyError)"
     (registro,) = _log(logs, "notification send failed; retry scheduled")
     assert registro["erro"] == "KeyError"
@@ -217,51 +285,53 @@ def test_falha_inesperada_conta_tentativa_com_o_nome_da_excecao_e_o_lugar(
     assert "segredo" not in repr(logs)
 
 
-def test_banco_fora_na_leitura_nao_e_falha_da_linha(notificador: Notificador) -> None:
-    notificador._montar = Montagem(_banco_fora())  # type: ignore[method-assign]
+def test_banco_fora_na_leitura_nao_e_falha_da_linha(cenario: Cenario) -> None:
+    cenario.montagem.resultado = _banco_fora()
 
-    with pytest.raises(OperationalError):
-        notificador._entregar(_linha())
+    with capture_logs() as logs:
+        cenario.entregar(_linha())
 
     # Nenhuma tentativa gasta: a linha volta quando o lease vencer.
-    assert _fila(notificador).falhas == []
-    assert _fila(notificador).entregues == []
+    assert cenario.fila.falhas == []
+    assert cenario.fila.entregues == []
+    (ciclo,) = _log(logs, "notification cycle failed")
+    assert ciclo["erro"] == "OperationalError"
 
 
 def test_enviado_sem_a_marca_por_banco_fora_nao_gasta_tentativa(
-    notificador: Notificador,
+    cenario: Cenario,
 ) -> None:
-    _fila(notificador).marcar = _banco_fora()
+    cenario.fila.marcar = _banco_fora()
 
     with capture_logs() as logs:
-        notificador._entregar(_linha())
+        cenario.entregar(_linha())
 
-    assert len(_smtp(notificador).enviados) == 1
-    assert _fila(notificador).falhas == []
+    assert len(cenario.smtp.enviados) == 1
+    assert cenario.fila.falhas == []
     assert (
         len(_log(logs, "notification sent but not marked; it returns after the lease"))
         == 1
     )
 
 
-def test_envio_que_passou_do_lease_avisa(notificador: Notificador) -> None:
-    _fila(notificador).marcar = False
+def test_envio_que_passou_do_lease_avisa(cenario: Cenario) -> None:
+    cenario.fila.marcar = False
 
     with capture_logs() as logs:
-        notificador._entregar(_linha())
+        cenario.entregar(_linha())
 
     assert len(_log(logs, "notification sent after losing the lease")) == 1
     assert _log(logs, "notification sent") == []
 
 
 def test_falha_que_nao_grava_por_banco_fora_avisa_sem_derrubar(
-    notificador: Notificador,
+    cenario: Cenario,
 ) -> None:
-    _smtp(notificador).erro = FalhaEnvioEmailError("TimeoutError")
-    _fila(notificador).registrar = _banco_fora()
+    cenario.smtp.erro = FalhaEnvioEmailError("TimeoutError")
+    cenario.fila.registrar = _banco_fora()
 
     with capture_logs() as logs:
-        notificador._entregar(_linha())
+        cenario.entregar(_linha())
 
     assert (
         len(_log(logs, "notification failure not recorded; it returns after the lease"))
@@ -269,95 +339,111 @@ def test_falha_que_nao_grava_por_banco_fora_avisa_sem_derrubar(
     )
 
 
-def _executar(notificador: Notificador, ciclos: int) -> threading.Event:
-    """Roda o laco por ``ciclos`` esperas e para."""
-    parar = threading.Event()
-    esperas = 0
-
-    def esperar(evento: threading.Event, poll_s: float) -> None:
-        nonlocal esperas
-        esperas += 1
-        if esperas >= ciclos:
-            evento.set()
-
-    notificador._escuta = MagicMock(esperar=esperar)  # type: ignore[assignment]
-    notificador.executar(parar)
-    return parar
-
-
 def test_ciclo_que_chega_ao_fim_marca_pronto_e_o_encerramento_desmarca(
-    notificador: Notificador, tmp_path: Path
+    cenario: Cenario,
 ) -> None:
-    _fila(notificador).linhas.append(_linha())
+    prontos: list[bool] = []
+    cenario.escuta.ao_esperar = lambda _n: prontos.append(
+        (cenario.pasta / "notificador-pronto").exists()
+    )
 
-    _executar(notificador, ciclos=1)
+    cenario.entregar(_linha())
 
-    assert (tmp_path / "notificador-heartbeat").exists()
-    # Encerrado: fora de pronto, e a linha foi entregue antes.
-    assert not (tmp_path / "notificador-pronto").exists()
-    assert len(_fila(notificador).entregues) == 1
+    assert (cenario.pasta / "notificador-heartbeat").exists()
+    # Pronto no fim do ciclo; encerrado, fora de pronto. A linha saiu antes.
+    assert prontos == [True]
+    assert not (cenario.pasta / "notificador-pronto").exists()
+    assert len(cenario.fila.entregues) == 1
     # A limpeza das linhas antigas e do ciclo (uma vez por intervalo).
-    assert _fila(notificador).limpezas == 1
+    assert cenario.fila.limpezas == 1
 
 
 def test_banco_fora_no_ciclo_tira_de_pronto_loga_sem_o_sql_e_segue(
-    notificador: Notificador, tmp_path: Path
+    cenario: Cenario,
 ) -> None:
-    (tmp_path / "notificador-pronto").touch()
-    notificador._montar = Montagem(_banco_fora())  # type: ignore[method-assign]
-    _fila(notificador).linhas.extend([_linha(), _linha()])
+    (cenario.pasta / "notificador-pronto").touch()
+    cenario.montagem.resultado = _banco_fora()
+    cenario.fila.linhas.extend([_linha(), _linha()])
     prontos: list[bool] = []
 
-    def esperar(evento: threading.Event, poll_s: float) -> None:
-        prontos.append((tmp_path / "notificador-pronto").exists())
-        if len(prontos) == 1:
+    def ao_esperar(ciclo: int) -> None:
+        prontos.append((cenario.pasta / "notificador-pronto").exists())
+        if ciclo == 1:
             # Segundo ciclo: o banco voltou.
-            notificador._montar = Montagem(_EMAIL)  # type: ignore[method-assign]
-        else:
-            evento.set()
+            cenario.montagem.resultado = _EMAIL
 
-    notificador._escuta = MagicMock(esperar=esperar)  # type: ignore[assignment]
+    cenario.escuta.ao_esperar = ao_esperar
 
     with capture_logs() as logs:
-        notificador.executar(threading.Event())
+        cenario.rodar(ciclos=2)
 
     # Com o banco fora o processo segue vivo e fora de pronto; na volta, pronto.
     assert prontos == [False, True]
     (falha,) = _log(logs, "notification cycle failed")
     assert falha["erro"] == "OperationalError"
     assert "clientes" not in repr(logs)
-    assert len(_fila(notificador).entregues) == 1
+    assert len(cenario.fila.entregues) == 1
 
 
 def test_limpeza_roda_uma_vez_por_intervalo_e_so_loga_quando_apagou(
-    notificador: Notificador,
+    cenario: Cenario,
 ) -> None:
-    _fila(notificador).apagadas = 3
+    cenario.fila.apagadas = 3
 
     with capture_logs() as logs:
-        notificador._limpar_se_devido()
-        notificador._limpar_se_devido()
+        cenario.rodar(ciclos=2)
 
-    assert _fila(notificador).limpezas == 1
+    assert cenario.fila.limpezas == 1
     (registro,) = _log(logs, "old notification rows deleted")
     assert registro["linhas"] == 3
 
 
-def test_limpeza_que_nao_apagou_nada_nao_loga(notificador: Notificador) -> None:
+def test_limpeza_que_nao_apagou_nada_nao_loga(cenario: Cenario) -> None:
     with capture_logs() as logs:
-        notificador._limpar_se_devido()
+        cenario.rodar()
 
-    assert _fila(notificador).limpezas == 1
+    assert cenario.fila.limpezas == 1
     assert _log(logs, "old notification rows deleted") == []
 
 
 def test_pedido_de_parada_antes_do_ciclo_nao_reivindica_linha(
-    notificador: Notificador,
+    cenario: Cenario,
 ) -> None:
-    _fila(notificador).linhas.append(_linha())
-    parar = threading.Event()
-    parar.set()
+    cenario.fila.linhas.append(_linha())
+    cenario.parar.set()
 
-    notificador._drenar(parar)
+    cenario.rodar()
 
-    assert len(_fila(notificador).linhas) == 1
+    assert len(cenario.fila.linhas) == 1
+
+
+def test_pedido_de_parada_no_meio_da_drenagem_nao_reivindica_a_seguinte(
+    cenario: Cenario,
+) -> None:
+    cenario.fila.linhas.extend([_linha(), _linha()])
+    # O SIGTERM chega durante o envio da primeira.
+    cenario.smtp.ao_enviar = cenario.parar.set
+
+    cenario.rodar()
+
+    assert len(cenario.fila.entregues) == 1
+    assert len(cenario.fila.linhas) == 1
+
+
+def test_o_encerramento_fecha_a_escuta_do_notify(cenario: Cenario) -> None:
+    cenario.rodar()
+
+    assert cenario.escuta.fechada
+
+
+def test_erro_inesperado_do_laco_sobe_mas_fecha_a_escuta_e_sai_de_pronto(
+    cenario: Cenario,
+) -> None:
+    (cenario.pasta / "notificador-pronto").touch()
+    cenario.fila.erro_ao_reivindicar = RuntimeError("bug")
+
+    with pytest.raises(RuntimeError, match="bug"):
+        cenario.rodar()
+
+    assert cenario.escuta.fechada
+    assert not (cenario.pasta / "notificador-pronto").exists()

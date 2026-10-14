@@ -25,7 +25,7 @@ from typing import Final
 from src.compartilhado.infraestrutura.ambiente import inteiro_do_ambiente
 from src.ordem_servico.aplicacao.emails import FalhaEnvioEmailError
 
-_TIMEOUT_SEGUNDOS: Final = 5
+TIMEOUT_SEGUNDOS: Final = 5
 _PORTA_PADRAO: Final = 1025
 
 
@@ -59,7 +59,7 @@ class SmtpEmailAdapter:
         mensagem["Subject"] = assunto
         mensagem.set_content(corpo)
         try:
-            with smtplib.SMTP(self._host, self._porta, timeout=_TIMEOUT_SEGUNDOS) as c:
+            with smtplib.SMTP(self._host, self._porta, timeout=TIMEOUT_SEGUNDOS) as c:
                 c.send_message(mensagem)
         except (OSError, smtplib.SMTPException) as exc:
             raise FalhaEnvioEmailError(type(exc).__name__) from None
