@@ -46,6 +46,9 @@ _log = structlog.get_logger(__name__)
 _EMAIL: Final = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
 )
+# O cadastro aceita o nome com quebra de linha e ate 255 caracteres; a saudacao
+# leva uma linha so, curta.
+_NOME_MAXIMO: Final = 80
 # Horario de Brasilia (UTC-3, sem horario de verao desde 2019), sem depender do
 # banco de fusos da imagem.
 _BRASILIA: Final = timezone(timedelta(hours=-3), "BRT")
@@ -74,8 +77,14 @@ def _instante(quando: datetime) -> str:
     return quando.astimezone(_BRASILIA).strftime("%d/%m/%Y %H:%M (horário de Brasília)")
 
 
+def _saudacao(nome: str) -> str:
+    """O nome numa linha so (sem quebra que forje linha do corpo) e curto."""
+    return " ".join(nome.split())[:_NOME_MAXIMO] or "cliente"
+
+
 def _corpo(nome: str, *paragrafos: str) -> str:
-    return "\n\n".join([f"Olá, {nome}!", *paragrafos, "Equipe PytStop"]) + "\n"
+    saudacao = f"Olá, {_saudacao(nome)}!"
+    return "\n\n".join([saudacao, *paragrafos, "Equipe PytStop"]) + "\n"
 
 
 type _Texto = tuple[str, list[str]]

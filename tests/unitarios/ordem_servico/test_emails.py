@@ -85,6 +85,34 @@ def test_situacao_diz_o_rotulo_do_status_do_pedido() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("nome", "saudacao"),
+    [
+        pytest.param(
+            "Hostil\r\nBcc: alvo@outro.com Nome",
+            "Olá, Hostil Bcc: alvo@outro.com Nome!",
+            id="quebra-de-linha-nao-forja-linha-do-corpo",
+        ),
+        pytest.param(
+            "Maria   da\tSilva \u2028 Souza", "Olá, Maria da Silva Souza!", id="espacos"
+        ),
+        pytest.param("A" * 255, "Olá, " + "A" * 80 + "!", id="tamanho-maximo"),
+        pytest.param(" \r\n ", "Olá, cliente!", id="so-espacos"),
+    ],
+)
+def test_saudacao_leva_o_nome_numa_linha_so_e_curto(nome: str, saudacao: str) -> None:
+    ordem = ordem_em(_S.EM_EXECUCAO)
+
+    email = _montar(ordem, nome=nome).executar(
+        Notificacao(ordem.id, _M.SITUACAO, _S.EM_EXECUCAO)
+    )
+
+    assert email is not None
+    assert email.corpo.splitlines()[0] == saudacao
+    # O corpo tem so as linhas do modelo: nenhuma nasce do nome.
+    assert len(email.corpo.splitlines()) == 7
+
+
 def test_orcamento_leva_o_total_a_validade_e_o_link_de_decisao() -> None:
     ordem = ordem_em(_S.AGUARDANDO_APROVACAO)
 
