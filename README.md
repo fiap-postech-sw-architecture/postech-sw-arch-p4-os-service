@@ -185,6 +185,7 @@ Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como
 | `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `false`, `http://jaeger:4317` | exportação OTLP dos spans |
 | `OTEL_SERVICE_NAME` | `pytstop-os-service` | `service.name` dos spans |
 | `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | prazo técnico gravado pela saga no envio de cada comando com resposta automática (1 ou mais; [seção Saga](#saga)) |
+| `ROOT_PATH` | vazio | prefixo da API atrás do gateway (`/os` no cluster); o `entrypoint.sh` o passa ao uvicorn como `--root-path` e recusa, no boot, valor sem a barra inicial ou com a barra final |
 
 Valor fora da faixa aborta o boot com a variável e o valor na mensagem.
 
