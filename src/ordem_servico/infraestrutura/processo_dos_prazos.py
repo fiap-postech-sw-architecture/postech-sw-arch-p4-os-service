@@ -59,6 +59,7 @@ class ProcessoDosPrazos:
         try:
             while not parar.is_set():
                 self._sinal.bater()
+                self._presenca.conectar()
                 try:
                     ciclo = self._vencer.executar(
                         self._depois_de_cada_saga, parar=parar.is_set

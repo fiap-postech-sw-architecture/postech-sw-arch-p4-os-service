@@ -9,15 +9,16 @@ inicia a compensacao por ``prazo_tecnico`` e a compensacao vai a
 ``falha_na_compensacao`` (``Saga.esgotar_prazo``).
 
 Antes de tudo o ciclo confere o relogio do processo contra o do banco (acima de
-5 s de desvio, nao age). Antes de cada saga confere a fila do consumidor do OS
-(``PresencaDoConsumidor``): sem consumidor em ``os.eventos``, com mensagem
-pronta nela (o consumidor voltou e ainda nao drenou as respostas) ou com o
-broker fora, a resposta pode estar esperando, e o ciclo nao reenvia nem esgota
-prazo, so avisa; a fila que muda no meio do ciclo interrompe o resto. O ciclo
-trata no maximo ``SAGAS_POR_CICLO`` sagas, e o ciclo seguinte segue dali; o
-SIGTERM e visto entre duas sagas. A saga
-trabalhada por outra replica (``SKIP LOCKED``) fica para ela; o consumidor que
-leu a saga antes perde na conferencia da ``versao`` e volta pela fila de retry.
+5 s de desvio, nao age). Com uma saga vencida reivindicada, e antes de trata-la,
+confere a fila do consumidor do OS (``PresencaDoConsumidor``): sem consumidor em
+``os.eventos``, com qualquer mensagem pronta nela (o consumidor voltou e ainda
+nao drenou as respostas) ou com o broker fora, a resposta pode estar esperando, e
+o ciclo desfaz a transacao, nao reenvia nem esgota prazo e so avisa; a fila que
+muda no meio do ciclo interrompe o resto. O ciclo trata no maximo
+``SAGAS_POR_CICLO`` sagas (as recusadas tem teto proprio), e o ciclo seguinte
+segue dali; o SIGTERM e visto entre duas sagas. A saga trabalhada por outra
+replica (``SKIP LOCKED``) fica para ela; o consumidor que leu a saga antes perde
+na conferencia da ``versao`` e volta pela fila de retry.
 """
 
 from __future__ import annotations
@@ -62,9 +63,14 @@ _log = structlog.get_logger(__name__)
 # vencidas. Cobre a latencia da consulta e fica longe dos 30 s do ciclo.
 DESVIO_MAXIMO_DO_RELOGIO: Final = timedelta(seconds=5)
 
-# O teto de sagas por ciclo: depois de uma parada longa, a rajada de reenvios e
-# repartida em ciclos, com a fila do consumidor conferida a cada saga.
+# O teto de sagas tratadas (reenviadas ou esgotadas) por ciclo: depois de uma
+# parada longa, a rajada de reenvios e repartida em ciclos, com a fila do
+# consumidor conferida a cada saga. As recusadas tem teto proprio: uma saga com
+# defeito sai do ciclo e nao gasta o das boas, e o ``ignorar`` que cresce com
+# elas fica limitado. Mais defeituosas que isso na frente (por prazo mais antigo)
+# deixam as boas para depois; o alerta de prazo vencido segue disparando.
 SAGAS_POR_CICLO: Final = 100
+RECUSADAS_POR_CICLO: Final = 1000
 
 # As recusas do dominio dizem so a etapa e o tipo do comando, sem dado de cliente:
 # o log leva a mensagem delas. De qualquer outro erro da saga so o tipo e o
@@ -78,6 +84,7 @@ class DesfechoDoPrazo(StrEnum):
     REENVIADA = "reenviada"
     ESGOTADA = "esgotada"
     RECUSADA = "recusada"
+    PAUSADA = "pausada"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +125,7 @@ class VencerPrazos:
         *,
         parar: Callable[[], bool] = lambda: False,
     ) -> ResultadoDoCiclo:
-        """Vence as sagas de prazo vencido, ate ``SAGAS_POR_CICLO``.
+        """Vence as sagas de prazo vencido, ate ``SAGAS_POR_CICLO`` tratadas.
 
         ``ao_tratar`` roda a cada saga: e o heartbeat do processo (a liveness
         tolera 120 s). ``parar`` e o SIGTERM do processo: visto entre duas sagas,
@@ -130,21 +137,24 @@ class VencerPrazos:
         if self._relogio_fora_do_banco():
             return ResultadoDoCiclo(pausado=True)
         recusadas: set[UUID] = set()
-        desfechos: list[DesfechoDoPrazo] = []
-        pausado = False
-        while len(desfechos) < SAGAS_POR_CICLO and not parar():
-            if not self._fila_em_dia():
-                pausado = True
-                break
+        contagem = dict.fromkeys(DesfechoDoPrazo, 0)
+        while (
+            contagem[DesfechoDoPrazo.REENVIADA] + contagem[DesfechoDoPrazo.ESGOTADA]
+            < SAGAS_POR_CICLO
+            and len(recusadas) < RECUSADAS_POR_CICLO
+            and not parar()
+        ):
             desfecho = self._vencer_uma(recusadas)
             if desfecho is None:
                 break
-            desfechos.append(desfecho)
+            contagem[desfecho] += 1
+            if desfecho is DesfechoDoPrazo.PAUSADA:
+                break
             ao_tratar()
         return ResultadoDoCiclo(
-            pausado=pausado,
-            reenviadas=desfechos.count(DesfechoDoPrazo.REENVIADA),
-            esgotadas=desfechos.count(DesfechoDoPrazo.ESGOTADA),
+            pausado=bool(contagem[DesfechoDoPrazo.PAUSADA]),
+            reenviadas=contagem[DesfechoDoPrazo.REENVIADA],
+            esgotadas=contagem[DesfechoDoPrazo.ESGOTADA],
             recusadas=len(recusadas),
         )
 
@@ -185,7 +195,12 @@ class VencerPrazos:
         return True
 
     def _vencer_uma(self, recusadas: set[UUID]) -> DesfechoDoPrazo | None:
-        """Uma saga numa transacao; ``None`` quando nenhuma venceu."""
+        """Uma saga numa transacao; ``None`` quando nenhuma venceu.
+
+        A fila do consumidor so e conferida com uma saga vencida na mao: o ciclo
+        ocioso nao consulta o broker. Fora de dia (sem consumidor, com resposta
+        esperando ou sem o broker), a transacao desfaz e o ciclo pausa.
+        """
         ordem_id: UUID | None = None
         try:
             with self._abrir() as transacao:
@@ -197,6 +212,8 @@ class VencerPrazos:
                 )
                 if saga is None:
                     return None
+                if not self._fila_em_dia():
+                    return DesfechoDoPrazo.PAUSADA
                 ordem_id = saga.ordem_id
                 # O comando e o contexto que a saga passa a guardar nascem no span
                 # do prazo, filho do trace dela (ADR-043).

@@ -260,16 +260,14 @@ class TestSemConsumidor:
         assert prazos.caso_de_uso.executar() == ResultadoDoCiclo(reenviadas=1)
         assert prazos.saga.reenvios == 1
 
-    def test_a_fila_e_conferida_antes_de_cada_saga_e_antes_da_busca_que_acaba_o_ciclo(
-        self,
-    ) -> None:
+    def test_a_fila_so_e_conferida_com_uma_saga_vencida_na_mao(self) -> None:
         prazos = _em("aguardando_orcamento")
 
         prazos.vencer()
-        assert prazos.presenca.consultas == 2  # a saga vencida e a busca vazia
+        assert prazos.presenca.consultas == 1  # a saga vencida; a busca vazia nao
         prazos.caso_de_uso.executar()  # o prazo novo ainda nao venceu
 
-        assert prazos.presenca.consultas == 3
+        assert prazos.presenca.consultas == 1
 
 
 class TestIsolamentoDasSagas:

@@ -620,6 +620,21 @@ class TestPresencaDoConsumidor:
         finally:
             presenca.fechar()
 
+    def test_conectar_marca_o_processo_pronto_sem_consultar_a_fila(
+        self, broker: Broker, tmp_path: Path
+    ) -> None:
+        # O ciclo ocioso so conecta: a readiness e a conexao, e o broker fora
+        # (porta sem servidor) deixa o processo fora de pronto sem levantar.
+        sinal = Sinalizador("prazos", tmp_path)
+        presenca = PresencaPikaDoConsumidor(broker.parametros("os"), sinal)
+        try:
+            assert not sinal.pronto.exists()
+            presenca.conectar()
+            assert sinal.pronto.exists()
+        finally:
+            presenca.fechar()
+        assert not sinal.pronto.exists()
+
     def test_conta_as_mensagens_prontas_de_os_eventos(
         self, broker: Broker, tmp_path: Path
     ) -> None:

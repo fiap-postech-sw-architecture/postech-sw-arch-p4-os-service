@@ -188,6 +188,8 @@ def test_laco_roda_um_ciclo_por_intervalo_toca_o_heartbeat_e_fecha_a_presenca(
     assert sinal.heartbeat.exists()
     presenca.fechar.assert_called_once()
     assert presenca.manter.called
+    # Uma conexao ao broker por ciclo, ocioso ou nao: a readiness e a conexao.
+    assert presenca.conectar.call_count == 3
     # So o ciclo com trabalho vai para o log; o ocioso e o pausado, nao.
     feitos = [e for e in logs if e["event"] == "deadline cycle done"]
     assert [(e["reenviadas"], e["esgotadas"], e["recusadas"]) for e in feitos] == [
@@ -332,8 +334,10 @@ class _Canal:
     def __init__(self, consumidores: int | Exception, prontas: int = 0) -> None:
         self._consumidores = consumidores
         self._prontas = prontas
+        self.declaracoes = 0
 
     def queue_declare(self, fila: str, *, passive: bool) -> Any:
+        self.declaracoes += 1
         assert (fila, passive) == ("os.eventos", True)
         if isinstance(self._consumidores, Exception):
             raise self._consumidores
@@ -427,6 +431,34 @@ def test_erro_na_declaracao_desconecta_e_nao_ha_situacao(
 
     assert presenca.situacao_da_fila() is None
     assert broker.desconexoes == 1
+
+
+def test_conectar_liga_o_processo_ao_broker_sem_consultar_a_fila(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canal = _Canal(1)
+    broker = _Broker(canal)
+    presenca = _presenca(monkeypatch, broker)
+
+    presenca.conectar()
+    presenca.conectar()
+
+    assert broker.canal is canal
+    assert canal.declaracoes == 0
+    assert presenca.situacao_da_fila() == SituacaoDaFila(consumidores=1, prontas=0)
+    assert canal.declaracoes == 1
+
+
+def test_conectar_sem_o_broker_nao_levanta_e_tenta_no_ciclo_seguinte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = _Broker(None, conecta=False)
+    presenca = _presenca(monkeypatch, broker)
+
+    presenca.conectar()
+
+    assert broker.canal is None
+    assert broker.desconexoes == 0
 
 
 def test_manter_atende_o_broker_e_a_queda_desconecta(

@@ -1,12 +1,12 @@
 """Presenca do consumidor do OS no RabbitMQ (RFC-004 secao 4.6, ADR-036).
 
-O processo ``prazos`` confere, antes de cada saga, a fila ``os.eventos``: uma
-declaracao passiva devolve ``consumer_count`` e ``message_count`` (as mensagens
-prontas) sem criar nem mudar nada (o usuario ``os`` ja le a fila). Sem consumidor,
-com resposta esperando na fila ou com o broker fora, o ciclo nao reenvia nem
-esgota prazo. A conexao e a do processo (``ConexaoDoProcesso``): conectado, o
-processo fica pronto; sem o broker, fora de pronto, sem reinicio. Ela reconecta
-a cada consulta que acha o canal fechado, sem backoff: o intervalo do ciclo e o
+O processo ``prazos`` confere a fila ``os.eventos`` com cada saga vencida na mao:
+uma declaracao passiva devolve ``consumer_count`` e ``message_count`` (as
+mensagens prontas) sem criar nem mudar nada (o usuario ``os`` ja le a fila). Sem
+consumidor, com qualquer resposta esperando na fila ou com o broker fora, o ciclo
+nao reenvia nem esgota prazo. A conexao e a do processo (``ConexaoDoProcesso``):
+conectado, o processo fica pronto; sem o broker, fora de pronto, sem reinicio. O
+laco reconecta uma vez por ciclo, sem backoff: o intervalo do ciclo e o
 espacamento das tentativas.
 """
 
@@ -38,6 +38,16 @@ class PresencaPikaDoConsumidor:
         self._broker = amqp.ConexaoDoProcesso(
             parametros, processo="prazos", sinal=sinal, declarar=self._declarar
         )
+
+    def conectar(self) -> None:
+        """Conecta ao broker se preciso e marca o processo pronto.
+
+        O laco chama a cada ciclo, com ou sem saga vencida: o ciclo ocioso nao
+        consulta a fila, e a readiness e a conexao. Sem o broker, a tentativa
+        seguinte e a do proximo ciclo.
+        """
+        if self._broker.canal is None:
+            self._broker.conectar()
 
     def situacao_da_fila(self) -> SituacaoDaFila | None:
         """Consumidores e mensagens prontas de ``os.eventos``.

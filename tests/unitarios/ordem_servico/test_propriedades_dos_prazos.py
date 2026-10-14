@@ -43,6 +43,7 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     COMANDOS_COM_PRAZO,
     GATILHOS_VALIDOS,
 )
+from src.ordem_servico.aplicacao.saga.vencer_prazos import ResultadoDoCiclo
 from src.ordem_servico.aplicacao.use_cases import RetomarCompensacao
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
@@ -264,10 +265,11 @@ class Simulacao:
         antes = _foto(self.cenario)
         resultado = self.prazos.caso_de_uso.executar()
         if fora:
-            # Sem consumidor, o ciclo nao reenvia nem esgota: nada muda.
-            assert resultado.pausado
+            # Sem consumidor, o ciclo nao reenvia nem esgota: nada muda. Pausa
+            # quando ha saga vencida; o ciclo ocioso nem consulta a fila.
+            assert resultado in (ResultadoDoCiclo(pausado=True), ResultadoDoCiclo())
             assert _foto(self.cenario) == antes
-            self.ciclos_pausados += 1
+            self.ciclos_pausados += resultado.pausado
         else:
             assert not resultado.pausado
             assert resultado.recusadas == 0

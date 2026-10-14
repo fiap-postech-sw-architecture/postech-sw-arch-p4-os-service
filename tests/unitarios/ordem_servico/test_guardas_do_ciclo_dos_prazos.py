@@ -247,3 +247,83 @@ class TestSigtermEntreSagas:
         assert prazos.caso_de_uso.executar(parar=lambda: False) == ResultadoDoCiclo(
             reenviadas=5
         )
+
+
+def _com_defeito(ruins: int, boas: int) -> Prazos:
+    """``ruins`` sagas de comando fora do contrato, mais antigas, e ``boas``."""
+    cenarios = [CenarioDaSaga.em("aguardando_orcamento") for _ in range(ruins + boas)]
+    primeiro = cenarios[0]
+    for outro in cenarios[1:]:
+        primeiro.ordens.ordens.update(outro.ordens.ordens)
+        primeiro.sagas.sagas.update(outro.sagas.sagas)
+    prazos = Prazos(primeiro)
+    sagas = [c.saga for c in cenarios]
+    base = max(s.prazo_resposta_em for s in sagas)
+    for posicao, saga in enumerate(sagas[:ruins]):
+        saga._comando_em_voo["tipo"] = "TipoQueNaoExiste"
+        saga._prazo_resposta_em = base - timedelta(hours=1) + timedelta(seconds=posicao)
+    prazos.relogio.agora = base + timedelta(seconds=30)
+    return prazos
+
+
+class TestTetoDasRecusadas:
+    def test_101_recusadas_na_frente_nao_deixam_as_9_boas_sem_tratamento(self) -> None:
+        prazos = _com_defeito(ruins=101, boas=9)
+
+        resultado = prazos.caso_de_uso.executar()
+
+        # As recusadas nao gastam o teto das tratadas: as 9 boas, atras das 101
+        # com defeito (de prazo mais antigo), sao reenviadas no mesmo ciclo.
+        assert resultado == ResultadoDoCiclo(reenviadas=9, recusadas=101)
+        assert len(prazos.comandos) == 9
+
+    def test_as_recusadas_nao_gastam_o_teto_das_tratadas(self) -> None:
+        prazos = _com_defeito(ruins=5, boas=SAGAS_POR_CICLO + 5)
+
+        primeiro = prazos.caso_de_uso.executar()
+        segundo = prazos.caso_de_uso.executar()
+
+        assert primeiro == ResultadoDoCiclo(reenviadas=SAGAS_POR_CICLO, recusadas=5)
+        # As 5 com defeito voltam a ser a primeira coisa que o ciclo seguinte acha.
+        assert segundo == ResultadoDoCiclo(reenviadas=5, recusadas=5)
+
+    def test_alem_do_teto_das_recusadas_o_ciclo_para_e_as_boas_esperam(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(vencer_prazos, "RECUSADAS_POR_CICLO", 20)
+        prazos = _com_defeito(ruins=25, boas=3)
+
+        resultado = prazos.caso_de_uso.executar()
+
+        # O limite conhecido: com mais defeituosas que o teto na frente, as boas
+        # esperam; o ciclo nao gira sem fim e o alerta de prazo vencido segue.
+        assert resultado == ResultadoDoCiclo(recusadas=20)
+        assert prazos.comandos == []
+
+
+class TestFilaSoComUmaSagaNaMao:
+    def test_ciclo_ocioso_nao_consulta_a_fila_nem_avisa(self) -> None:
+        prazos = Prazos(CenarioDaSaga.em("aguardando_orcamento"), prontas=5)
+        # O prazo ainda nao venceu: nenhuma saga na mao.
+        prazos.relogio.agora = prazos.saga.prazo_resposta_em - timedelta(seconds=1)
+
+        with capture_logs() as logs:
+            resultado = prazos.caso_de_uso.executar()
+
+        assert resultado == ResultadoDoCiclo()
+        assert prazos.presenca.consultas == 0
+        assert [e for e in logs if e["event"] == "saga deadlines paused"] == []
+
+    def test_fila_fora_de_dia_desfaz_a_transacao_da_saga_reivindicada(self) -> None:
+        prazos = _vencida()
+        prazos.presenca.prontas = 1
+
+        with capture_logs() as logs:
+            resultado = prazos.caso_de_uso.executar()
+
+        assert resultado == ResultadoDoCiclo(pausado=True)
+        assert prazos.presenca.consultas == 1
+        assert (prazos.comandos, prazos.transacao.commits) == ([], 0)
+        assert [e["motivo"] for e in logs if e["event"] == "saga deadlines paused"] == [
+            "respostas_na_fila"
+        ]
