@@ -31,6 +31,7 @@ from src.compartilhado.infraestrutura.mensageria.outbox import (
     MarcacaoComFencing,
 )
 from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
+from src.ordem_servico.aplicacao.saga.modelo import MotivoCompensacao
 from src.ordem_servico.dominio.status import StatusOrdem
 
 if TYPE_CHECKING:
@@ -44,17 +45,20 @@ _SQL_CLAIM: Final = text(
     "FROM notificacoes n "
     "WHERE n.situacao = 'pendente' AND n.proxima_tentativa_em <= now() "
     "AND n.modelo = ANY(:modelos) AND n.status_da_ordem = ANY(:status) "
+    "AND (n.motivo IS NULL OR n.motivo = ANY(:motivos)) "
     "AND NOT EXISTS (SELECT 1 FROM notificacoes p WHERE p.ordem_id = n.ordem_id "
     "AND p.id < n.id AND p.situacao = 'pendente') "
     "ORDER BY n.id FOR UPDATE OF n SKIP LOCKED LIMIT 1"
 )
-# So reivindica o que esta versao sabe escrever: o pedido de um modelo ou de um
-# status novo (a API ja na versao seguinte, o notificador ainda na anterior) fica
-# pendente para o notificador novo, em vez de derrubar este no laco do claim. A
-# ordem por OS segue valendo: o pedido que fica segura os seguintes da mesma OS.
+# So reivindica o que esta versao sabe escrever: o pedido de um modelo, de um
+# status ou de um motivo de compensacao novo (a API ja na versao seguinte, o
+# notificador ainda na anterior) fica pendente para o notificador novo, sem gastar
+# tentativa nem derrubar este no laco do claim. A ordem por OS segue valendo: o
+# pedido que fica segura os seguintes da mesma OS.
 _CONHECIDOS: Final = {
     "modelos": [modelo.value for modelo in ModeloDeNotificacao],
     "status": [status.value for status in StatusOrdem],
+    "motivos": [motivo.value for motivo in MotivoCompensacao],
 }
 _SQL_LEASE: Final = text(
     "UPDATE notificacoes SET proxima_tentativa_em = now() + :lease WHERE id = :id "

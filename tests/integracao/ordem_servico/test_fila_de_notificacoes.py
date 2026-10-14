@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
+from src.ordem_servico.aplicacao.saga.modelo import MotivoCompensacao
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.fila_de_notificacoes import FilaDeNotificacoes
 from src.ordem_servico.infraestrutura.notificacoes_mapping import (
@@ -294,6 +295,8 @@ _ATUALIZAR_O_PRIMEIRO_DA_OS_A = {
     "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'",
     "status": "UPDATE notificacoes SET status_da_ordem = 'futuro' "
     "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'",
+    "motivo": "UPDATE notificacoes SET motivo = 'motivo_futuro' "
+    "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'",
 }
 
 
@@ -320,6 +323,25 @@ def test_pedido_desconhecido_espera_o_notificador_da_versao_nova(
     assert [(n.situacao, n.tentativas) for n in _linhas(engine)] == [
         ("pendente", 0)
     ] * 3
+
+
+@pytest.mark.parametrize("motivo", list(MotivoCompensacao))
+def test_pedido_de_cancelamento_de_motivo_conhecido_e_reivindicado(
+    engine: Engine, session_factory: sessionmaker[Session], motivo: MotivoCompensacao
+) -> None:
+    ordem_id = _ordem(session_factory)
+    _gravar(
+        session_factory,
+        ordem_id,
+        ModeloDeNotificacao.CANCELAMENTO,
+        StatusOrdem.CANCELADA,
+        motivo.value,
+    )
+
+    linha = FilaDeNotificacoes(engine).reivindicar(_LEASE)
+
+    assert linha is not None
+    assert linha.notificacao.motivo == motivo.value
 
 
 def test_linha_travada_por_outra_replica_nao_trava_o_claim(
