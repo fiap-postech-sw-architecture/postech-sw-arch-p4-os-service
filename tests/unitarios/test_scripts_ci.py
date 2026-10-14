@@ -1,7 +1,8 @@
 """Scripts do CI (``scripts/ci/``): a conferencia que estreita a excecao do
 trivy (KSV-0109) ao ``PASSWORD`` lido do ambiente, o relatorio das imagens de
 terceiros dos manifestos, que nunca reprova o job, o registro da saida do
-pip-audit e do trivy no summary."""
+pip-audit e do trivy no summary e os nomes das variaveis do ``make
+kind-deploy``."""
 
 from __future__ import annotations
 
@@ -329,3 +330,53 @@ def test_o_security_yml_registra_o_pip_audit_e_o_trivy_no_summary(
     assert len(comandos) == 1
     assert comandos[0].startswith("scripts/ci/registra-no-summary.sh ")
     assert titulo in comandos[0].split(ferramenta)[0]
+
+
+PADRAO = "../postech-sw-arch-p4-platform"
+
+
+@pytest.mark.parametrize(
+    ("variaveis", "platform", "overlay"),
+    [
+        ([], PADRAO, "kind"),
+        (["KIND_OVERLAY=kind-ci"], PADRAO, "kind-ci"),
+        (["PLATFORM_DIR=/clone/platform"], "/clone/platform", "kind"),
+        (["PLATFORM=/clone/antigo"], "/clone/antigo", "kind"),
+        (["PLATFORM=/clone/antigo", "PLATFORM_DIR=/clone/novo"], "/clone/novo", "kind"),
+    ],
+    ids=[
+        "padroes",
+        "kind-overlay",
+        "platform-dir",
+        "nome-antigo",
+        "novo-vence-o-antigo",
+    ],
+)
+def test_kind_deploy_aceita_platform_dir_e_kind_overlay(
+    variaveis: list[str], platform: str, overlay: str
+) -> None:
+    """``PLATFORM_DIR`` e ``KIND_OVERLAY`` sao os nomes dos tres servicos;
+    ``PLATFORM``, o nome antigo do clone, segue valendo quando ``PLATFORM_DIR``
+    nao e dado."""
+    # Sem as variaveis do desenvolvedor (nem as que o make pai passa em
+    # MAKEFLAGS, como em `make check PLATFORM=...`), e como make filho
+    # (MAKELEVEL), que e como o CI roda: o make 4 avisa o diretorio.
+    ambiente = {
+        chave: valor
+        for chave, valor in os.environ.items()
+        if chave not in {"PLATFORM", "PLATFORM_DIR", "KIND_OVERLAY", "MAKEFLAGS"}
+    }
+    resultado = subprocess.run(  # noqa: S603 - o Makefile do proprio repositorio
+        ["make", "-n", "--no-print-directory", "kind-deploy", *variaveis],  # noqa: S607
+        cwd=RAIZ,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+        env={**ambiente, "MAKELEVEL": "1"},
+    )
+
+    assert resultado.returncode == 0, resultado.stderr
+    comando = " ".join(resultado.stdout.replace("\\\n", " ").split())
+    assert comando.startswith(f"{platform}/scripts/ci/implantar-servicos.sh")
+    assert f" --overlay {overlay} os-service=" in comando

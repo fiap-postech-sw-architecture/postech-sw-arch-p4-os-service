@@ -247,14 +247,18 @@ print-trivy-version:
 # Implantacao no kind do platform (README, "Implantacao"), com a plataforma
 # de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do
 # servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
-# carrega no kind, aplica o overlay kind de uma vez e espera o banco, o Job de
-# migracao e os Deployments, nessa ordem. PLATFORM e o clone do platform, por
-# padrao o vizinho deste; o script e o contrato de implantacao dos servicos estao
-# no platform (README dele, "Contrato com os servicos").
-PLATFORM ?= ../postech-sw-arch-p4-platform
+# carrega no kind, aplica o overlay e espera o banco, o Job de migracao e os
+# Deployments, nessa ordem. PLATFORM_DIR e o clone do platform, por padrao o
+# vizinho deste (PLATFORM, o nome antigo, segue valendo); KIND_OVERLAY e o overlay
+# (kind, kind-ci ou k3s). Sao os nomes do Execution Service e do Billing Service.
+# O script e o contrato de implantacao dos servicos estao no platform (README
+# dele, "Contrato com os servicos").
+PLATFORM_DIR ?= $(if $(PLATFORM),$(PLATFORM),../postech-sw-arch-p4-platform)
+KIND_OVERLAY ?= kind
 
 kind-deploy:
-	$(PLATFORM)/scripts/ci/implantar-servicos.sh --overlay kind os-service=$(CURDIR)
+	$(PLATFORM_DIR)/scripts/ci/implantar-servicos.sh --overlay $(KIND_OVERLAY) \
+		os-service=$(CURDIR)
 
 # Stack local do servico: API, relay, consumidor, prazos e notificador +
 # PostgreSQL 16, RabbitMQ e Mailpit (migracoes e admin seed no boot).
