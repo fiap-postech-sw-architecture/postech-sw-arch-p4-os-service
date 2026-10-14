@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+import threading
 from typing import TYPE_CHECKING
 
 import pytest
@@ -30,6 +30,7 @@ _TABELAS = {
     "outbox",
     "mensagens_processadas",
     "sagas",
+    "notificacoes",
 }
 
 
@@ -84,6 +85,29 @@ def banco_vazio(engine: Engine) -> Iterator[str]:
         conn.execute(text(f"DROP DATABASE IF EXISTS {nome} WITH (FORCE)"))
 
 
+def _migrar_com_prazo(url: str, prazo_s: float = 15) -> Exception | None:
+    """``alembic upgrade head`` numa thread; devolve o erro dele (ou ``None``).
+
+    Uma migracao sem ``lock_timeout`` ficaria presa no lock que o teste segura e
+    o pytest nao a interromperia: o job de CI penduraria em vez de reprovar. Com
+    o prazo, a migracao presa reprova o teste e o ``with`` do teste solta o lock.
+    """
+    erros: list[Exception] = []
+
+    def rodar() -> None:
+        try:
+            alembic(url)
+        except Exception as erro:  # devolvido ao teste
+            erros.append(erro)
+
+    thread = threading.Thread(target=rodar, daemon=True)
+    thread.start()
+    thread.join(prazo_s)
+    if thread.is_alive():
+        pytest.fail(f"a migracao ficou presa no lock por mais de {prazo_s} s")
+    return erros[0] if erros else None
+
+
 def test_upgrade_downgrade_upgrade(banco_vazio: str) -> None:
     eng = create_engine(banco_vazio)
     try:
@@ -108,11 +132,58 @@ def test_migracao_da_saga_desiste_do_lock_em_segundos(banco_vazio: str) -> None:
         alembic(banco_vazio, "002")
         with eng.connect() as leitura, leitura.begin():
             leitura.execute(text("SELECT count(*) FROM historico_status_ordem"))
-            inicio = time.monotonic()
-            with pytest.raises(OperationalError, match="lock"):
-                alembic(banco_vazio)
-            assert time.monotonic() - inicio < 15
+            erro = _migrar_com_prazo(banco_vazio)
+        assert isinstance(erro, OperationalError)
+        assert "lock" in str(erro)
         alembic(banco_vazio)
         assert "sagas" in inspect(eng).get_table_names()
+    finally:
+        eng.dispose()
+
+
+def test_notificacoes_sem_dado_pessoal_e_com_os_indices_do_claim(
+    engine: Engine,
+) -> None:
+    inspetor = inspect(engine)
+    colunas = {c["name"] for c in inspetor.get_columns("notificacoes")}
+    indices = {
+        i["name"]: i["column_names"] for i in inspetor.get_indexes("notificacoes")
+    }
+
+    assert colunas == {
+        "id",
+        "ordem_id",
+        "modelo",
+        "status_da_ordem",
+        "motivo",
+        "criada_em",
+        "situacao",
+        "tentativas",
+        "proxima_tentativa_em",
+        "entregue_em",
+        "ultimo_erro",
+    }
+    assert indices == {
+        "ix_notificacoes_claim": ["situacao", "proxima_tentativa_em"],
+        "ix_notificacoes_ordem": ["ordem_id", "id", "situacao"],
+    }
+
+
+def test_migracao_das_notificacoes_desiste_do_lock_em_segundos(
+    banco_vazio: str,
+) -> None:
+    # Uma escrita longa em ordens_de_servico segura o lock que a chave
+    # estrangeira da 004 pede: a migracao falha em segundos (o Job tenta de
+    # novo), sem enfileirar as escritas da app atras dela.
+    eng = create_engine(banco_vazio)
+    try:
+        alembic(banco_vazio, "003")
+        with eng.connect() as escrita, escrita.begin():
+            escrita.execute(text("LOCK TABLE ordens_de_servico IN ROW EXCLUSIVE MODE"))
+            erro = _migrar_com_prazo(banco_vazio)
+        assert isinstance(erro, OperationalError)
+        assert "lock" in str(erro)
+        alembic(banco_vazio)
+        assert "notificacoes" in inspect(eng).get_table_names()
     finally:
         eng.dispose()

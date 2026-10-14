@@ -210,3 +210,38 @@ def sagas_recusando_no_commit(engine: Engine) -> Iterator[None]:
         with engine.begin() as conexao:
             conexao.execute(text("DROP TRIGGER recusar_saga_no_commit ON sagas"))
             conexao.execute(text("DROP FUNCTION recusar_saga_no_commit()"))
+
+
+@contextmanager
+def notificacoes_recusando_no_commit(engine: Engine) -> Iterator[None]:
+    """Trigger DEFERIDO em ``notificacoes``: o INSERT passa e o COMMIT falha.
+
+    O pedido de e-mail e a ultima escrita da transicao; se a transacao for unica,
+    a recusa dele no COMMIT desfaz tambem a mudanca de status da OS.
+    """
+    with engine.begin() as conexao:
+        conexao.execute(
+            text(
+                "CREATE FUNCTION recusar_notificacao_no_commit() RETURNS trigger "
+                "LANGUAGE plpgsql AS $$ BEGIN "
+                "RAISE EXCEPTION 'notificacoes indisponivel no commit'; END $$"
+            )
+        )
+        conexao.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER recusar_notificacao_no_commit "
+                "AFTER INSERT ON notificacoes DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION recusar_notificacao_no_commit()"
+            )
+        )
+    try:
+        yield
+    finally:
+        with engine.begin() as conexao:
+            # Uma transacao esquecida com escrita em `notificacoes` seguraria o
+            # DROP para sempre: com o prazo, o teste falha em segundos.
+            conexao.execute(text("SET LOCAL lock_timeout = '5s'"))
+            conexao.execute(
+                text("DROP TRIGGER recusar_notificacao_no_commit ON notificacoes")
+            )
+            conexao.execute(text("DROP FUNCTION recusar_notificacao_no_commit()"))

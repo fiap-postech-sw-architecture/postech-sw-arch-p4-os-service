@@ -26,6 +26,7 @@ from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
 from tests.unitarios.fakes import (
     ClientePortFake,
     FakeUnitOfWork,
+    NotificacoesEspia,
     RepoEmMemoria,
     SagasEmMemoria,
 )
@@ -289,6 +290,7 @@ class CenarioDaSaga:
         self.ordens = RepoEmMemoria()
         self.sagas = SagasEmMemoria()
         self.publicador = FakeUnitOfWork()
+        self.notificacoes = NotificacoesEspia()
         aberta = AbrirOrdem(
             self.ordens, self.publicador, ClientePortFake(), self.sagas
         ).executar(
@@ -307,6 +309,7 @@ class CenarioDaSaga:
             ordens=self.ordens,
             sagas=self.sagas,
             publicador=self.publicador,
+            notificacoes=self.notificacoes,
             contexto=ContextoDeEnvio(PRAZO, self.relogio),
         )
 

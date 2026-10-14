@@ -1,0 +1,131 @@
+# Notificador dos e-mails ao cliente (python -m src.notificador), na mesma imagem
+# da API, com a saude por arquivo em /tmp como o relay (relay.yaml). Le a tabela
+# notificacoes e envia por SMTP ao Mailpit da plataforma (SMTP_* do ConfigMap).
+# So fala com o banco e com o SMTP: nao recebe RABBITMQ_URL (nao usa o broker)
+# nem ENCRYPTION_KEY (le o contato em claro, por projecao de duas colunas, e
+# nunca decifra o documento; ADR-042).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: os-service-notificador
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: os-service-notificador
+  template:
+    metadata:
+      labels:
+        app: os-service-notificador
+        processo: notificador
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false
+      # Cobre o e-mail em curso (ate algumas operacoes de socket de 5 s): o
+      # SIGTERM o conclui antes de fechar.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # O mesmo da API (api.yaml): espera a migracao desta versao, que cria a
+        # tabela notificacoes.
+        - name: aguarda-migracao
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, src.banco, aguardar]
+          env:
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: notificador
+          image: pytstop-os-service
+          imagePullPolicy: IfNotPresent
+          command: [python, -m, src.notificador]
+          ports:
+            - name: metrics
+              containerPort: 9100
+          envFrom:
+            - configMapRef:
+                name: os-service
+          env:
+            - name: POSTGRES_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: os-postgres
+                  key: POSTGRES_APP_PASSWORD
+            - name: DATABASE_URL
+              value: postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres.pytstop-os.svc.cluster.local:5432/os
+          # Sondas por comando direto, em Python (a imagem slim nao tem curl). A
+          # de vida tolera 90 s sem heartbeat; a de startup e a mesma, com 1 min
+          # para o boot, e nao o arquivo de pronto: banco fora no boot nao
+          # reinicia o pod, so o deixa fora de pronto.
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import os,sys,time;sys.exit(time.time()-os.path.getmtime('/tmp/notificador-heartbeat')>90)
+            periodSeconds: 2
+            timeoutSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import os,sys,time;sys.exit(time.time()-os.path.getmtime('/tmp/notificador-heartbeat')>90)
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Banco fora tira o notificador de pronto sem reinicia-lo. SMTP fora
+          # nao: so atrasa e-mail, e ninguem espera pelo notificador.
+          readinessProbe:
+            exec:
+              command: [test, -f, /tmp/notificador-pronto]
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

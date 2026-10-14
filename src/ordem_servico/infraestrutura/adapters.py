@@ -11,8 +11,9 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
+from src.cliente_veiculo.dominio.contato import CONTATO_ANONIMIZADO
 from src.cliente_veiculo.infraestrutura.mapping import clientes_table, veiculos_table
-from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
+from src.ordem_servico.aplicacao.dtos import ContatoDoCliente, RetratoDoVeiculo
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -59,3 +60,18 @@ class ClienteSQLAlchemyAdapter:
         return RetratoDoVeiculo(
             placa=linha.placa, marca=linha.marca, modelo=linha.modelo, ano=linha.ano
         )
+
+    def obter_contato(self, cliente_id: UUID) -> ContatoDoCliente | None:
+        """Nome e contato em claro (``nome`` e ``contato``), sem o agregado.
+
+        So duas colunas: o ``documento`` (o unico cifrado) nao e lido, e quem
+        chama nao precisa da ``ENCRYPTION_KEY``. Cliente anonimizado (contato
+        no marcador do apagamento LGPD) e como cliente sem contato.
+        """
+        c = clientes_table
+        linha = self._session.execute(
+            select(c.c.nome, c.c.contato).where(c.c.id == cliente_id)
+        ).first()
+        if linha is None or linha.contato == CONTATO_ANONIMIZADO:
+            return None
+        return ContatoDoCliente(nome=linha.nome, contato=linha.contato)

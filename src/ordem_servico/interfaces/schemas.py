@@ -13,12 +13,12 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from src.ordem_servico.aplicacao.saga.modelo import GatilhoDeProcesso
+from src.ordem_servico.aplicacao.situacoes import situacao_de
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.dominio.texto_livre import (
     TAMANHO_MAXIMO_DESCRICAO,
     TAMANHO_MAXIMO_MOTIVO,
 )
-from src.ordem_servico.interfaces.situacoes import situacao_de
 
 _DESCRICAO_STATUS = (
     "Status tecnico (snake_case): recebida, em_diagnostico, aguardando_aprovacao, "

@@ -1,5 +1,7 @@
-# So entrada (ADR-042): nega tudo no namespace e libera o previsto. A sonda do
-# kubelet, o port-forward e o exec nao passam por NetworkPolicy.
+# Entrada (ADR-042): nega toda entrada no namespace e libera o previsto. A sonda
+# do kubelet, o port-forward e o exec nao passam por NetworkPolicy. A unica
+# politica de saida do servico e a do notificador (`notificador-saida`, no fim do
+# arquivo), a excecao explicada la.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -49,7 +51,7 @@ spec:
         - port: 8000
           protocol: TCP
 ---
-# Relay e consumidor: so o Prometheus, no /metrics.
+# Relay, consumidor e notificador: so o Prometheus, no /metrics.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -59,7 +61,7 @@ spec:
     matchExpressions:
       - key: processo
         operator: In
-        values: [relay, consumidor]
+        values: [relay, consumidor, notificador]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -99,4 +101,57 @@ spec:
               app: prometheus
       ports:
         - port: 9187
+          protocol: TCP
+---
+# Notificador: unico processo que disca para um servico de terceiro configuravel
+# (o SMTP, em SMTP_HOST) e que tem acesso de escrita ao banco inteiro do servico.
+# Alem da entrada de todos (as politicas acima), a saida fica restrita ao que ele
+# usa: o DNS, o banco do servico e o Mailpit da plataforma na 1025. Nao fala com
+# o broker nem com o Jaeger. A API, o relay e o consumidor ficam sem politica de
+# saida: seus destinos sao fixos (o PostgreSQL do namespace e o RabbitMQ e o Jaeger
+# da plataforma). O criterio e ter destino de terceiro configuravel, e so o
+# notificador o tem.
+#
+# Trocar o SMTP_HOST (ConfigMap) para outro servidor exige ajustar esta politica:
+# o destino fora da regra nao e recusado, so expira (o prazo de 5 s por tentativa
+# do SMTP), e os e-mails vao para `dead` sem outro sinal alem do log. A regra de
+# entrada no Mailpit e do platform.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notificador-saida
+spec:
+  podSelector:
+    matchLabels:
+      app: os-service-notificador
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app: os-postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: pytstop-plataforma
+          podSelector:
+            matchLabels:
+              app: mailpit
+      ports:
+        - port: 1025
           protocol: TCP

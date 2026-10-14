@@ -17,10 +17,12 @@ from structlog.testing import capture_logs
 
 from src.compartilhado.infraestrutura.logging import configurar_logging
 from src.compartilhado.infraestrutura.mensageria import amqp, consumidor, relay
+from src.ordem_servico.aplicacao import emails
 from src.ordem_servico.aplicacao import use_cases as use_cases_os
 from src.ordem_servico.aplicacao.saga import orquestrador
-from src.ordem_servico.infraestrutura import metricas_da_saga
+from src.ordem_servico.infraestrutura import metricas_da_saga, notificador
 from tests.integracao.broker import Broker, subir_broker
+from tests.integracao.mailpit import Mailpit, subir_mailpit
 from tests.integracao.seed_helpers import criar_usuario
 from tests.rastreamento import RegistrosDoLog, Saidas
 
@@ -245,6 +247,23 @@ def broker_avulso(_broker_avulso_da_sessao: Broker) -> Iterator[Broker]:
         _broker_avulso_da_sessao.esvaziar()
 
 
+@pytest.fixture(scope="session")
+def _mailpit_da_sessao() -> Iterator[Mailpit]:
+    container, mailpit = subir_mailpit()
+    try:
+        yield mailpit
+    finally:
+        container.stop()
+
+
+@pytest.fixture
+def mailpit(_mailpit_da_sessao: Mailpit) -> Iterator[Mailpit]:
+    """Mailpit com a caixa de entrada vazia no comeco e no fim do teste."""
+    _mailpit_da_sessao.apagar()
+    yield _mailpit_da_sessao
+    _mailpit_da_sessao.apagar()
+
+
 @pytest.fixture
 def saidas(monkeypatch: pytest.MonkeyPatch) -> Iterator[Saidas]:
     """Logs dos processos capturados no teste, para as provas de LGPD.
@@ -258,7 +277,16 @@ def saidas(monkeypatch: pytest.MonkeyPatch) -> Iterator[Saidas]:
     configurar_logging()
     registros = RegistrosDoLog()
     logging.getLogger().addHandler(registros)
-    caminho = (amqp, consumidor, relay, orquestrador, use_cases_os, metricas_da_saga)
+    caminho = (
+        amqp,
+        consumidor,
+        relay,
+        orquestrador,
+        use_cases_os,
+        metricas_da_saga,
+        notificador,
+        emails,
+    )
     for modulo in caminho:
         monkeypatch.setattr(modulo, "_log", structlog.get_logger())
     try:

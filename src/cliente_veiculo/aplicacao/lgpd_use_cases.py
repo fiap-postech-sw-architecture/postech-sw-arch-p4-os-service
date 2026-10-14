@@ -17,6 +17,7 @@ from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
 from src.cliente_veiculo.dominio.exceptions import (
     ConsentimentoNaoEncontradoException,
 )
+from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
 
 if TYPE_CHECKING:
@@ -48,8 +49,12 @@ class ExportarDadosPessoais:
 class ExcluirDadosPessoais:
     """Anonimiza (erasure LGPD) os dados de um cliente sem OS ativa.
 
-    Alcanca cliente, veiculos e o texto livre das OS dele (descricao do
-    problema e motivos de cancelamento), tudo na mesma transacao.
+    Alcanca cliente, veiculos, o texto livre das OS dele (descricao do
+    problema e motivos de cancelamento), a placa e a descricao que ficaram nos
+    comandos da outbox e, por comando ``AnonimizarVeiculo`` (um por veiculo,
+    fora da saga), a placa guardada na Execucao (RFC-004 secao 5.3), tudo na
+    mesma transacao: se ela desfaz, nenhum comando sai. Repetido, o erasure nao
+    reenvia o comando de quem ja foi anonimizado.
 
     Espelha o guard de `DesativarCliente`: trava o cliente (FOR UPDATE) e
     consulta `OrdemDeServicoPort.existe_os_ativa_para_cliente` na mesma
@@ -73,8 +78,19 @@ class ExcluirDadosPessoais:
     def executar(self, cliente_id: UUID) -> None:
         with self._uow:
             travar_cliente_sem_os_ativa(self._repo, self._os_port, cliente_id)
+            # Lidos antes: depois de anonimizados, o repositorio nao os acha mais.
+            veiculos = self._repo.ids_dos_veiculos_a_anonimizar(cliente_id)
             self._repo.anonimizar_dados(cliente_id)
             self._os_port.anonimizar_textos_livres_do_cliente(cliente_id)
+            self._os_port.anonimizar_comandos_do_cliente_na_outbox(cliente_id)
+            for veiculo_id in veiculos:
+                # Fora da saga: o correlation_id e o veiculo, sem causa e sem
+                # resposta; a placa nunca vai para o log.
+                self._uow.publicar_comando(
+                    Comando.ANONIMIZAR_VEICULO,
+                    {"veiculo_id": veiculo_id},
+                    correlation_id=veiculo_id,
+                )
             self._uow.commit()
 
 

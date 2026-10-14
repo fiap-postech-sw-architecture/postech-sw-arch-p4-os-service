@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
+from src.cliente_veiculo.dominio.placa_anonimizada import (
+    PREFIXO_DO_TOMBSTONE,
+    PlacaAnonimizada,
+    tombstone_da_placa,
+)
 from src.compartilhado.dominio.placa import Placa
 
 
@@ -33,3 +37,15 @@ class TestPlacaAnonimizada:
         assert a is not b
         assert a == b
         assert a != PlacaAnonimizada(veiculo_id=uuid4())
+
+
+def test_tombstone_da_placa_tem_o_formato_anonimizado_dois_pontos_e_o_id() -> None:
+    # O texto da coluna `placa` e o contrato entre o erasure, o mapeamento do ORM
+    # e a consulta dos veiculos a avisar: mudar o formato exige mudar os tres.
+    veiculo_id = UUID("00000000-0000-0000-0000-000000000001")
+
+    assert PREFIXO_DO_TOMBSTONE == "ANONIMIZADO:"
+    assert (
+        tombstone_da_placa(veiculo_id)
+        == "ANONIMIZADO:00000000-0000-0000-0000-000000000001"
+    )

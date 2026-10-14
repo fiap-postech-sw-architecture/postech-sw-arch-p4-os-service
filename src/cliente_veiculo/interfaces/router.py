@@ -273,7 +273,12 @@ def excluir_dados_pessoais(
     usuario: Annotated[dict[str, object], Depends(exigir_papel(Papel.ADMIN))],
     session: Annotated[Session, Depends(obter_session)],
 ) -> None:
-    """Anonimiza os dados do cliente (LGPD erasure); 409 se houver OS ativa."""
+    """Anonimiza os dados do cliente (LGPD erasure); 409 se houver OS ativa.
+
+    Na mesma transacao: cliente, veiculos, texto livre das OS, placa e descricao
+    dos comandos ja gravados na outbox e um comando ``AnonimizarVeiculo`` por
+    veiculo para a Execucao trocar a placa que guarda.
+    """
     uc = obter_excluir_dados(session)
     uc.executar(cliente_id)
     # Auditoria LGPD (p3 #76): erasure (destrutivo, admin-only) registra ator +

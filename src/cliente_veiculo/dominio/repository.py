@@ -47,8 +47,21 @@ class ClienteRepository(Protocol):
         """True se a placa ja existe; excluir_cliente_id ignora o proprio cliente."""
         pass
 
+    def ids_dos_veiculos_a_anonimizar(self, cliente_id: UUID) -> list[UUID]:
+        """Ids dos veiculos do cliente que ainda guardam a placa original.
+
+        Consulta, lida antes de ``anonimizar_dados``: a Execucao guarda a placa
+        de cada um e e avisada por comando (``AnonimizarVeiculo``). Quem ja foi
+        anonimizado nao volta, entao um erasure repetido nao reenvia comando.
+        """
+        pass
+
     def anonimizar_dados(self, cliente_id: UUID) -> None:
-        """Apaga PII de cliente e veiculos com tombstones, na mesma transacao (LGPD)."""
+        """Apaga PII de cliente e veiculos com tombstones, na mesma transacao (LGPD).
+
+        Comando: nao devolve dado (os veiculos a avisar saem de
+        ``ids_dos_veiculos_a_anonimizar``, lido antes). Idempotente.
+        """
         pass
 
     def salvar_consentimento(self, consentimento: ConsentimentoCliente) -> None:

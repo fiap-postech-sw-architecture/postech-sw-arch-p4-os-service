@@ -20,17 +20,17 @@ from tests.manifestos import RAIZ, container, objeto
 _TMP_DO_CONTAINER = Path("/tmp")  # noqa: S108  # o /tmp do pod, nao deste processo
 
 
-def test_aguarda_migracao_e_o_mesmo_nos_tres_deployments() -> None:
+def test_aguarda_migracao_e_o_mesmo_nos_quatro_deployments() -> None:
     especificacoes = [
         container(objeto("Deployment", f"os-service-{processo}"), "aguarda-migracao")
-        for processo in ("api", "relay", "consumidor")
+        for processo in ("api", "relay", "consumidor", "notificador")
     ]
 
-    assert especificacoes[1:] == [especificacoes[0]] * 2
+    assert especificacoes[1:] == [especificacoes[0]] * 3
     assert especificacoes[0]["command"] == ["python", "-m", "src.banco", "aguardar"]
 
 
-@pytest.mark.parametrize("processo", ["relay", "consumidor"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador"])
 def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None:
     sinal = Sinalizador(processo, _TMP_DO_CONTAINER)
     principal = container(objeto("Deployment", f"os-service-{processo}"), processo)
@@ -47,7 +47,7 @@ def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None
     ]
 
 
-@pytest.mark.parametrize("processo", ["relay", "consumidor"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador"])
 def test_startup_do_processo_e_a_liveness(processo: str) -> None:
     # Broker fora no boot nao reinicia o pod (o pronto so existe com a conexao):
     # a startup olha a idade do heartbeat, como a liveness, e nao o pronto.
@@ -64,7 +64,7 @@ def _vida(codigo: str) -> int:
 
 
 @pytest.mark.parametrize("sonda", ["startupProbe", "livenessProbe"])
-@pytest.mark.parametrize("processo", ["relay", "consumidor"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador"])
 @pytest.mark.parametrize(
     ("idade_s", "viva"),
     [

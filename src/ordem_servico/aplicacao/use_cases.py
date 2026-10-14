@@ -34,6 +34,7 @@ from src.ordem_servico.aplicacao.dtos import (
     ResumoPagamentoDTO,
     SagaDTO,
 )
+from src.ordem_servico.aplicacao.notificacoes import registrar_transicao
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import enviar
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
         ClientePort,
         ConsultaAcompanhamento,
         ConsultaDaOrdem,
+        PublicadorDeNotificacoes,
         SagaRepository,
     )
     from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
@@ -418,14 +420,22 @@ class CancelarOrdem:
 
 
 class RegistrarEntrega:
-    """Entrega do veiculo ao cliente (T10, fora da saga): FINALIZADA -> ENTREGUE."""
+    """Entrega do veiculo ao cliente (T10, fora da saga): FINALIZADA -> ENTREGUE.
+
+    O e-mail da entrega vai na mesma transacao (``PublicadorDeNotificacoes``).
+    """
 
     def __init__(
-        self, repo: OrdemDeServicoRepository, uow: UnitOfWork, sagas: SagaRepository
+        self,
+        repo: OrdemDeServicoRepository,
+        uow: UnitOfWork,
+        sagas: SagaRepository,
+        notificacoes: PublicadorDeNotificacoes,
     ) -> None:
         self._repo = repo
         self._uow = uow
         self._sagas = sagas
+        self._notificacoes = notificacoes
 
     def executar(self, ordem_id: UUID, *, ator: str) -> OrdemDeServicoDTO:
         """Registra a entrega com origem ATENDIMENTO; ``ator`` e o sub do JWT.
@@ -438,8 +448,10 @@ class RegistrarEntrega:
         with self._uow:
             ordem = _obter_ordem(self._repo, ordem_id)
             saga = self._sagas.obter(ordem_id)
+            status_antes = ordem.status
             ordem.registrar_entrega(ator=ator)
             self._repo.salvar(ordem)
+            registrar_transicao(self._notificacoes, ordem, status_antes=status_antes)
             self._uow.commit()
         return _ordem_dto(ordem, saga)
 

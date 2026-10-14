@@ -1,4 +1,4 @@
-"""Partes comuns aos processos relay e consumidor: boot, saude e encerramento.
+"""Partes comuns aos processos relay, consumidor e notificador: boot, saude e fim.
 
 Prontidao (RFC-004 secao 6, ADR-042): sem HTTP de negocio, cada processo toca um
 arquivo de heartbeat a cada volta do laco (liveness; o processo vivo mas preso
@@ -110,6 +110,45 @@ def instalar_sinais(parar: threading.Event) -> None:
     signal.signal(signal.SIGINT, lambda *_: parar.set())
 
 
+def _iniciar(processo: str) -> None:
+    """Log JSON e a linha de versao no stdout (o commit que roda no pod)."""
+    configurar_logging()
+    git_sha = os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12]
+    git_date = os.environ.get("PYTSTOP_GIT_DATE", "unknown")
+    print(
+        f">>> pytstop-os-service {processo} | commit {git_sha} | {git_date}", flush=True
+    )
+
+
+def _recusar_senha_de_demonstracao(*conexoes: tuple[str, str, str]) -> None:
+    """Fora de development/test, a URL com a senha de demonstracao aborta o boot.
+
+    Cada item e (nome da variavel, URL, senha de demonstracao dela).
+    """
+    if os.environ.get("ENVIRONMENT", "development").lower() in AMBIENTES_DEV:
+        return
+    for nome, url_de_conexao, senha in conexoes:
+        if url_com_senha(url_de_conexao, senha):
+            msg = (
+                f"{nome} usa a senha de demonstracao -- proibido em producao. "
+                "Injete a credencial real via Secret."
+            )
+            raise RuntimeError(msg)
+
+
+def _abrir_banco(url_do_banco: str) -> Engine:
+    """Mapeamentos, engine de pool pequeno e timeouts abaixo dos do broker."""
+    from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
+
+    iniciar_todos_mapeamentos()
+    return criar_engine(
+        url_do_banco,
+        pool_size=_POOL_DOS_PROCESSOS,
+        max_overflow=_POOL_DOS_PROCESSOS,
+        opcoes=_OPCOES_DO_BANCO,
+    )
+
+
 def preparar(processo: str) -> tuple[Engine, pika.URLParameters]:
     """Boot comum: log JSON, guarda de segredo, mapeamentos, banco e broker.
 
@@ -118,40 +157,32 @@ def preparar(processo: str) -> tuple[Engine, pika.URLParameters]:
             ``DATABASE_URL`` com a senha de demonstracao fora de
             development/test, ou banco sem configuracao.
     """
-    configurar_logging()
-    git_sha = os.environ.get("PYTSTOP_GIT_SHA", "unknown")[:12]
-    git_date = os.environ.get("PYTSTOP_GIT_DATE", "unknown")
-    print(
-        f">>> pytstop-os-service {processo} | commit {git_sha} | {git_date}", flush=True
-    )
-
+    _iniciar(processo)
     url = os.environ.get("RABBITMQ_URL", "")
     if not url:
         msg = "RABBITMQ_URL obrigatoria (amqp://os:<senha>@<host>:5672/%2F)."
         raise RuntimeError(msg)
     url_do_banco = resolver_database_url()
-    if os.environ.get("ENVIRONMENT", "development").lower() not in AMBIENTES_DEV:
-        for nome, url_de_conexao, senha in (
-            ("RABBITMQ_URL", url, _SENHA_DO_BROKER_DEMO),
-            ("DATABASE_URL", url_do_banco, SENHA_DO_BANCO_DEMO),
-        ):
-            if url_com_senha(url_de_conexao, senha):
-                msg = (
-                    f"{nome} usa a senha de demonstracao -- proibido em producao. "
-                    "Injete a credencial real via Secret."
-                )
-                raise RuntimeError(msg)
-
-    from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
-
-    iniciar_todos_mapeamentos()
-    engine = criar_engine(
-        url_do_banco,
-        pool_size=_POOL_DOS_PROCESSOS,
-        max_overflow=_POOL_DOS_PROCESSOS,
-        opcoes=_OPCOES_DO_BANCO,
+    _recusar_senha_de_demonstracao(
+        ("RABBITMQ_URL", url, _SENHA_DO_BROKER_DEMO),
+        ("DATABASE_URL", url_do_banco, SENHA_DO_BANCO_DEMO),
     )
-    return engine, amqp.parametros(url, processo)
+    return _abrir_banco(url_do_banco), amqp.parametros(url, processo)
+
+
+def preparar_sem_broker(processo: str) -> Engine:
+    """Boot de um processo que so fala com o banco (o ``notificador``).
+
+    Como ``preparar``, sem o broker: ``RABBITMQ_URL`` nao e lida nem exigida.
+
+    Raises:
+        RuntimeError: ``DATABASE_URL`` com a senha de demonstracao fora de
+            development/test, ou banco sem configuracao.
+    """
+    _iniciar(processo)
+    url_do_banco = resolver_database_url()
+    _recusar_senha_de_demonstracao(("DATABASE_URL", url_do_banco, SENHA_DO_BANCO_DEMO))
+    return _abrir_banco(url_do_banco)
 
 
 def onde(exc: BaseException) -> str:

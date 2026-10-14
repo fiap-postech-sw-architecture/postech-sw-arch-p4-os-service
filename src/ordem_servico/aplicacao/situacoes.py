@@ -1,8 +1,9 @@
 """Vocabulario de situacao da OS — rotulo de apresentacao de cada status.
 
 Os valores persistidos de ``StatusOrdem`` sao snake_case; este modulo traduz
-para o rotulo exibido na API (campo ``situacao``). Os rotulos tem acento de
-proposito: sao texto para o usuario, nao identificadores.
+para o rotulo exibido na API (campo ``situacao``) e no e-mail da situacao ao
+cliente (``notificacoes``). Os rotulos tem acento de proposito: sao texto para
+o usuario, nao identificadores.
 """
 
 from __future__ import annotations

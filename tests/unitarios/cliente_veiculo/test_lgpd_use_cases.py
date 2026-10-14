@@ -23,6 +23,7 @@ from src.cliente_veiculo.dominio.exceptions import (
     ClienteNaoEncontradoException,
     ConsentimentoNaoEncontradoException,
 )
+from src.compartilhado.aplicacao.mensageria import ContratoInvalidoError
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.exceptions import ViolacaoRegraDeNegocioException
 from src.compartilhado.dominio.placa import Placa
@@ -36,6 +37,7 @@ class FakeClienteRepoLGPD:
         self._clientes: dict[UUID, Cliente] = {}
         self._consentimentos: dict[tuple[UUID, str], ConsentimentoCliente] = {}
         self.anonimizados: set[UUID] = set()
+        self.veiculos_anonimizados: set[UUID] = set()
         self.registro = registro if registro is not None else []
 
     def obter_por_id(self, cliente_id: UUID) -> Cliente | None:
@@ -66,9 +68,18 @@ class FakeClienteRepoLGPD:
     def obter_dados_pessoais(self, cliente_id: UUID) -> Cliente | None:
         return self._clientes.get(cliente_id)
 
+    def ids_dos_veiculos_a_anonimizar(self, cliente_id: UUID) -> list[UUID]:
+        self.registro.append("ids_dos_veiculos_a_anonimizar")
+        cliente = self._clientes.get(cliente_id)
+        veiculos = [] if cliente is None else [v.id for v in cliente.veiculos]
+        return [v for v in veiculos if v not in self.veiculos_anonimizados]
+
     def anonimizar_dados(self, cliente_id: UUID) -> None:
         self.registro.append("anonimizar_dados")
         self.anonimizados.add(cliente_id)
+        cliente = self._clientes.get(cliente_id)
+        if cliente is not None:
+            self.veiculos_anonimizados.update(v.id for v in cliente.veiculos)
 
     def salvar_consentimento(self, consentimento: ConsentimentoCliente) -> None:
         key = (consentimento.cliente_id, consentimento.tipo)
@@ -151,6 +162,9 @@ class StubOrdemDeServicoPort:
         self.registro.append("anonimizar_textos_livres_do_cliente")
         self.textos_anonimizados.append(cliente_id)
 
+    def anonimizar_comandos_do_cliente_na_outbox(self, cliente_id: UUID) -> None:
+        self.registro.append("anonimizar_comandos_do_cliente_na_outbox")
+
 
 class UowComRegistro(FakeUnitOfWork):
     def __init__(self, registro: list[str]) -> None:
@@ -187,6 +201,84 @@ class TestExcluirDadosPessoais:
         uc = ExcluirDadosPessoais(repo=repo, uow=uow, os_port=StubOrdemDeServicoPort())
         with pytest.raises(ClienteNaoEncontradoException):
             uc.executar(uuid4())
+        assert uow.comandos == []
+
+    @pytest.mark.parametrize("quantidade", [0, 1, 3])
+    def test_um_comando_anonimizar_veiculo_por_veiculo(self, quantidade: int) -> None:
+        repo = FakeClienteRepoLGPD()
+        uow = FakeUnitOfWork()
+        cliente = Cliente(
+            _nome="Joao",
+            _documento=CPF(numero=CPF_VALIDO),
+            _contato=Contato(valor="11999"),
+        )
+        for numero in range(quantidade):
+            cliente.adicionar_veiculo(
+                Placa(valor=f"ABC123{numero}"), "Fiat", "Uno", 2020
+            )
+        repo.salvar(cliente)
+
+        ExcluirDadosPessoais(
+            repo=repo, uow=uow, os_port=StubOrdemDeServicoPort()
+        ).executar(cliente.id)
+
+        # Fora da saga: o correlation_id e o veiculo, sem causa; a placa nao vai.
+        assert [
+            (tipo, dados, corr, causa) for tipo, dados, corr, causa in uow.comandos
+        ] == [
+            ("AnonimizarVeiculo", {"veiculo_id": v.id}, v.id, None)
+            for v in cliente.veiculos
+        ]
+        assert [e["tipo"] for e in uow.envelopes] == ["AnonimizarVeiculo"] * quantidade
+        assert "ABC123" not in repr(uow.envelopes)
+        assert uow.committed
+
+    def test_erasure_repetido_so_avisa_os_veiculos_ainda_nao_anonimizados(self) -> None:
+        repo = FakeClienteRepoLGPD()
+        uow = FakeUnitOfWork()
+        cliente = Cliente(
+            _nome="Joao",
+            _documento=CPF(numero=CPF_VALIDO),
+            _contato=Contato(valor="11999"),
+        )
+        cliente.adicionar_veiculo(Placa(valor="ABC1230"), "Fiat", "Uno", 2020)
+        cliente.adicionar_veiculo(Placa(valor="ABC1231"), "VW", "Gol", 2021)
+        repo.salvar(cliente)
+        excluir = ExcluirDadosPessoais(
+            repo=repo, uow=uow, os_port=StubOrdemDeServicoPort()
+        )
+
+        for _ in range(3):
+            excluir.executar(cliente.id)
+
+        # Um comando por veiculo no total, e nao por chamada.
+        assert [dados["veiculo_id"] for _, dados, _, _ in uow.comandos] == [
+            v.id for v in cliente.veiculos
+        ]
+
+    def test_comando_fora_do_contrato_desfaz_a_transacao(self) -> None:
+        repo = FakeClienteRepoLGPD()
+        cliente = Cliente(
+            _nome="Joao",
+            _documento=CPF(numero=CPF_VALIDO),
+            _contato=Contato(valor="11999"),
+        )
+        cliente.adicionar_veiculo(Placa(valor="ABC1234"), "Fiat", "Uno", 2020)
+        repo.salvar(cliente)
+
+        class UowQueRecusa(FakeUnitOfWork):
+            def publicar_comando(self, *args: object, **kwargs: object) -> UUID:
+                raise ContratoInvalidoError("recusado")
+
+        uow = UowQueRecusa()
+        with pytest.raises(ContratoInvalidoError):
+            ExcluirDadosPessoais(
+                repo=repo, uow=uow, os_port=StubOrdemDeServicoPort()
+            ).executar(cliente.id)
+
+        # Sem commit: a transacao (cliente, textos, outbox, comandos) cai inteira.
+        assert not uow.committed
+        assert uow.rolled_back
 
     def test_trava_o_cliente_e_checa_os_ativa_dentro_da_transacao(self) -> None:
         # Check-then-act: sem o lock dentro da UoW, uma OS aberta entre a
@@ -206,8 +298,10 @@ class TestExcluirDadosPessoais:
             "inicio",
             "bloquear_cliente",
             "existe_os_ativa_para_cliente",
+            "ids_dos_veiculos_a_anonimizar",
             "anonimizar_dados",
             "anonimizar_textos_livres_do_cliente",
+            "anonimizar_comandos_do_cliente_na_outbox",
             "commit",
         ]
 
@@ -228,6 +322,7 @@ class TestExcluirDadosPessoais:
             uc.executar(cliente.id)
         assert cliente.id not in repo.anonimizados
         assert os_port.textos_anonimizados == []
+        assert uow.comandos == []
         assert not uow.committed
 
 

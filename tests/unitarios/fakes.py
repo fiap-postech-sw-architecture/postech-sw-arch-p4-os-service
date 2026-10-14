@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
     from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+    from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -189,3 +190,13 @@ class ConsultaDaOrdemEmMemoria:
     def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
         ordem = self._ordens.obter_por_id(ordem_id)
         return None if ordem is None else (ordem, self._sagas.obter(ordem_id))
+
+
+class NotificacoesEspia:
+    """``PublicadorDeNotificacoes`` que guarda os pedidos, na ordem em que saem."""
+
+    def __init__(self) -> None:
+        self.registradas: list[Notificacao] = []
+
+    def registrar(self, notificacao: Notificacao) -> None:
+        self.registradas.append(notificacao)

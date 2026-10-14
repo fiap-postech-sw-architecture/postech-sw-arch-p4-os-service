@@ -26,6 +26,9 @@ from src.ordem_servico.infraestrutura.consultas import (
     ConsultaAcompanhamentoSQLAlchemy,
     ConsultaDaOrdemSQLAlchemy,
 )
+from src.ordem_servico.infraestrutura.notificacoes_mapping import (
+    NotificacoesSQLAlchemy,
+)
 from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 from src.ordem_servico.infraestrutura.rastreamento_da_saga import span_da_saga
 from src.ordem_servico.infraestrutura.repository import (
@@ -102,7 +105,10 @@ def obter_cancelar_ordem(session: Session) -> CancelarOrdem:
 
 def obter_registrar_entrega(session: Session) -> RegistrarEntrega:
     return RegistrarEntrega(
-        repo=_repo(session), uow=_uow(session), sagas=_sagas(session)
+        repo=_repo(session),
+        uow=_uow(session),
+        sagas=_sagas(session),
+        notificacoes=NotificacoesSQLAlchemy(session),
     )
 
 

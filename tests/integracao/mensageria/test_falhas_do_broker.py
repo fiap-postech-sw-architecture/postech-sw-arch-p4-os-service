@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import select
 import shutil
 import socket
 import threading
@@ -932,7 +933,7 @@ def test_sem_listen_nem_select_o_relay_segue_pelo_poll(
         return argumentos(url)
 
     falhas_de_select = [OSError("socket morto")]
-    select_original = modulo_relay.select.select
+    select_original = select.select
 
     def select_com_falha(*args: Any) -> Any:
         if falhas_de_select:
@@ -940,7 +941,7 @@ def test_sem_listen_nem_select_o_relay_segue_pelo_poll(
         return select_original(*args)
 
     monkeypatch.setattr(engine.dialect, "create_connect_args", connect_args)
-    monkeypatch.setattr(modulo_relay.select, "select", select_com_falha)
+    monkeypatch.setattr(select, "select", select_com_falha)
 
     with EmSegundoPlano(_relay(engine, rastreador, tmp_path)):
         esperar_ate(lambda: not falhas_de_listen and not falhas_de_select)
