@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from src.autenticacao.dominio.papel import Papel
 from src.autenticacao.dominio.usuario import Usuario
@@ -576,8 +577,14 @@ class TestClienteRepository:
         # Antes: os dois veiculos do cliente (o do outro cliente nao entra).
         assert repo.ids_dos_veiculos_a_anonimizar(cliente.id) == ids
         repo.anonimizar_dados(cliente.id)
-        # Depois: ninguem guarda mais a placa, entao nada a avisar.
+        # Depois: ninguem guarda mais a placa, entao nada a avisar. O tombstone
+        # gravado e o `ANONIMIZADO:{id}` que o mapeamento tambem escreve.
         assert repo.ids_dos_veiculos_a_anonimizar(cliente.id) == []
+        placas = session.execute(
+            text("SELECT placa FROM veiculos WHERE cliente_id = :id ORDER BY id"),
+            {"id": cliente.id},
+        ).scalars()
+        assert list(placas) == [f"ANONIMIZADO:{id_}" for id_ in ids]
 
     def test_anonimizar_dois_veiculos_preserva_unique_placa(
         self, session: Session
