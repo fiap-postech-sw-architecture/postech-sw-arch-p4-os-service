@@ -7,9 +7,12 @@ import time
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import httpx
 import pytest
 import structlog
 import uvicorn
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from src.compartilhado.infraestrutura.logging import (
     _JWT_PATTERN,
@@ -19,7 +22,10 @@ from src.compartilhado.infraestrutura.logging import (
     redigir_pii_erro,
     scrub_pii,
 )
+from src.compartilhado.interfaces import middleware
+from src.compartilhado.interfaces.middleware import SecurityHeadersMiddleware
 from tests.chaves_jwt import jwt_service
+from tests.servidor_http import servir
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -763,6 +769,111 @@ class TestLoggersDoUvicorn:
         configurar_logging(stream=buffer_com_uvicorn_restaurado)
 
         assert not logging.getLogger("uvicorn.access").hasHandlers()
+
+
+class TestAccessLogEstruturado:
+    """O ``http_request`` do middleware, no lugar da linha de texto do uvicorn."""
+
+    @pytest.fixture
+    def saida(
+        self,
+        buffer_com_uvicorn_restaurado: io.StringIO,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> io.StringIO:
+        configurar_logging(stream=buffer_com_uvicorn_restaurado)
+        # O logger do modulo guarda a configuracao da primeira vez que loga.
+        monkeypatch.setattr(middleware, "_log", structlog.get_logger())
+        return buffer_com_uvicorn_restaurado
+
+    @staticmethod
+    def _acessos(saida: io.StringIO) -> list[dict[str, object]]:
+        linhas = (json.loads(linha) for linha in saida.getvalue().splitlines())
+        return [linha for linha in linhas if linha["event"] == "http_request"]
+
+    @staticmethod
+    def _app() -> FastAPI:
+        app = FastAPI()
+
+        @app.get("/api/v1/saude")
+        def saude() -> dict[str, str]:
+            return {"status": "vivo"}
+
+        @app.get("/estoura")
+        def estoura() -> None:
+            msg = "falha"
+            raise RuntimeError(msg)
+
+        app.add_middleware(SecurityHeadersMiddleware)
+        return app
+
+    def test_cada_requisicao_gera_um_http_request_com_o_request_id_do_kong(
+        self, saida: io.StringIO
+    ) -> None:
+        cliente = TestClient(self._app())
+
+        cliente.get("/api/v1/saude", headers={"X-Request-ID": "req-do-kong-1"})
+        cliente.get("/api/v1/saude", headers={"X-Request-ID": "req-do-kong-2"})
+
+        acessos = self._acessos(saida)
+        assert [
+            (a["method"], a["path"], a["status"], a["request_id"], a["logger"])
+            for a in acessos
+        ] == [
+            (
+                "GET",
+                "/api/v1/saude",
+                200,
+                "req-do-kong-1",
+                "src.compartilhado.interfaces.middleware",
+            ),
+            (
+                "GET",
+                "/api/v1/saude",
+                200,
+                "req-do-kong-2",
+                "src.compartilhado.interfaces.middleware",
+            ),
+        ]
+        assert all(isinstance(a["duration_ms"], float) for a in acessos)
+        assert all(a["duration_ms"] >= 0 for a in acessos)  # type: ignore[operator]
+
+    def test_resposta_de_erro_e_o_500_do_envelope_tambem_saem_com_o_status(
+        self, saida: io.StringIO
+    ) -> None:
+        cliente = TestClient(self._app(), raise_server_exceptions=False)
+
+        cliente.get("/nao-existe")
+        cliente.get("/estoura")
+
+        assert [(a["path"], a["status"]) for a in self._acessos(saida)] == [
+            ("/nao-existe", 404),
+            ("/estoura", 500),
+        ]
+
+    def test_query_string_fica_fora_do_log_e_dado_pessoal_no_caminho_sai_mascarado(
+        self, saida: io.StringIO
+    ) -> None:
+        cliente = TestClient(self._app())
+
+        cliente.get(
+            "/clientes/123.456.789-00?email=joao@example.com&cpf=987.654.321-00"
+        )
+
+        (acesso,) = self._acessos(saida)
+        assert acesso["path"] != "/clientes/123.456.789-00"
+        assert str(acesso["path"]).startswith("/clientes/")
+        texto = saida.getvalue()
+        for pii in ("123.456.789-00", "joao@example.com", "987.654.321-00"):
+            assert pii not in texto
+
+    def test_caminho_leva_o_prefixo_da_borda_como_o_kong_o_ve(
+        self, saida: io.StringIO
+    ) -> None:
+        with servir(self._app(), root_path="/os") as url:
+            httpx.get(f"{url}/api/v1/saude")
+
+        (acesso,) = self._acessos(saida)
+        assert acesso["path"] == "/os/api/v1/saude"
 
 
 def test_log_dentro_de_um_span_leva_trace_id_e_span_id() -> None:

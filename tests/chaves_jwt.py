@@ -15,7 +15,7 @@ import json
 import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Self, cast
 from uuid import uuid4
 
 import jwt
@@ -113,10 +113,13 @@ def congelar_o_relogio_do_pyjwt(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class _Relogio(datetime):
         @classmethod
-        def now(cls, tz: tzinfo | None = None) -> datetime:
-            if tz is None:
-                return AGORA_CONGELADA.replace(tzinfo=None)
-            return AGORA_CONGELADA
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            agora = (
+                AGORA_CONGELADA
+                if tz is not None
+                else AGORA_CONGELADA.replace(tzinfo=None)
+            )
+            return cls.combine(agora.date(), agora.timetz())
 
     monkeypatch.setattr("jwt.api_jwt.datetime", _Relogio)
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.manifestos import exigir_kubectl
 from tests.rastreamento import Rastreador
 
 
@@ -19,6 +20,12 @@ def _reset_encryption_singleton() -> None:
     from src.compartilhado.infraestrutura.encryption import EncryptionService
 
     EncryptionService._instance = None
+
+
+@pytest.fixture(scope="session")
+def kubectl() -> None:
+    """Os testes que leem o render do kustomize pedem esta fixture."""
+    exigir_kubectl()
 
 
 @pytest.fixture

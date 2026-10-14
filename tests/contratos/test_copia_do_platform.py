@@ -5,7 +5,8 @@ init de usuarios e configuracao) sao comparados byte a byte com o tarball do
 platform nesse SHA (repositorio publico), baixado uma vez, com novas
 tentativas. Copia editada aqui, ou ``ORIGEM`` apontando para um SHA sem esses
 arquivos, reprova o CI; a copia atrasada em relacao a ``main`` do platform se
-resolve atualizando ``ORIGEM`` e copiando de novo.
+resolve atualizando ``ORIGEM`` e copiando de novo. O mesmo vale para os objetos
+da borda em ``k8s/base/borda.yaml``, que sao os do exemplo do platform.
 
 Sem rede o teste falha uma vez, com o motivo. Para rodar a suite offline de
 proposito: ``uv run pytest -m "not rede"``.
@@ -16,12 +17,15 @@ from __future__ import annotations
 import io
 import tarfile
 import time
+from functools import cache
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+import yaml
 
 from src.compartilhado.infraestrutura.mensageria.contratos import CONTRATOS
+from tests.manifestos import BASE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,6 +53,7 @@ def _no_platform(copia: Path) -> str:
     return f"k8s/base/rabbitmq/{copia.name}"
 
 
+@cache
 def _platform(sha: str) -> dict[str, bytes]:
     """Arquivos do platform no ``sha``, pelo caminho a partir da raiz do repositorio."""
     falha: httpx.HTTPError | None = None
@@ -92,3 +97,16 @@ def test_copia_e_identica_a_do_platform_no_sha_de_origem() -> None:
 
     assert len(_COPIAS) > 70
     assert divergentes == []
+
+
+@pytest.mark.rede
+def test_borda_e_a_do_exemplo_do_platform_no_sha_de_origem() -> None:
+    # Os objetos, nao os comentarios: o cabecalho do borda.yaml e deste repositorio.
+    exemplo = _platform(_ORIGEM.read_text().strip())[
+        "k8s/exemplos/borda-os-service.yaml"
+    ]
+
+    local = list(yaml.safe_load_all((BASE / "borda.yaml").read_text()))
+
+    assert len(local) == 13
+    assert local == list(yaml.safe_load_all(exemplo))
