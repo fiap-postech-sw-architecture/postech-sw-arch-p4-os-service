@@ -28,7 +28,9 @@ from src.ordem_servico.aplicacao.use_cases import (
     RETOMADA_RECUSADA,
     RetomarCompensacao,
 )
+from src.ordem_servico.infraestrutura.rastreamento_da_saga import span_da_saga
 from tests.fabricas import ATOR_ATENDENTE
+from tests.rastreamento import Rastreador, traceparent
 from tests.unitarios.fakes import FakeUnitOfWork
 from tests.unitarios.ordem_servico.cenario_da_saga import CenarioDaSaga
 
@@ -50,6 +52,46 @@ def _retomada(cenario: CenarioDaSaga) -> tuple[RetomarCompensacao, FakeUnitOfWor
 
 def _parada(falha: str = "estorno_recusado") -> CenarioDaSaga:
     return CenarioDaSaga.em_compensacao(PLANO, falha=falha)
+
+
+def test_o_span_da_retomada_e_filho_do_contexto_da_saga_com_link_para_a_requisicao(
+    rastreador: Rastreador,
+) -> None:
+    cenario = _parada()
+    with rastreador.tracer.start_as_current_span("transicao da saga"):
+        pass
+    (anterior,) = rastreador.spans("transicao da saga")
+    cenario.saga.registrar_contexto_de_trace(traceparent(anterior))
+    contexto = ContextoDeEnvio(
+        timedelta(seconds=120), cenario.relogio, span_da_saga(rastreador.tracer)
+    )
+    caso_de_uso = RetomarCompensacao(FakeUnitOfWork(), cenario.sagas, contexto)
+
+    with rastreador.tracer.start_as_current_span("POST compensacao") as requisicao:
+        caso_de_uso.executar(cenario.ordem_id, ator=ATOR_ATENDENTE)
+
+    # O span da retomada nasce no trace da saga (o pai e o contexto guardado), e o
+    # link e o que o liga a requisicao do admin, que tem trace proprio.
+    (retomada,) = rastreador.spans("saga retomada")
+    assert retomada.context.trace_id == anterior.context.trace_id
+    assert retomada.parent is not None
+    assert retomada.parent.span_id == anterior.context.span_id
+    assert retomada.context.trace_id != requisicao.get_span_context().trace_id
+    (link,) = retomada.links
+    assert link.context.span_id == requisicao.get_span_context().span_id
+
+
+def test_retomada_recusada_nao_abre_o_span(rastreador: Rastreador) -> None:
+    cenario = CenarioDaSaga.em("aguardando_orcamento")
+    contexto = ContextoDeEnvio(
+        timedelta(seconds=120), cenario.relogio, span_da_saga(rastreador.tracer)
+    )
+    caso_de_uso = RetomarCompensacao(FakeUnitOfWork(), cenario.sagas, contexto)
+
+    with pytest.raises(TransicaoStatusInvalidaException):
+        caso_de_uso.executar(cenario.ordem_id, ator=ATOR_ATENDENTE)
+
+    assert rastreador.spans("saga retomada") == []
 
 
 @pytest.mark.parametrize("falha", ["estorno_recusado", "reenvios_esgotados"])

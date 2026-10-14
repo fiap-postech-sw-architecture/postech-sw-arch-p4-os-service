@@ -141,3 +141,20 @@ def test_cancelamento_grava_o_comando_e_o_commit_dentro_do_span() -> None:
     # outbox e o commit ja tinha saido.
     assert aberturas == [("saga cancelamento", traceparent_da_saga)]
     assert dentro == [(antes + 1, True)]
+
+
+def test_o_caso_de_uso_do_cancelamento_abre_o_span_no_trace_da_saga() -> None:
+    rastreador = Rastreador()
+    cenario = CenarioDaSaga.em("aguardando_decisao")
+    da_saga = _contexto(rastreador, "transicao da saga")
+    cenario.saga.registrar_contexto_de_trace(da_saga)
+
+    with rastreador.tracer.start_as_current_span("POST cancelamento") as requisicao:
+        cenario.cancelar(span=span_da_saga(rastreador.tracer))
+
+    (acao,) = rastreador.spans("saga cancelamento")
+    (anterior,) = rastreador.spans("transicao da saga")
+    assert acao.parent is not None
+    assert acao.parent.span_id == anterior.context.span_id
+    (link,) = acao.links
+    assert link.context.span_id == requisicao.get_span_context().span_id
