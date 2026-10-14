@@ -172,6 +172,35 @@ def test_so_o_container_do_banco_recebe_a_senha_do_superusuario(overlay: str) ->
     assert com_a_senha == {_BANCO_DO_POD}
 
 
+# As variaveis com `value` literal. Nenhuma guarda segredo: as senhas vem de um
+# secretKeyRef, e a DATABASE_URL as recebe por $(VAR). Uma variavel literal nova
+# com nome de segredo (TOKEN, SENHA) passaria no gitleaks, porque o YAML separa
+# `name` de `value`: entra nesta lista so depois de revisada.
+ENV_LITERAL = frozenset(
+    {
+        "DATABASE_URL",
+        "DATA_SOURCE_URI",
+        "DATA_SOURCE_USER",
+        "PGDATA",
+        "POSTGRES_DB",
+        "POSTGRES_INITDB_ARGS",
+        "POSTGRES_USER",
+    }
+)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_variavel_com_valor_literal_e_so_a_que_nao_guarda_segredo(overlay: str) -> None:
+    literais = {
+        variavel["name"]
+        for _, especificacao, _ in containers(overlay)
+        for variavel in especificacao.get("env", [])
+        if "value" in variavel
+    }
+
+    assert literais == ENV_LITERAL
+
+
 @pytest.mark.parametrize("overlay", OVERLAYS)
 def test_configmap_do_servico_so_chega_aos_processos_que_o_leem(overlay: str) -> None:
     existentes = {
@@ -234,6 +263,42 @@ def test_todo_container_cumpre_o_pod_security_restricted(overlay: str) -> None:
     ]
 
     assert violacoes == []
+
+
+# Os tipos de volume que o perfil restricted permite e os pods daqui usam; o
+# admission do cluster so recusaria um hostPath no deploy.
+VOLUMES_DO_RESTRICTED = frozenset(
+    {
+        "configMap",
+        "downwardAPI",
+        "emptyDir",
+        "persistentVolumeClaim",
+        "projected",
+        "secret",
+    }
+)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_pod_so_declara_volume_de_tipo_que_o_restricted_permite(overlay: str) -> None:
+    # Cada volume e {"name": ..., "<tipo>": {...}}.
+    usados = {
+        f"{tipo}/{nome}": {
+            campo
+            for volume in pod.get("volumes", [])
+            for campo in volume.keys() - {"name"}
+        }
+        for tipo, nome, pod in pods(overlay)
+    }
+
+    fora = {
+        onde: sorted(tipos - VOLUMES_DO_RESTRICTED)
+        for onde, tipos in usados.items()
+        if tipos - VOLUMES_DO_RESTRICTED
+    }
+
+    assert len(usados) == 5
+    assert fora == {}
 
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
