@@ -1,5 +1,7 @@
-# So entrada (ADR-042): nega tudo no namespace e libera o previsto. A sonda do
-# kubelet, o port-forward e o exec nao passam por NetworkPolicy.
+# Entrada (ADR-042): nega toda entrada no namespace e libera o previsto. A sonda
+# do kubelet, o port-forward e o exec nao passam por NetworkPolicy. A unica
+# politica de saida do servico e a do notificador (`notificador-saida`, no fim do
+# arquivo), a excecao explicada la.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -102,10 +104,17 @@ spec:
           protocol: TCP
 ---
 # Notificador: unico processo que disca para um servico de terceiro configuravel
-# (o SMTP). Alem da entrada de todos (as politicas acima), a saida fica restrita
-# ao que ele usa: o DNS, o banco do servico e o Mailpit da plataforma na 1025.
-# Nao fala com o broker nem com o Jaeger. A regra de entrada no Mailpit e do
-# platform.
+# (o SMTP, em SMTP_HOST) e que tem acesso de escrita ao banco inteiro do servico.
+# Alem da entrada de todos (as politicas acima), a saida fica restrita ao que ele
+# usa: o DNS, o banco do servico e o Mailpit da plataforma na 1025. Nao fala com
+# o broker nem com o Jaeger. Quem so fala com o PostgreSQL e o RabbitMQ do proprio
+# namespace (a API, o relay e o consumidor) fica sem politica de saida: o criterio
+# e ter destino externo configuravel, e nenhum outro processo o tem.
+#
+# Trocar o SMTP_HOST (ConfigMap) para outro servidor exige ajustar esta politica:
+# o destino fora da regra nao e recusado, so expira (o prazo de 5 s por tentativa
+# do SMTP), e os e-mails vao para `dead` sem outro sinal alem do log. A regra de
+# entrada no Mailpit e do platform.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

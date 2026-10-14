@@ -60,6 +60,9 @@ configMapGenerator:
       - OUTBOX_LOTE=10
       - OUTBOX_LEASE_SEGUNDOS=60
       # SMTP do notificador: o Mailpit da plataforma, sem credencial (a demonstracao).
+      # Trocar o servidor exige ajustar a politica `notificador-saida`
+      # (networkpolicy.yaml): ela so deixa o notificador alcancar o Mailpit da
+      # plataforma na 1025, e o destino novo expiraria sem aviso.
       - SMTP_HOST=mailpit.pytstop-plataforma.svc.cluster.local
       - SMTP_PORT=1025
       - SMTP_FROM=oficina@pytstop.local
