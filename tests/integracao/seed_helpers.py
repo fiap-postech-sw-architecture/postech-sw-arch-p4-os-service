@@ -238,6 +238,9 @@ def notificacoes_recusando_no_commit(engine: Engine) -> Iterator[None]:
         yield
     finally:
         with engine.begin() as conexao:
+            # Uma transacao esquecida com escrita em `notificacoes` seguraria o
+            # DROP para sempre: com o prazo, o teste falha em segundos.
+            conexao.execute(text("SET LOCAL lock_timeout = '5s'"))
             conexao.execute(
                 text("DROP TRIGGER recusar_notificacao_no_commit ON notificacoes")
             )
