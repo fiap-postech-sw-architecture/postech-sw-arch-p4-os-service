@@ -67,15 +67,36 @@ def test_requisicao_gera_span_server_com_os_comandos_de_banco_como_filhos(
     assert all(c.parent is not None for c in consultas)
 
 
-@pytest.mark.parametrize("caminho", ["/api/v1/saude", "/api/v1/saude/pronto"])
-def test_sondas_nao_exportam_span(
+@pytest.mark.parametrize(
+    "caminho", ["/metrics", "/api/v1/saude", "/api/v1/saude/pronto"]
+)
+def test_raspagem_e_sondas_nao_exportam_span(
     api_rastreada: TestClient, rastreador: Rastreador, caminho: str
 ) -> None:
-    # A readiness consulta o banco: o comando de banco dela, sem span em volta, e
-    # descartado pelo amostrador.
+    # A readiness consulta o banco e o /metrics roda o coletor: os comandos de
+    # banco deles, sem span em volta, sao descartados pelo amostrador.
     assert api_rastreada.get(caminho).status_code == 200
 
     assert rastreador.spans() == []
+
+
+def test_post_com_corpo_gera_so_o_server_e_os_comandos_de_banco(
+    api_rastreada: TestClient, admin_user: Usuario, rastreador: Rastreador
+) -> None:
+    # Sem `exclude_spans`, o POST com corpo ganha um span `http receive` e cada
+    # resposta, um `http send`: no trace ficam o SERVER e as consultas, e mais nada.
+    resposta = api_rastreada.post(
+        "/api/v1/autenticacao/login",
+        json={"email": admin_user.email, "senha": SENHA_PADRAO},
+    )
+
+    assert resposta.status_code == 200
+    spans = rastreador.spans()
+    servidores = [s for s in spans if s.kind is SpanKind.SERVER]
+    consultas = [s for s in spans if s.kind is SpanKind.CLIENT]
+    assert len(servidores) == 1
+    assert len(spans) == len(servidores) + len(consultas)
+    assert not [s for s in spans if s.kind is SpanKind.INTERNAL]
 
 
 def test_span_da_requisicao_leva_o_template_e_nada_do_que_a_pessoa_enviou(

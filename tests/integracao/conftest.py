@@ -21,7 +21,7 @@ from src.compartilhado.infraestrutura.observability import instrumentar_banco
 from src.ordem_servico.aplicacao import emails
 from src.ordem_servico.aplicacao import use_cases as use_cases_os
 from src.ordem_servico.aplicacao.saga import orquestrador
-from src.ordem_servico.infraestrutura import metricas_da_saga, notificador
+from src.ordem_servico.infraestrutura import coletor_da_api, notificador
 from tests.integracao.broker import Broker, subir_broker
 from tests.integracao.mailpit import Mailpit, subir_mailpit
 from tests.integracao.seed_helpers import criar_usuario
@@ -317,7 +317,7 @@ def saidas(monkeypatch: pytest.MonkeyPatch) -> Iterator[Saidas]:
         relay,
         orquestrador,
         use_cases_os,
-        metricas_da_saga,
+        coletor_da_api,
         notificador,
         emails,
     )

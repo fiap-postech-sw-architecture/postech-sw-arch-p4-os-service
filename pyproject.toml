@@ -34,9 +34,10 @@ dependencies = [
     "pyyaml>=6.0.3",
     # Contexto W3C pela outbox e pelo AMQP, spans da API (FastAPI e SQLAlchemy) e
     # dos tres processos (SQLAlchemy) e metricas: sempre instalados (a exportacao
-    # OTLP continua no extra `otel`). O SDK 1.42.x exige a semantic-conventions
-    # 0.63bx, entao as instrumentacoes seguem em 0.63bx; atualizar os tres juntos,
-    # em milestones.
+    # OTLP continua no extra `otel`). O SDK 1.45.x exige a semantic-conventions
+    # 0.66bx, entao as instrumentacoes seguem em 0.66bx; atualizar os tres juntos,
+    # em milestones. A instrumentacao do FastAPI tem de ser 0.66b ou mais nova: a
+    # 0.63b nao acha as rotas de include_router do FastAPI 0.137 em diante.
     "opentelemetry-sdk>=1.45.1,<1.46",
     "opentelemetry-instrumentation-fastapi>=0.66b1,<0.67",
     "opentelemetry-instrumentation-sqlalchemy>=0.66b1,<0.67",
@@ -51,7 +52,6 @@ dependencies = [
 # versoes do SDK (dependencia principal).
 otel = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.45.1,<1.46",
-    "opentelemetry-exporter-prometheus>=0.66b1,<0.67",
 ]
 
 [dependency-groups]
@@ -318,9 +318,9 @@ ignore_missing_imports = true
 module = ["pika", "pika.*"]
 ignore_missing_imports = true
 
-# Sem o extra `otel` (o `uv sync` padrao so traz o grupo `dev`), os imports
-# lazy de observability.py / metrics.py apontam para pacotes ausentes; o CI e a
-# imagem instalam o extra.
+# Sem o extra `otel` (o `uv sync` padrao so traz o grupo `dev`), o import lazy do
+# exportador OTLP em observability.py aponta para pacote ausente; o CI e a imagem
+# instalam o extra.
 [[tool.mypy.overrides]]
 module = ["opentelemetry.*", "prometheus_client.*"]
 ignore_missing_imports = true

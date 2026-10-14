@@ -36,6 +36,7 @@ from src.ordem_servico.aplicacao.dtos import (
     SagaDTO,
 )
 from src.ordem_servico.aplicacao.notificacoes import registrar_transicao
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import agora as agora_utc
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import enviar
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
@@ -58,15 +59,17 @@ from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.texto_livre import motivo_de_cancelamento
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from uuid import UUID
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
     from src.compartilhado.dominio.documento import Documento
-    from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
+    from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, MetricasDasOrdens
     from src.ordem_servico.aplicacao.ports import (
         ClientePort,
         ConsultaAcompanhamento,
         ConsultaDaOrdem,
+        ConsultaDeMetricas,
         PublicadorDeNotificacoes,
         SagaRepository,
     )
@@ -553,6 +556,22 @@ def _documento(numero: str) -> Documento:
     if len(normalizar_cnpj(numero)) == _TAMANHO_CNPJ:
         return CNPJ(numero=numero)
     return CPF(numero=numero)
+
+
+class ObterMetricas:
+    """Metricas das OS para a operacao: total, por status e permanencia media."""
+
+    def __init__(
+        self,
+        consulta: ConsultaDeMetricas,
+        relogio: Callable[[], datetime] = agora_utc,
+    ) -> None:
+        self._consulta = consulta
+        self._relogio = relogio
+
+    def executar(self) -> MetricasDasOrdens:
+        """Le a contagem por status e a permanencia media dos ultimos 30 dias."""
+        return self._consulta.ler(self._relogio())
 
 
 class ConsultarAcompanhamento:

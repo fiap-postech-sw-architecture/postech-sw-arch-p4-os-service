@@ -63,8 +63,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     )
     from src.compartilhado.infraestrutura.observability import configurar_otel
     from src.compartilhado.interfaces.dependencies import (
+        abrir_conexao_de_metricas,
         configurar_engine_de_metricas,
         configurar_session_factory,
+    )
+    from src.ordem_servico.infraestrutura.coletor_da_api import (
+        desregistrar_coletor,
+        registrar_coletor,
     )
 
     # DATABASE_URL explicita tem precedencia. Em dev/test, a URL pode ser
@@ -91,10 +96,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     engine = criar_engine(database_url)
     configurar_session_factory(criar_session_factory(engine))
-    # Os gauges da saga consultam o banco na raspagem por uma conexao propria,
-    # com prazo curto: requisicoes lentas nao seguram o /metrics.
+    # Os gauges por consulta (saga, outbox e OS por status) raspam o banco por uma
+    # conexao propria, com prazo curto: requisicoes lentas nao seguram o /metrics.
+    # O coletor so existe com o app de pe (a engine dele nasce aqui).
     engine_de_metricas = criar_engine_de_metricas(database_url)
     configurar_engine_de_metricas(engine_de_metricas)
+    coletor = registrar_coletor(abrir_conexao_de_metricas)
 
     # Observabilidade OTLP: unico ponto onde app + engine existem
     # juntos. Default OFF (OTEL_ENABLED ausente/false) — no-op sem custo. O
@@ -104,6 +111,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     try:
         yield
     finally:
+        if coletor is not None:
+            desregistrar_coletor(coletor)
         if provedor is not None:
             provedor.shutdown()
         engine.dispose()
@@ -180,25 +189,17 @@ def criar_app(provedor: TracerProvider | None = None) -> FastAPI:
     application.add_middleware(SecurityHeadersMiddleware)
     registrar_error_handlers(application)
 
-    # Metricas Prometheus (API_METRICS_ENABLED, default off). Aqui e nao no
-    # lifespan porque adiciona middleware; adicionado por ultimo, o
-    # MetricasHTTPMiddleware fica o mais externo e mede a latencia completa.
-    from src.compartilhado.infraestrutura.metrics import configurar_metricas_api
+    # Metricas Prometheus, sempre ligadas. Aqui e nao no lifespan porque adiciona
+    # middleware; adicionado por ultimo, o MetricasHTTPMiddleware fica o mais
+    # externo e mede a latencia completa. Os gauges por consulta (RFC-004 secao 9)
+    # so a API os calcula: o coletor deles e registrado no lifespan.
+    from src.compartilhado.infraestrutura.metrics import configurar_metricas
+    from src.ordem_servico.infraestrutura.metrics import (
+        instrumentar_metricas_de_ordens,
+    )
 
-    if configurar_metricas_api(application):
-        from src.compartilhado.interfaces.dependencies import (
-            abrir_conexao_de_metricas,
-        )
-        from src.ordem_servico.infraestrutura.metricas_da_saga import (
-            registrar_coletor,
-        )
-        from src.ordem_servico.infraestrutura.metrics import (
-            instrumentar_metricas_de_ordens,
-        )
-
-        instrumentar_metricas_de_ordens()
-        # Gauges da saga por consulta: so a API os calcula (RFC-004 secao 9).
-        registrar_coletor(abrir_conexao_de_metricas)
+    configurar_metricas(application)
+    instrumentar_metricas_de_ordens()
 
     return application
 

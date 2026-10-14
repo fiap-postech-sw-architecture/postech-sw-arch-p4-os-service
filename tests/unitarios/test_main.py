@@ -81,40 +81,48 @@ class TestMain:
         ]
         assert "SecurityHeadersMiddleware" in middleware_classes
 
-    def test_metricas_desligadas_nao_instrumentam_nada(self) -> None:
-        # Default (API_METRICS_ENABLED ausente): sem middleware de metricas e
-        # sem listener de OS registrado.
+    def test_metricas_http_sempre_ligadas(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Sem flag: nem API_METRICS_ENABLED=false (a variavel de antes) as desliga.
+        monkeypatch.setenv("API_METRICS_ENABLED", "false")
         application = criar_app()
         middleware_classes = [
             getattr(m.cls, "__name__", "") for m in application.user_middleware
         ]
-        assert "MetricasHTTPMiddleware" not in middleware_classes
 
-    def test_metricas_ligadas_instrumentam_ordens(
+        assert "MetricasHTTPMiddleware" in middleware_classes
+        assert TestClient(application).get("/metrics").status_code == 200
+
+    def test_metricas_http_ficam_por_fora_de_todos_os_middlewares(self) -> None:
+        # O ultimo middleware adicionado e o mais externo: mede a request inteira,
+        # com o roteamento, a seguranca e o rate limiting dentro.
+        application = criar_app()
+
+        assert application.user_middleware[0].cls.__name__ == "MetricasHTTPMiddleware"
+
+    def test_criar_app_registra_o_listener_das_ordens_criadas(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Wiring do composition root: quando configurar_metricas_api
-        # ativa, criar_app registra o listener de metricas de negocio de OS e
-        # o coletor dos gauges da saga.
-        # Os dois imports em criar_app sao locais e resolvem o atributo do
-        # modulo na chamada — o monkeypatch na origem e efetivo.
         chamadas: list[str] = []
         monkeypatch.setattr(
-            "src.compartilhado.infraestrutura.metrics.configurar_metricas_api",
-            lambda app: chamadas.append("configurar") or True,
-        )
-        monkeypatch.setattr(
             "src.ordem_servico.infraestrutura.metrics.instrumentar_metricas_de_ordens",
-            lambda: chamadas.append("instrumentar"),
-        )
-        monkeypatch.setattr(
-            "src.ordem_servico.infraestrutura.metricas_da_saga.registrar_coletor",
-            lambda abrir_sessao: chamadas.append("coletor da saga"),
+            lambda: chamadas.append("listener"),
         )
 
         criar_app()
 
-        assert chamadas == ["configurar", "instrumentar", "coletor da saga"]
+        assert chamadas == ["listener"]
+
+    def test_o_coletor_dos_gauges_so_nasce_com_o_lifespan(self) -> None:
+        # Fora do lifespan nao ha engine de metricas: com o coletor no registro,
+        # toda leitura do REGISTRY tentaria o banco. Ver
+        # test_lifespan_registra_o_coletor_e_o_tira_no_fim.
+        from prometheus_client import REGISTRY
+
+        criar_app()
+
+        assert REGISTRY.get_sample_value("pytstop_saga_coletor_disponivel") is None
 
     def test_docs_url_em_development(self) -> None:
         with patch.dict(os.environ, {"ENVIRONMENT": "development"}, clear=False):
@@ -352,6 +360,51 @@ class TestMain:
                     mock_metricas.return_value.dispose.assert_not_called()
                 mock_engine.return_value.dispose.assert_called_once_with()
                 mock_metricas.return_value.dispose.assert_called_once_with()
+
+        asyncio.run(_run())
+
+    @pytest.mark.parametrize("ja_havia", [False, True], ids=["primeiro", "segundo"])
+    def test_lifespan_registra_o_coletor_e_o_tira_no_fim(self, ja_havia: bool) -> None:
+        """O coletor dos gauges por consulta existe so com o app de pe, e so o app
+        que o registrou o tira; o segundo app do processo (os testes) nao o tem."""
+        app = FastAPI()
+        coletor = MagicMock()
+
+        async def _run() -> None:
+            with (
+                patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.compartilhado.infraestrutura.database.criar_engine"),
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_session_factory"
+                ),
+                patch(
+                    "src.ordem_servico.infraestrutura.coletor_da_api.registrar_coletor",
+                    return_value=None if ja_havia else coletor,
+                ) as mock_registrar,
+                patch(
+                    "src.ordem_servico.infraestrutura.coletor_da_api.desregistrar_coletor"
+                ) as mock_desregistrar,
+                patch.dict(
+                    os.environ,
+                    {"DATABASE_URL": "postgresql://x:x@localhost:5432/x"},
+                    clear=False,
+                ),
+            ):
+                async with lifespan(app):
+                    # O coletor abre a conexao pela engine das metricas, configurada
+                    # antes dele.
+                    (abrir,) = mock_registrar.call_args.args
+                    assert abrir.__name__ == "abrir_conexao_de_metricas"
+                    mock_desregistrar.assert_not_called()
+                if ja_havia:
+                    mock_desregistrar.assert_not_called()
+                else:
+                    mock_desregistrar.assert_called_once_with(coletor)
 
         asyncio.run(_run())
 

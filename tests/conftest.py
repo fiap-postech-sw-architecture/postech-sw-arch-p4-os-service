@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from opentelemetry.sdk.trace.export import SpanExportResult
+from prometheus_client import REGISTRY
 
 from tests.manifestos import exigir_kubectl
 from tests.rastreamento import Rastreador, tudo_que_o_span_leva
@@ -16,6 +17,20 @@ if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan
 
 MODULO_DO_OTLP = "opentelemetry.exporter.otlp.proto.grpc.trace_exporter"
+
+
+def valor_da_metrica(nome: str, **rotulos: str) -> float:
+    """O valor da serie no ``REGISTRY``; 0.0 se ela ainda nao existe.
+
+    O registro e global ao processo: os testes comparam o valor antes e depois do
+    caso que a dispara, nunca o valor absoluto.
+    """
+    return REGISTRY.get_sample_value(nome, rotulos) or 0.0
+
+
+def existe_a_serie(nome: str, **rotulos: str) -> bool:
+    """A serie existe no ``REGISTRY`` (um contador pre-inicializado vale 0.0)."""
+    return REGISTRY.get_sample_value(nome, rotulos) is not None
 
 
 @pytest.fixture(autouse=True)

@@ -7,16 +7,19 @@ transacao raiz. Rollback (o da raiz e o de um SAVEPOINT, que descarta os fatos
 anotados dentro dele), conflito de versao ou commit que falha os descartam: a
 mensagem que volta pela retry nao conta duas vezes. Quem emite e o processo que
 tira a saga da etapa (API na abertura e no cancelamento, consumidor nos eventos).
+A mesma regra do commit vale para outra metrica da sessao (``registrar``): a OS
+criada (``ordem_servico/infraestrutura/metrics.py``).
 
 Contadores do processo ``prazos`` (``pytstop_saga_reenvios_total`` e
 ``pytstop_saga_prazos_esgotados_total``, por tipo de comando): vem dos fatos
 ``ComandoReenviadoEvent`` e ``PrazoEsgotadoEvent``, com a mesma regra do commit.
 
-Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` (e, no
-prazo vencido, ``outbox``) na hora da raspagem, numa conexao propria e com prazo
-curto, e continua certo com os outros processos fora do ar; as replicas repetem o
-valor, e os paineis agregam com ``max``. A serie
-``pytstop_saga_coletor_disponivel`` diz se a leitura deu certo.
+Gauges: a leitura das sagas (``ler_sagas``) e do ``ColetorDaApi``
+(``coletor_da_api.py``), registrado so na API: consulta ``sagas`` (e, no prazo
+vencido, ``outbox``) na hora da raspagem, numa conexao propria e com prazo curto, e
+continua certo com os outros processos fora do ar; as replicas repetem o valor, e
+os paineis agregam com ``max``. A serie ``pytstop_saga_coletor_disponivel`` diz se
+a leitura das sagas deu certo.
 
 Series de rotulo fechado comecam em zero no boot de cada processo, para o
 ``increase()`` dos paineis nao perder o primeiro evento.
@@ -24,11 +27,11 @@ Series de rotulo fechado comecam em zero no boot de cada processo, para o
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Final
 
-import structlog
-from prometheus_client import REGISTRY, Counter, Histogram
+from prometheus_client import Counter, Histogram
 from prometheus_client.core import GaugeMetricFamily
 from sqlalchemy import String, event, func, select, text, type_coerce
 from sqlalchemy.orm import Session
@@ -50,20 +53,15 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
 )
 from src.ordem_servico.infraestrutura.envio_em_voo import ULTIMO_ENVIO
 from src.ordem_servico.infraestrutura.mapping import sagas_table
-from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from collections.abc import Callable, Iterable, Iterator
     from datetime import timedelta
-    from typing import Any
 
-    from prometheus_client.registry import Collector
-    from sqlalchemy import Connection, Row
+    from sqlalchemy import Connection
     from sqlalchemy.orm import SessionTransaction
 
     from src.compartilhado.dominio.events import DomainEvent
-
-_log = structlog.get_logger(__name__)
 
 SAGAS_INICIADAS: Final = Counter(
     "pytstop_saga_iniciadas_total", "Sagas abertas junto com a OS."
@@ -123,7 +121,15 @@ def anotar(sessao: Session, fatos: Iterable[DomainEvent]) -> None:
         TypeError: fato sem metrica (um fato novo da saga sem a observacao
             dele), antes do commit: nada se perde em silencio.
     """
-    observacoes = [_observacao(fato) for fato in fatos]
+    registrar(sessao, [_observacao(fato) for fato in fatos])
+
+
+def registrar(sessao: Session, observacoes: Iterable[Callable[[], None]]) -> None:
+    """Guarda cada observacao ate o commit da transacao da ``sessao``.
+
+    Rodam no commit da transacao raiz; o rollback da raiz ou do SAVEPOINT em que
+    foram guardadas as descarta.
+    """
     _instrumentar_sessoes()
     savepoint = sessao.get_nested_transaction()
     sessao.info.setdefault(_FATOS, []).extend((savepoint, o) for o in observacoes)
@@ -221,74 +227,57 @@ _ATRASO_DO_PRAZO: Final = text(
 )
 
 
-class ColetorDaSaga:
-    """Gauges por consulta: ``pytstop_saga_ativas`` e mais dois.
+@dataclass(frozen=True, slots=True)
+class LeituraDaSaga:
+    """A leitura das sagas: total e idade por etapa, e o atraso do prazo."""
+
+    por_etapa: dict[str, tuple[int, float]]
+    atraso_do_prazo: float
+
+
+def ler_sagas(conexao: Connection, prazo: timedelta) -> LeituraDaSaga:
+    """As duas consultas dos gauges da saga, na transacao e nos prazos da ``conexao``.
 
     ``..._etapa_mais_antiga_segundos`` sai da mesma consulta de ``ativas``, pelo
     indice parcial ``ix_sagas_ativas``; ``..._prazo_vencido_segundos``, de uma
-    segunda, que junta ``sagas`` e ``outbox`` pelo indice ``ix_sagas_prazo``. As
-    duas rodam numa conexao propria (fora do pool das requisicoes) e com prazo de
-    2 s por consulta e de 1 s para esperar um lock. Qualquer falha (banco fora,
-    tabela travada, prazo esgotado) omite os tres gauges, que ficam ausentes e
-    nunca zero, conta em ``pytstop_saga_coletor_falhas_total`` e publica
-    ``pytstop_saga_coletor_disponivel`` em 0: o alerta "Saga parada" nao fica
-    mudo com o coletor quebrado. Etapa que esta versao nao conhece (rollout com
+    segunda, que junta ``sagas`` e ``outbox`` pelo indice ``ix_sagas_prazo``. A
+    etapa vem como texto: uma etapa que esta versao nao conhece (rollout com
     versoes misturadas) fica fora da contagem, sem derrubar a raspagem.
     """
-
-    def __init__(
-        self,
-        abrir_conexao: Callable[[], Connection],
-        prazo: Callable[[], timedelta] = prazo_de_resposta_da_saga,
-    ) -> None:
-        self._abrir_conexao = abrir_conexao
-        self._prazo = prazo
-
-    def describe(self) -> Iterator[GaugeMetricFamily]:
-        """Nomes dos gauges sem consultar o banco (registro antes do boot)."""
-        yield from _gauges()
-        yield _prazo_vencido()
-        yield _disponibilidade()
-
-    def collect(self) -> Iterator[GaugeMetricFamily]:
-        try:
-            linhas, atraso = self._consultar()
-        except Exception as exc:  # noqa: BLE001  # a raspagem nunca cai pelo coletor
-            FALHAS_DO_COLETOR.inc()
-            _log.warning("saga gauges unavailable", erro=type(exc).__name__)
-            yield _disponibilidade(0)
-            return
-        por_etapa = {etapa: (total, float(idade)) for etapa, total, idade in linhas}
-        ativas, mais_antiga = _gauges()
-        for etapa in ETAPAS_NAO_FINAIS:
-            total, idade = por_etapa.get(etapa.value, (0, 0.0))
-            ativas.add_metric([etapa.value], total)
-            mais_antiga.add_metric([etapa.value], idade)
-        yield ativas
-        yield mais_antiga
-        yield _prazo_vencido(float(atraso))
-        yield _disponibilidade(1)
-
-    def _consultar(self) -> tuple[Sequence[Row[Any]], float]:
-        t = sagas_table
-        consulta = (
-            select(
-                # Texto, nao o enum: uma etapa de outra versao nao quebra a leitura.
-                type_coerce(t.c.etapa, String),
-                func.count(),
-                func.extract("epoch", func.now() - func.min(t.c.etapa_desde)),
-            )
-            .where(t.c.etapa.not_in(ETAPAS_FINAIS))
-            .group_by(t.c.etapa)
+    t = sagas_table
+    consulta = (
+        select(
+            type_coerce(t.c.etapa, String),
+            func.count(),
+            func.extract("epoch", func.now() - func.min(t.c.etapa_desde)),
         )
-        with self._abrir_conexao() as conexao, conexao.begin():
-            conexao.execute(text("SET LOCAL statement_timeout = '2s'"))
-            conexao.execute(text("SET LOCAL lock_timeout = '1s'"))
-            linhas = conexao.execute(consulta).all()
-            atraso = conexao.execute(
-                _ATRASO_DO_PRAZO, {"prazo": self._prazo()}
-            ).scalar_one()
-            return linhas, float(atraso)
+        .where(t.c.etapa.not_in(ETAPAS_FINAIS))
+        .group_by(t.c.etapa)
+    )
+    linhas = conexao.execute(consulta).all()
+    atraso = conexao.execute(_ATRASO_DO_PRAZO, {"prazo": prazo}).scalar_one()
+    return LeituraDaSaga(
+        {etapa: (total, float(idade)) for etapa, total, idade in linhas}, float(atraso)
+    )
+
+
+def familias_da_saga(leitura: LeituraDaSaga) -> Iterator[GaugeMetricFamily]:
+    """``pytstop_saga_ativas``, ``..._etapa_mais_antiga_segundos`` e o prazo vencido."""
+    ativas, mais_antiga = _gauges()
+    for etapa in ETAPAS_NAO_FINAIS:
+        total, idade = leitura.por_etapa.get(etapa.value, (0, 0.0))
+        ativas.add_metric([etapa.value], total)
+        mais_antiga.add_metric([etapa.value], idade)
+    yield ativas
+    yield mais_antiga
+    yield _prazo_vencido(leitura.atraso_do_prazo)
+
+
+def descrever_a_saga() -> Iterator[GaugeMetricFamily]:
+    """Os nomes dos gauges da saga, sem consultar o banco (registro antes do boot)."""
+    yield from _gauges()
+    yield _prazo_vencido()
+    yield disponibilidade()
 
 
 def _gauges() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
@@ -312,21 +301,14 @@ def _prazo_vencido(valor: float | None = None) -> GaugeMetricFamily:
     )
 
 
-def _disponibilidade(valor: int | None = None) -> GaugeMetricFamily:
+def disponibilidade(valor: int | None = None) -> GaugeMetricFamily:
+    """``pytstop_saga_coletor_disponivel``: 1 se leu as sagas, 0 se falhou.
+
+    Com 0 os gauges da saga saem ausentes (nunca em zero): o alerta "Saga parada"
+    nao fica mudo com o coletor quebrado.
+    """
     return GaugeMetricFamily(
         "pytstop_saga_coletor_disponivel",
         "1 se o coletor leu as sagas nesta raspagem; 0 se falhou.",
         value=valor,
     )
-
-
-_coletor: Collector | None = None
-
-
-def registrar_coletor(abrir_conexao: Callable[[], Connection]) -> None:
-    """Registra o ``ColetorDaSaga`` no registro padrao (uma vez por processo)."""
-    global _coletor  # noqa: PLW0603  # init-once flag
-    if _coletor is not None:
-        return
-    _coletor = ColetorDaSaga(abrir_conexao)
-    REGISTRY.register(_coletor)

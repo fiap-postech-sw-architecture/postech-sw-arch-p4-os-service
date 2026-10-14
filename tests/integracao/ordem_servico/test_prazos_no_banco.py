@@ -35,7 +35,7 @@ from src.ordem_servico.aplicacao.saga.vencer_prazos import (
 )
 from src.ordem_servico.aplicacao.use_cases import RetomarCompensacao
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
-from src.ordem_servico.infraestrutura.metricas_da_saga import ColetorDaSaga
+from src.ordem_servico.infraestrutura.coletor_da_api import ColetorDaApi
 from src.ordem_servico.infraestrutura.repository import SagaSQLAlchemyRepository
 from src.ordem_servico.infraestrutura.transacao_dos_prazos import (
     TransacaoDosPrazosSQLAlchemy,
@@ -788,7 +788,7 @@ def test_duas_replicas_do_prazos_nunca_tratam_a_mesma_saga(
 
 def _gauge(engine: Engine) -> float:
     registro = CollectorRegistry()
-    registro.register(ColetorDaSaga(engine.connect, lambda: PRAZO))
+    registro.register(ColetorDaApi(engine.connect, lambda: PRAZO))
     valor = registro.get_sample_value("pytstop_saga_prazo_vencido_segundos")
     assert valor is not None
     assert registro.get_sample_value("pytstop_saga_coletor_disponivel") == 1
