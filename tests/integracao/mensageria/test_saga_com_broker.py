@@ -502,6 +502,57 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
     assert saga == esperado
 
 
+def test_aprovacao_de_peca_fora_do_formato_do_billing_vai_para_a_dlq_e_a_saga_espera(
+    atendimento: Atendimento,
+    engine: Engine,
+    broker: Broker,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O diagnostico aceita o codigo mais permissivo que o ``GerarOrcamento``
+    tambem aceita, mas o SKU do ``ReservarPecas`` e so o formato do Billing. Na
+    pratica o caso nao chega aqui: o Billing responde ``GeracaoDeOrcamentoFalhou``
+    ao codigo que nao esta na tabela dele (so tem maiusculas, digitos e hifens),
+    e a saga compensa. O evento de aprovacao e forcado para ver o que o OS faz
+    se ele vier mesmo assim: o comando nao e montado, nada vai para a outbox, a
+    aprovacao vai para a DLQ e a saga fica onde estava, sem prazo correndo."""
+    ordem_id = atendimento.abrir()
+    atendimento.receber("SolicitarDiagnostico")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
+    atendimento.esperar_passo("DiagnosticoIniciado")
+    itens = [{"tipo": "peca", "codigo": "pec_vela.2", "quantidade": 1}]
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido", itens=itens)
+    gerar = atendimento.receber("GerarOrcamento")
+    assert gerar["dados"]["itens"] == itens
+    atendimento.responder("GerarOrcamento", "OrcamentoGerado")
+    atendimento.esperar_passo("OrcamentoGerado")
+    antes = _estado(engine, ordem_id)
+    monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
+
+    with capture_logs() as logs:
+        aprovado = atendimento.responder("GerarOrcamento", "OrcamentoAprovado")
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+
+    assert [
+        (log["motivo"], log["erro"])
+        for log in logs
+        if log["event"] == "message rejected to dlq"
+    ] == [("erro_no_handler", "ContratoInvalidoError")]
+    assert _estado(engine, ordem_id) == antes
+    assert atendimento.etapa() == "aguardando_decisao"
+    assert "ReservarPecas" not in antes[3]
+    with engine.connect() as conexao:
+        registrada = conexao.execute(
+            text("SELECT count(*) FROM mensagens_processadas WHERE mensagem_id = :id"),
+            {"id": aprovado["id"]},
+        ).scalar_one()
+        prazo = conexao.execute(
+            text("SELECT prazo_resposta_em FROM sagas WHERE ordem_id = :id"),
+            {"id": ordem_id},
+        ).scalar_one()
+    assert registrada == 0
+    assert prazo is None
+
+
 def _compensacoes_na_outbox(engine: Engine) -> list[str]:
     with engine.connect() as conexao:
         tipos = conexao.execute(
