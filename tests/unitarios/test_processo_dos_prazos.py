@@ -16,6 +16,7 @@ from structlog.testing import capture_logs
 
 import src.prazos as processo_prazos
 from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
+from src.ordem_servico.aplicacao.ports import SituacaoDaFila
 from src.ordem_servico.aplicacao.saga.vencer_prazos import ResultadoDoCiclo
 from src.ordem_servico.infraestrutura import (
     presenca_do_consumidor,
@@ -235,14 +236,19 @@ def test_sigterm_interrompe_a_espera_entre_os_ciclos(tmp_path: Path) -> None:
 
 
 class _Canal:
-    def __init__(self, consumidores: int | Exception) -> None:
+    def __init__(self, consumidores: int | Exception, prontas: int = 0) -> None:
         self._consumidores = consumidores
+        self._prontas = prontas
 
     def queue_declare(self, fila: str, *, passive: bool) -> Any:
         assert (fila, passive) == ("os.eventos", True)
         if isinstance(self._consumidores, Exception):
             raise self._consumidores
-        return MagicMock(method=MagicMock(consumer_count=self._consumidores))
+        return MagicMock(
+            method=MagicMock(
+                consumer_count=self._consumidores, message_count=self._prontas
+            )
+        )
 
 
 class _Broker:
@@ -282,26 +288,34 @@ def _presenca(
     return PresencaPikaDoConsumidor(MagicMock(), MagicMock())
 
 
-@pytest.mark.parametrize(("consumidores", "ha"), [(0, False), (1, True), (3, True)])
-def test_ha_consumidor_vem_do_consumer_count_da_declaracao_passiva(
-    monkeypatch: pytest.MonkeyPatch, consumidores: int, ha: bool
+@pytest.mark.parametrize(
+    ("consumidores", "prontas", "em_dia"),
+    [
+        pytest.param(0, 0, False, id="sem-consumidor"),
+        pytest.param(1, 0, True, id="um-consumidor"),
+        pytest.param(3, 0, True, id="tres-consumidores"),
+        pytest.param(1, 7, False, id="com-consumidor-e-mensagens-prontas"),
+        pytest.param(0, 7, False, id="sem-consumidor-e-mensagens-prontas"),
+    ],
+)
+def test_a_situacao_vem_do_consumer_count_e_do_message_count_da_declaracao_passiva(
+    monkeypatch: pytest.MonkeyPatch, consumidores: int, prontas: int, em_dia: bool
 ) -> None:
-    presenca = _presenca(monkeypatch, _Broker(_Canal(consumidores)))
+    presenca = _presenca(monkeypatch, _Broker(_Canal(consumidores, prontas)))
 
-    with capture_logs() as logs:
-        assert presenca.ha_consumidor() is ha
+    situacao = presenca.situacao_da_fila()
 
-    avisos = [e["event"] for e in logs if e["log_level"] == "warning"]
-    assert avisos == ([] if ha else ["os.eventos has no consumer"])
+    assert situacao == SituacaoDaFila(consumidores=consumidores, prontas=prontas)
+    assert situacao.em_dia is em_dia
 
 
-def test_sem_conexao_ao_broker_nao_ha_consumidor_e_nada_levanta(
+def test_sem_conexao_ao_broker_nao_ha_situacao_e_nada_levanta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = _Broker(None, conecta=False)
     presenca = _presenca(monkeypatch, broker)
 
-    assert presenca.ha_consumidor() is False
+    assert presenca.situacao_da_fila() is None
     assert broker.desconexoes == 0
 
 
@@ -312,13 +326,13 @@ def test_sem_conexao_ao_broker_nao_ha_consumidor_e_nada_levanta(
         pytest.param(ChannelClosedByBroker(404, "NOT_FOUND"), id="fila-inexistente"),
     ],
 )
-def test_erro_na_declaracao_desconecta_e_nao_ha_consumidor(
+def test_erro_na_declaracao_desconecta_e_nao_ha_situacao(
     monkeypatch: pytest.MonkeyPatch, erro: Exception
 ) -> None:
     broker = _Broker(_Canal(erro))
     presenca = _presenca(monkeypatch, broker)
 
-    assert presenca.ha_consumidor() is False
+    assert presenca.situacao_da_fila() is None
     assert broker.desconexoes == 1
 
 
@@ -330,7 +344,7 @@ def test_manter_atende_o_broker_e_a_queda_desconecta(
     presenca.manter()
     assert broker.atendeu == 0  # sem conexao, nada a atender
 
-    assert presenca.ha_consumidor() is True
+    assert presenca.situacao_da_fila() is not None
     presenca.manter()
     assert (broker.atendeu, broker.desconexoes) == (1, 0)
 

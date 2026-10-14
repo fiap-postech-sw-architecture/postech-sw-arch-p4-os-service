@@ -18,6 +18,7 @@ from uuid import UUID
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
+from src.ordem_servico.aplicacao.ports import SituacaoDaFila
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
@@ -260,15 +261,32 @@ class TransacaoDosPrazosFake(FakeUnitOfWork):
 
 
 class PresencaFake:
-    """``PresencaDoConsumidor`` com a resposta que o teste escolhe."""
+    """``PresencaDoConsumidor`` com a resposta que o teste escolhe.
 
-    def __init__(self, *, ha_consumidor: bool = True) -> None:
+    ``prontas`` sao as respostas esperando em ``os.eventos``; ``cai_na_consulta``
+    e a consulta (a primeira e a 1) a partir da qual o consumidor some.
+    """
+
+    def __init__(
+        self,
+        *,
+        ha_consumidor: bool = True,
+        prontas: int = 0,
+        broker_fora: bool = False,
+    ) -> None:
         self.ha = ha_consumidor
+        self.prontas = prontas
+        self.broker_fora = broker_fora
+        self.cai_na_consulta: int | None = None
         self.consultas = 0
 
-    def ha_consumidor(self) -> bool:
+    def situacao_da_fila(self) -> SituacaoDaFila | None:
         self.consultas += 1
-        return self.ha
+        if self.cai_na_consulta is not None and self.consultas >= self.cai_na_consulta:
+            self.ha = False
+        if self.broker_fora:
+            return None
+        return SituacaoDaFila(consumidores=1 if self.ha else 0, prontas=self.prontas)
 
 
 class NotificacoesEspia:

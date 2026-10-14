@@ -9,12 +9,14 @@ inicia a compensacao por ``prazo_tecnico`` e a compensacao vai a
 ``falha_na_compensacao`` (``Saga.esgotar_prazo``).
 
 Antes de tudo o ciclo confere o relogio do processo contra o do banco (acima de
-5 s de desvio, nao age) e a presenca do consumidor do OS
-(``PresencaDoConsumidor``): sem consumidor em ``os.eventos`` ou com o broker
-fora a resposta pode estar esperando na fila, e o ciclo nao reenvia nem esgota
-prazo, so avisa. A saga trabalhada por outra replica (``SKIP LOCKED``) fica para
-ela; o consumidor que leu a saga antes perde na conferencia da ``versao`` e
-volta pela fila de retry.
+5 s de desvio, nao age). Antes de cada saga confere a fila do consumidor do OS
+(``PresencaDoConsumidor``): sem consumidor em ``os.eventos``, com mensagem
+pronta nela (o consumidor voltou e ainda nao drenou as respostas) ou com o
+broker fora, a resposta pode estar esperando, e o ciclo nao reenvia nem esgota
+prazo, so avisa; a fila que muda no meio do ciclo interrompe o resto. O ciclo
+trata no maximo ``SAGAS_POR_CICLO`` sagas, e o ciclo seguinte segue dali. A saga
+trabalhada por outra replica (``SKIP LOCKED``) fica para ela; o consumidor que
+leu a saga antes perde na conferencia da ``versao`` e volta pela fila de retry.
 """
 
 from __future__ import annotations
@@ -61,6 +63,10 @@ _log = structlog.get_logger(__name__)
 # reenvia e esgota antes da hora, sem volta, e o atrasado deixa de achar as
 # vencidas. Cobre a latencia da consulta e fica longe dos 30 s do ciclo.
 DESVIO_MAXIMO_DO_RELOGIO: Final = timedelta(seconds=5)
+
+# O teto de sagas por ciclo: depois de uma parada longa, a rajada de reenvios e
+# repartida em ciclos, com a fila do consumidor conferida a cada saga.
+SAGAS_POR_CICLO: Final = 100
 
 # O que recusa a saga de vez: o estado dela, o comando guardado ou o relogio desta
 # replica. Repetir no mesmo ciclo nao muda nada: a saga fica de fora dele, o
@@ -113,7 +119,11 @@ class Vencimento(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ResultadoDoCiclo:
-    """O que um ciclo fez: sagas reenviadas, esgotadas e recusadas, ou a pausa."""
+    """O que um ciclo fez: sagas reenviadas, esgotadas e recusadas, ou a pausa.
+
+    ``pausado`` e o ciclo que parou sem agir mais (relogio fora do banco, fila do
+    consumidor sem estar em dia); o que tratou antes da pausa fica nos contadores.
+    """
 
     pausado: bool = False
     reenviadas: int = 0
@@ -122,7 +132,7 @@ class ResultadoDoCiclo:
 
 
 class VencerPrazos:
-    """Um ciclo do ``prazos``: confere o consumidor e vence cada saga sem resposta."""
+    """Um ciclo do ``prazos``: confere o relogio e o consumidor e vence as sagas."""
 
     def __init__(
         self,
@@ -140,27 +150,50 @@ class VencerPrazos:
     def executar(
         self, ao_tratar: Callable[[], None] = lambda: None
     ) -> ResultadoDoCiclo:
-        """Vence todas as sagas de prazo vencido; ``ao_tratar`` roda a cada uma.
+        """Vence as sagas de prazo vencido, ate ``SAGAS_POR_CICLO``.
 
-        ``ao_tratar`` e o heartbeat do processo, tocado a cada saga (a liveness
+        ``ao_tratar`` roda a cada saga: e o heartbeat do processo (a liveness
         tolera 120 s). Erro de banco sobe para o laco do processo; a saga que o
         dominio recusa fica de fora do resto do ciclo.
         """
         if self._relogio_fora_do_banco():
             return ResultadoDoCiclo(pausado=True)
-        if not self._presenca.ha_consumidor():
-            _log.warning("saga deadlines paused: the os.eventos consumer is away")
-            return ResultadoDoCiclo(pausado=True)
         recusadas: set[UUID] = set()
         vencimentos: list[Vencimento] = []
-        while (vencimento := self._vencer_uma(recusadas)) is not None:
+        pausado = False
+        while len(vencimentos) < SAGAS_POR_CICLO:
+            if not self._fila_em_dia():
+                pausado = True
+                break
+            vencimento = self._vencer_uma(recusadas)
+            if vencimento is None:
+                break
             vencimentos.append(vencimento)
             ao_tratar()
         return ResultadoDoCiclo(
+            pausado=pausado,
             reenviadas=vencimentos.count(Vencimento.REENVIADA),
             esgotadas=vencimentos.count(Vencimento.ESGOTADA),
             recusadas=len(recusadas),
         )
+
+    def _fila_em_dia(self) -> bool:
+        """Consumidor de pe e sem resposta esperando em ``os.eventos``."""
+        fila = self._presenca.situacao_da_fila()
+        if fila is not None and fila.em_dia:
+            return True
+        if fila is None:
+            motivo = "broker_fora"
+        elif fila.consumidores == 0:
+            motivo = "sem_consumidor"
+        else:
+            motivo = "respostas_na_fila"
+        _log.warning(
+            "saga deadlines paused",
+            motivo=motivo,
+            prontas=None if fila is None else fila.prontas,
+        )
+        return False
 
     def _relogio_fora_do_banco(self) -> bool:
         """Confere o relogio do processo contra o do banco, uma vez por ciclo.

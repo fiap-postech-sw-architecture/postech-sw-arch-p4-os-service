@@ -22,6 +22,7 @@ from structlog.testing import capture_logs
 from src.compartilhado.infraestrutura.mensageria.processo import Sinalizador
 from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
 from src.consumidor import montar_despachante
+from src.ordem_servico.aplicacao.ports import SituacaoDaFila
 from src.ordem_servico.aplicacao.saga import vencer_prazos
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.vencer_prazos import VencerPrazos
@@ -60,6 +61,7 @@ PRAZO = timedelta(seconds=1)
 INTERVALO_S = 0.2
 MAXIMO = 5
 _DLQ = "os.eventos.dlq"
+SEM_CONSUMIDOR = SituacaoDaFila(consumidores=0, prontas=0)
 
 
 def _processo_dos_prazos(
@@ -535,13 +537,13 @@ class TestPresencaDoConsumidor:
             session_factory, broker, rastreador, tmp_path, PRAZO
         )
         try:
-            assert presenca.ha_consumidor() is False
+            assert presenca.situacao_da_fila() == SEM_CONSUMIDOR
             # Conectado ao broker, de pe; sem consumidor, mas pronto: broker fora e
             # que tira o processo de pronto.
             assert sinal.pronto.exists()
             with EmSegundoPlano(consumidor):
-                esperar_ate(presenca.ha_consumidor)
-            esperar_ate(lambda: presenca.ha_consumidor() is False)
+                esperar_ate(lambda: _consumidores(presenca) == 1)
+            esperar_ate(lambda: presenca.situacao_da_fila() == SEM_CONSUMIDOR)
         finally:
             presenca.fechar()
         assert not sinal.pronto.exists()
@@ -556,8 +558,8 @@ class TestPresencaDoConsumidor:
         parametros = amqp.parametros("amqp://os:x@127.0.0.1:1/%2F", "teste")
         presenca = PresencaPikaDoConsumidor(parametros, sinal)
 
-        assert presenca.ha_consumidor() is False
-        assert presenca.ha_consumidor() is False
+        assert presenca.situacao_da_fila() is None
+        assert presenca.situacao_da_fila() is None
         assert not sinal.pronto.exists()
         # O laco do processo toca o heartbeat mesmo assim.
         presenca.manter()
@@ -569,17 +571,43 @@ class TestPresencaDoConsumidor:
         sinal = Sinalizador("prazos", tmp_path)
         presenca = PresencaPikaDoConsumidor(broker.parametros("os"), sinal)
         try:
-            assert presenca.ha_consumidor() is False
+            assert presenca.situacao_da_fila() == SEM_CONSUMIDOR
             presenca._broker.conexao.close()  # a conexao cai por baixo do adaptador
 
-            # A queda vira False, sem levantar, e tira o processo de pronto...
-            assert presenca.ha_consumidor() is False
+            # A queda vira None, sem levantar, e tira o processo de pronto...
+            assert presenca.situacao_da_fila() is None
             assert not sinal.pronto.exists()
             # ...e o ciclo seguinte reconecta e volta a ficar pronto.
-            assert presenca.ha_consumidor() is False
+            assert presenca.situacao_da_fila() == SEM_CONSUMIDOR
             assert sinal.pronto.exists()
         finally:
             presenca.fechar()
+
+    def test_conta_as_mensagens_prontas_de_os_eventos(
+        self, broker: Broker, tmp_path: Path
+    ) -> None:
+        sinal = Sinalizador("prazos", tmp_path)
+        presenca = PresencaPikaDoConsumidor(broker.parametros("os"), sinal)
+        try:
+            assert presenca.situacao_da_fila() == SEM_CONSUMIDOR
+            for _ in range(3):
+                broker.publicar_evento(envelope_de_evento("OrcamentoGerado"))
+            # O publicador confirma a entrega, mas a contagem da fila pode atrasar.
+            esperar_ate(
+                lambda: (
+                    presenca.situacao_da_fila()
+                    == SituacaoDaFila(consumidores=0, prontas=3)
+                )
+            )
+            broker.esvaziar()
+            esperar_ate(lambda: presenca.situacao_da_fila() == SEM_CONSUMIDOR)
+        finally:
+            presenca.fechar()
+
+
+def _consumidores(presenca: PresencaPikaDoConsumidor) -> int | None:
+    situacao = presenca.situacao_da_fila()
+    return None if situacao is None else situacao.consumidores
 
 
 def json_dados(envelope: dict[str, Any]) -> str:

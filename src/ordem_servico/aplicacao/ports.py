@@ -11,6 +11,7 @@ o broker, para a camada de aplicacao nao importar o cliente AMQP).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
@@ -119,13 +120,27 @@ class SagaRepository(Protocol):
         pass
 
 
+@dataclass(frozen=True, slots=True)
+class SituacaoDaFila:
+    """O que a declaracao passiva de ``os.eventos`` mostra."""
+
+    consumidores: int
+    prontas: int
+
+    @property
+    def em_dia(self) -> bool:
+        """Com consumidor e sem resposta esperando na fila."""
+        return self.consumidores > 0 and self.prontas == 0
+
+
 class PresencaDoConsumidor(Protocol):
-    """Se o consumidor do OS esta de pe: a resposta pode estar esperando na fila."""
+    """Se o consumidor do OS esta de pe e em dia: a resposta pode estar na fila."""
 
-    def ha_consumidor(self) -> bool:
-        """``False`` com ``os.eventos`` sem consumidor ou com o broker fora.
+    def situacao_da_fila(self) -> SituacaoDaFila | None:
+        """Consumidores e mensagens prontas de ``os.eventos``; ``None`` sem o broker.
 
-        Nos dois casos o ``prazos`` nao reenvia nem esgota prazo no ciclo
+        Sem consumidor, com mensagem pronta na fila (o consumidor voltou e ainda
+        nao a drenou) ou sem o broker, o ``prazos`` nao reenvia nem esgota prazo
         (RFC-004 secao 4.6): quem acusa a demora e o alerta de saga parada.
         """
         pass

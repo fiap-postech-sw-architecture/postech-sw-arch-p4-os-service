@@ -44,6 +44,7 @@ class Prazos:
         cenario: CenarioDaSaga,
         *,
         ha_consumidor: bool = True,
+        prontas: int = 0,
         maximo: int = MAXIMO,
         span: Any = None,
         na_outbox_do_cenario: bool = False,
@@ -59,7 +60,7 @@ class Prazos:
             cenario.publicador if na_outbox_do_cenario else None,
             banco=lambda: self.relogio.agora - self.adiantamento,
         )
-        self.presenca = PresencaFake(ha_consumidor=ha_consumidor)
+        self.presenca = PresencaFake(ha_consumidor=ha_consumidor, prontas=prontas)
         contexto = ContextoDeEnvio(PRAZO, self.relogio)
         if span is not None:
             contexto = ContextoDeEnvio(PRAZO, self.relogio, span)

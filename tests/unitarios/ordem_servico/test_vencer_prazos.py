@@ -233,10 +233,11 @@ class TestSemConsumidor:
         assert resultado == ResultadoDoCiclo(pausado=True)
         assert (prazos.saga.etapa, prazos.saga.reenvios, prazos.saga.passos) == antes
         assert (prazos.comandos, prazos.transacao.commits) == ([], 0)
-        assert [e["event"] for e in logs] == [
-            "saga deadlines paused: the os.eventos consumer is away"
-        ]
-        assert logs[0]["log_level"] == "warning"
+        assert [e["event"] for e in logs] == ["saga deadlines paused"]
+        assert (logs[0]["log_level"], logs[0]["motivo"]) == (
+            "warning",
+            "sem_consumidor",
+        )
 
     def test_a_saga_segue_de_onde_estava_quando_o_consumidor_volta(self) -> None:
         prazos = _em("aguardando_reserva")
@@ -249,13 +250,16 @@ class TestSemConsumidor:
         assert prazos.caso_de_uso.executar() == ResultadoDoCiclo(reenviadas=1)
         assert prazos.saga.reenvios == 1
 
-    def test_a_presenca_e_conferida_uma_vez_por_ciclo(self) -> None:
+    def test_a_fila_e_conferida_antes_de_cada_saga_e_antes_da_busca_que_acaba_o_ciclo(
+        self,
+    ) -> None:
         prazos = _em("aguardando_orcamento")
 
         prazos.vencer()
-        prazos.vencer()
+        assert prazos.presenca.consultas == 2  # a saga vencida e a busca vazia
+        prazos.caso_de_uso.executar()  # o prazo novo ainda nao venceu
 
-        assert prazos.presenca.consultas == 2
+        assert prazos.presenca.consultas == 3
 
 
 class TestIsolamentoDasSagas:
