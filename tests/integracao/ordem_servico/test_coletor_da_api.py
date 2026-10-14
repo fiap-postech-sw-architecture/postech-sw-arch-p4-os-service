@@ -346,6 +346,36 @@ class TestBancoComProblema:
         # espera mais que isso (sem ele o pool esperaria o prazo inteiro).
         assert decorrido < 3
 
+    def test_consulta_que_executa_devagar_e_cortada_pelo_statement_timeout(
+        self, metricas: Engine
+    ) -> None:
+        # A consulta da outbox vira uma que dorme 8 s no servidor (sem lock, so
+        # execucao lenta). O statement_timeout (2 s) a corta, e as leituras que
+        # vem depois dela ainda cabem no prazo da raspagem (5 s). Sem ele, a
+        # raspagem esgotaria o prazo esperando a consulta, e as OS ficariam ausentes.
+        def devagar(
+            _conexao: object,
+            _cursor: object,
+            comando: str,
+            parametros: object,
+            *_: object,
+        ) -> tuple[str, object]:
+            if "FROM outbox WHERE status" in comando:
+                return "SELECT 1.0 FROM (SELECT pg_sleep(8)) AS pausa", ()
+            return comando, parametros
+
+        event.listen(metricas, "before_cursor_execute", devagar, retval=True)
+        coletor = ColetorDaApi(metricas.connect)
+
+        inicio = time.monotonic()
+        raspagem = _raspar(coletor)
+        decorrido = time.monotonic() - inicio
+
+        assert 1.9 <= decorrido < 4.5
+        assert raspagem["pytstop_saga_coletor_disponivel"] == [1]
+        assert not _DA_OUTBOX & set(raspagem)
+        assert set(raspagem) >= (_DA_SAGA | _DAS_ORDENS)
+
     def test_banco_mudo_na_abertura_responde_em_segundos(
         self, engine: Engine, proxy: ProxyTcp
     ) -> None:

@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import atexit
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import SpanKind, StatusCode
 from structlog.testing import capture_logs
 
@@ -27,6 +28,11 @@ from src.compartilhado.infraestrutura.observability import (
 )
 from tests.conftest import MODULO_DO_OTLP
 from tests.rastreamento import Rastreador, tudo_que_o_span_leva
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from opentelemetry.sdk.trace import ReadableSpan
 
 _PAI_AMOSTRADO = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 _PAI_NAO_AMOSTRADO = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
@@ -213,6 +219,29 @@ class TestLimpezaDoTextoDeErro:
         (texto,) = otlp_falso["texto"]
         assert "segredo" not in texto
         assert "RuntimeError" in texto
+
+    def test_exportador_de_envio_imediato_recebe_o_span_limpo_na_hora(self) -> None:
+        # Ele serializa o span dentro do `on_end` do processador que o envolve: se
+        # a limpeza nao viesse antes dele, a foto sairia com o texto da excecao.
+        fotos: list[str] = []
+
+        class _TiraFoto(SpanExporter):
+            def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+                fotos.extend(tudo_que_o_span_leva(s) for s in spans)
+                return SpanExportResult.SUCCESS
+
+        provedor = criar_provedor("api", exportador=_TiraFoto())
+
+        with (
+            pytest.raises(RuntimeError, match="segredo"),
+            provedor.get_tracer("t").start_as_current_span("x"),
+        ):
+            msg = "segredo do cliente"
+            raise RuntimeError(msg)
+
+        (foto,) = fotos
+        assert "segredo" not in foto
+        assert "RuntimeError" in foto
 
     def test_shutdown_e_flush_chegam_ao_exportador(
         self, monkeypatch: pytest.MonkeyPatch, otlp_falso: dict[str, Any]

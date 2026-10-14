@@ -31,6 +31,8 @@ from src.ordem_servico.infraestrutura.metricas_da_saga import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from sqlalchemy import Connection
+
     from src.ordem_servico.infraestrutura.coletor_da_api import _Leitura
 
 _NOMES = {
@@ -55,7 +57,7 @@ def _log_fresco(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(coletor_da_api, "_log", structlog.get_logger("test_coletor"))
 
 
-def _sem_conexao() -> None:
+def _sem_conexao() -> Connection:
     pytest.fail("nenhuma conexao aberta neste teste")
 
 
@@ -67,7 +69,7 @@ def _trocar_a_leitura(
     coletor: ColetorDaApi, leitura: Callable[[_Leitura], None]
 ) -> None:
     """A leitura do banco do coletor vira ``leitura`` (o resto da mecanica e real)."""
-    coletor._ler_tudo = leitura  # type: ignore[method-assign]  # troca no teste
+    coletor._ler_tudo = leitura  # type: ignore[method-assign,assignment]  # troca no teste
 
 
 def _raspar(coletor: ColetorDaApi) -> dict[str, list[float]]:
@@ -164,11 +166,11 @@ class TestRaspagem:
         assert [log["motivo"] for log in logs] == ["OSError", "OSError"]
 
     def test_antes_do_boot_marca_o_coletor_indisponivel(self) -> None:
-        def sem_engine() -> None:
+        def sem_engine() -> Connection:
             msg = "Engine de metricas nao configurada"
             raise RuntimeError(msg)
 
-        coletor = ColetorDaApi(sem_engine)  # type: ignore[arg-type]  # a conexao nem abre
+        coletor = ColetorDaApi(sem_engine)
 
         assert _raspar(coletor) == {"pytstop_saga_coletor_disponivel": [0]}
 
@@ -269,8 +271,8 @@ class TestRegistro:
         return registro
 
     def test_registra_uma_vez_por_processo(self, registro: CollectorRegistry) -> None:
-        primeiro = registrar_coletor(_sem_conexao)  # type: ignore[arg-type]  # nem abre
-        segundo = registrar_coletor(_sem_conexao)  # type: ignore[arg-type]
+        primeiro = registrar_coletor(_sem_conexao)
+        segundo = registrar_coletor(_sem_conexao)
 
         assert primeiro is not None
         assert segundo is None
@@ -279,10 +281,10 @@ class TestRegistro:
     def test_quem_registrou_tira_e_o_processo_pode_registrar_de_novo(
         self, registro: CollectorRegistry
     ) -> None:
-        coletor = registrar_coletor(_sem_conexao)  # type: ignore[arg-type]
+        coletor = registrar_coletor(_sem_conexao)
         assert coletor is not None
 
         desregistrar_coletor(coletor)
 
         assert registro._names_to_collectors == {}
-        assert registrar_coletor(_sem_conexao) is not None  # type: ignore[arg-type]
+        assert registrar_coletor(_sem_conexao) is not None
