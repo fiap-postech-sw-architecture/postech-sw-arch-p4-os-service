@@ -25,13 +25,14 @@ resources:
   - api.yaml
   - relay.yaml
   - consumidor.yaml
+  - prazos.yaml
   - servico.yaml
   - hpa.yaml
   - networkpolicy.yaml
   - borda.yaml
 
 configMapGenerator:
-  # Ambiente da API, do relay, do consumidor e do Job (envFrom); os overlays
+  # Ambiente da API, do relay, do consumidor, do prazos e do Job (envFrom); os overlays
   # acrescentam o TRUSTED_PROXIES, o CIDR de pods do cluster.
   - name: os-service
     literals:
@@ -42,7 +43,7 @@ configMapGenerator:
       - OTEL_ENABLED=true
       - OTEL_SERVICE_NAME=os-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger.pytstop-plataforma.svc.cluster.local:4317
-      # /metrics do relay e do consumidor, a porta `metrics` dos Deployments.
+      # /metrics do relay, do consumidor e do prazos, a porta `metrics` dos Deployments.
       - METRICS_PORT=9100
       # Migracao e semente sao do Job, que os pods esperam.
       - RUN_MIGRATIONS_ON_STARTUP=false
@@ -57,6 +58,12 @@ configMapGenerator:
       - OUTBOX_POLL_SEGUNDOS=5
       - OUTBOX_LOTE=10
       - OUTBOX_LEASE_SEGUNDOS=60
+      # Prazos da saga (RFC-004 secoes 4.6 e 10.3). O prazo de resposta vale na
+      # API e no consumidor, que o gravam no envio de cada comando, e no prazos,
+      # que o compara com o instante em que o relay entregou o comando.
+      - SAGA_PRAZO_RESPOSTA_SEGUNDOS=120
+      - SAGA_MAX_REENVIOS=5
+      - PRAZOS_INTERVALO_SEGUNDOS=30
       # Por replica da API; com 3 no HPA do k3s, relay, consumidor, Job e
       # exporter, ficam abaixo do max_connections 100 do PostgreSQL 16.
       - DB_POOL_SIZE=5

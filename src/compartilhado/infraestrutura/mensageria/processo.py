@@ -46,6 +46,9 @@ _PORTA_DE_METRICAS: Final = 9100
 # (k8s/base/relay.yaml e consumidor.yaml; um teste confere os manifestos): acima
 # dos cerca de 70 s de um publish preso no broker mudo (mensageria/amqp.py).
 IDADE_MAXIMA_DO_HEARTBEAT_S: Final = 90
+# A do prazos (k8s/base/prazos.yaml): o ciclo trata uma saga por transacao, com
+# o banco sob o statement_timeout de 15 s, e toca o heartbeat a cada uma.
+IDADE_MAXIMA_DO_HEARTBEAT_DOS_PRAZOS_S: Final = 120
 # Limpezas da outbox e de `mensagens_processadas`: uma vez por hora.
 INTERVALO_DE_LIMPEZA_S: Final = 3600.0
 # Relay e consumidor: no maximo 4 conexoes do pool cada, e nenhum comando nem
