@@ -1,11 +1,12 @@
-# Stack local do OS Service: API, relay da outbox e consumidor de `os.eventos`
-# (a mesma imagem, com comandos diferentes), PostgreSQL 16 proprio (banco `os`)
-# e um RabbitMQ 4 com a topologia do platform (contratos/rabbitmq/).
+# Stack local do OS Service: API, relay da outbox, consumidor de `os.eventos` e
+# processo dos prazos da saga (a mesma imagem, com comandos diferentes),
+# PostgreSQL 16 proprio (banco `os`) e um RabbitMQ 4 com a topologia do platform
+# (contratos/rabbitmq/).
 # Uso: `make compose-up` (build + migracoes + admin seed) e `make compose-down`.
 # Todos os valores abaixo sao de DEMONSTRACAO para dev local; em qualquer
 # ambiente exposto entram por Secret e o boot com ENVIRONMENT=production
 # recusa estes literais (validar_segredos_no_startup, para a chave RSA do JWT
-# validar_chave_jwt_no_startup e, no relay e no consumidor, a senha do broker).
+# validar_chave_jwt_no_startup e, nos processos, a senha do broker).
 # Credenciais do Postgres de demo num lugar so: o banco as usa para se criar e
 # a API (e o Alembic e o seed) monta a URL com elas (ENVIRONMENT=development).
 x-banco-demo: &banco-demo
@@ -13,13 +14,18 @@ x-banco-demo: &banco-demo
   POSTGRES_USER: pytstop
   POSTGRES_PASSWORD: pytstop  # gitleaks:allow (senha do banco de demo)
 
-# Prazo tecnico de resposta da saga (segundos): o mesmo valor na API (a primeira
-# compensacao do cancelamento) e no consumidor (os comandos seguintes); um ponto
-# so, para os dois nao gravarem prazos diferentes para a mesma saga.
+# Prazos da saga: o prazo tecnico de resposta (segundos) vale igual na API (a
+# primeira compensacao do cancelamento e a retomada), no consumidor (os comandos
+# seguintes) e no prazos (que o compara com a entrega do comando); um ponto so,
+# para ninguem gravar prazos diferentes para a mesma saga. Os reenvios e o
+# intervalo dos ciclos so o prazos le. O original e os cinco reenvios (6 x 120 s)
+# ficam acima dos 381 s do retry do consumidor.
 x-saga: &saga
   SAGA_PRAZO_RESPOSTA_SEGUNDOS: ${SAGA_PRAZO_RESPOSTA_SEGUNDOS:-120}
+  SAGA_MAX_REENVIOS: ${SAGA_MAX_REENVIOS:-5}
+  PRAZOS_INTERVALO_SEGUNDOS: ${PRAZOS_INTERVALO_SEGUNDOS:-30}
 
-# Relay e consumidor: banco (montado das POSTGRES_* em development) e o usuario
+# Relay, consumidor e prazos: banco (montado das POSTGRES_* em development) e o usuario
 # `os` do RabbitMQ, com a mesma senha de demonstracao do platform.
 x-mensageria: &mensageria
   <<: [*banco-demo, *saga]
@@ -28,7 +34,7 @@ x-mensageria: &mensageria
   RABBITMQ_URL: amqp://os:pytstop-os-demo-2026@rabbitmq:5672/%2F  # gitleaks:allow (senha de demo)
   OTEL_ENABLED: ${OTEL_ENABLED:-false}
 
-# Relay e consumidor: sistema de arquivos so leitura (o /tmp dos arquivos de
+# Relay, consumidor e prazos: sistema de arquivos so leitura (o /tmp dos arquivos de
 # saude e um tmpfs), sem capabilities nem escalada de privilegio e com teto de
 # memoria, CPU e processos. Cada um usa ate 4 conexoes com o banco (pool de
 # 2 + 2), e o relay mais 1, a do LISTEN.
@@ -84,8 +90,9 @@ services:
       retries: 6
       start_period: 20s
 
-  # Relay da outbox (python -m src.relay) e consumidor de os.eventos (python -m
-  # src.consumidor): a imagem da API, sem HTTP de negocio. Sobem depois da API
+  # Relay da outbox (python -m src.relay), consumidor de os.eventos (python -m
+  # src.consumidor) e prazos da saga (python -m src.prazos): a imagem da API, sem
+  # HTTP de negocio. Sobem depois da API
   # pronta (migracoes aplicadas) e dos usuarios do RabbitMQ criados. Saudavel =
   # conectado ao broker (arquivo de pronto) e laco vivo: heartbeat do processo
   # com ate 90 s, porque com o broker mudo um publish fica ate cerca de 70 s
@@ -132,6 +139,33 @@ services:
         - python
         - -c
         - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/consumidor-pronto') and time.time() - os.path.getmtime('/tmp/consumidor-heartbeat') < 90 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # Prazos da saga: reenvia o comando sem resposta e, esgotados os reenvios,
+  # compensa ou para a saga em falha_na_compensacao (README, "Prazos, falha na
+  # compensacao e retomada"). Saudavel = conectado ao RabbitMQ (arquivo de pronto)
+  # e laco vivo; a liveness tolera 120 s sem heartbeat, como no Kubernetes.
+  prazos:
+    image: ${APP_IMAGE:-pytstop-os-service:dev}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["python", "-m", "src.prazos"]
+    environment: *mensageria
+    <<: *processo-endurecido
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq-usuarios:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/prazos-pronto') and time.time() - os.path.getmtime('/tmp/prazos-heartbeat') < 120 else 1)"
       interval: 5s
       timeout: 3s
       retries: 12
