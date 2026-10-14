@@ -14,19 +14,13 @@
     "pecas": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/peca"
+        "$ref": "#/$defs/peca_a_reservar"
       },
       "maxItems": 50
     }
   },
   "$defs": {
-    "codigo": {
-      "type": "string",
-      "maxLength": 50,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
-      "description": "Código do serviço ou SKU da peça na tabela de preços do Billing (até 50 caracteres)."
-    },
-    "peca": {
+    "peca_a_reservar": {
       "type": "object",
       "required": [
         "sku",
@@ -34,7 +28,7 @@
       ],
       "properties": {
         "sku": {
-          "$ref": "#/$defs/codigo"
+          "$ref": "#/$defs/sku"
         },
         "quantidade": {
           "$ref": "#/$defs/quantidade"
@@ -45,6 +39,12 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 1000
+    },
+    "sku": {
+      "type": "string",
+      "maxLength": 50,
+      "pattern": "^[A-Z0-9]+(?:-[A-Z0-9]+)*(?![\\s\\S])",
+      "description": "SKU da peça no formato do Billing, dono dos códigos: letras maiúsculas e dígitos separados por hífens, até 50 caracteres (ex.: PEC-OLEO-5W30). O comando é mais estrito que o `codigo` dos orçamentos: a Execução só cadastra no estoque o formato do Billing."
     },
     "uuid": {
       "type": "string",
