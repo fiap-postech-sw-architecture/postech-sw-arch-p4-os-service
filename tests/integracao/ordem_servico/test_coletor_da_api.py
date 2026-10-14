@@ -22,8 +22,8 @@ from src.compartilhado.infraestrutura.database import criar_engine_de_metricas
 from src.ordem_servico.infraestrutura import coletor_da_api
 from src.ordem_servico.infraestrutura.coletor_da_api import ColetorDaApi
 from src.ordem_servico.infraestrutura.metricas_da_saga import FALHAS_DO_COLETOR
-from tests.integracao.ordem_servico.test_metricas_das_ordens import _com_historicos
 from tests.integracao.proxy_tcp import ProxyTcp
+from tests.integracao.seed_helpers import criar_ordens_com_historicos
 from tests.relogio import RelogioFixo
 
 if TYPE_CHECKING:
@@ -93,7 +93,7 @@ class TestLeitura:
         session_factory: sessionmaker[Session],
     ) -> None:
         agora = datetime.now(UTC)
-        _com_historicos(
+        criar_ordens_com_historicos(
             session_factory, [("recebida", agora), ("em_diagnostico", agora)]
         )
 
@@ -178,7 +178,8 @@ class TestCache:
         por_status = "pytstop_os_por_status"
 
         primeira = _raspar(coletor)
-        _com_historicos(session_factory, [("recebida", agora)])  # muda o banco
+        # Muda o banco: a leitura em cache nao o ve.
+        criar_ordens_com_historicos(session_factory, [("recebida", agora)])
         relogio.avancar(29)
         dentro_da_validade = _raspar(coletor)
         relogio.avancar(2)

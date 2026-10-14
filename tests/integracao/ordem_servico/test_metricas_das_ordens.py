@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 import pytest
 from prometheus_client import CollectorRegistry
@@ -25,8 +24,7 @@ from src.ordem_servico.infraestrutura.consultas import (
 )
 from tests.integracao.seed_helpers import (
     SENHA_PADRAO,
-    criar_cliente_com_veiculo,
-    criar_ordem_recebida,
+    criar_ordens_com_historicos,
     criar_usuario,
 )
 
@@ -36,57 +34,10 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from src.autenticacao.dominio.usuario import Usuario
+    from tests.integracao.seed_helpers import Passos
 
 AGORA = datetime(2026, 10, 14, 12, tzinfo=UTC)
 _METRICAS = "/api/v1/ordens-de-servico/metricas"
-type Passos = list[tuple[str, datetime]]
-
-
-def _ordem(sess: Session, passos: Passos, *, status_atual: str | None = None) -> UUID:
-    """Uma OS com o historico exatamente ``passos`` (status e instante de entrada).
-
-    O status da OS e o do ultimo passo (ou ``status_atual``).
-    """
-    cliente = criar_cliente_com_veiculo(sess)
-    ordem = criar_ordem_recebida(
-        sess, cliente_id=cliente.id, veiculo_id=cliente.veiculos[0].id
-    )
-    sess.execute(
-        text("DELETE FROM historico_status_ordem WHERE ordem_id = :id"),
-        {"id": ordem.id},
-    )
-    anterior: str | None = None
-    for sequencia, (status, quando) in enumerate(passos, start=1):
-        sess.execute(
-            text(
-                "INSERT INTO historico_status_ordem "
-                "(id, ordem_id, sequencia, de, para, origem, ocorrido_em) "
-                "VALUES (gen_random_uuid(), :ordem, :sequencia, :de, :para, "
-                "'saga', :quando)"
-            ),
-            {
-                "ordem": ordem.id,
-                "sequencia": sequencia,
-                "de": anterior,
-                "para": status,
-                "quando": quando,
-            },
-        )
-        anterior = status
-    sess.execute(
-        text("UPDATE ordens_de_servico SET status = :status WHERE id = :id"),
-        {"status": status_atual or passos[-1][0], "id": ordem.id},
-    )
-    return ordem.id
-
-
-def _com_historicos(
-    session_factory: sessionmaker[Session], *ordens: Passos
-) -> list[UUID]:
-    with session_factory() as sess:
-        ids = [_ordem(sess, passos) for passos in ordens]
-        sess.commit()
-    return ids
 
 
 def _s(segundos: float) -> timedelta:
@@ -115,7 +66,7 @@ class TestLeitura:
     def test_total_por_status_e_permanencia_media(
         self, session_factory: sessionmaker[Session]
     ) -> None:
-        _com_historicos(session_factory, *_fixture_conhecida(AGORA))
+        criar_ordens_com_historicos(session_factory, *_fixture_conhecida(AGORA))
 
         with session_factory() as sess:
             metricas = ler_metricas_das_ordens(sess, AGORA)
@@ -170,7 +121,7 @@ class TestLeitura:
         entra: bool,
     ) -> None:
         entrada = AGORA - JANELA_DAS_PERMANENCIAS + deslocamento
-        _com_historicos(
+        criar_ordens_com_historicos(
             session_factory,
             [("recebida", entrada), ("em_diagnostico", entrada + _s(600))],
         )
@@ -188,7 +139,7 @@ class TestLeitura:
     ) -> None:
         # Duas replicas gravam o `ocorrido_em` com relogios diferentes: a segunda
         # linha pode ser anterior a primeira, e a media nao pode ficar negativa.
-        _com_historicos(
+        criar_ordens_com_historicos(
             session_factory,
             [("recebida", AGORA - _s(1000)), ("em_diagnostico", AGORA - _s(1010))],
         )
@@ -203,7 +154,7 @@ class TestLeitura:
     def test_status_de_outra_versao_fica_fora_sem_derrubar_a_leitura(
         self, session_factory: sessionmaker[Session]
     ) -> None:
-        (ordem_id,) = _com_historicos(
+        (ordem_id,) = criar_ordens_com_historicos(
             session_factory,
             [
                 ("recebida", AGORA - _s(900)),
@@ -226,7 +177,7 @@ class TestLeitura:
     def test_ordem_que_volta_ao_status_conta_cada_permanencia(
         self, session_factory: sessionmaker[Session]
     ) -> None:
-        _com_historicos(
+        criar_ordens_com_historicos(
             session_factory,
             [
                 ("aguardando_pagamento", AGORA - _s(5000)),
@@ -267,7 +218,7 @@ class TestRota:
         session_factory: sessionmaker[Session],
     ) -> None:
         agora = datetime.now(UTC)
-        _com_historicos(session_factory, *_fixture_conhecida(agora))
+        criar_ordens_com_historicos(session_factory, *_fixture_conhecida(agora))
 
         resposta = api_client.get(_METRICAS, headers=admin)
 
@@ -364,7 +315,7 @@ def test_gauges_do_coletor_sao_os_numeros_da_rota(
     engine: Engine,
     session_factory: sessionmaker[Session],
 ) -> None:
-    _com_historicos(session_factory, *_fixture_conhecida(datetime.now(UTC)))
+    criar_ordens_com_historicos(session_factory, *_fixture_conhecida(datetime.now(UTC)))
 
     corpo = api_client.get(_METRICAS, headers=admin).json()
     registro = _registro(engine)
