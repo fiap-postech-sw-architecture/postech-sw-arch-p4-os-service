@@ -9,7 +9,6 @@ reinicia-lo: reiniciar nao traz o broker de volta.
 
 from __future__ import annotations
 
-import math
 import os
 import signal
 import tempfile
@@ -21,6 +20,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from prometheus_client import start_http_server
 
+from src.compartilhado.infraestrutura.ambiente import inteiro_do_ambiente
 from src.compartilhado.infraestrutura.database import (
     AMBIENTES_DEV,
     SENHA_DO_BANCO_DEMO,
@@ -98,36 +98,6 @@ class Agenda:
             return False
         self._proxima = agora + self._intervalo_s
         return True
-
-
-def inteiro_do_ambiente(nome: str, padrao: int, *, minimo: int) -> int:
-    """Le um inteiro do ambiente; valor invalido aborta o boot com mensagem clara."""
-    bruto = os.environ.get(nome, str(padrao))
-    try:
-        valor = int(bruto)
-    except ValueError:
-        valor = minimo - 1
-    if valor < minimo:
-        msg = f"config invalida no boot: {nome}={bruto!r} (inteiro >= {minimo})"
-        raise RuntimeError(msg)
-    return valor
-
-
-def numero_do_ambiente(
-    nome: str, padrao: float, *, minimo: float, maximo: float = math.inf
-) -> float:
-    """Le um numero do ambiente; valor invalido aborta o boot com mensagem clara."""
-    bruto = os.environ.get(nome, str(padrao))
-    try:
-        valor = float(bruto)
-    except ValueError:
-        valor = minimo - 1
-    if math.isnan(valor) or valor < minimo or valor > maximo:
-        msg = (
-            f"config invalida no boot: {nome}={bruto!r} (numero de {minimo} a {maximo})"
-        )
-        raise RuntimeError(msg)
-    return valor
 
 
 def instalar_sinais(parar: threading.Event) -> None:

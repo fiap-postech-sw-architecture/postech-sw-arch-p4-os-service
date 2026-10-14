@@ -15,6 +15,8 @@ from src.ordem_servico.dominio.resumos import (
     ResumoPagamento,
     StatusPagamento,
     pagamento_confirmado,
+    pagamento_exigido,
+    pagamento_no_estado,
     pagamento_solicitado,
 )
 from tests.fabricas import EXPIRA_EM, VALIDO_ATE
@@ -174,9 +176,96 @@ class TestCicloDoPagamento:
 
         assert pagamento_confirmado(solicitado) == solicitado.confirmado()
 
+    @pytest.mark.parametrize(
+        "status", [StatusPagamento.SOLICITADO, StatusPagamento.CONFIRMADO]
+    )
+    def test_estado_com_transicao_propria_nao_passa_por_pagamento_no_estado(
+        self, status: StatusPagamento
+    ) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match=status.value):
+            pagamento_no_estado(_pagamento(), status)
+
+    def test_estado_depois_do_checkout_sem_resumo_levanta(self) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
+            pagamento_no_estado(None, StatusPagamento.ESTORNADO)
+
     def test_confirmado_sem_solicitado_levanta(self) -> None:
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
             pagamento_confirmado(None)
+
+
+_S = StatusPagamento
+_ORIGENS = (
+    _S.SOLICITADO,
+    _S.CONFIRMADO,
+    _S.RECUSADO,
+    _S.EXPIRADO,
+    _S.CANCELADO,
+    _S.ESTORNADO,
+)
+# RFC-004 secao 4.4 e 7.1: o cancelamento so atinge a cobranca em aberto; em
+# outro estado a resposta chegou depois de um mais novo (ou repetida) e o resumo
+# segue como esta, sem recusar a resposta do Billing; o estorno serve a
+# compensacao (origem confirmado) e ao estorno tardio do Billing, que aceita
+# qualquer origem: seis origens por duas transicoes, 12 celulas.
+_CANCELADO = {o: _S.CANCELADO if o is _S.SOLICITADO else o for o in _ORIGENS}
+_ESTORNADO = dict.fromkeys(_ORIGENS, _S.ESTORNADO)
+
+
+class TestTransicoesDoPagamento:
+    @pytest.mark.parametrize(
+        ("origem", "destino"),
+        [pytest.param(o, d, id=f"{o.value}-cancelado") for o, d in _CANCELADO.items()],
+    )
+    def test_cancelado_pela_tabela(
+        self, origem: StatusPagamento, destino: StatusPagamento
+    ) -> None:
+        resumo = _pagamento(status=origem)
+
+        assert resumo.cancelado() == _pagamento(
+            pagamento_id=resumo.pagamento_id, status=destino
+        )
+
+    @pytest.mark.parametrize(
+        ("origem", "destino"),
+        [pytest.param(o, d, id=f"{o.value}-estornado") for o, d in _ESTORNADO.items()],
+    )
+    def test_estornado_pela_tabela(
+        self, origem: StatusPagamento, destino: StatusPagamento
+    ) -> None:
+        resumo = _pagamento(status=origem)
+
+        assert resumo.estornado() == _pagamento(
+            pagamento_id=resumo.pagamento_id, status=destino
+        )
+
+    def test_repetir_a_transicao_no_destino_devolve_o_mesmo_valor(self) -> None:
+        cancelado = _pagamento(status=_S.CANCELADO)
+        estornado = _pagamento(status=_S.ESTORNADO)
+
+        assert cancelado.cancelado() is cancelado
+        assert estornado.estornado() == estornado
+
+    @pytest.mark.parametrize("origem", _ORIGENS)
+    def test_recusado_e_expirado_so_partem_do_solicitado(
+        self, origem: StatusPagamento
+    ) -> None:
+        # O estado antigo que chega depois de um mais novo (o recusado depois do
+        # estorno da aprovacao tardia) nao o desfaz.
+        resumo = _pagamento(status=origem)
+        solicitado = origem is _S.SOLICITADO
+
+        assert resumo.recusado().status is (_S.RECUSADO if solicitado else origem)
+        assert resumo.expirado().status is (_S.EXPIRADO if solicitado else origem)
+
+    def test_exigido_sem_resumo_levanta(self) -> None:
+        with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):
+            pagamento_exigido(None)
+
+    def test_exigido_devolve_o_resumo(self) -> None:
+        resumo = _pagamento()
+
+        assert pagamento_exigido(resumo) is resumo
 
 
 def test_status_de_pagamento_cobre_o_ciclo_do_billing() -> None:

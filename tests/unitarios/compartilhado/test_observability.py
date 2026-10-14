@@ -30,6 +30,7 @@ import src.compartilhado.infraestrutura.observability as observability_modulo
 from src.compartilhado.infraestrutura.observability import (
     _redigir_pii_da_span,
     configurar_otel,
+    tracer_da_api,
 )
 
 
@@ -80,6 +81,10 @@ def otel_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
 
         def add_span_processor(self, processor: object) -> None:
             self.processors.append(processor)
+
+        def get_tracer(self, nome: str) -> object:
+            registro["tracer"] = ("tracer", nome)
+            return registro["tracer"]
 
         def shutdown(self) -> None:
             registro["shutdown_chamado"] = True
@@ -140,7 +145,29 @@ def otel_stubs(monkeypatch: pytest.MonkeyPatch) -> dict:
         "batch": BatchSpanProcessorStub,
         "provider": TracerProviderStub,
     }
+    # O tracer da API e de processo: um teste nao deixa o dele para o seguinte.
+    monkeypatch.setattr(observability_modulo, "_tracer_da_api", None)
     return registro
+
+
+class TestTracerDaApi:
+    def test_sem_a_instrumentacao_e_o_no_op(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(observability_modulo, "_tracer_da_api", None)
+
+        with tracer_da_api().start_as_current_span("x") as span:
+            assert not span.get_span_context().is_valid
+
+    def test_com_a_instrumentacao_e_o_do_provider_dela(
+        self, monkeypatch: pytest.MonkeyPatch, otel_stubs: dict
+    ) -> None:
+        monkeypatch.setenv("OTEL_ENABLED", "true")
+
+        assert configurar_otel(FastAPI(), object()) is True
+
+        assert tracer_da_api() is otel_stubs["tracer"]
+        assert otel_stubs["tracer"] == ("tracer", "pytstop-os-service.api")
 
 
 class TestFlagDesligada:

@@ -14,11 +14,14 @@ from uuid import UUID, uuid4
 import httpx
 import jwt
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
 from scripts.validar_token import validar_access_token
-from src.ordem_servico.aplicacao.use_cases import CANCELAMENTO_INDISPONIVEL
+from src.compartilhado.aplicacao.mensageria import Desfecho
+from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
+from src.consumidor import tratar_evento_da_saga
+from src.ordem_servico.aplicacao.use_cases import ORDEM_JA_CANCELADA
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.repository import (
@@ -30,6 +33,7 @@ from tests.chaves_jwt import (
     claims,
     forjar_hmac_com_a_chave_publica,
 )
+from tests.eventos import evento
 from tests.fabricas import FLUXO, aplicar_fato
 from tests.integracao.seed_helpers import SENHA_PADRAO, criar_usuario
 
@@ -99,11 +103,11 @@ def _os_sem_saga(
     veiculo_id: str,
     descricao: str = "Motor falhando",
 ) -> str:
-    """OS gravada sem saga (como as anteriores a ela): o cancelamento e direto.
+    """OS gravada sem saga (como as anteriores a ela): so os fatos de dominio.
 
-    Com a saga em andamento, o cancelamento pela API responde 409 ate passar
-    pelas compensacoes; os cenarios que precisam de uma OS cancelada partem
-    daqui.
+    Nao ha cancelamento para ela (toda OS aberta pela API tem saga): os cenarios
+    que so precisam de uma OS em andamento, ou dos fatos aplicados direto no
+    dominio, partem daqui.
     """
     with session_factory() as sess:
         ordem = OrdemDeServico.abrir(
@@ -115,6 +119,32 @@ def _os_sem_saga(
         OrdemDeServicoSQLAlchemyRepository(sess).salvar(ordem)
         sess.commit()
         return str(ordem.id)
+
+
+def _cancelar_pela_api(
+    api_client: TestClient,
+    session_factory: sessionmaker[Session],
+    headers: dict[str, str],
+    ordem_id: str,
+    motivo: str,
+) -> None:
+    """Pedido de cancelamento na etapa do diagnostico e a ultima compensacao.
+
+    O atendente pede (202) e a Execucao responde ao `DescartarDiagnostico`, o
+    unico passo a desfazer: a OS fica CANCELADA pelo consumidor (a resposta
+    entra no mesmo caminho do consumidor, sobre a transacao da mensagem).
+    """
+    pedido = api_client.post(
+        f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": motivo}
+    )
+    assert pedido.status_code == 202
+    resposta = evento("DiagnosticoDescartado", UUID(ordem_id))
+    with session_factory() as sess:
+        desfecho = tratar_evento_da_saga(
+            resposta, TransacaoDaMensagem(sess), prazo_resposta=timedelta(seconds=120)
+        )
+        sess.commit()
+    assert desfecho is Desfecho.PROCESSADA
 
 
 def _levar_ate(
@@ -158,8 +188,11 @@ class TestAutenticacao:
 
 
 class TestCicloDaOrdem:
-    def test_abrir_consultar_listar_e_cancelar_com_a_saga_em_andamento(
-        self, api_client: TestClient, admin_user: Usuario
+    def test_abrir_consultar_listar_e_cancelar_pela_saga(
+        self,
+        api_client: TestClient,
+        admin_user: Usuario,
+        session_factory: sessionmaker[Session],
     ) -> None:
         headers = _login(api_client, admin_user.email)
         cliente_id, veiculo_id = _cliente_com_veiculo(
@@ -176,27 +209,61 @@ class TestCicloDaOrdem:
         assert [i["id"] for i in lista["items"]] == [ordem_id]
         assert lista["total"] == 1
 
-        # A saga esta em aguardando_diagnostico: o cancelamento passa por ela
-        # quando as compensacoes chegarem; ate la, 409 sem mudar a OS.
-        recusado = api_client.post(
+        # O pedido responde 202 com a etapa: a OS guarda o texto e mantem o
+        # status ate a saga desfazer o que fez (RFC-004 secao 4.4).
+        pedido = api_client.post(
             f"{_OS}/{ordem_id}/cancelamento",
             headers=headers,
             json={"motivo": "cliente desistiu"},
         )
-        assert recusado.status_code == 409
-        assert recusado.json()["erro"] == {
-            "codigo": "TRANSICAO_STATUS_INVALIDA",
-            "mensagem": CANCELAMENTO_INDISPONIVEL,
-            "id_requisicao": recusado.headers["X-Request-ID"],
-        }
-        depois = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
-        assert (depois["status"], depois["versao"], depois["etapa"]) == (
+        assert pedido.status_code == 202
+        corpo = pedido.json()
+        assert (corpo["status"], corpo["etapa"], corpo["versao"]) == (
             "recebida",
-            1,
-            "aguardando_diagnostico",
+            "compensando",
+            2,
+        )
+        assert corpo["motivo_cancelamento"] == "cliente desistiu"
+        saga = api_client.get(f"/api/v1/sagas/{ordem_id}", headers=headers).json()
+        assert (saga["etapa"], saga["motivo"], saga["plano_compensacao"]) == (
+            "compensando",
+            "cancelamento",
+            ["DescartarDiagnostico"],
+        )
+        assert saga["comando_em_voo"]["tipo"] == "DescartarDiagnostico"
+        # Repetido, o pedido responde 202 com a etapa e nao muda nada.
+        repetido = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "outro"}
+        )
+        assert repetido.status_code == 202
+        assert (repetido.json()["versao"], repetido.json()["motivo_cancelamento"]) == (
+            2,
+            "cliente desistiu",
         )
 
-    def test_os_sem_saga_cancela_direto_e_sai_da_fila_padrao(
+        # A Execucao responde ao ultimo passo: a OS fica CANCELADA, com o texto
+        # do atendente, e o pedido seguinte e recusado (409).
+        resposta = evento("DiagnosticoDescartado", UUID(ordem_id))
+        with session_factory() as sess:
+            tratar_evento_da_saga(
+                resposta,
+                TransacaoDaMensagem(sess),
+                prazo_resposta=timedelta(seconds=120),
+            )
+            sess.commit()
+        depois = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
+        assert (depois["status"], depois["etapa"]) == ("cancelada", "compensada")
+        de_novo = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+        assert de_novo.status_code == 409
+        assert de_novo.json()["erro"] == {
+            "codigo": "TRANSICAO_STATUS_INVALIDA",
+            "mensagem": ORDEM_JA_CANCELADA,
+            "id_requisicao": de_novo.headers["X-Request-ID"],
+        }
+
+    def test_os_cancelada_pela_saga_sai_da_fila_padrao(
         self,
         api_client: TestClient,
         admin_user: Usuario,
@@ -206,32 +273,30 @@ class TestCicloDaOrdem:
         cliente_id, veiculo_id = _cliente_com_veiculo(
             api_client, headers, documento="21249722519", placa="ABC1D24"
         )
-        ordem_id = _os_sem_saga(session_factory, cliente_id, veiculo_id)
+        ordem_id = str(_abrir(api_client, headers, cliente_id, veiculo_id)["id"])
 
-        cancelada = api_client.post(
-            f"{_OS}/{ordem_id}/cancelamento",
-            headers=headers,
-            json={"motivo": "cliente desistiu"},
+        _cancelar_pela_api(
+            api_client, session_factory, headers, ordem_id, "cliente desistiu"
         )
-        assert cancelada.status_code == 200
-        assert (cancelada.json()["versao"], cancelada.json()["etapa"]) == (2, None)
 
         historico = api_client.get(f"{_OS}/{ordem_id}/historico", headers=headers)
-        # O ator de cada linha e o sub do JWT de quem agiu (RFC-004 secao 7.2).
-        sub = str(admin_user.id)
+        # O ator de cada linha e o sub do JWT de quem agiu ou o processo (RFC-004
+        # secao 7.2): a OS cancelada deixa o sub de quem pediu o cancelamento
+        # (ADR-039), com o texto do pedido; o registro da saga e do consumidor.
         assert [
             (m["de"], m["para"], m["origem"], m["motivo"], m["ator"])
             for m in historico.json()["mudancas"]
         ] == [
-            (None, "recebida", "atendimento", None, "atendente-teste"),
-            ("recebida", "cancelada", "atendimento", "cliente desistiu", sub),
+            (None, "recebida", "atendimento", None, str(admin_user.id)),
+            ("recebida", "cancelada", "saga", "cliente desistiu", str(admin_user.id)),
         ]
-
-        de_novo = api_client.post(
-            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
-        )
-        assert de_novo.status_code == 409
-        assert de_novo.json()["erro"]["codigo"] == "TRANSICAO_STATUS_INVALIDA"
+        assert [
+            (p["gatilho"], p["ator"], p["motivo"]) for p in historico.json()["passos"]
+        ] == [
+            ("abertura", str(admin_user.id), None),
+            ("cancelamento_solicitado", str(admin_user.id), "cancelamento"),
+            ("DiagnosticoDescartado", "consumidor", "cancelamento"),
+        ]
         # Encerrada sai da fila padrao e volta com incluir_encerradas.
         padrao = api_client.get(_OS, headers=headers).json()
         assert (padrao["items"], padrao["total"]) == ([], 0)
@@ -240,6 +305,27 @@ class TestCicloDaOrdem:
         ).json()
         assert [i["id"] for i in completa["items"]] == [ordem_id]
         assert completa["total"] == 1
+
+    def test_os_sem_saga_nao_tem_cancelamento(
+        self,
+        api_client: TestClient,
+        admin_user: Usuario,
+        session_factory: sessionmaker[Session],
+    ) -> None:
+        headers = _login(api_client, admin_user.email)
+        cliente_id, veiculo_id = _cliente_com_veiculo(
+            api_client, headers, documento="21249722519", placa="ABC1D25"
+        )
+        ordem_id = _os_sem_saga(session_factory, cliente_id, veiculo_id)
+
+        resp = api_client.post(
+            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["erro"]["codigo"] == "ENTIDADE_NAO_ENCONTRADA"
+        detalhe = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
+        assert (detalhe["status"], detalhe["versao"]) == ("recebida", 1)
 
     def test_abertura_inicia_a_saga_visivel_na_os_no_historico_e_na_operacao(
         self, api_client: TestClient, admin_user: Usuario
@@ -284,19 +370,10 @@ class TestCicloDaOrdem:
         cliente_id, veiculo_id = _cliente_com_veiculo(
             api_client, headers, documento="52998224725", placa="DEF4G56"
         )
-        # Sem saga: os fatos entram direto no dominio, e o 409 abaixo e o do
-        # pivot (com a saga em andamento, o cancelamento ja seria recusado).
+        # Sem saga: os fatos entram direto no dominio.
         ordem_id = _os_sem_saga(session_factory, cliente_id, veiculo_id)
 
         _levar_ate(session_factory, ordem_id, StatusOrdem.EM_EXECUCAO)
-        tarde = api_client.post(
-            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
-        )
-        assert tarde.status_code == 409
-        assert tarde.json()["erro"]["mensagem"].startswith(
-            "Transicao invalida de em_execucao para cancelada"
-        )
-
         _levar_ate(session_factory, ordem_id, StatusOrdem.FINALIZADA)
         entregue = api_client.post(f"{_OS}/{ordem_id}/entrega", headers=headers)
         assert entregue.status_code == 200
@@ -668,7 +745,7 @@ class TestRegrasEntreContextos:
         cliente_id, veiculo_id = _cliente_com_veiculo(
             api_client, headers, documento="21249722519", placa="ATV1A23"
         )
-        ordem_id = _os_sem_saga(session_factory, cliente_id, veiculo_id)
+        ordem_id = str(_abrir(api_client, headers, cliente_id, veiculo_id)["id"])
 
         bloqueado = api_client.delete(f"/api/v1/clientes/{cliente_id}", headers=headers)
         assert bloqueado.status_code == 409
@@ -677,10 +754,21 @@ class TestRegrasEntreContextos:
         )
         assert erasure.status_code == 409
 
-        encerrada = api_client.post(
+        # Com o pedido de cancelamento a OS ainda esta ativa: so a saga a encerra.
+        pedido = api_client.post(
             f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
         )
-        assert encerrada.status_code == 200
+        assert pedido.status_code == 202
+        ainda = api_client.delete(f"/api/v1/clientes/{cliente_id}", headers=headers)
+        assert ainda.status_code == 409
+        resposta = evento("DiagnosticoDescartado", UUID(ordem_id))
+        with session_factory() as sess:
+            tratar_evento_da_saga(
+                resposta,
+                TransacaoDaMensagem(sess),
+                prazo_resposta=timedelta(seconds=120),
+            )
+            sess.commit()
         liberado = api_client.delete(f"/api/v1/clientes/{cliente_id}", headers=headers)
         assert liberado.status_code == 204
 
@@ -694,18 +782,24 @@ class TestRegrasEntreContextos:
         cliente_id, veiculo_id = _cliente_com_veiculo(
             api_client, headers, documento="21249722519", placa="LGP1A23"
         )
-        ordem_id = _os_sem_saga(
-            session_factory,
-            cliente_id,
-            veiculo_id,
-            descricao="Cliente Maria, tel 11 99999-0000, motor",
-        )
-        cancelada = api_client.post(
-            f"{_OS}/{ordem_id}/cancelamento",
+        ordem = api_client.post(
+            _OS,
             headers=headers,
-            json={"motivo": "Maria ligou do 11 99999-0000 desistindo"},
+            json={
+                "cliente_id": cliente_id,
+                "veiculo_id": veiculo_id,
+                "descricao_problema": "Cliente Maria, tel 11 99999-0000, motor",
+            },
         )
-        assert cancelada.status_code == 200
+        assert ordem.status_code == 201
+        ordem_id = ordem.json()["id"]
+        _cancelar_pela_api(
+            api_client,
+            session_factory,
+            headers,
+            ordem_id,
+            "Maria ligou do 11 99999-0000 desistindo",
+        )
 
         erasure = api_client.delete(
             f"/api/v1/clientes/{cliente_id}/dados-pessoais", headers=headers
@@ -715,7 +809,18 @@ class TestRegrasEntreContextos:
         ordem = api_client.get(f"{_OS}/{ordem_id}", headers=headers).json()
         assert ordem["descricao_problema"] == "ANONIMIZADO"
         assert ordem["motivo_cancelamento"] == "ANONIMIZADO"
-        assert ordem["versao"] == 3  # abertura, cancelamento e erasure
+        # Abertura, pedido, cancelamento pela saga e erasure.
+        assert ordem["versao"] == 4
+        # A saga guarda so codigos: o texto do atendente nao esta nela.
+        with session_factory() as sess:
+            texto_da_saga = sess.execute(
+                text(
+                    "SELECT passos::text || coalesce(comando_em_voo::text, '') "
+                    "FROM sagas"
+                )
+            ).scalar_one()
+        assert "Maria" not in texto_da_saga
+        assert "99999" not in texto_da_saga
         mudancas = api_client.get(
             f"{_OS}/{ordem_id}/historico", headers=headers
         ).json()["mudancas"]
@@ -735,11 +840,8 @@ class TestRegrasEntreContextos:
         cliente_id, veiculo_id = _cliente_com_veiculo(
             api_client, headers, documento="21249722519", placa="VEI1A23"
         )
-        ordem_id = _os_sem_saga(session_factory, cliente_id, veiculo_id)
-        cancelada = api_client.post(
-            f"{_OS}/{ordem_id}/cancelamento", headers=headers, json={"motivo": "x"}
-        )
-        assert cancelada.status_code == 200
+        ordem_id = str(_abrir(api_client, headers, cliente_id, veiculo_id)["id"])
+        _cancelar_pela_api(api_client, session_factory, headers, ordem_id, "x")
 
         resp = api_client.delete(
             f"/api/v1/clientes/{cliente_id}/veiculos/{veiculo_id}", headers=headers

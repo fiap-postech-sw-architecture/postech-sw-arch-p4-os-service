@@ -1,155 +1,68 @@
-"""Instancia da saga: abertura, a tabela da RFC-004 secao 4.1 no agregado e a
-classificacao dos eventos.
+"""Instancia da saga: abertura, as tabelas da RFC-004 secoes 4.1 e 4.4 no
+agregado e a corrida do pivot.
 
-Cada linha da tabela (etapa seguinte, comando, dados, prazo e passo concluido)
-e aplicada e recusada no proprio agregado, alem do handler. A matriz da
-classificacao (12 etapas x 10 perfis da OS x 23 tipos) e gerada do oraculo do
-``cenario_da_saga``, escrito a partir da RFC e nao importado do modulo testado.
+Cada linha da tabela (etapa seguinte, comando, dados, prazo e passo concluido),
+o inicio da compensacao por falha de negocio e pelo cancelamento, a resposta
+de cada compensacao e a corrida do pivot sao aplicados e recusados no proprio
+agregado. A classificacao esta em ``test_classificacao``, e as invariantes e o
+vocabulario do gatilho em ``test_transicoes``.
 """
 
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime, timedelta
-from typing import Any
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
 
 from src.compartilhado.aplicacao.mensageria import Comando, MensagemRecebida
+from src.ordem_servico.aplicacao.saga.classificacao import Classificacao
 from src.ordem_servico.aplicacao.saga.modelo import (
+    CompensacaoIniciadaEvent,
     Envio,
     EtapaDaSagaAlteradaEvent,
     EtapaSaga,
+    MotivoCompensacao,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
-    itens_do_diagnostico,
+    pecas_dos_itens,
 )
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     COMANDOS_COM_PRAZO,
-    Classificacao,
 )
 from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 from src.ordem_servico.dominio.status import StatusOrdem
 from tests.eventos import evento
-from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO, ordem_em
+from tests.fabricas import ATOR_ATENDENTE, ATOR_PROCESSO
 from tests.unitarios.ordem_servico.cenario_da_saga import (
-    ESPERADA,
-    PERFIS,
-    STATUS_DE_ENTRADA,
-    esperado,
-    ordem_no_perfil,
+    COMPENSACOES,
+)
+from tests.unitarios.ordem_servico.saga_de_teste import (
+    AGORA,
+    DEPOIS,
+    ITENS,
+    ORCAMENTO_ID,
+    PRAZO,
+    comando_em_voo_de,
+    compensacao_enviada,
+    dados_do_comando,
+    envio_do_comando,
+    feito_no_perfil,
+    foto_da_saga,
+    marcos_da_ordem,
+    saga_compensando,
+    saga_em,
 )
 
-AGORA = datetime(2026, 10, 7, 12, tzinfo=UTC)
-DEPOIS = AGORA + timedelta(minutes=10)
-PRAZO = DEPOIS + timedelta(minutes=2)
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 C = Classificacao
 E = EtapaSaga
 S = StatusOrdem
-# Itens do DiagnosticoConcluido de exemplo do platform (um servico e uma peca).
-_ITENS = itens_do_diagnostico(evento("DiagnosticoConcluido", uuid4()).dados)
-_PECAS = [
-    {"sku": i["codigo"], "quantidade": i["quantidade"]}
-    for i in _ITENS
-    if i["tipo"] == "peca"
-]
-# Orcamento que a OS guarda nos testes do agregado (o do OrcamentoGerado).
-_ORCAMENTO_ID = uuid4()
-
-
-def saga_em(etapa: EtapaSaga | str, **campos: Any) -> Saga:
-    """Saga como a persistencia a reidrata, ja na ``etapa``.
-
-    Nas etapas da compensacao, com motivo e plano (o invariante delas).
-    """
-    if EtapaSaga(etapa) is E.COMPENSANDO:
-        campos = {
-            "_motivo": "cancelamento",
-            "_plano_compensacao": ["DescartarDiagnostico"],
-            **campos,
-        }
-    return Saga(
-        **{
-            "id": uuid4(),
-            "_etapa": EtapaSaga(etapa),
-            "_iniciada_em": AGORA,
-            "_etapa_desde": AGORA,
-            "_atualizada_em": AGORA,
-            **campos,
-        }
-    )
-
-
-def _marcos(
-    *,
-    diagnostico: bool = True,
-    checkout: bool = False,
-    orcamento_id: UUID | None = _ORCAMENTO_ID,
-) -> MarcosDaOrdem:
-    return MarcosDaOrdem(
-        diagnostico_iniciado=diagnostico,
-        checkout_aberto=checkout,
-        encerrada=False,
-        orcamento_id=orcamento_id,
-    )
-
-
-def _dados(comando: Comando, saga: Saga) -> dict[str, Any]:
-    """Os ``dados`` certos do comando para a ``saga`` (RFC-004 secao 4.1)."""
-    ordem_id = str(saga.ordem_id)
-    return {
-        Comando.GERAR_ORCAMENTO: {"ordem_id": ordem_id, "itens": _ITENS},
-        Comando.RESERVAR_PECAS: {"ordem_id": ordem_id, "pecas": _PECAS},
-        Comando.SOLICITAR_PAGAMENTO: {
-            "ordem_id": ordem_id,
-            "orcamento_id": str(_ORCAMENTO_ID),
-        },
-        Comando.AGENDAR_EXECUCAO: {"ordem_id": ordem_id, "prioridade": "normal"},
-    }[comando]
-
-
-def _envio(comando: Comando, saga: Saga, **campos: Any) -> Envio:
-    return Envio(
-        **{
-            "tipo": comando,
-            "id": uuid4(),
-            "dados": _dados(comando, saga),
-            "prazo_resposta_em": PRAZO,
-            **campos,
-        }
-    )
-
-
-def _em_voo(ordem_id: UUID) -> dict[str, Any]:
-    """Comando em voo de antes do evento, ja reenviado duas vezes."""
-    return {
-        "_comando_em_voo": {
-            "tipo": "GerarOrcamento",
-            "dados": {"ordem_id": str(ordem_id)},
-            "mensagem_ids": [str(uuid4())],
-            "enviado_em": AGORA.isoformat(),
-        },
-        "_prazo_resposta_em": AGORA + timedelta(minutes=2),
-        "_reenvios": 2,
-    }
-
-
-def _foto(saga: Saga) -> tuple[object, ...]:
-    """Estado observavel completo, para provar que nada mudou."""
-    return (
-        saga.etapa,
-        saga.etapa_desde,
-        saga.atualizada_em,
-        saga.passos,
-        saga.passos_concluidos,
-        saga.comando_em_voo,
-        saga.prazo_resposta_em,
-        saga.reenvios,
-        saga.itens,
-        tuple(saga.coletar_eventos()),
-    )
 
 
 class TestIniciar:
@@ -225,22 +138,20 @@ class TestIniciar:
         saga = saga_em("aguardando_diagnostico")
         saga.avancar(
             evento("DiagnosticoConcluido", saga.ordem_id),
-            _marcos(),
+            marcos_da_ordem(),
             agora=DEPOIS,
             ator=ATOR_PROCESSO,
-            envio=_envio(Comando.GERAR_ORCAMENTO, saga),
+            envio=envio_do_comando(Comando.GERAR_ORCAMENTO, saga),
         )
 
         saga.passos[0]["ator"] = "outro"
         saga.itens[0]["quantidade"] = 999
-        saga.pecas.clear()
         em_voo = saga.comando_em_voo
         assert em_voo is not None
         em_voo["mensagem_ids"].append("outro")
 
         assert saga.passos[0]["ator"] == ATOR_PROCESSO
-        assert saga.itens[0]["quantidade"] == _ITENS[0]["quantidade"]
-        assert saga.pecas == _PECAS
+        assert saga.itens[0]["quantidade"] == ITENS[0]["quantidade"]
         assert saga.comando_em_voo is not None
         assert len(saga.comando_em_voo["mensagem_ids"]) == 1
 
@@ -256,42 +167,6 @@ class TestIniciar:
             _prazo_resposta_em=AGORA,
         )
         assert "nao-aparece" not in repr(saga)
-
-
-class TestInvariantes:
-    @pytest.mark.parametrize(
-        "campos",
-        [
-            pytest.param({"_prazo_resposta_em": AGORA}, id="prazo-sem-comando"),
-            pytest.param(
-                {
-                    "_comando_em_voo": {
-                        "tipo": "GerarOrcamento",
-                        "dados": {},
-                        "mensagem_ids": [],
-                        "enviado_em": "x",
-                    }
-                },
-                id="comando-sem-prazo",
-            ),
-            pytest.param({"_reenvios": -7}, id="reenvios-negativo"),
-            pytest.param({"_reenvios": 3}, id="reenvios-sem-comando"),
-        ],
-    )
-    def test_estado_contraditorio_nao_monta(self, campos: dict[str, Any]) -> None:
-        with pytest.raises(ValueError, match=r"prazo|reenvios"):
-            saga_em("aguardando_orcamento", **campos)
-
-    @pytest.mark.parametrize(
-        "campos",
-        [
-            pytest.param({"_motivo": None}, id="sem-motivo"),
-            pytest.param({"_plano_compensacao": []}, id="sem-plano"),
-        ],
-    )
-    def test_compensando_exige_motivo_e_plano(self, campos: dict[str, Any]) -> None:
-        with pytest.raises(ValueError, match="compensando"):
-            saga_em("compensando", **campos)
 
 
 # (evento, etapa antes, comando enviado, etapa nova, passo concluido)
@@ -376,7 +251,7 @@ LINHAS = [
 
 def _marcos_da_linha(tipo: str) -> MarcosDaOrdem:
     """Os marcos com que o evento se classifica para processar na etapa dele."""
-    return _marcos(
+    return marcos_da_ordem(
         diagnostico=tipo != "DiagnosticoIniciado",
         checkout=tipo not in {"DiagnosticoIniciado", "PagamentoSolicitado"}
         and tipo
@@ -399,10 +274,12 @@ class TestAvancar:
         nova: EtapaSaga,
         concluido: str | None,
     ) -> None:
-        saga = saga_em(antes, _itens=list(_ITENS), _passos_concluidos=["T1"])
-        saga = saga_em(antes, id=saga.ordem_id, _itens=list(_ITENS), **_em_voo(saga))
+        saga = saga_em(antes, _itens=list(ITENS), _passos_concluidos=["T1"])
+        saga = saga_em(
+            antes, id=saga.ordem_id, _itens=list(ITENS), **comando_em_voo_de(saga)
+        )
         recebido = evento(tipo, saga.ordem_id)
-        envio = _envio(comando, saga) if comando else None
+        envio = envio_do_comando(comando, saga) if comando else None
 
         saga.avancar(
             recebido,
@@ -466,10 +343,10 @@ class TestAvancar:
 
         saga.avancar(
             evento("DiagnosticoConcluido", saga.ordem_id, itens=itens),
-            _marcos(),
+            marcos_da_ordem(),
             agora=DEPOIS,
             ator=ATOR_PROCESSO,
-            envio=_envio(
+            envio=envio_do_comando(
                 Comando.GERAR_ORCAMENTO,
                 saga,
                 dados={"ordem_id": str(saga.ordem_id), "itens": guardados},
@@ -477,14 +354,14 @@ class TestAvancar:
         )
 
         assert saga.itens == tuple(guardados)
-        assert saga.pecas == [{"sku": "PEC-1", "quantidade": 2}]
+        assert pecas_dos_itens(saga.itens) == [{"sku": "PEC-1", "quantidade": 2}]
 
     def test_execucao_agendada_guarda_a_posicao_so_no_passo(self) -> None:
         saga = saga_em("aguardando_agendamento")
 
         saga.avancar(
             evento("ExecucaoAgendada", saga.ordem_id, posicao_na_fila=7),
-            _marcos(checkout=True),
+            marcos_da_ordem(checkout=True),
             agora=DEPOIS,
             ator=ATOR_PROCESSO,
         )
@@ -497,16 +374,16 @@ class TestAvancar:
         saga = saga_em("aguardando_diagnostico")
         saga.avancar(
             evento("DiagnosticoConcluido", saga.ordem_id),
-            _marcos(),
+            marcos_da_ordem(),
             agora=AGORA + timedelta(minutes=10),
             ator=ATOR_PROCESSO,
-            envio=_envio(Comando.GERAR_ORCAMENTO, saga),
+            envio=envio_do_comando(Comando.GERAR_ORCAMENTO, saga),
         )
         saga.limpar_eventos()
 
         saga.avancar(
             evento("OrcamentoGerado", saga.ordem_id),
-            _marcos(),
+            marcos_da_ordem(),
             agora=AGORA + timedelta(minutes=25),
             ator=ATOR_PROCESSO,
         )
@@ -518,11 +395,43 @@ class TestAvancar:
             timedelta(minutes=15),
         )
 
+    def test_permanencia_na_compensacao_conta_desde_a_entrada_na_etapa(
+        self,
+    ) -> None:
+        # A compensacao e a primeira etapa com varios registros (um por
+        # resposta): a duracao que o histograma recebe e a da etapa inteira.
+        saga, enviado = saga_compensando(COMPENSACOES[3:])
+        saga.avancar(
+            evento("OrcamentoCancelado", saga.ordem_id, causation_id=enviado),
+            marcos_da_ordem(),
+            agora=AGORA + timedelta(minutes=5),
+            ator=ATOR_PROCESSO,
+            envio=compensacao_enviada("DescartarDiagnostico", saga, "cancelamento"),
+        )
+        saga.limpar_eventos()
+        em_voo = saga.comando_em_voo
+        assert em_voo is not None
+        ultimo = UUID(em_voo["mensagem_ids"][-1])
+
+        saga.avancar(
+            evento("DiagnosticoDescartado", saga.ordem_id, causation_id=ultimo),
+            marcos_da_ordem(),
+            agora=AGORA + timedelta(minutes=9),
+            ator=ATOR_PROCESSO,
+        )
+
+        (mudanca,) = saga.coletar_eventos()
+        assert isinstance(mudanca, EtapaDaSagaAlteradaEvent)
+        assert (mudanca.etapa_anterior, mudanca.permanencia) == (
+            E.COMPENSANDO,
+            timedelta(minutes=9),
+        )
+
     def test_dado_malformado_levanta_antes_de_mudar(self) -> None:
         # O schema do contrato barra o evento sem a posicao; quem chamar sem
         # ele encontra a saga intacta.
         saga = saga_em("aguardando_agendamento")
-        antes = _foto(saga)
+        antes = foto_da_saga(saga)
         sem_posicao = MensagemRecebida(
             id=uuid4(),
             tipo="ExecucaoAgendada",
@@ -536,10 +445,13 @@ class TestAvancar:
 
         with pytest.raises(KeyError):
             saga.avancar(
-                sem_posicao, _marcos(checkout=True), agora=DEPOIS, ator=ATOR_PROCESSO
+                sem_posicao,
+                marcos_da_ordem(checkout=True),
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
             )
 
-        assert _foto(saga) == antes
+        assert foto_da_saga(saga) == antes
 
 
 def _recusa(**mudanca: Any) -> dict[str, Any]:
@@ -552,7 +464,9 @@ RECUSAS = [
     pytest.param(_recusa(correlation_id=uuid4()), id="evento-de-outra-ordem"),
     pytest.param(_recusa(tipo="ExecucaoIniciada"), id="adiantado-de-etapa"),
     pytest.param(_recusa(tipo="OrcamentoRecusado"), id="falha-de-negocio"),
-    pytest.param(_recusa(marcos=_marcos(diagnostico=False)), id="adiantado-na-etapa"),
+    pytest.param(
+        _recusa(marcos=marcos_da_ordem(diagnostico=False)), id="adiantado-na-etapa"
+    ),
     pytest.param(
         _recusa(
             marcos=MarcosDaOrdem(
@@ -583,11 +497,14 @@ class TestRecusasDoAvancar:
     @pytest.mark.parametrize("mudanca", RECUSAS)
     def test_recusa_sem_mudar_nada(self, mudanca: dict[str, Any]) -> None:
         saga = saga_em("aguardando_diagnostico")
-        antes = _foto(saga)
+        antes = foto_da_saga(saga)
         tipo = mudanca.get("tipo", "DiagnosticoConcluido")
         recebido = evento(tipo, mudanca.get("correlation_id", saga.ordem_id))
         comando = mudanca.get("comando", Comando.GERAR_ORCAMENTO)
-        dados = {**_dados(Comando.GERAR_ORCAMENTO, saga), **mudanca.get("dados", {})}
+        dados = {
+            **dados_do_comando(Comando.GERAR_ORCAMENTO, saga),
+            **mudanca.get("dados", {}),
+        }
         envio = (
             mudanca["envio"]
             if "envio" in mudanca
@@ -602,13 +519,13 @@ class TestRecusasDoAvancar:
         with pytest.raises(TransicaoDaSagaInvalidaError):
             saga.avancar(
                 recebido,
-                mudanca.get("marcos", _marcos()),
+                mudanca.get("marcos", marcos_da_ordem()),
                 agora=mudanca.get("agora", DEPOIS),
                 ator=ATOR_PROCESSO,
                 envio=envio,
             )
 
-        assert _foto(saga) == antes
+        assert foto_da_saga(saga) == antes
 
     @pytest.mark.parametrize(
         ("etapa", "tipo", "marcos"),
@@ -616,25 +533,25 @@ class TestRecusasDoAvancar:
             pytest.param(
                 "aguardando_diagnostico",
                 "DiagnosticoIniciado",
-                _marcos(),
+                marcos_da_ordem(),
                 id="diagnostico-repetido",
             ),
             pytest.param(
                 "aguardando_pagamento",
                 "PagamentoSolicitado",
-                _marcos(checkout=True),
+                marcos_da_ordem(checkout=True),
                 id="pagamento-repetido",
             ),
             pytest.param(
                 "aguardando_pagamento",
                 "PagamentoConfirmado",
-                _marcos(checkout=False),
+                marcos_da_ordem(checkout=False),
                 id="confirmado-sem-checkout",
             ),
             pytest.param(
                 "compensando",
                 "ReservaLiberada",
-                _marcos(),
+                marcos_da_ordem(),
                 id="resposta-de-compensacao",
             ),
         ],
@@ -643,45 +560,45 @@ class TestRecusasDoAvancar:
         self, etapa: str, tipo: str, marcos: MarcosDaOrdem
     ) -> None:
         saga = saga_em(etapa)
-        antes = _foto(saga)
+        antes = foto_da_saga(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match=tipo):
             saga.avancar(
                 evento(tipo, saga.ordem_id), marcos, agora=DEPOIS, ator=ATOR_PROCESSO
             )
 
-        assert _foto(saga) == antes
+        assert foto_da_saga(saga) == antes
 
     def test_envio_onde_a_linha_nao_envia_comando_e_recusado(self) -> None:
         saga = saga_em("aguardando_diagnostico")
-        antes = _foto(saga)
+        antes = foto_da_saga(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="nenhum comando"):
             saga.avancar(
                 evento("DiagnosticoIniciado", saga.ordem_id),
-                _marcos(diagnostico=False),
+                marcos_da_ordem(diagnostico=False),
                 agora=DEPOIS,
                 ator=ATOR_PROCESSO,
-                envio=_envio(Comando.GERAR_ORCAMENTO, saga),
+                envio=envio_do_comando(Comando.GERAR_ORCAMENTO, saga),
             )
 
-        assert _foto(saga) == antes
+        assert foto_da_saga(saga) == antes
 
     def test_pecas_que_nao_sao_as_dos_itens_sao_recusadas(self) -> None:
-        saga = saga_em("aguardando_decisao", _itens=list(_ITENS))
+        saga = saga_em("aguardando_decisao", _itens=list(ITENS))
         servicos = [
             {"sku": i["codigo"], "quantidade": 1}
-            for i in _ITENS
+            for i in ITENS
             if i["tipo"] == "servico"
         ]
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="dados"):
             saga.avancar(
                 evento("OrcamentoAprovado", saga.ordem_id),
-                _marcos(),
+                marcos_da_ordem(),
                 agora=DEPOIS,
                 ator=ATOR_PROCESSO,
-                envio=_envio(
+                envio=envio_do_comando(
                     Comando.RESERVAR_PECAS,
                     saga,
                     dados={"ordem_id": str(saga.ordem_id), "pecas": servicos},
@@ -696,15 +613,15 @@ class TestRecusasDoAvancar:
                 "PecasReservadas",
                 Comando.SOLICITAR_PAGAMENTO,
                 {"orcamento_id": str(uuid4())},
-                _marcos(),
+                marcos_da_ordem(),
                 id="orcamento-que-nao-e-o-da-os",
             ),
             pytest.param(
                 "aguardando_reserva",
                 "PecasReservadas",
                 Comando.SOLICITAR_PAGAMENTO,
-                {"orcamento_id": str(_ORCAMENTO_ID)},
-                _marcos(orcamento_id=None),
+                {"orcamento_id": str(ORCAMENTO_ID)},
+                marcos_da_ordem(orcamento_id=None),
                 id="os-sem-orcamento",
             ),
             pytest.param(
@@ -712,7 +629,7 @@ class TestRecusasDoAvancar:
                 "PecasReservadas",
                 Comando.SOLICITAR_PAGAMENTO,
                 {"orcamento_id": None},
-                _marcos(orcamento_id=None),
+                marcos_da_ordem(orcamento_id=None),
                 id="pagamento-sem-orcamento-e-os-sem-orcamento",
             ),
             pytest.param(
@@ -720,7 +637,7 @@ class TestRecusasDoAvancar:
                 "PagamentoConfirmado",
                 Comando.AGENDAR_EXECUCAO,
                 {"prioridade": "alta"},
-                _marcos(checkout=True),
+                marcos_da_ordem(checkout=True),
                 id="prioridade-que-nao-e-normal",
             ),
             pytest.param(
@@ -728,7 +645,7 @@ class TestRecusasDoAvancar:
                 "PagamentoConfirmado",
                 Comando.AGENDAR_EXECUCAO,
                 {"prioridade": None},
-                _marcos(checkout=True),
+                marcos_da_ordem(checkout=True),
                 id="agendamento-sem-prioridade",
             ),
         ],
@@ -742,10 +659,10 @@ class TestRecusasDoAvancar:
         marcos: MarcosDaOrdem,
     ) -> None:
         saga = saga_em(etapa)
-        antes = _foto(saga)
+        antes = foto_da_saga(saga)
         # ``None`` tira a chave dos dados do comando.
-        trocados = {**_dados(comando, saga), **dados}
-        envio = _envio(
+        trocados = {**dados_do_comando(comando, saga), **dados}
+        envio = envio_do_comando(
             comando, saga, dados={k: v for k, v in trocados.items() if v is not None}
         )
 
@@ -758,7 +675,7 @@ class TestRecusasDoAvancar:
                 envio=envio,
             )
 
-        assert _foto(saga) == antes
+        assert foto_da_saga(saga) == antes
 
 
 class TestContextoDeTrace:
@@ -827,112 +744,630 @@ def test_comandos_com_prazo_sao_os_nove_com_resposta_automatica() -> None:
     }
 
 
-# Marcos de cada perfil da OS, calculados uma vez para a matriz.
-_MARCOS = {perfil: MarcosDaOrdem.da_ordem(ordem_no_perfil(perfil)) for perfil in PERFIS}
+# A resposta de cada compensacao, como o participante a publica.
+RESPOSTA = {
+    "CancelarExecucao": "ExecucaoCancelada",
+    "EstornarPagamento": "PagamentoCancelado",
+    "LiberarReserva": "ReservaLiberada",
+    "CancelarOrcamento": "OrcamentoCancelado",
+    "DescartarDiagnostico": "DiagnosticoDescartado",
+}
 
 
-class TestClassificar:
+# (falha, etapa, perfil do que a saga ja fez, motivo, plano): as linhas de
+# falha de negocio da tabela da RFC-004 secao 4.4.
+FALHAS = [
+    pytest.param(
+        "GeracaoDeOrcamentoFalhou",
+        "aguardando_orcamento",
+        "aguardando_orcamento",
+        "geracao_falhou",
+        COMPENSACOES[4:],
+        id="geracao",
+    ),
+    pytest.param(
+        "OrcamentoRecusado",
+        "aguardando_decisao",
+        "aguardando_decisao",
+        "orcamento_recusado",
+        COMPENSACOES[4:],
+        id="recusa",
+    ),
+    pytest.param(
+        "OrcamentoExpirado",
+        "aguardando_decisao",
+        "aguardando_decisao",
+        "orcamento_expirado",
+        COMPENSACOES[4:],
+        id="expiracao",
+    ),
+    pytest.param(
+        "ReservaDePecasFalhou",
+        "aguardando_reserva",
+        "aguardando_reserva",
+        "reserva_falhou",
+        COMPENSACOES[3:],
+        id="reserva",
+    ),
+    pytest.param(
+        "PagamentoRecusado",
+        "aguardando_pagamento",
+        "aguardando_pagamento_com_checkout",
+        "pagamento_recusado",
+        COMPENSACOES[2:],
+        id="pagamento-recusado",
+    ),
+    pytest.param(
+        "PagamentoExpirado",
+        "aguardando_pagamento",
+        "aguardando_pagamento_com_checkout",
+        "pagamento_expirado",
+        COMPENSACOES[2:],
+        id="pagamento-expirado",
+    ),
+]
+
+
+class TestFalhaDeNegocio:
+    @pytest.mark.parametrize(("falha", "etapa", "perfil", "motivo", "plano"), FALHAS)
+    def test_inicia_a_compensacao_pela_primeira_do_plano(
+        self,
+        falha: str,
+        etapa: str,
+        perfil: str,
+        motivo: str,
+        plano: tuple[str, ...],
+    ) -> None:
+        saga = saga_em(etapa, **feito_no_perfil(perfil))
+        recebido = evento(falha, saga.ordem_id)
+        envio = compensacao_enviada(plano[0], saga, motivo)
+
+        saga.avancar(
+            recebido,
+            marcos_da_ordem(checkout=perfil.endswith("checkout")),
+            agora=DEPOIS,
+            ator=ATOR_PROCESSO,
+            envio=envio,
+        )
+
+        assert (saga.etapa, saga.motivo, saga.falha) == (E.COMPENSANDO, motivo, None)
+        assert saga.plano_compensacao == plano
+        assert saga.comando_em_voo == envio.em_voo(DEPOIS)
+        assert (saga.prazo_resposta_em, saga.reenvios) == (PRAZO, 0)
+        (passo,) = saga.passos
+        assert (passo["gatilho"], passo["mensagem_id"], passo["motivo"]) == (
+            falha,
+            str(recebido.id),
+            motivo,
+        )
+        assert (passo["de"], passo["para"], passo["comando"]) == (
+            etapa,
+            "compensando",
+            plano[0],
+        )
+        assert saga.coletar_eventos() == [
+            EtapaDaSagaAlteradaEvent(
+                agregado_id=saga.ordem_id,
+                etapa_anterior=EtapaSaga(etapa),
+                etapa_nova=E.COMPENSANDO,
+                permanencia=DEPOIS - AGORA,
+                ocorrido_em=DEPOIS,
+            ),
+            CompensacaoIniciadaEvent(
+                agregado_id=saga.ordem_id,
+                motivo=MotivoCompensacao(motivo),
+                ocorrido_em=DEPOIS,
+            ),
+        ]
+
     @pytest.mark.parametrize(
-        ("etapa", "perfil", "tipo"),
+        "mudanca",
         [
-            pytest.param(etapa, perfil, tipo, id=f"{etapa}-{perfil}-{tipo}")
-            for etapa in STATUS_DE_ENTRADA
-            for perfil in PERFIS
-            for tipo in ESPERADA
+            pytest.param({"envio": None}, id="sem-envio"),
+            pytest.param({"comando": "LiberarReserva"}, id="outra-compensacao"),
+            pytest.param({"motivo": "cancelamento"}, id="outro-motivo"),
+            pytest.param({"prazo_resposta_em": None}, id="sem-prazo"),
         ],
     )
-    def test_matriz_etapa_por_perfil_da_os_por_tipo(
-        self, etapa: str, perfil: str, tipo: str
+    def test_recusa_o_envio_que_nao_e_a_primeira_do_plano(
+        self, mudanca: dict[str, Any]
+    ) -> None:
+        saga = saga_em("aguardando_reserva", **feito_no_perfil("aguardando_reserva"))
+        antes = foto_da_saga(saga)
+        envio = mudanca.get(
+            "envio",
+            compensacao_enviada(
+                mudanca.get("comando", "CancelarOrcamento"),
+                saga,
+                mudanca.get("motivo", "reserva_falhou"),
+                prazo_resposta_em=mudanca.get("prazo_resposta_em", PRAZO),
+            ),
+        )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError):
+            saga.avancar(
+                evento("ReservaDePecasFalhou", saga.ordem_id),
+                marcos_da_ordem(),
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
+                envio=envio,
+            )
+
+        assert foto_da_saga(saga) == antes
+
+
+class TestRespostaDaCompensacao:
+    @pytest.mark.parametrize(
+        "plano",
+        [pytest.param(COMPENSACOES[i:], id=COMPENSACOES[i]) for i in range(4)],
+    )
+    def test_resposta_da_pendente_envia_a_seguinte(
+        self, plano: tuple[str, ...]
+    ) -> None:
+        saga, enviado = saga_compensando(plano)
+        recebido = evento(RESPOSTA[plano[0]], saga.ordem_id, causation_id=enviado)
+        envio = compensacao_enviada(plano[1], saga, "cancelamento")
+
+        saga.avancar(
+            recebido, marcos_da_ordem(), agora=DEPOIS, ator=ATOR_PROCESSO, envio=envio
+        )
+
+        assert (saga.etapa, saga.motivo) == (E.COMPENSANDO, "cancelamento")
+        assert saga.plano_compensacao == plano[1:]
+        # Comando novo: os envios e o contador recomecam (RFC-004 secao 4.6).
+        assert saga.comando_em_voo == envio.em_voo(DEPOIS)
+        assert (saga.prazo_resposta_em, saga.reenvios) == (PRAZO, 0)
+        (passo,) = saga.passos
+        assert (passo["gatilho"], passo["comando"], passo["motivo"]) == (
+            RESPOSTA[plano[0]],
+            plano[1],
+            "cancelamento",
+        )
+        assert saga.coletar_eventos() == []
+
+    def test_resposta_da_ultima_compensa_a_saga(self) -> None:
+        saga, enviado = saga_compensando(("DescartarDiagnostico",))
+        recebido = evento("DiagnosticoDescartado", saga.ordem_id, causation_id=enviado)
+
+        saga.avancar(recebido, marcos_da_ordem(), agora=DEPOIS, ator=ATOR_PROCESSO)
+
+        assert (saga.etapa, saga.motivo, saga.plano_compensacao) == (
+            E.COMPENSADA,
+            "cancelamento",
+            (),
+        )
+        assert (saga.comando_em_voo, saga.prazo_resposta_em, saga.reenvios) == (
+            None,
+            None,
+            0,
+        )
+        assert saga.encerrada
+        assert saga.coletar_eventos() == [
+            EtapaDaSagaAlteradaEvent(
+                agregado_id=saga.ordem_id,
+                etapa_anterior=E.COMPENSANDO,
+                etapa_nova=E.COMPENSADA,
+                permanencia=DEPOIS - AGORA,
+                ocorrido_em=DEPOIS,
+            )
+        ]
+
+    @pytest.mark.parametrize("resposta", ["PagamentoCancelado", "PagamentoEstornado"])
+    def test_estorno_responde_com_o_cancelamento_ou_o_estorno_casados(
+        self, resposta: str
+    ) -> None:
+        saga, enviado = saga_compensando(COMPENSACOES[1:])
+        recebido = evento(resposta, saga.ordem_id, causation_id=enviado)
+        envio = compensacao_enviada("LiberarReserva", saga, "cancelamento")
+
+        saga.avancar(
+            recebido, marcos_da_ordem(), agora=DEPOIS, ator=ATOR_PROCESSO, envio=envio
+        )
+
+        assert saga.plano_compensacao == COMPENSACOES[2:]
+
+    def test_estorno_recusado_para_a_sequencia(self) -> None:
+        # O compensado fica compensado, o resto como estava; a pendente segue
+        # no plano para a retomada (RFC-004 secao 4.7).
+        saga, enviado = saga_compensando(COMPENSACOES[1:])
+        antes = {"_comando_em_voo": saga.comando_em_voo}
+        recebido = evento(
+            "EstornoDePagamentoFalhou", saga.ordem_id, causation_id=enviado
+        )
+
+        saga.avancar(recebido, marcos_da_ordem(), agora=DEPOIS, ator=ATOR_PROCESSO)
+
+        assert (saga.etapa, saga.falha, saga.motivo) == (
+            E.FALHA_NA_COMPENSACAO,
+            "estorno_recusado",
+            "cancelamento",
+        )
+        assert saga.plano_compensacao == COMPENSACOES[1:]
+        # O comando em voo fica, com os ids de todos os envios, e sem prazo: uma
+        # resposta tardia ainda casa depois da retomada (RFC-004 secoes 4.4/4.7).
+        assert saga.comando_em_voo == antes["_comando_em_voo"]
+        assert (saga.prazo_resposta_em, saga.reenvios) == (None, 1)
+        assert not saga.encerrada
+        (passo,) = saga.passos
+        assert (passo["gatilho"], passo["para"], passo["comando"]) == (
+            "EstornoDePagamentoFalhou",
+            "falha_na_compensacao",
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        "resposta",
+        ["PagamentoCancelado", "PagamentoEstornado", "EstornoDePagamentoFalhou"],
+    )
+    def test_resposta_do_estorno_sem_o_causation_id_de_um_envio_e_recusada(
+        self, resposta: str
+    ) -> None:
+        saga, _ = saga_compensando(COMPENSACOES[1:])
+        antes = foto_da_saga(saga)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError):
+            saga.avancar(
+                evento(resposta, saga.ordem_id, causation_id=uuid4()),
+                marcos_da_ordem(),
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
+            )
+
+        assert foto_da_saga(saga) == antes
+
+    @pytest.mark.parametrize("posicao", [0, 1, 2])
+    @pytest.mark.parametrize(
+        "resposta",
+        ["PagamentoCancelado", "PagamentoEstornado", "EstornoDePagamentoFalhou"],
+    )
+    def test_resposta_ao_envio_original_ou_a_um_reenvio_casa_pelo_causation_id(
+        self, resposta: str, posicao: int
+    ) -> None:
+        # O comando foi reenviado duas vezes: a resposta de qualquer um dos tres
+        # envios (o original inclusive) responde a pendente (RFC-004 secao 4.4).
+        ids = [uuid4(), uuid4(), uuid4()]
+        saga, _ = saga_compensando(
+            COMPENSACOES[1:],
+            _comando_em_voo={
+                "tipo": "EstornarPagamento",
+                "dados": {},
+                "mensagem_ids": [str(i) for i in ids],
+                "enviado_em": AGORA.isoformat(),
+            },
+        )
+        falhou = resposta == "EstornoDePagamentoFalhou"
+        envio = (
+            None
+            if falhou
+            else compensacao_enviada("LiberarReserva", saga, "cancelamento")
+        )
+
+        saga.avancar(
+            evento(resposta, saga.ordem_id, causation_id=ids[posicao]),
+            marcos_da_ordem(),
+            agora=DEPOIS,
+            ator=ATOR_PROCESSO,
+            envio=envio,
+        )
+
+        assert saga.etapa is (E.FALHA_NA_COMPENSACAO if falhou else E.COMPENSANDO)
+
+    def test_resposta_que_envia_outra_compensacao_e_recusada(self) -> None:
+        saga, enviado = saga_compensando(COMPENSACOES[2:])
+        antes = foto_da_saga(saga)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError):
+            saga.avancar(
+                evento("ReservaLiberada", saga.ordem_id, causation_id=enviado),
+                marcos_da_ordem(),
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
+                envio=compensacao_enviada("DescartarDiagnostico", saga, "cancelamento"),
+            )
+
+        assert foto_da_saga(saga) == antes
+
+
+class TestCorridaDoPivot:
+    @pytest.mark.parametrize("etapa", ["compensando", "falha_na_compensacao"])
+    def test_inicio_com_o_cancelamento_da_execucao_pendente_volta_ao_fluxo(
+        self, etapa: str
+    ) -> None:
+        # Nada foi desfeito: a saga volta a em_execucao, sem motivo nem plano,
+        # e o registro diz que o cancelamento foi recusado (RFC-004 4.5).
+        saga = saga_em(
+            etapa, _plano_compensacao=list(COMPENSACOES), _passos_concluidos=["T7"]
+        )
+        iniciada = evento("ExecucaoIniciada", saga.ordem_id)
+
+        saga.avancar(
+            iniciada, marcos_da_ordem(checkout=True), agora=DEPOIS, ator=ATOR_PROCESSO
+        )
+
+        assert (saga.etapa, saga.motivo, saga.falha) == (E.EM_EXECUCAO, None, None)
+        # O prazo e o comando em voo somem com a volta ao fluxo.
+        assert (saga.plano_compensacao, saga.comando_em_voo) == ((), None)
+        assert (saga.prazo_resposta_em, saga.reenvios) == (None, 0)
+        (passo,) = saga.passos
+        assert (
+            passo["gatilho"],
+            passo["mensagem_id"],
+            passo["de"],
+            passo["motivo"],
+        ) == ("cancelamento_recusado", str(iniciada.id), etapa, None)
+        assert [type(f) for f in saga.coletar_eventos()] == [EtapaDaSagaAlteradaEvent]
+
+    @pytest.mark.parametrize("pendente", COMPENSACOES[1:])
+    def test_inicio_com_outra_compensacao_pendente_e_recusado(
+        self, pendente: str
+    ) -> None:
+        saga = saga_em(
+            "compensando",
+            _plano_compensacao=list(COMPENSACOES[COMPENSACOES.index(pendente) :]),
+        )
+        antes = foto_da_saga(saga)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError):
+            saga.avancar(
+                evento("ExecucaoIniciada", saga.ordem_id),
+                marcos_da_ordem(checkout=True),
+                agora=DEPOIS,
+                ator=ATOR_PROCESSO,
+            )
+
+        assert foto_da_saga(saga) == antes
+
+
+# (perfil do que a saga ja fez, etapa, plano): as linhas de cancelamento da
+# tabela da RFC-004 secao 4.4.
+CANCELAMENTOS = [
+    pytest.param(perfil, perfil.removesuffix("_com_checkout"), plano, id=perfil)
+    for perfil, plano in [
+        ("aguardando_diagnostico", COMPENSACOES[4:]),
+        ("aguardando_orcamento", COMPENSACOES[3:]),
+        ("aguardando_decisao", COMPENSACOES[3:]),
+        ("aguardando_reserva", COMPENSACOES[2:]),
+        ("aguardando_pagamento", COMPENSACOES[1:]),
+        ("aguardando_pagamento_com_checkout", COMPENSACOES[1:]),
+        ("aguardando_agendamento", COMPENSACOES),
+        ("aguardando_inicio", COMPENSACOES),
+    ]
+]
+
+
+class TestCancelar:
+    @pytest.mark.parametrize(("perfil", "etapa", "plano"), CANCELAMENTOS)
+    def test_antes_do_pivot_compensa_os_passos_e_o_em_voo(
+        self, perfil: str, etapa: str, plano: tuple[str, ...]
+    ) -> None:
+        saga = saga_em(etapa, **feito_no_perfil(perfil))
+        marcos = marcos_da_ordem(checkout=perfil.endswith("com_checkout"))
+        envio = compensacao_enviada(plano[0], saga, "cancelamento", marcos)
+
+        saga.solicitar_cancelamento(
+            marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=envio
+        )
+
+        assert (saga.etapa, saga.motivo) == (E.COMPENSANDO, "cancelamento")
+        assert saga.plano_compensacao == plano
+        assert saga.comando_em_voo == envio.em_voo(DEPOIS)
+        (passo,) = saga.passos
+        assert passo == {
+            "seq": 1,
+            "em": DEPOIS.isoformat(),
+            "de": etapa,
+            "para": "compensando",
+            "gatilho": "cancelamento_solicitado",
+            "mensagem_id": None,
+            "comando": plano[0],
+            "comando_id": str(envio.id),
+            "motivo": "cancelamento",
+            "ator": ATOR_ATENDENTE,
+        }
+        assert saga.coletar_eventos()[-1] == CompensacaoIniciadaEvent(
+            agregado_id=saga.ordem_id,
+            motivo=MotivoCompensacao.CANCELAMENTO,
+            ocorrido_em=DEPOIS,
+        )
+
+    @pytest.mark.parametrize(
+        "etapa",
+        [
+            "em_execucao",
+            "concluida",
+            "compensando",
+            "compensada",
+            "falha_na_compensacao",
+        ],
+    )
+    def test_fora_das_etapas_de_antes_do_pivot_e_recusado(self, etapa: str) -> None:
+        saga = saga_em(etapa)
+        antes = foto_da_saga(saga)
+
+        with pytest.raises(TransicaoDaSagaInvalidaError, match=etapa):
+            saga.solicitar_cancelamento(
+                marcos_da_ordem(),
+                agora=DEPOIS,
+                ator=ATOR_ATENDENTE,
+                envio=compensacao_enviada("DescartarDiagnostico", saga, "cancelamento"),
+            )
+
+        assert foto_da_saga(saga) == antes
+
+    @pytest.mark.parametrize(
+        ("mudanca", "agora"),
+        [
+            pytest.param({"comando": "CancelarOrcamento"}, DEPOIS, id="outra"),
+            pytest.param({"motivo": "prazo_tecnico"}, DEPOIS, id="outro-motivo"),
+            pytest.param({}, AGORA - timedelta(seconds=1), id="instante-que-volta"),
+            pytest.param({}, datetime(2026, 10, 7, 13), id="instante-sem-fuso"),
+            pytest.param({"prazo_resposta_em": None}, DEPOIS, id="prazo-ausente"),
+            pytest.param({"prazo_resposta_em": DEPOIS}, DEPOIS, id="prazo-no-instante"),
+            pytest.param(
+                {"prazo_resposta_em": DEPOIS - timedelta(seconds=1)},
+                DEPOIS,
+                id="prazo-no-passado",
+            ),
+            pytest.param(
+                {"prazo_resposta_em": datetime(2026, 10, 7, 14)},
+                DEPOIS,
+                id="prazo-sem-fuso",
+            ),
+        ],
+    )
+    def test_envio_ou_instante_errado_e_recusado(
+        self, mudanca: dict[str, Any], agora: datetime
+    ) -> None:
+        # A guarda do prazo e da propria ``cancelar``: sem ela o envio errado so
+        # seria barrado pelas invariantes, depois de a saga mudar.
+        saga = saga_em("aguardando_diagnostico")
+        antes = foto_da_saga(saga)
+        envio = compensacao_enviada(
+            mudanca.get("comando", "DescartarDiagnostico"),
+            saga,
+            mudanca.get("motivo", "cancelamento"),
+            **(
+                {"prazo_resposta_em": mudanca["prazo_resposta_em"]}
+                if "prazo_resposta_em" in mudanca
+                else {}
+            ),
+        )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError):
+            saga.solicitar_cancelamento(
+                marcos_da_ordem(), agora=agora, ator=ATOR_ATENDENTE, envio=envio
+            )
+
+        assert foto_da_saga(saga) == antes
+
+    @pytest.mark.parametrize(("perfil", "etapa", "plano"), CANCELAMENTOS)
+    def test_primeira_compensacao_vem_pronta_para_enviar_sem_mudar_a_saga(
+        self, perfil: str, etapa: str, plano: tuple[str, ...]
+    ) -> None:
+        saga = saga_em(etapa, **feito_no_perfil(perfil))
+        marcos = marcos_da_ordem(checkout=perfil.endswith("com_checkout"))
+        antes = foto_da_saga(saga)
+
+        comando, dados = saga.primeira_compensacao_do_cancelamento(marcos, agora=DEPOIS)
+
+        assert comando == plano[0]
+        # Os mesmos dados que o solicitar_cancelamento confere: serve de envio.
+        assert dados == dict(
+            compensacao_enviada(plano[0], saga, "cancelamento", marcos).dados
+        )
+        assert foto_da_saga(saga) == antes
+        saga.solicitar_cancelamento(
+            marcos,
+            agora=DEPOIS,
+            ator=ATOR_ATENDENTE,
+            envio=Envio(tipo=comando, id=uuid4(), dados=dados, prazo_resposta_em=PRAZO),
+        )
+        assert saga.plano_compensacao[0] == plano[0]
+
+    @pytest.mark.parametrize(
+        "etapa", ["em_execucao", "concluida", "compensando", "compensada"]
+    )
+    def test_primeira_compensacao_fora_de_antes_do_pivot_e_recusada(
+        self, etapa: str
     ) -> None:
         saga = saga_em(etapa)
 
-        assert saga.classificar(tipo, _MARCOS[perfil]) is esperado(etapa, tipo, perfil)
-
-    def test_matriz_cobre_as_12_etapas_os_10_perfis_e_os_23_tipos(self) -> None:
-        assert set(STATUS_DE_ENTRADA) == {e.value for e in EtapaSaga}
-        assert len(PERFIS) == len(S) + 1
-        assert len(ESPERADA) == 23
+        with pytest.raises(TransicaoDaSagaInvalidaError, match=etapa):
+            saga.primeira_compensacao_do_cancelamento(marcos_da_ordem(), agora=DEPOIS)
 
     @pytest.mark.parametrize(
-        ("etapa", "status", "pagamento", "tipo", "classificacao"),
+        "agora", [AGORA - timedelta(seconds=1), datetime(2026, 10, 7, 13)]
+    )
+    def test_primeira_compensacao_com_instante_errado_e_recusada(
+        self, agora: datetime
+    ) -> None:
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="instante"):
+            saga_em("aguardando_diagnostico").primeira_compensacao_do_cancelamento(
+                marcos_da_ordem(), agora=agora
+            )
+
+
+class TestIdDoRecursoNaCompensacao:
+    # O CancelarOrcamento leva o orcamento_id e o EstornarPagamento o
+    # pagamento_id quando a OS ja os tem, e nenhum quando nao (RFC-004 secao
+    # 5.3): a saga confere contra o que a OS guarda.
+    @pytest.mark.parametrize(
+        ("comando", "campo", "perfil"),
         [
+            pytest.param("CancelarOrcamento", "orcamento_id", "aguardando_decisao"),
             pytest.param(
-                "aguardando_diagnostico",
-                S.EM_DIAGNOSTICO,
-                False,
-                "DiagnosticoIniciado",
-                C.REPETIDO,
-                id="diagnostico-iniciado-repetido",
-            ),
-            pytest.param(
-                "aguardando_diagnostico",
-                S.EM_DIAGNOSTICO,
-                False,
-                "DiagnosticoConcluido",
-                C.PROCESSAR,
-                id="diagnostico-concluido-depois-do-inicio",
-            ),
-            pytest.param(
-                "aguardando_pagamento",
-                S.AGUARDANDO_PAGAMENTO,
-                True,
-                "PagamentoSolicitado",
-                C.REPETIDO,
-                id="pagamento-solicitado-repetido",
-            ),
-            pytest.param(
-                "aguardando_pagamento",
-                S.AGUARDANDO_PAGAMENTO,
-                True,
-                "PagamentoConfirmado",
-                C.PROCESSAR,
-                id="pagamento-confirmado-com-checkout",
-            ),
-            pytest.param(
-                "aguardando_pagamento",
-                S.AGUARDANDO_PAGAMENTO,
-                True,
-                "PagamentoRecusado",
-                C.PROCESSAR,
-                id="pagamento-recusado-com-checkout",
-            ),
-            pytest.param(
-                "aguardando_pagamento",
-                S.AGUARDANDO_PAGAMENTO,
-                True,
-                "PagamentoExpirado",
-                C.PROCESSAR,
-                id="pagamento-expirado-com-checkout",
+                "EstornarPagamento", "pagamento_id", "aguardando_pagamento_com_checkout"
             ),
         ],
     )
-    def test_dentro_da_mesma_etapa_os_marcos_da_os_desempatam(
+    @pytest.mark.parametrize(
+        "dados",
+        [
+            pytest.param(lambda campo: {}, id="sem-o-id-que-a-os-tem"),
+            pytest.param(lambda campo: {campo: str(uuid4())}, id="outro-id"),
+        ],
+    )
+    def test_id_ausente_ou_de_outro_recurso_e_recusado(
         self,
-        etapa: str,
-        status: StatusOrdem,
-        pagamento: bool,
-        tipo: str,
-        classificacao: Classificacao,
+        comando: str,
+        campo: str,
+        perfil: str,
+        dados: Callable[[str], dict[str, str]],
     ) -> None:
-        ordem = ordem_em(status)
-        assert (ordem.resumo_pagamento is not None) is pagamento
+        saga = saga_em(perfil.removesuffix("_com_checkout"), **feito_no_perfil(perfil))
+        marcos = marcos_da_ordem(checkout=perfil.endswith("com_checkout"))
+        certo = compensacao_enviada(comando, saga, "cancelamento", marcos)
+        errado = Envio(
+            tipo=certo.tipo,
+            id=certo.id,
+            dados={
+                "ordem_id": str(saga.ordem_id),
+                "motivo": "cancelamento",
+                **dados(campo),
+            },
+            prazo_resposta_em=PRAZO,
+        )
+        antes = foto_da_saga(saga)
 
-        marcos = MarcosDaOrdem.da_ordem(ordem)
-        assert saga_em(etapa).classificar(tipo, marcos) is classificacao
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
+            saga.solicitar_cancelamento(
+                marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=errado
+            )
 
-    def test_os_cancelada_antes_do_diagnostico_recusa_o_evento(self) -> None:
-        # Nem repetido nem processado: a saga viva com a OS encerrada e o
-        # estado que o cancelamento recusa, e nenhum evento a toca.
-        marcos = MarcosDaOrdem.da_ordem(ordem_em(S.CANCELADA))
+        assert foto_da_saga(saga) == antes
 
-        classificacao = saga_em("aguardando_diagnostico").classificar(
-            "DiagnosticoIniciado", marcos
+    def test_campo_a_mais_nos_dados_da_compensacao_e_recusado(self) -> None:
+        saga = saga_em("aguardando_diagnostico")
+        certo = compensacao_enviada("DescartarDiagnostico", saga, "cancelamento")
+        com_a_mais = Envio(
+            tipo=certo.tipo,
+            id=certo.id,
+            dados={**certo.dados, "descricao": "texto livre"},
+            prazo_resposta_em=PRAZO,
         )
 
-        assert classificacao is C.ORDEM_ENCERRADA
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
+            saga.solicitar_cancelamento(
+                marcos_da_ordem(), agora=DEPOIS, ator=ATOR_ATENDENTE, envio=com_a_mais
+            )
 
-    def test_falha_na_compensacao_ignora_resposta_atrasada(self) -> None:
-        marcos = MarcosDaOrdem.da_ordem(ordem_em(S.AGUARDANDO_APROVACAO))
-        saga = saga_em("falha_na_compensacao")
+    def test_id_que_a_os_nao_tem_nao_vai_no_comando(self) -> None:
+        saga = saga_em(
+            "aguardando_orcamento", **feito_no_perfil("aguardando_orcamento")
+        )
+        marcos = marcos_da_ordem(orcamento_id=None)
+        com_id = Envio(
+            tipo=Comando.CANCELAR_ORCAMENTO,
+            id=uuid4(),
+            dados={
+                "ordem_id": str(saga.ordem_id),
+                "motivo": "cancelamento",
+                "orcamento_id": str(ORCAMENTO_ID),
+            },
+            prazo_resposta_em=PRAZO,
+        )
 
-        assert saga.classificar("ReservaLiberada", marcos) is C.FORA_DA_COMPENSACAO
+        with pytest.raises(TransicaoDaSagaInvalidaError, match="nao sao os desta saga"):
+            saga.solicitar_cancelamento(
+                marcos, agora=DEPOIS, ator=ATOR_ATENDENTE, envio=com_id
+            )

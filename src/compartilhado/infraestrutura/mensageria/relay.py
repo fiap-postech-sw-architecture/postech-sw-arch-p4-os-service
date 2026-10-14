@@ -38,6 +38,10 @@ from prometheus_client import Counter, Gauge
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.compartilhado.aplicacao.mensageria import ContratoInvalidoError
+from src.compartilhado.infraestrutura.ambiente import (
+    inteiro_do_ambiente,
+    numero_do_ambiente,
+)
 from src.compartilhado.infraestrutura.database import tempo_de_conexao
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
@@ -51,8 +55,6 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     INTERVALO_DE_LIMPEZA_S,
     Agenda,
     Sinalizador,
-    inteiro_do_ambiente,
-    numero_do_ambiente,
     onde,
 )
 from src.compartilhado.infraestrutura.mensageria.telemetria import (

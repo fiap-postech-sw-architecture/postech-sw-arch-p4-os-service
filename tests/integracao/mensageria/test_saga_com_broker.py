@@ -20,10 +20,13 @@ from prometheus_client import REGISTRY, generate_latest
 from sqlalchemy import event, text
 from structlog.testing import capture_logs
 
+from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaPermanenteError
+from src.compartilhado.infraestrutura import observability as observabilidade
 from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
     ConfigConsumidor,
     Consumidor,
+    Handler,
 )
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
@@ -34,6 +37,8 @@ from src.consumidor import montar_despachante
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import (
     obter_abrir_ordem,
+    obter_cancelar_ordem,
+    obter_obter_ordem,
     obter_obter_saga,
     obter_registrar_entrega,
 )
@@ -46,7 +51,7 @@ from tests.integracao.seed_helpers import (
 from tests.rastreamento import traceparent
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from pathlib import Path
 
     from opentelemetry.sdk.trace import ReadableSpan
@@ -65,6 +70,19 @@ _FILA = {
     "ReservarPecas": "execucao.comandos",
     "SolicitarPagamento": "billing.comandos",
     "AgendarExecucao": "execucao.comandos",
+    "CancelarExecucao": "execucao.comandos",
+    "EstornarPagamento": "billing.comandos",
+    "LiberarReserva": "execucao.comandos",
+    "CancelarOrcamento": "billing.comandos",
+    "DescartarDiagnostico": "execucao.comandos",
+}
+# As cinco compensacoes, na ordem da RFC-004 secao 4.4, e a resposta de cada uma.
+_COMPENSACOES = {
+    "CancelarExecucao": "ExecucaoCancelada",
+    "EstornarPagamento": "PagamentoEstornado",
+    "LiberarReserva": "ReservaLiberada",
+    "CancelarOrcamento": "OrcamentoCancelado",
+    "DescartarDiagnostico": "DiagnosticoDescartado",
 }
 
 
@@ -219,6 +237,33 @@ class Atendimento:
         self.receber("AgendarExecucao")
 
 
+def _relay(
+    engine: Engine, broker: Broker, rastreador: Rastreador, pasta: Path
+) -> Relay:
+    return Relay(
+        engine=engine,
+        parametros=broker.parametros("os"),
+        tracer=rastreador.tracer,
+        config=ConfigRelay(poll_s=0.1, diretorio_de_saude=pasta),
+    )
+
+
+def _consumidor(
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    rastreador: Rastreador,
+    pasta: Path,
+    despachante: Mapping[str, Handler] | None = None,
+) -> Consumidor:
+    return Consumidor(
+        session_factory=session_factory,
+        parametros=broker.parametros("os"),
+        despachante=despachante or montar_despachante(timedelta(seconds=120)),
+        tracer=rastreador.tracer,
+        config=ConfigConsumidor(inatividade_s=0.1, diretorio_de_saude=pasta),
+    )
+
+
 @pytest.fixture
 def atendimento(
     engine: Engine,
@@ -228,19 +273,8 @@ def atendimento(
     tmp_path: Path,
 ) -> Iterator[Atendimento]:
     """Relay e consumidor reais em threads, com o despachante do processo."""
-    relay = Relay(
-        engine=engine,
-        parametros=broker.parametros("os"),
-        tracer=rastreador.tracer,
-        config=ConfigRelay(poll_s=0.1, diretorio_de_saude=tmp_path),
-    )
-    consumidor = Consumidor(
-        session_factory=session_factory,
-        parametros=broker.parametros("os"),
-        despachante=montar_despachante(timedelta(seconds=120)),
-        tracer=rastreador.tracer,
-        config=ConfigConsumidor(inatividade_s=0.1, diretorio_de_saude=tmp_path),
-    )
+    relay = _relay(engine, broker, rastreador, tmp_path)
+    consumidor = _consumidor(session_factory, broker, rastreador, tmp_path)
     with EmSegundoPlano(relay), EmSegundoPlano(consumidor):
         esperar_ate(lambda: (tmp_path / "consumidor-pronto").exists())
         yield Atendimento(engine, session_factory, broker, rastreador)
@@ -521,7 +555,7 @@ def _estado(engine: Engine, ordem_id: UUID) -> tuple[object, ...]:
         pytest.param("divergente", "ordem_id_divergente", None, id="divergente"),
         pytest.param("sem_saga", "saga_inexistente", None, id="sem-saga"),
         pytest.param(
-            "recusa", "sem_tratador_nesta_versao", "aguardando_decisao", id="recusa"
+            "encerrada", "ordem_encerrada", "aguardando_diagnostico", id="encerrada"
         ),
     ],
 )
@@ -535,15 +569,18 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
     motivo: str,
     etapa: str | None,
 ) -> None:
-    atendimento.abrir()
+    ordem_id = atendimento.abrir()
     atendimento.receber("SolicitarDiagnostico")
-    if caso == "recusa":
-        atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
-        atendimento.esperar_passo("DiagnosticoIniciado")
-        atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
-        atendimento.receber("GerarOrcamento")
-        atendimento.responder("GerarOrcamento", "OrcamentoGerado")
-        atendimento.esperar_passo("OrcamentoGerado")
+    if caso == "encerrada":
+        # OS encerrada com a saga viva, forcada por fora: o cancelamento passa
+        # pela saga e nunca produz esse estado, e nenhum evento o toca.
+        with engine.begin() as conexao:
+            conexao.execute(
+                text(
+                    "UPDATE ordens_de_servico SET status = 'cancelada' WHERE id = :id"
+                ),
+                {"id": ordem_id},
+            )
     gatilhos = atendimento.gatilhos()
     monkeypatch.setattr(modulo_consumidor, "_log", structlog.get_logger())
 
@@ -557,7 +594,9 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
                 recusado = envelope_de_evento("DiagnosticoIniciado")
                 broker.publicar_evento(recusado)
             case _:
-                recusado = atendimento.responder("GerarOrcamento", "OrcamentoRecusado")
+                recusado = atendimento.responder(
+                    "SolicitarDiagnostico", "DiagnosticoIniciado"
+                )
         esperar_ate(lambda: broker.contar(_DLQ) == 1)
 
     # O operador le o motivo no log e no span; o id fica livre para o redrive.
@@ -579,3 +618,293 @@ def test_recusa_vai_para_a_dlq_com_o_motivo_sem_efeito_nem_registro(
     if etapa is not None:
         esperado["pytstop.saga.etapa"] = etapa
     assert saga == esperado
+
+
+def _compensacoes_na_outbox(engine: Engine) -> list[str]:
+    with engine.connect() as conexao:
+        tipos = conexao.execute(
+            text("SELECT envelope ->> 'tipo' FROM outbox ORDER BY id")
+        ).scalars()
+        return [tipo for tipo in tipos if tipo in _COMPENSACOES]
+
+
+def _cancelar(
+    atendimento: Atendimento,
+    session_factory: sessionmaker[Session],
+    rastreador: Rastreador,
+    monkeypatch: pytest.MonkeyPatch,
+    motivo: str = "Cliente vendeu o carro",
+) -> None:
+    """O atendente pede o cancelamento, no trace de uma requisicao propria."""
+    monkeypatch.setattr(observabilidade, "_tracer_da_api", rastreador.tracer)
+    with (
+        rastreador.tracer.start_as_current_span("POST cancelamento"),
+        session_factory() as sess,
+    ):
+        cancelada = obter_cancelar_ordem(sess).executar(
+            atendimento.ordem_id, motivo, ator=_ATENDENTE
+        )
+    assert cancelada.etapa == "compensando"
+
+
+def test_cancelamento_depois_do_pagamento_compensa_uma_por_vez_na_ordem_da_rfc(
+    atendimento: Atendimento,
+    engine: Engine,
+    broker: Broker,
+    session_factory: sessionmaker[Session],
+    rastreador: Rastreador,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compensacoes = _amostra("pytstop_saga_compensacoes_total", motivo="cancelamento")
+    compensadas = _amostra("pytstop_saga_finalizadas_total", resultado="compensada")
+    ordem_id = atendimento.abrir()
+    atendimento.ate_aguardando_agendamento()
+    atendimento.responder("AgendarExecucao", "ExecucaoAgendada")
+    atendimento.esperar_passo("ExecucaoAgendada")
+
+    _cancelar(atendimento, session_factory, rastreador, monkeypatch)
+
+    respostas: list[dict[str, Any]] = []
+    for indice, (comando, resposta) in enumerate(_COMPENSACOES.items(), start=1):
+        envelope = atendimento.receber(comando)
+        # Uma por vez: a seguinte so sai depois da resposta desta.
+        assert _compensacoes_na_outbox(engine) == list(_COMPENSACOES)[:indice]
+        assert envelope["dados"]["motivo"] == "cancelamento"
+        # A primeira nasce da requisicao (sem causa); as outras, da resposta
+        # anterior (RFC-004 secao 5.2).
+        causa = respostas[-1]["id"] if respostas else None
+        assert envelope["causation_id"] == causa
+        respostas.append(atendimento.responder(comando, resposta))
+    esperar_ate(lambda: atendimento.etapa() == "compensada")
+
+    with session_factory() as sess:
+        ordem = obter_obter_ordem(sess).executar(ordem_id)
+    assert (ordem.status, ordem.etapa) == ("cancelada", "compensada")
+    ultima = ordem.historico[-1]
+    assert (ultima.origem, ultima.motivo) == ("saga", "Cliente vendeu o carro")
+    gatilhos = atendimento.gatilhos()
+    assert gatilhos[-6:] == ["cancelamento_solicitado", *_COMPENSACOES.values()]
+    assert broker.contar(_DLQ) == 0
+    assert _amostra(
+        "pytstop_saga_compensacoes_total", motivo="cancelamento"
+    ) == pytest.approx(compensacoes + 1)
+    assert _amostra(
+        "pytstop_saga_finalizadas_total", resultado="compensada"
+    ) == pytest.approx(compensadas + 1)
+
+    # O trace da saga segue pelo cancelamento: o span da acao e filho do ultimo
+    # contexto dela, com link para a requisicao, e o primeiro comando sai dele.
+    esperar_ate(lambda: rastreador.spans("process DiagnosticoDescartado"))
+    (raiz,) = rastreador.spans("POST /api/v1/ordens-de-servico")
+    (requisicao,) = rastreador.spans("POST cancelamento")
+    (acao,) = rastreador.spans("saga cancelamento")
+    trace_id = raiz.get_span_context().trace_id
+    assert acao.context.trace_id == trace_id
+    assert _pai(acao) == _id(rastreador, "process ExecucaoAgendada")
+    (link,) = acao.links
+    assert link.context.span_id == requisicao.get_span_context().span_id
+    assert _pai(rastreador.spans("publish CancelarExecucao")[0]) == (
+        acao.get_span_context().span_id
+    )
+    assert {s.get_span_context().trace_id for s in rastreador.spans()} == {
+        trace_id,
+        requisicao.get_span_context().trace_id,
+    }
+
+
+def test_falta_de_peca_compensa_o_orcamento_e_o_diagnostico_e_cancela_a_os(
+    atendimento: Atendimento,
+    engine: Engine,
+    broker: Broker,
+    session_factory: sessionmaker[Session],
+) -> None:
+    # Falha de negocio de ponta a ponta no broker real: a reserva falha, e a saga
+    # desfaz o orcamento e o diagnostico, um por vez, cada um causado pela
+    # resposta anterior (RFC-004 secoes 4.4 e 5.2).
+    compensacoes = _amostra("pytstop_saga_compensacoes_total", motivo="reserva_falhou")
+    compensadas = _amostra("pytstop_saga_finalizadas_total", resultado="compensada")
+    ordem_id = atendimento.abrir()
+    atendimento.receber("SolicitarDiagnostico")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
+    atendimento.esperar_passo("DiagnosticoIniciado")
+    atendimento.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
+    atendimento.receber("GerarOrcamento")
+    atendimento.responder("GerarOrcamento", "OrcamentoGerado")
+    atendimento.esperar_passo("OrcamentoGerado")
+    atendimento.responder("GerarOrcamento", "OrcamentoAprovado")
+    atendimento.receber("ReservarPecas")
+
+    falta = atendimento.responder("ReservarPecas", "ReservaDePecasFalhou")
+
+    cancelar = atendimento.receber("CancelarOrcamento")
+    assert (cancelar["dados"]["motivo"], cancelar["causation_id"]) == (
+        "reserva_falhou",
+        falta["id"],
+    )
+    # Uma por vez: o diagnostico so e descartado depois do orcamento cancelado.
+    assert _compensacoes_na_outbox(engine) == ["CancelarOrcamento"]
+    cancelado = atendimento.responder("CancelarOrcamento", "OrcamentoCancelado")
+    descartar = atendimento.receber("DescartarDiagnostico")
+    assert (descartar["dados"]["motivo"], descartar["causation_id"]) == (
+        "reserva_falhou",
+        cancelado["id"],
+    )
+    assert _compensacoes_na_outbox(engine) == [
+        "CancelarOrcamento",
+        "DescartarDiagnostico",
+    ]
+    atendimento.responder("DescartarDiagnostico", "DiagnosticoDescartado")
+    esperar_ate(lambda: atendimento.etapa() == "compensada")
+
+    with session_factory() as sess:
+        ordem = obter_obter_ordem(sess).executar(ordem_id)
+    assert (ordem.status, ordem.etapa) == ("cancelada", "compensada")
+    ultima = ordem.historico[-1]
+    assert (ultima.origem, ultima.motivo) == ("saga", "Falta de peça para a reserva")
+    assert atendimento.gatilhos()[-4:] == [
+        "OrcamentoAprovado",
+        "ReservaDePecasFalhou",
+        "OrcamentoCancelado",
+        "DiagnosticoDescartado",
+    ]
+    assert broker.contar(_DLQ) == 0
+    assert _amostra(
+        "pytstop_saga_compensacoes_total", motivo="reserva_falhou"
+    ) == pytest.approx(compensacoes + 1)
+    assert _amostra(
+        "pytstop_saga_finalizadas_total", resultado="compensada"
+    ) == pytest.approx(compensadas + 1)
+
+
+def test_estorno_recusado_para_a_sequencia_e_guarda_o_comando_em_voo(
+    atendimento: Atendimento,
+    engine: Engine,
+    broker: Broker,
+    session_factory: sessionmaker[Session],
+    rastreador: Rastreador,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ordem_id = atendimento.abrir()
+    atendimento.ate_aguardando_agendamento()
+    atendimento.responder("AgendarExecucao", "ExecucaoAgendada")
+    atendimento.esperar_passo("ExecucaoAgendada")
+    _cancelar(atendimento, session_factory, rastreador, monkeypatch)
+    atendimento.receber("CancelarExecucao")
+    atendimento.responder("CancelarExecucao", "ExecucaoCancelada")
+    estorno = atendimento.receber("EstornarPagamento")
+
+    atendimento.responder("EstornarPagamento", "EstornoDePagamentoFalhou")
+    esperar_ate(lambda: atendimento.etapa() == "falha_na_compensacao")
+
+    with session_factory() as sess:
+        saga = obter_obter_saga(sess).executar(ordem_id)
+        ordem = obter_obter_ordem(sess).executar(ordem_id)
+    assert (saga.falha, saga.motivo) == ("estorno_recusado", "cancelamento")
+    assert saga.plano_compensacao == tuple(list(_COMPENSACOES)[1:])
+    # O comando em voo fica, sem prazo, para a retomada.
+    assert saga.comando_em_voo is not None
+    assert (saga.comando_em_voo.tipo, saga.prazo_resposta_em) == (
+        "EstornarPagamento",
+        None,
+    )
+    with engine.connect() as conexao:
+        ids = conexao.execute(
+            text(
+                "SELECT comando_em_voo -> 'mensagem_ids' FROM sagas WHERE ordem_id = :i"
+            ),
+            {"i": ordem_id},
+        ).scalar_one()
+    assert ids == [estorno["id"]]
+    # A sequencia parou: nada alem das duas primeiras saiu, e a OS fica como estava.
+    assert _compensacoes_na_outbox(engine) == ["CancelarExecucao", "EstornarPagamento"]
+    assert ordem.status == "aguardando_execucao"
+
+    # A resposta atrasada ao envio original so atualiza o resumo do pagamento.
+    atendimento.responder("EstornarPagamento", "PagamentoEstornado")
+
+    def estornado() -> bool:
+        with session_factory() as sess:
+            pagamento = obter_obter_ordem(sess).executar(ordem_id).pagamento
+        return pagamento is not None and pagamento.status == "estornado"
+
+    esperar_ate(estornado)
+    assert atendimento.etapa() == "falha_na_compensacao"
+    assert broker.contar(_DLQ) == 0
+
+
+def _redrive(broker: Broker, nome: str) -> None:
+    """O mesmo shovel de ``make redrive FILA=os.eventos``, do platform."""
+    broker.rabbitmqctl(
+        "set_parameter",
+        "shovel",
+        nome,
+        json.dumps(
+            {
+                "src-uri": "amqp://",
+                "src-queue": _DLQ,
+                "dest-uri": "amqp://",
+                "dest-queue": "os.eventos",
+                "src-delete-after": "queue-length",
+            }
+        ),
+    )
+
+
+def test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    broker: Broker,
+    rastreador: Rastreador,
+    tmp_path: Path,
+) -> None:
+    # A versao anterior mandava a falha de negocio e a resposta de compensacao
+    # para a DLQ com `sem_tratador_nesta_versao`, sem registrar a mensagem
+    # (ADR-036). A ordem do procedimento: implantar a versao nova e so depois o
+    # redrive. Antes disso a versao anterior, que ainda consome `os.eventos`, as
+    # recusa de novo.
+    def sem_tratador(_mensagem: object, _transacao: object) -> Desfecho:
+        raise FalhaPermanenteError("sem_tratador_nesta_versao")
+
+    anterior = {**montar_despachante(timedelta(seconds=120))}
+    for tipo in ("PagamentoRecusado", *_COMPENSACOES.values()):
+        anterior[tipo] = sem_tratador
+    atendimento = Atendimento(engine, session_factory, broker, rastreador)
+    pasta_anterior = tmp_path / "anterior"
+    pasta_anterior.mkdir()
+    with (
+        EmSegundoPlano(_relay(engine, broker, rastreador, pasta_anterior)),
+        EmSegundoPlano(
+            _consumidor(session_factory, broker, rastreador, pasta_anterior, anterior)
+        ),
+    ):
+        esperar_ate(lambda: (pasta_anterior / "consumidor-pronto").exists())
+        atendimento.abrir()
+        atendimento.ate_aguardando_pagamento_com_checkout()
+        recusado = atendimento.responder("SolicitarPagamento", "PagamentoRecusado")
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+        assert atendimento.etapa() == "aguardando_pagamento"
+
+        # Redrive ANTES de implantar: a versao anterior recusa de novo.
+        recusadas = _consumidas("PagamentoRecusado", "dlq")
+        _redrive(broker, "redrive-antes-de-implantar")
+        esperar_ate(lambda: _consumidas("PagamentoRecusado", "dlq") == recusadas + 1)
+        esperar_ate(lambda: broker.contar(_DLQ) == 1)
+        assert atendimento.etapa() == "aguardando_pagamento"
+
+    pasta_nova = tmp_path / "nova"
+    pasta_nova.mkdir()
+    with (
+        EmSegundoPlano(_relay(engine, broker, rastreador, pasta_nova)),
+        EmSegundoPlano(_consumidor(session_factory, broker, rastreador, pasta_nova)),
+    ):
+        esperar_ate(lambda: (pasta_nova / "consumidor-pronto").exists())
+        # Versao nova implantada: agora o redrive trata o evento.
+        _redrive(broker, "redrive-depois-de-implantar")
+        esperar_ate(lambda: atendimento.etapa() == "compensando")
+        liberacao = atendimento.receber("LiberarReserva")
+
+    # A saga compensa como se o evento tivesse chegado na hora, e a DLQ esvazia.
+    assert liberacao["causation_id"] == recusado["id"]
+    assert liberacao["dados"]["motivo"] == "pagamento_recusado"
+    esperar_ate(lambda: broker.contar(_DLQ) == 0)
+    assert atendimento.gatilhos()[-1] == "PagamentoRecusado"

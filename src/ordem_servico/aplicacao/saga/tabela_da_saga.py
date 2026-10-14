@@ -1,36 +1,27 @@
-"""Tabela da saga (RFC-004 secao 4.1) e a classificacao dos eventos (secao 4.5).
+"""Tabelas da saga (RFC-004 secao 4.1): ordem das etapas, etapa esperada e linhas.
 
 A ordem das etapas, a etapa em que cada evento e esperado, a linha de cada
 evento do fluxo normal (etapa seguinte, comando enviado e passo concluido) e os
-comandos com prazo; ``classificar`` decide se o evento recebido e processado,
-ignorado, adiantado ou recusado. ``linha_do_evento``, ``conferir_envio`` e
-``conferir_prazo`` sao as conferencias que a ``Saga`` faz antes de aplicar uma
-linha.
+comandos com prazo. So dados: a classificacao do evento recebido esta em
+``classificacao``, e as transicoes e conferencias que a ``Saga`` faz antes de
+mudar, em ``transicoes``; as da compensacao vem de ``compensacao``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.aplicacao.mensageria import Comando
+from src.ordem_servico.aplicacao.saga.compensacao import ORDEM_DAS_COMPENSACOES
 from src.ordem_servico.aplicacao.saga.modelo import (
     EtapaSaga,
-    TransicaoDaSagaInvalidaError,
-    pecas_dos_itens,
+    GatilhoDeProcesso,
+    Transicao,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from datetime import datetime
-    from uuid import UUID
-
-    from src.compartilhado.aplicacao.mensageria import MensagemRecebida
-    from src.ordem_servico.aplicacao.saga.modelo import Envio, ItemDoDiagnostico
-    from src.ordem_servico.aplicacao.saga.saga import Saga
-    from src.ordem_servico.dominio.marcos import MarcosDaOrdem
+    from collections.abc import Mapping
 
 _E = EtapaSaga
 
@@ -47,6 +38,10 @@ FLUXO_DA_SAGA: Final = (
     _E.EM_EXECUCAO,
     _E.CONCLUIDA,
 )
+# Etapas de onde o cancelamento passa pela saga: as de antes do pivot.
+ANTES_DO_PIVOT: Final = FLUXO_DA_SAGA[: FLUXO_DA_SAGA.index(_E.EM_EXECUCAO)]
+# Compensacao em curso, ou parada nela: a saga tem motivo e plano.
+ETAPAS_EM_COMPENSACAO: Final = (_E.COMPENSANDO, _E.FALHA_NA_COMPENSACAO)
 # Etapas de onde a saga nao sai mais, e as de onde ainda sai (os labels de
 # etapa das metricas).
 ETAPAS_FINAIS: Final = (_E.CONCLUIDA, _E.COMPENSADA)
@@ -83,41 +78,32 @@ ETAPA_ESPERADA: Final[Mapping[str, EtapaSaga]] = MappingProxyType(
     }
 )
 
+# O vocabulario fechado do gatilho de um registro (RFC-004 secao 7.2): o tipo de
+# cada mensagem consumida ou uma palavra do processo.
+GATILHOS_VALIDOS: Final = frozenset(ETAPA_ESPERADA) | frozenset(GatilhoDeProcesso)
 
-@dataclass(frozen=True, slots=True)
-class LinhaDoFluxo:
-    """Linha da tabela da RFC-004 secao 4.1 para um evento do fluxo normal.
-
-    ``seguinte`` e a etapa depois do evento; ``comando``, o que ele envia (com
-    prazo tecnico se estiver em ``COMANDOS_COM_PRAZO``); ``concluido``, o passo
-    T que ele conclui, que o plano de compensacao desfaz (RFC-004 secao 4.4).
-    """
-
-    seguinte: EtapaSaga
-    comando: Comando | None = None
-    concluido: str | None = None
-
-
-FLUXO_NORMAL: Final[Mapping[str, LinhaDoFluxo]] = MappingProxyType(
+# Linha da tabela da RFC-004 secao 4.1 de cada evento do fluxo normal: etapa
+# seguinte, comando enviado (com prazo tecnico se estiver em
+# ``COMANDOS_COM_PRAZO``) e o passo T concluido, que o plano de compensacao
+# desfaz (RFC-004 secao 4.4).
+FLUXO_NORMAL: Final[Mapping[str, Transicao]] = MappingProxyType(
     {
-        "DiagnosticoIniciado": LinhaDoFluxo(_E.AGUARDANDO_DIAGNOSTICO),
-        "DiagnosticoConcluido": LinhaDoFluxo(
+        "DiagnosticoIniciado": Transicao(_E.AGUARDANDO_DIAGNOSTICO),
+        "DiagnosticoConcluido": Transicao(
             _E.AGUARDANDO_ORCAMENTO, Comando.GERAR_ORCAMENTO
         ),
-        "OrcamentoGerado": LinhaDoFluxo(_E.AGUARDANDO_DECISAO, concluido="T3"),
-        "OrcamentoAprovado": LinhaDoFluxo(
-            _E.AGUARDANDO_RESERVA, Comando.RESERVAR_PECAS
-        ),
-        "PecasReservadas": LinhaDoFluxo(
+        "OrcamentoGerado": Transicao(_E.AGUARDANDO_DECISAO, concluido="T3"),
+        "OrcamentoAprovado": Transicao(_E.AGUARDANDO_RESERVA, Comando.RESERVAR_PECAS),
+        "PecasReservadas": Transicao(
             _E.AGUARDANDO_PAGAMENTO, Comando.SOLICITAR_PAGAMENTO, "T5"
         ),
-        "PagamentoSolicitado": LinhaDoFluxo(_E.AGUARDANDO_PAGAMENTO, concluido="T6"),
-        "PagamentoConfirmado": LinhaDoFluxo(
+        "PagamentoSolicitado": Transicao(_E.AGUARDANDO_PAGAMENTO, concluido="T6"),
+        "PagamentoConfirmado": Transicao(
             _E.AGUARDANDO_AGENDAMENTO, Comando.AGENDAR_EXECUCAO
         ),
-        "ExecucaoAgendada": LinhaDoFluxo(_E.AGUARDANDO_INICIO, concluido="T7"),
-        "ExecucaoIniciada": LinhaDoFluxo(_E.EM_EXECUCAO),
-        "ExecucaoFinalizada": LinhaDoFluxo(_E.CONCLUIDA),
+        "ExecucaoAgendada": Transicao(_E.AGUARDANDO_INICIO, concluido="T7"),
+        "ExecucaoIniciada": Transicao(_E.EM_EXECUCAO),
+        "ExecucaoFinalizada": Transicao(_E.CONCLUIDA),
     }
 )
 # Comandos com resposta automatica, que ganham prazo tecnico (RFC-004 secoes 4.3
@@ -128,169 +114,9 @@ COMANDOS_COM_PRAZO: Final = frozenset(
         Comando.RESERVAR_PECAS,
         Comando.SOLICITAR_PAGAMENTO,
         Comando.AGENDAR_EXECUCAO,
-        Comando.CANCELAR_EXECUCAO,
-        Comando.ESTORNAR_PAGAMENTO,
-        Comando.LIBERAR_RESERVA,
-        Comando.CANCELAR_ORCAMENTO,
-        Comando.DESCARTAR_DIAGNOSTICO,
+        *ORDEM_DAS_COMPENSACOES,
     }
 )
 # O AgendarExecucao sai sempre com esta prioridade nesta fase: nenhuma regra
 # escolhe `alta` (RFC-004 secao 5.3).
 PRIORIDADE_DO_AGENDAMENTO: Final = "normal"
-GATILHO_ABERTURA: Final = "abertura"
-
-
-class Classificacao(StrEnum):
-    """Como um evento recebido se encaixa na etapa atual (RFC-004 secao 4.5)."""
-
-    PROCESSAR = "processar"
-    # Etapa a frente da atual: volta pela fila de retry ate a saga alcanca-lo.
-    ADIANTADO = "adiantado"
-    # Etapa ja passada, inclusive a resposta que o participante republica
-    # quando o comando e reenviado.
-    OBSOLETO = "obsoleto"
-    # Mesma etapa, com o fato ja aplicado.
-    REPETIDO = "repetido"
-    # Evento do fluxo normal com a saga encerrada ou em compensacao.
-    FORA_DO_FLUXO = "fora_do_fluxo"
-    # Resposta de compensacao sem compensacao em curso.
-    FORA_DA_COMPENSACAO = "fora_da_compensacao"
-    # OS cancelada ou entregue com a saga viva: o cancelamento recusa esse
-    # estado, e nenhum evento o toca (nem comando para uma OS encerrada).
-    ORDEM_ENCERRADA = "ordem_encerrada"
-
-
-def classificar(etapa: EtapaSaga, tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
-    """Classifica o evento ``tipo`` ANTES de tocar no dominio (RFC-004 secao 4.5).
-
-    Saga encerrada: ignorado. OS encerrada com a saga viva: recusado. Resposta
-    de compensacao: processada em compensando e ignorada fora dela. Evento do
-    fluxo normal com a saga em compensacao (ou na falha dela) ou de etapa ja
-    passada: ignorado; de etapa a frente: adiantado. Na mesma etapa, os marcos
-    da OS desempatam: ``DiagnosticoConcluido`` antes do diagnostico iniciado e
-    ``PagamentoConfirmado``, ``Recusado`` ou ``Expirado`` antes do checkout
-    aberto sao adiantados; ``DiagnosticoIniciado`` com o diagnostico ja
-    iniciado e ``PagamentoSolicitado`` com o checkout ja aberto, repetidos.
-    """
-    esperada = ETAPA_ESPERADA[tipo]
-    if etapa in ETAPAS_FINAIS:
-        if esperada is _E.COMPENSANDO:
-            return Classificacao.FORA_DA_COMPENSACAO
-        return Classificacao.FORA_DO_FLUXO
-    if marcos.encerrada:
-        return Classificacao.ORDEM_ENCERRADA
-    if esperada is _E.COMPENSANDO:
-        if etapa is _E.COMPENSANDO:
-            return Classificacao.PROCESSAR
-        return Classificacao.FORA_DA_COMPENSACAO
-    if etapa not in FLUXO_DA_SAGA:
-        return Classificacao.FORA_DO_FLUXO
-    atual = FLUXO_DA_SAGA.index(etapa)
-    alvo = FLUXO_DA_SAGA.index(esperada)
-    if alvo < atual:
-        return Classificacao.OBSOLETO
-    if alvo > atual:
-        return Classificacao.ADIANTADO
-    return _na_mesma_etapa(tipo, marcos)
-
-
-def _na_mesma_etapa(tipo: str, marcos: MarcosDaOrdem) -> Classificacao:
-    """Fora de ordem dentro da etapa, pelos marcos da OS (RFC-004 secao 4.5)."""
-    match tipo:
-        case "DiagnosticoIniciado" if marcos.diagnostico_iniciado:
-            return Classificacao.REPETIDO
-        case "DiagnosticoConcluido" if not marcos.diagnostico_iniciado:
-            return Classificacao.ADIANTADO
-        case "PagamentoSolicitado" if marcos.checkout_aberto:
-            return Classificacao.REPETIDO
-        case "PagamentoConfirmado" | "PagamentoRecusado" | "PagamentoExpirado" if (
-            not marcos.checkout_aberto
-        ):
-            return Classificacao.ADIANTADO
-    return Classificacao.PROCESSAR
-
-
-def linha_do_evento(
-    saga: Saga, evento: MensagemRecebida, marcos: MarcosDaOrdem, agora: datetime
-) -> LinhaDoFluxo:
-    """A linha do ``evento`` no fluxo normal, se ele pode avancar a ``saga`` agora.
-
-    O evento e da OS da saga e se classifica para processar na etapa dela (com
-    os ``marcos`` da OS de antes do fato), e o instante tem fuso e nao volta
-    antes do ultimo registro.
-
-    Raises:
-        TransicaoDaSagaInvalidaError: alguma das tres conferencias falhou.
-    """
-    tipo = evento.tipo
-    linha = FLUXO_NORMAL.get(tipo)
-    if evento.correlation_id != saga.id:
-        msg = f"{tipo} de outra ordem"
-    elif linha is None or classificar(saga.etapa, tipo, marcos) is not (
-        Classificacao.PROCESSAR
-    ):
-        msg = f"{tipo} nao avanca a saga na etapa {saga.etapa.value}"
-    elif agora.tzinfo is None or agora < saga.atualizada_em:
-        msg = f"{tipo} num instante sem fuso ou anterior ao ultimo registro"
-    else:
-        return linha
-    raise TransicaoDaSagaInvalidaError(msg)
-
-
-def conferir_envio(
-    linha: LinhaDoFluxo,
-    envio: Envio | None,
-    *,
-    ordem_id: UUID,
-    itens: Sequence[ItemDoDiagnostico],
-    marcos: MarcosDaOrdem,
-) -> None:
-    """O ``envio`` e o comando da ``linha``, com os dados que a saga e a OS fixam.
-
-    Nenhum envio onde a linha nao envia; nos dados, o ``ordem_id`` da OS e o que
-    a saga e a OS guardam: os ``itens`` do diagnostico no ``GerarOrcamento``, as
-    pecas deles no ``ReservarPecas``, o orcamento dos ``marcos`` da OS no
-    ``SolicitarPagamento`` e a prioridade ``normal`` no ``AgendarExecucao``.
-
-    Raises:
-        TransicaoDaSagaInvalidaError: o envio nao e o da linha, ou seus dados
-            nao sao os desta saga.
-    """
-    if envio is None and linha.comando is None:
-        return
-    if envio is None or envio.tipo is not linha.comando:
-        enviado = envio.tipo if envio is not None else "nenhum comando"
-        msg = f"a linha envia {linha.comando or 'nenhum comando'}, nao {enviado}"
-        raise TransicaoDaSagaInvalidaError(msg)
-    # Sem orcamento na OS, str(None), que e "None", nao casa com id nenhum.
-    da_saga: dict[Comando, dict[str, object]] = {
-        Comando.GERAR_ORCAMENTO: {"itens": list(itens)},
-        Comando.RESERVAR_PECAS: {"pecas": pecas_dos_itens(itens)},
-        Comando.SOLICITAR_PAGAMENTO: {"orcamento_id": str(marcos.orcamento_id)},
-        Comando.AGENDAR_EXECUCAO: {"prioridade": PRIORIDADE_DO_AGENDAMENTO},
-    }
-    esperados = {"ordem_id": str(ordem_id), **da_saga.get(envio.tipo, {})}
-    if any(envio.dados.get(chave) != valor for chave, valor in esperados.items()):
-        msg = f"{envio.tipo} com dados que nao sao os desta saga"
-        raise TransicaoDaSagaInvalidaError(msg)
-
-
-def conferir_prazo(envio: Envio | None, agora: datetime) -> None:
-    """O prazo de resposta do ``envio``, que so os ``COMANDOS_COM_PRAZO`` levam.
-
-    O prazo e depois de ``agora`` e tem fuso horario.
-
-    Raises:
-        TransicaoDaSagaInvalidaError: prazo faltando, sobrando, sem fuso horario
-            ou que nao e depois do envio.
-    """
-    if envio is None:
-        return
-    prazo = envio.prazo_resposta_em
-    com_prazo = envio.tipo in COMANDOS_COM_PRAZO
-    if (prazo is not None) is not com_prazo or (
-        prazo is not None and (prazo.tzinfo is None or prazo <= agora)
-    ):
-        msg = f"{envio.tipo} sem o prazo de resposta depois do envio"
-        raise TransicaoDaSagaInvalidaError(msg)

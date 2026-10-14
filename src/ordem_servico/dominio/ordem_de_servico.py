@@ -1,14 +1,10 @@
-"""Aggregate root ``OrdemDeServico`` da fase 4.
-
-A OS deixa de ter itens e de calcular orcamento (agora do Billing e da
-Execucao): guarda o problema relatado, o status com o historico das
-mudancas e o resumo do orcamento e do pagamento que chegam pelos fatos da
-saga (RFC-004 secoes 4.2, 4.4 e 6.1).
+"""Aggregate root ``OrdemDeServico``: o problema relatado, o status com o historico
+e o resumo do orcamento e do pagamento que chegam pelos fatos da saga (RFC-004
+secoes 4.2, 4.4 e 6.1). O orcamento e o pagamento sao do Billing.
 """
 
 from __future__ import annotations
 
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
@@ -24,49 +20,34 @@ from src.ordem_servico.dominio.events import (
     StatusDaOrdemAlteradoEvent,
 )
 from src.ordem_servico.dominio.historico import MudancaDeStatus, OrigemMudanca
+from src.ordem_servico.dominio.leitura_da_ordem import LeituraDaOrdem
 from src.ordem_servico.dominio.maquina_de_status import MaquinaDeStatus
 from src.ordem_servico.dominio.resumos import (
     ResumoOrcamento,
     ResumoPagamento,
+    StatusPagamento,
     pagamento_confirmado,
+    pagamento_no_estado,
     pagamento_solicitado,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.dominio.texto_livre import (
+    TAMANHO_MAXIMO_DESCRICAO,
+    motivo_de_cancelamento,
+    texto_obrigatorio,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
 
-# Limites dos textos livres (espelhados nas colunas e nos schemas HTTP).
-TAMANHO_MAXIMO_DESCRICAO: Final = 1000
-TAMANHO_MAXIMO_MOTIVO: Final = 500
-
 # Stateless (so le a tabela de transicoes): uma instancia para todos.
 _maquina: Final = MaquinaDeStatus()
-
-
-def _texto_obrigatorio(valor: str, rotulo: str, maximo: int) -> str:
-    """Texto livre aparado, nao vazio, dentro do limite e sem controle.
-
-    CRLF vira LF (quebra de linha de formulario); qualquer outro caractere de
-    controle (NUL inclusive, que o Postgres recusa no flush) e rejeitado: so
-    quebra de linha e tabulacao passam. Violacao levanta
-    ``ValorInvalidoException`` (422).
-    """
-    texto = (valor or "").replace("\r\n", "\n").strip()
-    if not texto:
-        msg = f"{rotulo} e obrigatorio"
-        raise ValorInvalidoException(msg)
-    if len(texto) > maximo:
-        msg = f"{rotulo} excede {maximo} caracteres"
-        raise ValorInvalidoException(msg)
-    if any(c not in "\n\t" and unicodedata.category(c) == "Cc" for c in texto):
-        msg = f"{rotulo} tem caractere de controle"
-        raise ValorInvalidoException(msg)
-    return texto
+_S = StatusOrdem
+_O = OrigemMudanca
 
 
 @dataclass(eq=False)
-class OrdemDeServico(AggregateRoot):
+class OrdemDeServico(AggregateRoot, LeituraDaOrdem):
     """Aggregate root do contexto Ordem de Servico.
 
     Construir via ``OrdemDeServico.abrir``. Cada transicao valida a
@@ -79,7 +60,7 @@ class OrdemDeServico(AggregateRoot):
     _veiculo_id: UUID = field(kw_only=True, repr=False)
     # Texto livre do atendimento: fora do repr, pode conter PII.
     _descricao_problema: str = field(kw_only=True, repr=False)
-    _status: StatusOrdem = field(default=StatusOrdem.RECEBIDA, kw_only=True)
+    _status: StatusOrdem = field(default=_S.RECEBIDA, kw_only=True)
     _historico: list[MudancaDeStatus] = field(
         default_factory=list, kw_only=True, repr=False
     )
@@ -107,7 +88,7 @@ class OrdemDeServico(AggregateRoot):
         if self._veiculo_id is None:
             msg = "veiculo_id e obrigatorio"
             raise ValorInvalidoException(msg)
-        self._descricao_problema = _texto_obrigatorio(
+        self._descricao_problema = texto_obrigatorio(
             self._descricao_problema,
             "descricao do problema",
             TAMANHO_MAXIMO_DESCRICAO,
@@ -136,11 +117,7 @@ class OrdemDeServico(AggregateRoot):
             _atualizado_em=agora,
         )
         ordem._anotar(
-            de=None,
-            para=StatusOrdem.RECEBIDA,
-            origem=OrigemMudanca.ATENDIMENTO,
-            motivo=None,
-            ator=ator,
+            de=None, para=_S.RECEBIDA, origem=_O.ATENDIMENTO, motivo=None, ator=ator
         )
         ordem._registrar_evento(
             OrdemAbertaEvent(
@@ -152,101 +129,102 @@ class OrdemDeServico(AggregateRoot):
         )
         return ordem
 
-    @property
-    def cliente_id(self) -> UUID:
-        """Cliente dono do veiculo atendido."""
-        return self._cliente_id
-
-    @property
-    def veiculo_id(self) -> UUID:
-        """Veiculo recebido para o servico."""
-        return self._veiculo_id
-
-    @property
-    def descricao_problema(self) -> str:
-        """Problema relatado no atendimento: texto livre ja aparado e validado."""
-        return self._descricao_problema
-
-    @property
-    def status(self) -> StatusOrdem:
-        """Status atual; so muda pelos fatos de dominio, que validam a maquina."""
-        return self._status
-
-    @property
-    def historico(self) -> tuple[MudancaDeStatus, ...]:
-        """Linha do tempo das mudancas de status, da abertura ate agora."""
-        return tuple(self._historico)
-
-    @property
-    def resumo_orcamento(self) -> ResumoOrcamento | None:
-        """Resumo do orcamento do Billing; ``None`` ate o ``OrcamentoGerado``."""
-        return self._resumo_orcamento
-
-    @property
-    def resumo_pagamento(self) -> ResumoPagamento | None:
-        """Resumo do pagamento do Billing; ``None`` ate o ``PagamentoSolicitado``."""
-        return self._resumo_pagamento
-
-    @property
-    def motivo_cancelamento(self) -> str | None:
-        """Motivo informado no cancelamento; ``None`` se a ordem nao foi cancelada."""
-        return self._motivo_cancelamento
-
-    @property
-    def versao(self) -> int:
-        """Versao do lock otimista: comeca em 1 e sobe a cada gravacao."""
-        return self._versao
-
-    @property
-    def criado_em(self) -> datetime:
-        """Instante da abertura da ordem (UTC)."""
-        return self._criado_em
-
-    @property
-    def atualizado_em(self) -> datetime:
-        """Instante da ultima alteracao do agregado (UTC)."""
-        return self._atualizado_em
-
-    # ----- fatos da saga (cada transicao valida, anota no historico e emite
-    # evento; o status segue a tabela de etapas da RFC-004 secao 4.1)
+    # ----- fatos da saga (cada transicao valida a maquina, anota o historico
+    # e emite o evento; o status segue a tabela da RFC-004 secao 4.1)
 
     def registrar_diagnostico_iniciado(self, *, ator: str) -> None:
         """``DiagnosticoIniciado`` (Execucao): RECEBIDA -> EM_DIAGNOSTICO."""
-        self._transicionar(
-            StatusOrdem.EM_DIAGNOSTICO, origem=OrigemMudanca.EXECUCAO, ator=ator
-        )
+        self._transicionar(_S.EM_DIAGNOSTICO, origem=_O.EXECUCAO, ator=ator)
 
     def registrar_orcamento_gerado(self, resumo: ResumoOrcamento, *, ator: str) -> None:
         """``OrcamentoGerado`` (Billing): EM_DIAGNOSTICO -> AGUARDANDO_APROVACAO.
 
         Guarda o resumo do orcamento, de onde sai o link de decisao do cliente.
         """
-        self._transicionar(
-            StatusOrdem.AGUARDANDO_APROVACAO, origem=OrigemMudanca.BILLING, ator=ator
-        )
+        self._transicionar(_S.AGUARDANDO_APROVACAO, origem=_O.BILLING, ator=ator)
         self._resumo_orcamento = resumo
 
     def registrar_pecas_reservadas(self, *, ator: str) -> None:
         """``PecasReservadas`` (Execucao): AGUARDANDO_APROVACAO -> AGUARDANDO_PAGAMENTO.
 
-        O pagamento e pedido em seguida, sobre o orcamento gerado: sem o resumo
-        dele, levanta ``ViolacaoRegraDeNegocioException`` antes de mudar.
+        Sem o resumo do orcamento (o pagamento e pedido sobre ele), levanta
+        ``ViolacaoRegraDeNegocioException`` antes de mudar.
         """
-        self._validar_transicao(StatusOrdem.AGUARDANDO_PAGAMENTO)
+        _maquina.validar_transicao(self._status, _S.AGUARDANDO_PAGAMENTO)
         if self._resumo_orcamento is None:
             msg = f"Ordem {self.id} sem orcamento gerado"
             raise ViolacaoRegraDeNegocioException(msg)
+        self._aplicar_transicao(_S.AGUARDANDO_PAGAMENTO, origem=_O.EXECUCAO, ator=ator)
+
+    def registrar_estado_do_pagamento(
+        self,
+        status: StatusPagamento,
+        *,
+        ator: str,
+        resumo: ResumoPagamento | None = None,
+    ) -> None:
+        """O estado do pagamento que o Billing informou (RFC-004 secoes 4.1 e 4.4).
+
+        ``solicitado`` grava o ``resumo`` do checkout (so com a OS aguardando
+        pagamento) e nao muda o status; ``confirmado`` leva AGUARDANDO_PAGAMENTO
+        -> AGUARDANDO_EXECUCAO, e o ``ator`` entra no historico; recusado,
+        expirado, cancelado e estornado so trocam o resumo, com a OS em qualquer
+        status (a tabela de origens e a de ``resumos``).
+
+        Raises:
+            TransicaoStatusInvalidaException: o fato nao cabe no status da OS.
+            ViolacaoRegraDeNegocioException: ``resumo`` faltando ou sobrando, ou
+                pagamento que o estado nao admite.
+        """
+        if (resumo is None) is (status is StatusPagamento.SOLICITADO):
+            msg = "O resumo acompanha o pagamento solicitado, e so ele"
+            raise ViolacaoRegraDeNegocioException(msg)
+        if resumo is not None:
+            self._solicitar_pagamento(resumo)
+        elif status is StatusPagamento.CONFIRMADO:
+            self._confirmar_pagamento(ator)
+        else:
+            self._resumo_pagamento = pagamento_no_estado(self._resumo_pagamento, status)
+            self._atualizado_em = datetime.now(UTC)
+
+    def registrar_execucao_iniciada(self, *, ator: str) -> None:
+        """``ExecucaoIniciada`` (Execucao), o pivot da saga.
+
+        AGUARDANDO_EXECUCAO -> EM_EXECUCAO; depois dele nao ha cancelamento, e o
+        pedido que perdeu a corrida para o inicio e descartado (RFC-004 secao 4.5).
+        """
+        self._transicionar(_S.EM_EXECUCAO, origem=_O.EXECUCAO, ator=ator)
+        self._motivo_cancelamento = None
+
+    def finalizar(self, *, ator: str) -> None:
+        """``ExecucaoFinalizada`` (Execucao): EM_EXECUCAO -> FINALIZADA."""
+        self._transicionar(_S.FINALIZADA, origem=_O.EXECUCAO, ator=ator)
+
+    def registrar_entrega(self, *, ator: str) -> None:
+        """Entrega ao cliente (atendimento, fora da saga): FINALIZADA -> ENTREGUE."""
+        self._transicionar(_S.ENTREGUE, origem=_O.ATENDIMENTO, ator=ator)
+
+    def registrar_pedido_de_cancelamento(self, motivo: str) -> None:
+        """Guarda o texto do pedido de cancelamento, sem mudar o status.
+
+        A saga desfaz os passos e so entao cancela a OS com ele (RFC-004 4.4);
+        ate la o texto fica aqui, ao alcance da eliminacao de dados da LGPD.
+        """
+        _maquina.validar_transicao(self._status, _S.CANCELADA)
+        self._motivo_cancelamento = motivo_de_cancelamento(motivo)
+        self._atualizado_em = datetime.now(UTC)
+
+    def cancelar(self, motivo: str, origem: OrigemMudanca, *, ator: str) -> None:
+        """Cancela a OS antes do pivot, com o ``motivo`` validado como o do pedido."""
+        self.registrar_pedido_de_cancelamento(motivo)
         self._aplicar_transicao(
-            StatusOrdem.AGUARDANDO_PAGAMENTO, origem=OrigemMudanca.EXECUCAO, ator=ator
+            _S.CANCELADA, origem=origem, motivo=self._motivo_cancelamento, ator=ator
         )
 
-    def registrar_pagamento_solicitado(self, resumo: ResumoPagamento) -> None:
-        """``PagamentoSolicitado`` (Billing): grava o resumo, sem mudar o status.
+    # ----- mecanica interna
 
-        So com a OS aguardando pagamento (``TransicaoStatusInvalidaException``);
-        o ciclo do resumo e o de ``resumos.pagamento_solicitado``.
-        """
-        if self._status is not StatusOrdem.AGUARDANDO_PAGAMENTO:
+    def _solicitar_pagamento(self, resumo: ResumoPagamento) -> None:
+        if self._status is not _S.AGUARDANDO_PAGAMENTO:
             raise TransicaoStatusInvalidaException(
                 mensagem="Pagamento so e solicitado com a ordem aguardando "
                 f"pagamento; status atual: {self._status.value}"
@@ -254,62 +232,11 @@ class OrdemDeServico(AggregateRoot):
         self._resumo_pagamento = pagamento_solicitado(self._resumo_pagamento, resumo)
         self._atualizado_em = datetime.now(UTC)
 
-    def registrar_pagamento_confirmado(self, *, ator: str) -> None:
-        """``PagamentoConfirmado`` (Billing): o resumo passa a confirmado.
-
-        AGUARDANDO_PAGAMENTO -> AGUARDANDO_EXECUCAO: o agendamento que vem depois
-        e tecnico e nao falha por regra de negocio (RFC-004 secao 4.1).
-        """
-        self._validar_transicao(StatusOrdem.AGUARDANDO_EXECUCAO)
+    def _confirmar_pagamento(self, ator: str) -> None:
+        _maquina.validar_transicao(self._status, _S.AGUARDANDO_EXECUCAO)
         confirmado = pagamento_confirmado(self._resumo_pagamento)
-        self._aplicar_transicao(
-            StatusOrdem.AGUARDANDO_EXECUCAO, origem=OrigemMudanca.BILLING, ator=ator
-        )
+        self._aplicar_transicao(_S.AGUARDANDO_EXECUCAO, origem=_O.BILLING, ator=ator)
         self._resumo_pagamento = confirmado
-
-    def registrar_execucao_iniciada(self, *, ator: str) -> None:
-        """``ExecucaoIniciada`` (Execucao), o pivot da saga.
-
-        AGUARDANDO_EXECUCAO -> EM_EXECUCAO; depois dele nao ha cancelamento.
-        """
-        self._transicionar(
-            StatusOrdem.EM_EXECUCAO, origem=OrigemMudanca.EXECUCAO, ator=ator
-        )
-
-    def finalizar(self, *, ator: str) -> None:
-        """``ExecucaoFinalizada`` (Execucao): EM_EXECUCAO -> FINALIZADA."""
-        self._transicionar(
-            StatusOrdem.FINALIZADA, origem=OrigemMudanca.EXECUCAO, ator=ator
-        )
-
-    def registrar_entrega(self, *, ator: str) -> None:
-        """Entrega ao cliente (atendimento, fora da saga): FINALIZADA -> ENTREGUE."""
-        self._transicionar(
-            StatusOrdem.ENTREGUE, origem=OrigemMudanca.ATENDIMENTO, ator=ator
-        )
-
-    def cancelar(self, motivo: str, origem: OrigemMudanca, *, ator: str) -> None:
-        """Cancela a OS antes do inicio da execucao.
-
-        A maquina e validada primeiro: depois de EM_EXECUCAO (pivot) ou em
-        estado terminal, o erro e ``TransicaoStatusInvalidaException`` (409),
-        nao o motivo. Motivo vazio, acima do limite ou com caractere de
-        controle levanta ``ValorInvalidoException`` (422).
-        """
-        self._validar_transicao(StatusOrdem.CANCELADA)
-        motivo_normalizado = _texto_obrigatorio(
-            motivo, "motivo de cancelamento", TAMANHO_MAXIMO_MOTIVO
-        )
-        self._aplicar_transicao(
-            StatusOrdem.CANCELADA, origem=origem, motivo=motivo_normalizado, ator=ator
-        )
-        self._motivo_cancelamento = motivo_normalizado
-
-    # ----- mecanica interna
-
-    def _validar_transicao(self, para: StatusOrdem) -> None:
-        """Valida SEM mutar: estado invalido falha antes de qualquer trabalho."""
-        _maquina.validar_transicao(self._status, para)
 
     def _aplicar_transicao(
         self,
@@ -338,7 +265,7 @@ class OrdemDeServico(AggregateRoot):
     def _transicionar(
         self, para: StatusOrdem, *, origem: OrigemMudanca, ator: str
     ) -> None:
-        self._validar_transicao(para)
+        _maquina.validar_transicao(self._status, para)
         self._aplicar_transicao(para, origem=origem, ator=ator)
 
     def _anotar(

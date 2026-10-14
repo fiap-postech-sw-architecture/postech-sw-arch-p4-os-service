@@ -9,10 +9,9 @@ efeito, comandos e ``mensagens_processadas`` juntos (ADR-036).
 from __future__ import annotations
 
 import threading
-from datetime import timedelta
 from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
 from opentelemetry import trace
 
@@ -23,17 +22,18 @@ from src.compartilhado.infraestrutura.mensageria.consumidor import (
 )
 from src.compartilhado.infraestrutura.mensageria.processo import (
     instalar_sinais,
-    inteiro_do_ambiente,
     preparar,
     subir_metricas,
 )
 from src.compartilhado.infraestrutura.observability import criar_tracer
-from src.ordem_servico.aplicacao.saga.orquestrador import (
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
+from src.ordem_servico.aplicacao.saga.orquestrador import OrquestradorDaSaga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
+from src.ordem_servico.aplicacao.saga.tratamento import (
     EventoAdiantadoError,
     EventoRecusadoError,
-    OrquestradorDaSaga,
 )
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import ETAPA_ESPERADA
+from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
     SagaSQLAlchemyRepository,
@@ -41,12 +41,10 @@ from src.ordem_servico.infraestrutura.repository import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from datetime import timedelta
 
     from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
     from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
-
-# Espera por resposta a comando, gravada pela saga no envio (RFC-004 secao 10.3).
-_PRAZO_RESPOSTA_PADRAO_S: Final = 120
 
 
 def tratar_evento_da_saga(
@@ -66,7 +64,7 @@ def tratar_evento_da_saga(
         ordens=OrdemDeServicoSQLAlchemyRepository(session=transacao.session),
         sagas=SagaSQLAlchemyRepository(session=transacao.session),
         publicador=transacao,
-        prazo_resposta=prazo_resposta,
+        contexto=ContextoDeEnvio(prazo_resposta),
     )
     try:
         tratamento = orquestrador.tratar(mensagem)
@@ -90,6 +88,8 @@ def tratar_evento_da_saga(
             "pytstop.saga.desfecho": tratamento.desfecho.value,
         }
     )
+    if tratamento.falha is not None:
+        span.set_attribute("pytstop.saga.falha", tratamento.falha)
     return tratamento.desfecho
 
 
@@ -105,15 +105,10 @@ def main() -> None:
     instalar_sinais(parar)
     engine, parametros = preparar("consumidor")
     try:
-        prazo_resposta = timedelta(
-            seconds=inteiro_do_ambiente(
-                "SAGA_PRAZO_RESPOSTA_SEGUNDOS", _PRAZO_RESPOSTA_PADRAO_S, minimo=1
-            )
-        )
         consumidor = Consumidor(
             session_factory=criar_session_factory(engine),
             parametros=parametros,
-            despachante=montar_despachante(prazo_resposta),
+            despachante=montar_despachante(prazo_de_resposta_da_saga()),
             tracer=criar_tracer("consumidor"),
         )
         subir_metricas()
