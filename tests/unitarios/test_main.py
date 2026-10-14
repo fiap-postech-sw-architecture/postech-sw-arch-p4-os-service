@@ -408,6 +408,60 @@ class TestMain:
 
         asyncio.run(_run())
 
+    def test_lifespan_desfaz_o_coletor_e_as_engines_se_a_observabilidade_falha(
+        self,
+    ) -> None:
+        """Falha ao ligar a observabilidade (exportador, instrumentacao) nao deixa o
+        coletor registrado no processo nem as engines abertas."""
+        app = FastAPI()
+        coletor = MagicMock()
+
+        async def _run() -> None:
+            with (
+                patch("src.cliente_veiculo.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.ordem_servico.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch("src.autenticacao.infraestrutura.mapping.iniciar_mapeamentos"),
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_engine"
+                ) as mock_engine,
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_engine_de_metricas"
+                ) as mock_metricas,
+                patch(
+                    "src.compartilhado.infraestrutura.database.criar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_session_factory"
+                ),
+                patch(
+                    "src.compartilhado.interfaces.dependencies.configurar_engine_de_metricas"
+                ),
+                patch(
+                    "src.ordem_servico.infraestrutura.coletor_da_api.registrar_coletor",
+                    return_value=coletor,
+                ),
+                patch(
+                    "src.ordem_servico.infraestrutura.coletor_da_api.desregistrar_coletor"
+                ) as mock_desregistrar,
+                patch(
+                    "src.compartilhado.infraestrutura.observability.configurar_otel",
+                    side_effect=RuntimeError("exportador"),
+                ),
+                patch.dict(
+                    os.environ,
+                    {"DATABASE_URL": "postgresql://x:x@localhost:5432/x"},
+                    clear=False,
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="exportador"):
+                    async with lifespan(app):
+                        pytest.fail("o app nao pode subir")
+                mock_desregistrar.assert_called_once_with(coletor)
+                mock_engine.return_value.dispose.assert_called_once_with()
+                mock_metricas.return_value.dispose.assert_called_once_with()
+
+        asyncio.run(_run())
+
     def test_lifespan_configura_session_factory_com_database_url(self) -> None:
         app = FastAPI()
         url_customizada = "postgresql://custom:custom@remote:5433/db"

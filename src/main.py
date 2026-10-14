@@ -103,12 +103,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     configurar_engine_de_metricas(engine_de_metricas)
     coletor = registrar_coletor(abrir_conexao_de_metricas)
 
-    # Observabilidade OTLP: unico ponto onde app + engine existem
-    # juntos. Default OFF (OTEL_ENABLED ausente/false) — no-op sem custo. O
-    # provider que ele monta e encerrado no fim: o shutdown descarrega o lote de
-    # spans, e o atexit nao roda quando o uvicorn nao e o PID 1.
-    provedor = configurar_otel(app, engine, getattr(app.state, "provedor", None))
+    provedor: TracerProvider | None = None
     try:
+        # Observabilidade OTLP: unico ponto onde app + engine existem
+        # juntos. Default OFF (OTEL_ENABLED ausente/false) — no-op sem custo. O
+        # provider que ele monta e encerrado no fim: o shutdown descarrega o lote
+        # de spans, e o atexit nao roda quando o uvicorn nao e o PID 1.
+        provedor = configurar_otel(app, engine, getattr(app.state, "provedor", None))
         yield
     finally:
         if coletor is not None:
