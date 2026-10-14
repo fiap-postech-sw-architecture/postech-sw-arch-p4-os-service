@@ -50,11 +50,11 @@ IDADE_MAXIMA_DO_HEARTBEAT_S: Final = 90
 IDADE_MAXIMA_DO_HEARTBEAT_DOS_PRAZOS_S: Final = 120
 # Limpezas da outbox e de `mensagens_processadas`: uma vez por hora.
 INTERVALO_DE_LIMPEZA_S: Final = 3600.0
-# Relay e consumidor: no maximo 4 conexoes do pool cada, e nenhum comando nem
-# espera por lock passa de segundos. O laco e unico (um comando preso para o
-# processo inteiro) e o handler roda na thread da conexao AMQP: o banco devolve
-# o erro antes de o heartbeat do broker vencer, e a mensagem segue a escada de
-# retry.
+# Relay, consumidor, prazos e notificador: no maximo 4 conexoes do pool cada, e
+# nenhum comando nem espera por lock passa de segundos. O laco e unico (um comando
+# preso para o processo inteiro) e o handler roda na thread da conexao AMQP: o
+# banco devolve o erro antes de o heartbeat do broker vencer, e a mensagem segue a
+# escada de retry.
 _POOL_DOS_PROCESSOS: Final = 2
 _OPCOES_DO_BANCO: Final = "-c statement_timeout=15000 -c lock_timeout=10000"
 # Senha de demonstracao do usuario `os` (compose e .env.example): proibida fora
