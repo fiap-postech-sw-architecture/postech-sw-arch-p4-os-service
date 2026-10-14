@@ -1,0 +1,21 @@
+# Autoescalonamento so da API, por CPU (o metrics-server vem do platform no
+# kind e do proprio k3s). Teto por overlay: 2 no kind, 1 no kind-ci (ADR-042) e
+# 3 no k3s. Relay e consumidor ficam com uma replica fixa.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: os-service-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: os-service-api
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

@@ -1,0 +1,18 @@
+# Kind do CD (job deploy-kind, ADR-042): o do kind com teto de 1 replica no HPA
+# da API, para os tres servicos caberem no runner com a plataforma. O
+# implantar-servicos.sh do platform gera k8s/overlays/execucao a partir deste,
+# com a imagem do commit, e o apaga no fim.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../kind
+
+patches:
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: os-service-api
+    patch: |-
+      - op: replace
+        path: /spec/maxReplicas
+        value: 1

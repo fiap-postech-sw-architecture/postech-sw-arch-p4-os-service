@@ -6,19 +6,59 @@ title = "PytStop fase 4 gitleaks config"
 [extend]
 useDefault = true
 
+# URL com senha, como a DATABASE_URL e a RABBITMQ_URL: as regras padrao nao as
+# reconhecem, e a senha que o make deploy do platform gera (48 hexadecimais)
+# passaria num manifesto. Ficam de fora, pelos caracteres excluidos, o
+# placeholder (<senha>), a variavel de shell ($senha), a expansao do Kubernetes
+# ($(POSTGRES_APP_PASSWORD), a forma dos manifestos de k8s/) e a f-string
+# ({senha}). No kind e no k3s o make deploy gera as senhas no cluster (ADR-042).
+[[rules]]
+id = "pytstop-url-amqp-com-senha"
+description = "URL AMQP com senha"
+regex = '''amqps?://[^:/\s@]+:([^@\s"'{}<>$]{8,})@'''
+secretGroup = 1
+keywords = ["amqp"]
+
+# A senha de mentira dos testes do processo (RABBITMQ_URL de producao com uma
+# senha qualquer); vale so naquele arquivo, e nao pelo marcador na linha porque
+# o historico ja a traz sem ele.
+[[rules.allowlists]]
+description = "Senha de mentira do teste do boot dos processos"
+condition = "AND"
+paths = ['''^tests/unitarios/compartilhado/mensageria/test_processo\.py$''']
+regexes = ['''^outra-senha$''']
+
+# As senhas de demonstracao do RabbitMQ (pytstop-<componente>-demo-2026) so valem
+# no compose, como no platform. Em qualquer outro arquivo a URL com elas reprova
+# (so o marcador gitleaks:allow na linha a libera): um manifesto de k8s/ nao pode
+# levar senha, nem a de demonstracao.
+[[rules.allowlists]]
+description = "Senhas de demonstracao do compose"
+condition = "AND"
+paths = ['''^docker-compose\.yml$''']
+regexes = ['''^pytstop-[a-z-]+-demo-2026$''']
+
+# A do PostgreSQL so vale em k8s/: os testes montam URLs de banco com senha de
+# mentira (postgresql://os:s3nh4@db), que a regra nao distingue da gerada.
+[[rules]]
+id = "pytstop-url-postgres-com-senha"
+description = "URL PostgreSQL com senha num manifesto"
+regex = '''postgres(?:ql)?(?:\+[a-z0-9]+)?://[^:/\s@]+:([^@\s"'{}<>$]{8,})@'''
+secretGroup = 1
+keywords = ["postgres"]
+path = '''^k8s/'''
+
 [allowlist]
 description = "Fixtures de teste e valores de demonstracao (nao sao credenciais reais)"
 paths = [
   # Senhas ficticias que exercitam as regras de validacao do seed de admin.
   '''^tests/unitarios/scripts/test_seed_admin\.py$''',
 ]
-# Copias do platform em contratos/ (mesma regra do .gitleaks.toml de la): JSON
-# nao aceita comentario, entao a regra vale para a linha inteira.
-# - senhas pytstop-<componente>-demo-2026 do RabbitMQ de desenvolvimento;
-# - link de decisao e checkout dos exemplos de contrato, que apontam para
-#   http://localhost e carregam um token ilustrativo.
+# Copias do platform em contratos/ (mesma regra do .gitleaks.toml de la): o link
+# de decisao e o checkout dos exemplos de contrato apontam para http://localhost
+# e carregam um token ilustrativo. JSON nao aceita comentario, entao a regra vale
+# para a linha inteira.
 regexTarget = "line"
 regexes = [
-  '''pytstop-[a-z-]+-demo-2026''',
   '''"(link_decisao|checkout_url)": "http://localhost/''',
 ]

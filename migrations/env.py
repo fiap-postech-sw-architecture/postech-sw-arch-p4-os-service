@@ -28,6 +28,24 @@ target_metadata = metadata
 # Chave do pg_advisory_lock das migracoes (qualquer bigint fixo do servico).
 _TRAVA_DE_MIGRACAO = 4_034_001
 
+# No Kubernetes (k8s/base/papeis.sql) a aplicacao tem DML em toda tabela que o
+# dono cria, a alembic_version inclusive, mas so o Job de migracao a escreve: a
+# API so a le (o initContainer aguarda-migracao), e uma API comprometida que a
+# adulterasse travaria o proximo upgrade ou liberaria pods de uma versao que o
+# banco ainda nao tem. Idempotente, a cada upgrade; onde o papel nao existe
+# (compose, testes) nao faz nada.
+_VERSAO_SO_PARA_LEITURA = text(
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'os_app') THEN
+            REVOKE INSERT, UPDATE, DELETE ON alembic_version FROM os_app;
+        END IF;
+    END
+    $$
+    """
+)
+
 
 def get_url() -> str:
     """Mesma resolucao da API: DATABASE_URL, ou POSTGRES_* so em dev/test."""
@@ -63,6 +81,7 @@ def run_migrations_online() -> None:
             )
             with context.begin_transaction():
                 context.run_migrations()
+            connection.execute(_VERSAO_SO_PARA_LEITURA)
         finally:
             connection.execute(
                 text("SELECT pg_advisory_unlock(:chave)"),

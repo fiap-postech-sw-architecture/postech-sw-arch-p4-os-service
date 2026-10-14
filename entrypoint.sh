@@ -3,6 +3,17 @@ set -e
 
 echo ">>> pytstop-os-service | commit ${PYTSTOP_GIT_SHA:0:12} | ${PYTSTOP_GIT_DATE:-unknown}"
 
+# ROOT_PATH e o prefixo da borda: vazio, ou comeca com / e nao termina com /.
+# Sem a barra inicial (os) o servico sobe, mas o Swagger busca o openapi.json
+# fora do prefixo e o CSP bloqueia a pagina, sem erro nenhum no log.
+case "${ROOT_PATH:-}" in
+  "" | /*[!/]) ;;
+  *)
+    echo "ROOT_PATH must be empty or start with / and not end with /: '${ROOT_PATH}'" >&2
+    exit 64
+    ;;
+esac
+
 # Migracao e seed ligados por env no compose (container unico, sem corrida).
 # No Kubernetes a migracao roda num Job dedicado antes do rollout, entao o
 # ConfigMap deixa RUN_MIGRATIONS_ON_STARTUP=false e este bloco vira no-op.
@@ -25,6 +36,11 @@ fi
 # --no-proxy-headers: o trust de X-Forwarded-For e controlado pela app via
 # TRUSTED_PROXIES (ProxyHeadersMiddleware proprio); a flag desliga a camada
 # implicita do uvicorn, que confiaria no XFF de peers loopback.
+# --no-access-log: o access log estruturado (com request_id) sai do
+# SecurityHeadersMiddleware; o do uvicorn e uma linha de texto sem campos.
 # --no-server-header: sem `server: uvicorn` (nao anuncia a stack).
+# --root-path: no cluster a API responde atras do Kong sob o prefixo do servico
+# (ROOT_PATH=/os no ConfigMap, ADR-038): o Swagger em /os/docs busca o
+# /os/openapi.json, e o OpenAPI declara o prefixo em `servers`. Vazio fora dele.
 exec uvicorn src.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers \
-  --no-server-header
+  --no-access-log --no-server-header --root-path "${ROOT_PATH:-}"

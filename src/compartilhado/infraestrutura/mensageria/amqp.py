@@ -9,16 +9,14 @@ from __future__ import annotations
 
 import contextlib
 import random
+import socket
 import time
 from typing import TYPE_CHECKING, Any, Final
 
 import pika
 import structlog
-from pika.exceptions import (
-    AMQPConnectionError,
-    ChannelClosedByBroker,
-    ChannelWrongStateError,
-)
+from pika.adapters.utils.connection_workflow import AMQPConnectorStackTimeout
+from pika.exceptions import AMQPConnectionError, AMQPError, ChannelWrongStateError
 from prometheus_client import Counter
 
 if TYPE_CHECKING:
@@ -29,14 +27,27 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-# Queda do broker (e nao falha de uma mensagem): conexao recusada ou perdida,
-# heartbeat vencido, canal usado depois que a conexao caiu e o nome do broker
-# sem resolucao no DNS, que o pika levanta como ``socket.gaierror`` (OSError),
-# sem embrulhar (o Service headless do broker some do DNS sem pod pronto).
+# Queda do broker com a conexao aberta (e nao falha de uma mensagem): conexao
+# perdida, heartbeat vencido ou canal usado depois que a conexao caiu. Aberta a
+# conexao, o pika embrulha o erro de socket em ``StreamLostError``; um
+# ``OSError`` cru vem de outra origem (o arquivo de vida, no disco) e derruba o
+# processo, em vez de virar reconexao em laco.
 ERROS_DE_CONEXAO: Final[tuple[type[Exception], ...]] = (
     AMQPConnectionError,
     ChannelWrongStateError,
-    OSError,
+)
+# Broker fora na abertura: o que o pika embrulha em ``AMQPError`` (conexao
+# recusada, credencial, 403 ou 404 da declaracao passiva) e dois erros que ele
+# deixa sair crus: o nome do broker sem resolucao no DNS (``socket.gaierror``;
+# o Service headless do broker some do DNS sem pod pronto) e o prazo da pilha
+# vencido (``AMQPConnectorStackTimeout``: o broker aceitou o TCP e nao respondeu
+# o AMQP). Os outros ``OSError`` crus da abertura (descritores esgotados, falha
+# de TLS) sao defeito de ambiente ou de configuracao: derrubam o processo para
+# aparecer, e o Kubernetes o reinicia.
+ERROS_DE_ABERTURA: Final[tuple[type[Exception], ...]] = (
+    AMQPError,
+    socket.gaierror,
+    AMQPConnectorStackTimeout,
 )
 
 # Heartbeat de 30 s: o pika e o broker dao a conexao por perdida depois de dois
@@ -167,13 +178,17 @@ class ConexaoDoProcesso:
             self.conexao.add_on_connection_blocked_callback(self._bloqueada)
             self.conexao.add_on_connection_unblocked_callback(self._desbloqueada)
             self._declarar(self.canal)
-        except (*ERROS_DE_CONEXAO, ChannelClosedByBroker) as exc:
+        except ERROS_DE_ABERTURA as exc:
             _log.warning(
                 "broker unavailable",
                 erro=type(exc).__name__,
                 codigo=getattr(exc, "reply_code", None),
             )
             self.desconectar()
+            # O pika nao poe prazo na resolucao do nome: com o DNS mudo a
+            # tentativa dura o tempo do resolver, e a idade do heartbeat na
+            # espera seguinte nao soma a dela.
+            self._sinal.bater()
             return False
         self._conectada_em = _relogio()
         self._sinal.marcar_pronto()

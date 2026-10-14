@@ -1,0 +1,14 @@
+# Service interno da API, sem anotacao do Kong: o do JWKS_URL de Billing e
+# Execucao (http://os-service.pytstop-os.svc.cluster.local:8000). A borda usa
+# os Services de borda.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: os-service
+spec:
+  selector:
+    app: os-service-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

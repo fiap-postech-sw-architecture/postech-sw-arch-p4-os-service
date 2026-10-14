@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from uuid import uuid4
 
 import structlog
@@ -21,6 +22,8 @@ from src.compartilhado.infraestrutura.database import (
     url_com_senha,
 )
 from src.compartilhado.interfaces.error_handler import resposta_erro_interno
+
+_log = structlog.get_logger(__name__)
 
 _CSP_DEFAULT = "default-src 'none'"
 # Paths that serve Swagger UI / ReDoc / OpenAPI schema. The default CSP blocks
@@ -56,6 +59,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     Vincula o request_id ao contexto do structlog para correlacionar logs
     dentro do mesmo request. Os headers aplicados estao listados no metodo
     dispatch.
+
+    Tambem e o access log: um ``http_request`` estruturado por requisicao
+    (metodo, caminho, status, duracao e ``request_id``), no lugar da linha de
+    texto do uvicorn, que sai sem campos e sem o ``request_id`` que o Kong
+    entrega (a API sobe com ``--no-access-log``). So o caminho, sem a query
+    string; o scrub do log mascara o que parecer dado pessoal nele.
     """
 
     async def dispatch(
@@ -68,6 +77,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(request_id=request_id)
+        inicio = time.perf_counter()
         try:
             response = await call_next(request)
         except Exception as exc:  # noqa: BLE001  # vira o 500 do contrato
@@ -81,9 +91,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         )
         # A rota que define o proprio cache (o JWKS publico) o mantem.
         response.headers.setdefault("Cache-Control", "no-store")
-        if not _caminho_de_docs(request.url.path):
+        # Com o --root-path do entrypoint (o prefixo da borda), o path chega com
+        # o prefixo (/os/docs): a excecao do CSP compara o caminho da rota.
+        caminho = request.url.path.removeprefix(request.scope.get("root_path", ""))
+        if not _caminho_de_docs(caminho):
             response.headers["Content-Security-Policy"] = _CSP_DEFAULT
         response.headers["X-Request-ID"] = request_id
+        _log.info(
+            "http_request",
+            method=request.method,
+            path=request.url.path,
+            status=response.status_code,
+            duration_ms=round((time.perf_counter() - inicio) * 1000, 1),
+        )
         return response
 
 

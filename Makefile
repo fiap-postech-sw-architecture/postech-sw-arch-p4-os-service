@@ -1,8 +1,9 @@
 # Gates do OS Service, os mesmos comandos do CI. `make check` espelha os jobs
 # lint, type-check, security e test: uv.lock em dia, lint, formato, contratos
 # de camada, tipos, seguranca e testes (unitarios + integracao com
-# testcontainers) com gate de cobertura (.coveragerc). `make smoke` e o job
-# build e `make audit` e o pip-audit do workflow Security.
+# testcontainers) com gate de cobertura (.coveragerc). `make manifests` e
+# `make smoke` sao o job build e `make audit` e o pip-audit do workflow
+# Security. `make kind-deploy` implanta o servico no kind do platform.
 PY := uv run
 PY_PATHS := src/ scripts/ migrations/
 PY_PATHS_COM_TESTS := $(PY_PATHS) tests/
@@ -12,7 +13,7 @@ GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch typecheck security test check audit \
-	smoke compose-up compose-down
+	smoke compose-up compose-down manifests print-trivy-version kind-deploy
 
 lock-check:
 	uv lock --check
@@ -28,15 +29,25 @@ format:
 lint-arch:
 	$(PY) lint-imports
 
+# Os testes dos manifestos, do aguardar e dos papeis do banco entram no mesmo
+# mypy strict de src (a lista cresce; os demais testes ainda nao passam nele).
+TESTES_TIPADOS := tests/manifestos.py tests/migracoes.py \
+	tests/unitarios/test_manifestos.py tests/unitarios/test_contrato_dos_manifestos.py \
+	tests/unitarios/test_entrypoint.py tests/unitarios/test_scripts_ci.py \
+	tests/integracao/banco_do_manifesto.py tests/integracao/test_banco.py \
+	tests/integracao/test_banco_do_manifesto.py tests/integracao/test_log_do_init_do_banco.py \
+	tests/unitarios/test_documentacao.py
+
 typecheck:
-	$(PY) mypy src scripts
+	$(PY) mypy src scripts $(TESTES_TIPADOS)
 
 security:
 	$(PY) bandit -r src scripts -c pyproject.toml -q
 
 # Suite completa com cobertura (addopts do pyproject liga --cov=src). Gera os
 # relatorios que o CI publica (coverage.xml para o SonarQube, htmlcov/ e o
-# JUnit em reports/). O conftest de integracao acha o socket do colima.
+# JUnit em reports/). O conftest de integracao acha o socket do colima; os
+# testes dos manifestos pedem o kubectl no PATH (sem ele a suite encerra de uma vez).
 test:
 	$(PY) pytest --cov-report=xml:coverage.xml --cov-report=html:htmlcov \
 		--junitxml=reports/junit.xml
@@ -82,7 +93,9 @@ audit:
 #
 # O log do uvicorn sai em JSON desde a primeira linha ("Started server
 # process"): o `configurar_logging` roda na fabrica do app, que o uvicorn importa
-# antes do servidor subir. O smoke falha se aparecer linha de texto puro dele.
+# antes do servidor subir. O smoke falha se aparecer linha de texto puro dele, ou
+# o access log dele (a API sobe com --no-access-log): o acesso de cada requisicao
+# sai do middleware, como `http_request` com o request_id.
 #
 # O compose sobe a API com ENVIRONMENT=development (a guarda de producao
 # recusa os segredos de demonstracao), entao o que a imagem faz em producao e
@@ -152,11 +165,59 @@ smoke:
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
 	&& { ! printf '%s\n' "$$logs" | grep -Eq '^(INFO|WARNING|ERROR|CRITICAL): ' \
 		|| { echo "smoke: o uvicorn escreveu log em texto puro" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON, imagem de producao, relay e consumidor prontos" \
+	&& { ! printf '%s\n' "$$logs" | grep -q '"logger": "uvicorn.access"' \
+		|| { echo "smoke: o uvicorn escreveu o access log dele" >&2; false; }; } \
+	&& { printf '%s\n' "$$logs" | grep '"event": "http_request"' | grep -q '"request_id": "' \
+		|| { echo "smoke: o access log estruturado (http_request com request_id) nao saiu" >&2; false; }; } \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay e consumidor prontos" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
 	exit $$status
+
+# Manifests Kubernetes (k8s/): os tres overlays pelo kubeconform, contra os
+# schemas da versao do no do kind do platform (Secret reprova: senha nao entra
+# nos manifests), e pelo trivy config, sem achado HIGH nem CRITICAL (o que ele
+# ignora, com o motivo, esta em k8s/trivy-ignore.rego). Mesmas imagens e opcoes
+# do `make manifests` do platform.
+KUBERNETES_VERSION := 1.35.0
+KUBECONFORM_IMAGE := ghcr.io/yannh/kubeconform:v0.8.0
+# Fonte unica da versao do trivy: o security.yml instala a de print-trivy-version.
+TRIVY_VERSION := 0.72.0
+TRIVY_IMAGE := aquasec/trivy:$(TRIVY_VERSION)
+KUBECONFORM := docker run --rm -i $(KUBECONFORM_IMAGE) -strict -summary \
+	-output text -kubernetes-version $(KUBERNETES_VERSION) -reject Secret
+TRIVY_CONFIG := docker run --rm -i \
+	-v "$(CURDIR)/k8s/trivy-ignore.rego:/trivy-ignore.rego:ro" \
+	--entrypoint sh $(TRIVY_IMAGE) -c \
+	'cat > /tmp/manifests.yaml && trivy config --quiet --severity HIGH,CRITICAL \
+	--exit-code 1 --ignore-policy /trivy-ignore.rego /tmp/manifests.yaml'
+
+# O render vai para uma variavel antes: num pipe, o sh sem pipefail esconderia
+# a falha do kustomize atras do kubeconform satisfeito com a entrada vazia.
+manifests:
+	@scripts/ci/confere-senhas-do-papeis.sh
+	@set -e; for overlay in kind kind-ci k3s; do \
+		echo ">> kubeconform e trivy: k8s/overlays/$$overlay"; \
+		manifestos="$$(kubectl kustomize "k8s/overlays/$$overlay")"; \
+		printf '%s\n' "$$manifestos" | $(KUBECONFORM) -; \
+		printf '%s\n' "$$manifestos" | $(TRIVY_CONFIG); \
+	done
+
+print-trivy-version:
+	@echo $(TRIVY_VERSION)
+
+# Implantacao no kind do platform (README, "Implantacao"), com a plataforma
+# de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do
+# servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
+# carrega no kind, aplica o overlay kind de uma vez e espera o banco, o Job de
+# migracao e os Deployments, nessa ordem. PLATFORM e o clone do platform, por
+# padrao o vizinho deste; o script e o contrato de implantacao dos servicos estao
+# no platform (README dele, "Contrato com os servicos").
+PLATFORM ?= ../postech-sw-arch-p4-platform
+
+kind-deploy:
+	$(PLATFORM)/scripts/ci/implantar-servicos.sh --overlay kind os-service=$(CURDIR)
 
 # Stack local do servico: API, relay e consumidor + PostgreSQL 16 e RabbitMQ
 # (migracoes e admin seed no boot).
