@@ -154,7 +154,7 @@ def _semear_e_comitar(
     session_factory: sessionmaker[Session], envios: Envios, **campos: object
 ) -> UUID:
     with session_factory() as sess:
-        ordem_id = _semear(sess, envios, **campos)  # type: ignore[arg-type]
+        ordem_id = _semear(sess, envios, **campos)
         sess.commit()
     return ordem_id
 
@@ -185,6 +185,17 @@ IDS_INVALIDOS = [
     pytest.param("[null]", id="nulo"),
     pytest.param('["12345678-1234-1234-1234-12345678901z"]', id="quase-uuid"),
 ]
+
+
+def _sem_esperar_lock(sess: Session) -> Session:
+    """Desiste do lock em 2 s: sem ``SKIP LOCKED`` o teste falha em vez de pendurar.
+
+    As sessoes dos testes de lock rodam na mesma thread; uma que esperasse o lock
+    de outra nao voltaria, e o timeout por sinal do pytest nao interrompe a
+    chamada bloqueante do driver.
+    """
+    sess.execute(text("SET LOCAL lock_timeout = '2s'"))
+    return sess
 
 
 def _reivindicar(
@@ -337,12 +348,21 @@ class TestConsultaDasVencidas:
 
         assert _reivindicar(session_factory) == ordem_id
 
+    def test_vence_com_o_prazo_gravado_exatamente_agora(
+        self, session_factory: sessionmaker[Session]
+    ) -> None:
+        ordem_id = _semear_e_comitar(
+            session_factory, [_entregue(T0 - timedelta(hours=1))], prazo_em=T0
+        )
+
+        assert _reivindicar(session_factory) == ordem_id
+
     def test_a_saga_vem_carregada_e_travada_para_a_transacao(
         self, session_factory: sessionmaker[Session]
     ) -> None:
         ordem_id = _semear_e_comitar(session_factory, [_entregue(T0 - PRAZO)])
 
-        with session_factory() as sess:
+        with session_factory() as sess, session_factory() as outra:
             saga = SagaSQLAlchemyRepository(sess).reivindicar_vencida(T0, PRAZO)
 
             assert saga is not None
@@ -352,6 +372,13 @@ class TestConsultaDasVencidas:
                 "GerarOrcamento",
             )
             assert saga.ordem_id == ordem_id
+            # Travada: outra transacao nao a pega nem espera por ela.
+            assert (
+                SagaSQLAlchemyRepository(_sem_esperar_lock(outra)).reivindicar_vencida(
+                    T0, PRAZO
+                )
+                is None
+            )
 
     def test_a_travada_por_outra_transacao_e_pulada_sem_esperar(
         self, session_factory: sessionmaker[Session]
@@ -365,6 +392,8 @@ class TestConsultaDasVencidas:
         )
 
         with session_factory() as a, session_factory() as b, session_factory() as c:
+            for sessao in (a, b, c):
+                _sem_esperar_lock(sessao)
             da_a = SagaSQLAlchemyRepository(a).reivindicar_vencida(T0, PRAZO)
             da_b = SagaSQLAlchemyRepository(b).reivindicar_vencida(T0, PRAZO)
             da_c = SagaSQLAlchemyRepository(c).reivindicar_vencida(T0, PRAZO)
@@ -374,6 +403,7 @@ class TestConsultaDasVencidas:
             assert da_c is None
             a.rollback()
             # Solta a primeira: a terceira transacao a reivindica.
+            _sem_esperar_lock(c)
             da_c = SagaSQLAlchemyRepository(c).reivindicar_vencida(T0, PRAZO)
             assert da_c is not None
             assert da_c.ordem_id == primeira
@@ -458,7 +488,7 @@ class TestCicloNoBanco:
             "GerarOrcamento",
             original["dados"],
         )
-        assert reenvio["e"]["causation_id"] is None  # type: ignore[index]
+        assert reenvio["e"]["causation_id"] is None
         assert reenvio["id"] != original["id"]
         em_voo = saga.comando_em_voo
         assert em_voo is not None
@@ -469,6 +499,26 @@ class TestCicloNoBanco:
         assert (
             _contador("pytstop_saga_reenvios_total", comando="GerarOrcamento")
             == antes + 1
+        )
+
+    def test_entregue_ha_menos_que_o_prazo_o_ciclo_espera_o_que_falta(
+        self, engine: Engine, session_factory: sessionmaker[Session]
+    ) -> None:
+        # O relay atrasou o envio: o `prazo_resposta_em` da saga e de antes da
+        # entrega, mas o participante so teve 110 s do prazo de 120 s.
+        ordem_id = _semear_e_comitar(
+            session_factory,
+            [_entregue(T0 - PRAZO + timedelta(seconds=10))],
+            prazo_em=T0 - timedelta(minutes=1),
+        )
+
+        assert _prazos(session_factory, T0).executar() == ResultadoDoCiclo()
+        assert _saga(session_factory, ordem_id).reenvios == 0
+        assert len(_linhas_da_outbox(engine, ordem_id)) == 1
+        # Passados os 10 s que faltam, vence.
+        agora = T0 + timedelta(seconds=10)
+        assert _prazos(session_factory, agora).executar() == ResultadoDoCiclo(
+            reenviadas=1
         )
 
     def test_falha_no_commit_desfaz_o_reenvio_e_nao_conta(
@@ -520,7 +570,7 @@ class TestCicloNoBanco:
             "pendente",
             "CancelarOrcamento",
         )
-        assert compensacao["dados"]["motivo"] == "prazo_tecnico"  # type: ignore[index]
+        assert compensacao["dados"]["motivo"] == "prazo_tecnico"
         assert saga.passos[-1]["gatilho"] == "prazo_esgotado"
         assert (
             _contador("pytstop_saga_prazos_esgotados_total", comando="GerarOrcamento")

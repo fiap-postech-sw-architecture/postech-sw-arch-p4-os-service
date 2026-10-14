@@ -112,7 +112,7 @@ def test_reenvios_e_prazos_esgotados_tem_a_serie_de_cada_comando_e_contam_no_com
 
     metricas_da_saga.anotar(
         sessao,
-        [fato(agregado_id=uuid4(), comando="LiberarReserva")],  # type: ignore[call-arg]
+        [fato(agregado_id=uuid4(), comando="LiberarReserva")],
     )
     assert _contador(nome, "LiberarReserva") == antes
     sessao.commit()

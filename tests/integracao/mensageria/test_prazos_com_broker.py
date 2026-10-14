@@ -9,7 +9,6 @@ cabem em segundos. O relogio e o real, o banco e o broker tambem.
 from __future__ import annotations
 
 import json
-import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -60,9 +59,45 @@ if TYPE_CHECKING:
 
 PRAZO = timedelta(seconds=1)
 INTERVALO_S = 0.2
+# Ciclos que a ausencia de um efeito espera: 25 x 0,2 s = 5 prazos de 1 s.
+CICLOS_DE_AUSENCIA = 25
 MAXIMO = 5
 _DLQ = "os.eventos.dlq"
 SEM_CONSUMIDOR = SituacaoDaFila(consumidores=0, prontas=0)
+
+
+class _CicloContado:
+    """O ``VencerPrazos`` real, contando os ciclos que terminaram."""
+
+    def __init__(self, vencer: VencerPrazos) -> None:
+        self._vencer = vencer
+        self.ciclos = 0
+
+    def executar(self, *args: Any, **kwargs: Any) -> Any:
+        resultado = self._vencer.executar(*args, **kwargs)
+        self.ciclos += 1
+        return resultado
+
+
+class ProcessoContado(ProcessoDosPrazos):
+    """O laco real dos prazos, com a conta dos ciclos que o ``VencerPrazos`` rodou.
+
+    Os testes de ausencia ("nao reenvia") esperam ciclos observados, nao segundos:
+    a ausencia so vale depois de o ciclo ter tido a chance de agir.
+    """
+
+    def __init__(self, *, vencer: VencerPrazos, **resto: Any) -> None:
+        self._contado = _CicloContado(vencer)
+        super().__init__(vencer=self._contado, **resto)
+
+    @property
+    def ciclos(self) -> int:
+        return self._contado.ciclos
+
+    def esperar_ciclos(self, quantos: int) -> None:
+        """Espera ``quantos`` ciclos inteiros a partir de agora."""
+        alvo = self.ciclos + quantos + 1  # o ciclo em curso nao conta
+        esperar_ate(lambda: self.ciclos >= alvo, prazo_s=60)
 
 
 def _processo_dos_prazos(
@@ -73,7 +108,7 @@ def _processo_dos_prazos(
     *,
     prazo: timedelta = PRAZO,
     maximo: int = MAXIMO,
-) -> ProcessoDosPrazos:
+) -> ProcessoContado:
     sinal = Sinalizador("prazos", pasta)
     presenca = PresencaPikaDoConsumidor(broker.parametros("os"), sinal)
     vencer = VencerPrazos(
@@ -83,7 +118,7 @@ def _processo_dos_prazos(
         max_reenvios=maximo,
         banco_fora=BANCO_FORA,
     )
-    return ProcessoDosPrazos(
+    return ProcessoContado(
         vencer=vencer, presenca=presenca, sinal=sinal, intervalo_s=INTERVALO_S
     )
 
@@ -321,7 +356,7 @@ class TestEstornoRecusadoEFalha:
                 esperar_ate(lambda: ordem.saga()["etapa"] == "falha_na_compensacao")
 
                 # Parada: o prazo nao reenvia, mesmo depois de varios ciclos.
-                time.sleep(2 * prazo.total_seconds())
+                prazos.esperar_ciclos(CICLOS_DE_AUSENCIA)
                 parada = ordem.saga()
                 assert (parada["etapa"], parada["falha"]) == (
                     "falha_na_compensacao",
@@ -396,7 +431,7 @@ class TestSemConsumidorEComRelayParado:
                     )
                 )
             with capture_logs() as logs:
-                time.sleep(5 * PRAZO.total_seconds())
+                prazos.esperar_ciclos(CICLOS_DE_AUSENCIA)
                 pausado = [e for e in logs if "paused" in e["event"]]
                 coletor = CollectorRegistry()
                 coletor.register(
@@ -447,7 +482,7 @@ class TestSemConsumidorEComRelayParado:
                 )
                 atendimento.esperar_passo(tipo)
 
-            time.sleep(5 * PRAZO.total_seconds())
+            prazos.esperar_ciclos(CICLOS_DE_AUSENCIA)
 
             # O GerarOrcamento espera na outbox (o relay esta parado): o prazo nao
             # corre, e o gauge de prazo vencido nao o conta.

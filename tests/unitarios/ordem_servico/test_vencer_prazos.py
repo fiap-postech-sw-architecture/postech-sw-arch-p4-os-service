@@ -223,7 +223,13 @@ class TestEsgotamentoEmCompensacao:
 
 
 class TestSemConsumidor:
-    @pytest.mark.parametrize("reenvios", [0, MAXIMO])
+    @pytest.mark.parametrize(
+        "reenvios",
+        [
+            pytest.param(0, id="antes-do-primeiro-reenvio"),
+            pytest.param(MAXIMO, id="com-os-reenvios-esgotados"),
+        ],
+    )
     def test_sem_consumidor_nao_reenvia_nem_esgota(self, reenvios: int) -> None:
         prazos = _em("aguardando_orcamento")
         prazos.saga._reenvios = reenvios
@@ -336,7 +342,9 @@ class TestIsolamentoDasSagas:
         assert "motivo" not in recusa
         assert "ABC1D23" not in str(logs)
 
-    def test_erro_do_banco_que_se_repetiria_nao_trava_as_outras_sagas(self) -> None:
+    def test_erro_do_banco_que_se_repetiria_nao_trava_as_outras_sagas(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         ruim, boa = self._duas_sagas()
         ruim = Prazos(ruim.cenario, banco_fora=BANCO_FORA)
         ruim.saga._prazo_resposta_em = ruim.saga.atualizada_em
@@ -350,7 +358,7 @@ class TestIsolamentoDasSagas:
                 raise DataError("UPDATE sagas ...", {}, Exception("dado-do-cliente"))
             salvar(saga)
 
-        sagas.salvar = _salvar  # type: ignore[method-assign]
+        monkeypatch.setattr(sagas, "salvar", _salvar)
 
         with capture_logs() as logs:
             resultado = ruim.caso_de_uso.executar()
@@ -370,14 +378,14 @@ class TestIsolamentoDasSagas:
         ],
     )
     def test_banco_fora_depois_de_reivindicar_sobe_e_nao_recusa_a_saga(
-        self, erro: Exception
+        self, erro: Exception, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         prazos = Prazos(CenarioDaSaga.em("aguardando_orcamento"), banco_fora=BANCO_FORA)
 
         def _cai_o_banco(saga: Any) -> None:
             raise erro
 
-        prazos.cenario.sagas.salvar = _cai_o_banco  # type: ignore[method-assign]
+        monkeypatch.setattr(prazos.cenario.sagas, "salvar", _cai_o_banco)
 
         # O banco fora nao e defeito da saga: o ciclo falha, a transacao desfaz e
         # o laco do processo tenta de novo no ciclo seguinte.
@@ -412,7 +420,9 @@ class TestIsolamentoDasSagas:
             "saga sem a OS dela",
         )
 
-    def test_erro_do_banco_sobe_para_o_laco_do_processo(self) -> None:
+    def test_erro_do_banco_sobe_para_o_laco_do_processo(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         prazos = _em("aguardando_orcamento")
 
         class BancoFora(Exception):  # noqa: N818  # excecao de teste
@@ -421,7 +431,7 @@ class TestIsolamentoDasSagas:
         def _falha(*_: Any, **__: Any) -> None:
             raise BancoFora
 
-        prazos.cenario.sagas.reivindicar_vencida = _falha  # type: ignore[method-assign,assignment]
+        monkeypatch.setattr(prazos.cenario.sagas, "reivindicar_vencida", _falha)
 
         with pytest.raises(BancoFora):
             prazos.vencer()
@@ -492,7 +502,7 @@ class TestSpanELog:
 
 class TestErroQueSobeAoLaco:
     def test_conflito_antes_de_reivindicar_alguma_saga_sobe_sem_recusar_ninguem(
-        self,
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Sem saga reivindicada nao ha a quem recusar: o erro sobe ao laco do
         # processo, que so trata o erro de banco; qualquer outro derruba o
@@ -502,7 +512,7 @@ class TestErroQueSobeAoLaco:
         def _conflita(*_: Any, **__: Any) -> None:
             raise ConflitoDeConcorrenciaException
 
-        prazos.cenario.sagas.reivindicar_vencida = _conflita  # type: ignore[method-assign,assignment]
+        monkeypatch.setattr(prazos.cenario.sagas, "reivindicar_vencida", _conflita)
 
         with pytest.raises(ConflitoDeConcorrenciaException):
             prazos.vencer()

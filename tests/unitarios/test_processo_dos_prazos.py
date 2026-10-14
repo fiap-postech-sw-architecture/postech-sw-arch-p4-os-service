@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +28,9 @@ from src.ordem_servico.infraestrutura.presenca_do_consumidor import (
     PresencaPikaDoConsumidor,
 )
 from src.ordem_servico.infraestrutura.processo_dos_prazos import ProcessoDosPrazos
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class _Processo:
@@ -99,9 +104,9 @@ def test_main_le_os_tres_parametros_do_ambiente(
 @pytest.mark.parametrize(
     ("variavel", "valor"),
     [
-        ("SAGA_PRAZO_RESPOSTA_SEGUNDOS", "0"),
-        ("SAGA_MAX_REENVIOS", "-1"),
-        ("PRAZOS_INTERVALO_SEGUNDOS", "301"),
+        pytest.param("SAGA_PRAZO_RESPOSTA_SEGUNDOS", "0", id="prazo-zero"),
+        pytest.param("SAGA_MAX_REENVIOS", "-1", id="reenvios-negativos"),
+        pytest.param("PRAZOS_INTERVALO_SEGUNDOS", "301", id="intervalo-acima-do-teto"),
     ],
 )
 def test_parametro_invalido_aborta_o_boot_antes_de_abrir_banco_e_broker(
@@ -122,17 +127,20 @@ def test_parametro_invalido_aborta_o_boot_antes_de_abrir_banco_e_broker(
 class _Ciclo:
     """``VencerPrazos`` falso: devolve (ou levanta) o que o teste programa."""
 
-    def __init__(self, parar: threading.Event, *resultados: Any) -> None:
+    def __init__(self, parar: Any, *resultados: Any) -> None:
         self._parar = parar
         self._resultados = list(resultados)
         self.chamadas = 0
         self.tratadas: list[Any] = []
         self.paradas: list[Any] = []
+        # Roda logo antes de o ciclo simulado "tratar" uma saga.
+        self.antes_de_tratar: Callable[[], None] = lambda: None
 
     def executar(self, ao_tratar: Any, *, parar: Any) -> ResultadoDoCiclo:
         self.chamadas += 1
         self.tratadas.append(ao_tratar)
         self.paradas.append(parar)
+        self.antes_de_tratar()
         ao_tratar()
         resultado = self._resultados.pop(0)
         if not self._resultados:
@@ -153,7 +161,7 @@ def _processo(
             vencer=ciclo,
             presenca=presenca,
             sinal=sinal,
-            intervalo_s=intervalo_s,  # type: ignore[arg-type]
+            intervalo_s=intervalo_s,
         ),
         presenca,
         sinal,
@@ -196,9 +204,13 @@ def test_cada_saga_tratada_atende_o_broker_alem_de_tocar_o_heartbeat(
     parar = threading.Event()
     ciclo = _Ciclo(parar, ResultadoDoCiclo(reenviadas=3))
     processo, presenca, sinal = _processo(tmp_path, ciclo, intervalo_s=3600)
+    # O arquivo ja existe pelo toque do inicio do laco: recua a hora dele antes de
+    # a saga ser tratada, e so o toque por saga o traz de volta.
+    ciclo.antes_de_tratar = lambda: os.utime(sinal.heartbeat, (0, 0))
 
     processo.executar(parar)
 
+    assert sinal.heartbeat.stat().st_mtime > time.time() - 60
     assert ciclo.tratadas == [processo._depois_de_cada_saga]
     # O ciclo recebe o SIGTERM do processo, para sair entre duas sagas.
     assert ciclo.paradas == [parar.is_set]
@@ -227,16 +239,93 @@ def test_banco_fora_nao_derruba_o_processo_e_o_ciclo_seguinte_tenta_de_novo(
     presenca.fechar.assert_called_once()
 
 
-def test_sigterm_interrompe_a_espera_entre_os_ciclos(tmp_path: Path) -> None:
+def test_com_o_sigterm_ja_ligado_o_laco_nem_roda_um_ciclo(tmp_path: Path) -> None:
     parar = threading.Event()
     ciclo = _Ciclo(parar, ResultadoDoCiclo(), ResultadoDoCiclo())
-    # Intervalo de uma hora: so o `parar` faz o laco sair no tempo do teste.
     processo, _, _ = _processo(tmp_path, ciclo, intervalo_s=3600)
     parar.set()
 
     processo.executar(parar)
 
     assert ciclo.chamadas == 0
+
+
+def test_sigterm_no_meio_da_espera_devolve_o_laco_antes_da_fatia_acabar(
+    tmp_path: Path,
+) -> None:
+    parar = threading.Event()
+    ciclo = _Ciclo(parar, ResultadoDoCiclo(), ResultadoDoCiclo())
+    # Intervalo de uma hora e fatia de 5 s: so o `Event.wait` acorda a tempo.
+    processo, _, _ = _processo(tmp_path, ciclo, intervalo_s=3600)
+    laco = threading.Thread(target=processo.executar, args=(parar,))
+    laco.start()
+    while ciclo.chamadas == 0:  # o primeiro ciclo ja rodou: o laco esta na espera
+        pass
+    parar.set()
+
+    laco.join(timeout=2)
+
+    assert not laco.is_alive()
+
+
+class _Relogio:
+    """Relogio monotonico que so anda quando alguem espera."""
+
+    def __init__(self) -> None:
+        self.agora = 100.0
+
+    def monotonic(self) -> float:
+        return self.agora
+
+
+class _EventoQueEspera:
+    """``threading.Event`` que registra a espera e a faz passar no relogio falso."""
+
+    def __init__(self, relogio: _Relogio) -> None:
+        self._relogio = relogio
+        self._ligado = False
+        self.esperas: list[float] = []
+
+    def is_set(self) -> bool:
+        return self._ligado
+
+    def set(self) -> None:
+        self._ligado = True
+
+    def wait(self, timeout: float) -> bool:
+        self.esperas.append(timeout)
+        self._relogio.agora += timeout
+        return self._ligado
+
+
+@pytest.mark.parametrize(
+    "resultado",
+    [
+        pytest.param(ResultadoDoCiclo(reenviadas=1), id="ciclo-com-trabalho"),
+        pytest.param(ResultadoDoCiclo(pausado=True), id="ciclo-pausado"),
+        pytest.param(
+            OperationalError("SELECT 1", {}, Exception("banco fora")),
+            id="banco-fora",
+        ),
+    ],
+)
+def test_o_laco_espera_o_intervalo_inteiro_em_fatias_depois_de_cada_ciclo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resultado: Any
+) -> None:
+    monkeypatch.setattr(processo_dos_prazos, "_log", structlog.get_logger())
+    relogio = _Relogio()
+    monkeypatch.setattr(processo_dos_prazos, "time", relogio)
+    parar = _EventoQueEspera(relogio)
+    # Dois ciclos com a espera entre eles; o `_Ciclo` liga o `parar` no ultimo.
+    ciclo = _Ciclo(parar, resultado, resultado)
+    processo, _, _ = _processo(tmp_path, ciclo, intervalo_s=12.0)
+
+    processo.executar(parar)
+
+    # 12 s em fatias de 5 s, e nenhuma espera depois do ultimo ciclo (sem laco
+    # apertado: sem a espera o banco e o broker seriam consultados sem parar).
+    assert ciclo.chamadas == 2
+    assert parar.esperas == [5.0, 5.0, 2.0]
 
 
 class _Canal:

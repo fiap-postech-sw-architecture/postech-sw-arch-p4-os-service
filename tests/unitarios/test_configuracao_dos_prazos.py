@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Final
 
 import pytest
 
@@ -24,8 +23,6 @@ from src.ordem_servico.infraestrutura.prazo_da_saga import (
     PRAZO_RESPOSTA_PADRAO_S,
 )
 from tests.manifestos import OVERLAYS, RAIZ, literais_do_servico
-
-_ATRASO_DO_ALERTA_S: Final = 60
 
 
 def _atrasos_do_broker_s() -> list[float]:
@@ -63,11 +60,11 @@ def test_o_reenvio_do_ultimo_nivel_ainda_cabe_antes_de_desistir() -> None:
     assert sum(_atrasos_do_broker_s()) < MAX_REENVIOS_PADRAO * PRAZO_RESPOSTA_PADRAO_S
 
 
-def test_o_ciclo_e_o_alerta_acompanham_o_intervalo_padrao() -> None:
-    # "Saga parada" dispara com prazo vencido ha mais de 60 s: duas vezes o intervalo
-    # do `prazos` (30 s), de modo que um ciclo perdido nao dispara o alerta.
+def test_o_intervalo_padrao_do_ciclo_e_bem_menor_que_o_prazo_de_resposta() -> None:
+    # O alerta "Saga parada" do platform usa 60 s, duas vezes o intervalo: um
+    # ciclo perdido nao o dispara. O limiar mora no platform; aqui fica o que e
+    # do OS, o intervalo de 30 s dentro do prazo de 120 s.
     assert INTERVALO_DOS_PRAZOS_PADRAO_S == 30
-    assert _ATRASO_DO_ALERTA_S == 2 * INTERVALO_DOS_PRAZOS_PADRAO_S
     assert INTERVALO_DOS_PRAZOS_PADRAO_S < PRAZO_RESPOSTA_PADRAO_S
 
 
