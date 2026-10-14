@@ -289,7 +289,8 @@ def test_falha_inesperada_conta_tentativa_com_o_nome_da_excecao_e_o_lugar(
     assert motivo == "falha ao enviar o e-mail (KeyError)"
     (registro,) = _log(logs, "notification send failed; retry scheduled")
     assert registro["erro"] == "KeyError"
-    assert registro["onde"].startswith("test_notificador.py:")
+    # O quadro do servico que chamou o que falhou (o fake do teste fica por baixo).
+    assert registro["onde"].startswith("notificador.py:")
     assert "segredo" not in repr(logs)
 
 
