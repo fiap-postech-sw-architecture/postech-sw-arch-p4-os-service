@@ -58,7 +58,7 @@ class ProcessoDosPrazos:
             while not parar.is_set():
                 self._sinal.bater()
                 try:
-                    ciclo = self._vencer.executar(self._sinal.bater)
+                    ciclo = self._vencer.executar(self._depois_de_cada_saga)
                 except SQLAlchemyError:
                     # Banco fora (failover, blip do pool): o proximo ciclo
                     # tenta de novo; derrubar o processo so reiniciaria o pod.
@@ -69,6 +69,15 @@ class ProcessoDosPrazos:
         finally:
             self._presenca.fechar()
             _log.info("prazos stopped")
+
+    def _depois_de_cada_saga(self) -> None:
+        """Heartbeat do processo e do broker a cada saga tratada.
+
+        Um ciclo longo (muitas sagas vencidas de uma vez, depois de uma parada)
+        nao pode passar dos dois heartbeats AMQP sem atender o broker.
+        """
+        self._sinal.bater()
+        self._presenca.manter()
 
     def _esperar(self, parar: threading.Event) -> None:
         """Espera o intervalo em fatias, com a saude e o broker em dia."""

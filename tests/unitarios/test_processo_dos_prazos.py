@@ -125,9 +125,11 @@ class _Ciclo:
         self._parar = parar
         self._resultados = list(resultados)
         self.chamadas = 0
+        self.tratadas: list[Any] = []
 
     def executar(self, ao_tratar: Any) -> ResultadoDoCiclo:
         self.chamadas += 1
+        self.tratadas.append(ao_tratar)
         ao_tratar()
         resultado = self._resultados.pop(0)
         if not self._resultados:
@@ -182,6 +184,22 @@ def test_laco_roda_um_ciclo_por_intervalo_toca_o_heartbeat_e_fecha_a_presenca(
     ]
     eventos = [e["event"] for e in logs]
     assert (eventos[0], eventos[-1]) == ("prazos started", "prazos stopped")
+
+
+def test_cada_saga_tratada_atende_o_broker_alem_de_tocar_o_heartbeat(
+    tmp_path: Path,
+) -> None:
+    # Um ciclo longo nao pode passar dos heartbeats AMQP sem atender o broker.
+    parar = threading.Event()
+    ciclo = _Ciclo(parar, ResultadoDoCiclo(reenviadas=3))
+    processo, presenca, sinal = _processo(tmp_path, ciclo, intervalo_s=3600)
+
+    processo.executar(parar)
+
+    assert ciclo.tratadas == [processo._depois_de_cada_saga]
+    # Uma vez pelo ciclo simulado; a espera nao rodou (o `parar` ja estava ligado).
+    assert presenca.manter.call_count == 1
+    assert sinal.heartbeat.exists()
 
 
 def test_banco_fora_nao_derruba_o_processo_e_o_ciclo_seguinte_tenta_de_novo(
