@@ -38,7 +38,6 @@ from tests.unitarios.ordem_servico.cenario_da_saga import FEITO, PLANO_DA_RFC
 from tests.unitarios.ordem_servico.saga_de_teste import (
     AGORA,
     ORCAMENTO_ID,
-    PAGAMENTO_ID,
     dados_do_comando,
     foto_da_saga,
     marcos_da_ordem,
@@ -300,12 +299,9 @@ class TestEsgotarEmEtapaLinear:
         self, etapa: str
     ) -> None:
         saga = _saga_linear(etapa, reenvios=5)
-        marcos = marcos_da_ordem(checkout=etapa == "aguardando_agendamento")
         comando = Comando(FEITO[etapa][1] or "")
         plano = PLANO_DA_RFC[(etapa, "prazo_tecnico")]
-        primeira, dados = (
-            compensacao_do_esgotamento(saga, marcos, VENCIDO) or (None,) * 2
-        )
+        primeira, dados = compensacao_do_esgotamento(saga, VENCIDO) or (None,) * 2
         assert primeira is Comando(plano[0])
         envio = Envio(
             tipo=primeira,
@@ -314,7 +310,7 @@ class TestEsgotarEmEtapaLinear:
             prazo_resposta_em=VENCIDO + PRAZO_S,
         )
 
-        saga.esgotar_prazo(marcos, agora=VENCIDO, ator=ATOR_PRAZOS, envio=envio)
+        saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS, envio=envio)
 
         assert (saga.etapa, saga.motivo, saga.falha) == (
             E.COMPENSANDO,
@@ -357,35 +353,39 @@ class TestEsgotarEmEtapaLinear:
             ),
         ]
 
-    def test_a_compensacao_leva_o_id_do_recurso_que_a_os_ja_conhece(self) -> None:
-        saga = _saga_linear("aguardando_pagamento", reenvios=5)
+    @pytest.mark.parametrize("etapa", ETAPAS_TECNICAS)
+    def test_a_primeira_compensacao_leva_so_o_ordem_id_e_o_motivo(
+        self, etapa: str
+    ) -> None:
+        # No prazo esgotado a OS ainda nao conhece o recurso do passo em voo (o id
+        # nasce na resposta que apagaria o prazo): nenhum id de recurso vai junto.
+        saga = _saga_linear(etapa, reenvios=5)
 
-        primeira = compensacao_do_esgotamento(
-            saga, marcos_da_ordem(checkout=True), VENCIDO
-        )
+        primeira = compensacao_do_esgotamento(saga, VENCIDO)
 
-        assert primeira == (
-            Comando.ESTORNAR_PAGAMENTO,
-            {
-                "ordem_id": str(saga.id),
-                "motivo": "prazo_tecnico",
-                "pagamento_id": str(PAGAMENTO_ID),
-            },
-        )
+        assert primeira is not None
+        assert primeira[1] == {"ordem_id": str(saga.id), "motivo": "prazo_tecnico"}
 
-    def test_orcamento_em_voo_cancela_o_orcamento_da_os(self) -> None:
+    def test_envio_com_o_id_de_um_recurso_que_a_os_nao_conhece_e_recusado(
+        self,
+    ) -> None:
         saga = _saga_linear("aguardando_orcamento", reenvios=5)
-
-        primeira = compensacao_do_esgotamento(saga, marcos_da_ordem(), VENCIDO)
-
-        assert primeira == (
-            Comando.CANCELAR_ORCAMENTO,
-            {
+        antes = foto_da_saga(saga)
+        com_id = Envio(
+            tipo=Comando.CANCELAR_ORCAMENTO,
+            id=uuid4(),
+            dados={
                 "ordem_id": str(saga.id),
                 "motivo": "prazo_tecnico",
                 "orcamento_id": str(ORCAMENTO_ID),
             },
+            prazo_resposta_em=VENCIDO + PRAZO_S,
         )
+
+        with pytest.raises(TransicaoDaSagaInvalidaError):
+            saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS, envio=com_id)
+
+        assert foto_da_saga(saga) == antes
 
     def test_envio_que_nao_e_a_primeira_compensacao_e_recusado(self) -> None:
         saga = _saga_linear("aguardando_reserva", reenvios=5)
@@ -398,9 +398,7 @@ class TestEsgotarEmEtapaLinear:
         )
 
         with pytest.raises(TransicaoDaSagaInvalidaError):
-            saga.esgotar_prazo(
-                marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS, envio=errado
-            )
+            saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS, envio=errado)
 
         assert foto_da_saga(saga) == antes
 
@@ -409,7 +407,7 @@ class TestEsgotarEmEtapaLinear:
         antes = foto_da_saga(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError):
-            saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
+            saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS)
 
         assert foto_da_saga(saga) == antes
 
@@ -419,10 +417,9 @@ class TestEsgotarEmCompensacao:
         plano = ("LiberarReserva", "CancelarOrcamento", "DescartarDiagnostico")
         saga = _saga_compensando(plano, reenvios=5)
         antes = saga.comando_em_voo
-        marcos = marcos_da_ordem()
 
-        assert compensacao_do_esgotamento(saga, marcos, VENCIDO) is None
-        saga.esgotar_prazo(marcos, agora=VENCIDO, ator=ATOR_PRAZOS)
+        assert compensacao_do_esgotamento(saga, VENCIDO) is None
+        saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS)
 
         assert (saga.etapa, saga.falha, saga.motivo) == (
             E.FALHA_NA_COMPENSACAO,
@@ -456,7 +453,7 @@ class TestEsgotarEmCompensacao:
     def test_na_ultima_compensacao_tambem_para(self) -> None:
         saga = _saga_compensando(("DescartarDiagnostico",), reenvios=5)
 
-        saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
+        saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS)
 
         assert (saga.etapa, saga.plano_compensacao) == (
             E.FALHA_NA_COMPENSACAO,
@@ -469,7 +466,6 @@ class TestEsgotarEmCompensacao:
 
         with pytest.raises(TransicaoDaSagaInvalidaError):
             saga.esgotar_prazo(
-                marcos_da_ordem(),
                 agora=VENCIDO,
                 ator=ATOR_PRAZOS,
                 envio=_reenvio_de(saga),
@@ -487,7 +483,7 @@ class TestEsgotarSemPrazo:
         saga = saga_em(etapa)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="sem prazo"):
-            saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
+            saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS)
 
     def test_prazo_gravado_numa_etapa_que_nao_compensa_e_recusado(self) -> None:
         # Estado que o agregado nao produz (prazo em `em_execucao`): recusa em vez
@@ -505,7 +501,7 @@ class TestEsgotarSemPrazo:
         antes = foto_da_saga(saga)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="em_execucao"):
-            saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
+            saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS)
 
         assert foto_da_saga(saga) == antes
 
@@ -513,15 +509,13 @@ class TestEsgotarSemPrazo:
         saga = _saga_parada(("EstornarPagamento",), falha=REENVIOS_ESGOTADOS)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="sem prazo"):
-            saga.esgotar_prazo(marcos_da_ordem(), agora=VENCIDO, ator=ATOR_PRAZOS)
+            saga.esgotar_prazo(agora=VENCIDO, ator=ATOR_PRAZOS)
 
     def test_instante_que_volta_e_recusado(self) -> None:
         saga = _saga_compensando(("LiberarReserva",), reenvios=5)
 
         with pytest.raises(TransicaoDaSagaInvalidaError, match="instante"):
-            saga.esgotar_prazo(
-                marcos_da_ordem(), agora=AGORA - timedelta(seconds=1), ator="x"
-            )
+            saga.esgotar_prazo(agora=AGORA - timedelta(seconds=1), ator="x")
 
     def test_sem_comando_em_voo_nao_ha_o_que_reenviar(self) -> None:
         with pytest.raises(TransicaoDaSagaInvalidaError, match="sem comando em voo"):
@@ -666,9 +660,7 @@ class TestRetomar:
             agora=depois,
             ator=ATOR_PRAZOS,
         )
-        saga.esgotar_prazo(
-            marcos_da_ordem(), agora=depois + timedelta(seconds=1), ator=ATOR_PRAZOS
-        )
+        saga.esgotar_prazo(agora=depois + timedelta(seconds=1), ator=ATOR_PRAZOS)
         assert (saga.etapa, saga.falha) == (E.FALHA_NA_COMPENSACAO, REENVIOS_ESGOTADOS)
         ids_antes = (saga.comando_em_voo or {}).get("mensagem_ids", [])
         assert len(ids_antes) == 3

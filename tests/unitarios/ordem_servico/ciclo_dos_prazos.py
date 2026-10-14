@@ -56,7 +56,6 @@ class Prazos:
         # do processo esta na frente dele (negativo: atrasado).
         self.adiantamento = timedelta(0)
         self.transacao = TransacaoDosPrazosFake(
-            cenario.ordens,
             cenario.sagas,
             cenario.publicador if na_outbox_do_cenario else None,
             banco=lambda: self.relogio.agora - self.adiantamento,

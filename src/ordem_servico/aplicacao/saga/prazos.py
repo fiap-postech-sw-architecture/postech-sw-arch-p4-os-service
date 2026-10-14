@@ -32,6 +32,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import ANTES_DO_PIVOT
 from src.ordem_servico.aplicacao.saga.transicoes import instante_valido
+from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -39,12 +40,22 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.saga.contexto_de_envio import ComandoParaEnviar
     from src.ordem_servico.aplicacao.saga.leitura_da_saga import LeituraDaSaga
     from src.ordem_servico.aplicacao.saga.modelo import ComandoEmVoo, Envio
-    from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 # O processo que reenvia e esgota os prazos (``ator`` dos registros dele), e a
 # falha da compensacao que ficou sem resposta (RFC-004 secao 4.7).
 ATOR_PRAZOS: Final = "prazos"
 REENVIOS_ESGOTADOS: Final = "reenvios_esgotados"
+
+# O que a OS sabe quando o prazo esgota: nada do recurso do passo em voo, porque
+# o id dele nasce na resposta que apagaria o prazo (o orcamento no
+# ``OrcamentoGerado``, o pagamento no ``PagamentoSolicitado``). A primeira
+# compensacao (``CancelarOrcamento``, ``LiberarReserva``, ``EstornarPagamento`` ou
+# ``CancelarExecucao``, uma por etapa tecnica) leva so ``ordem_id`` e ``motivo``, e
+# o participante acha o recurso pelo ``ordem_id`` (RFC-004 secao 5.3). Por isso o
+# esgotamento nao le a OS.
+SEM_RECURSOS: Final = MarcosDaOrdem(
+    diagnostico_iniciado=False, checkout_aberto=False, encerrada=False
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +167,7 @@ def transicao_do_esgotamento(saga: LeituraDaSaga, agora: datetime) -> Transicao:
 
 
 def compensacao_do_esgotamento(
-    saga: LeituraDaSaga, marcos: MarcosDaOrdem, agora: datetime
+    saga: LeituraDaSaga, agora: datetime
 ) -> ComandoParaEnviar | None:
     """A primeira compensacao do prazo esgotado, pronta para enviar.
 
@@ -167,7 +178,9 @@ def compensacao_do_esgotamento(
     transicao = transicao_do_esgotamento(saga, agora)
     if transicao.comando is None:
         return None
-    dados = dados_da_compensacao(transicao.comando, saga.id, transicao.motivo, marcos)
+    dados = dados_da_compensacao(
+        transicao.comando, saga.id, transicao.motivo, SEM_RECURSOS
+    )
     return transicao.comando, dados
 
 

@@ -211,23 +211,21 @@ class ConsultaDaOrdemEmMemoria:
 
 
 class TransacaoDosPrazosFake(FakeUnitOfWork):
-    """``TransacaoDosPrazos`` sobre os repositorios em memoria e a outbox fake.
+    """``TransacaoDosPrazos`` sobre o repositorio de sagas em memoria e a outbox fake.
 
     Cada ``with`` e uma transacao: ``commits`` conta os commits e ``rollbacks``, os
-    desfeitos (excecao dentro do bloco). O estado das sagas e da OS e o dos fakes,
-    que nao desfazem sozinhos: os testes de rollback conferem a outbox e o commit.
+    desfeitos (excecao dentro do bloco). O estado das sagas e o dos fakes, que nao
+    desfazem sozinhos: os testes de rollback conferem a outbox e o commit.
     """
 
     def __init__(
         self,
-        ordens: RepoEmMemoria,
         sagas: SagasEmMemoria,
         outbox: FakeUnitOfWork | None = None,
         *,
         banco: Callable[[], datetime],
     ) -> None:
         super().__init__()
-        self.ordens = ordens
         self.sagas = sagas
         self._banco = banco
         self.leituras_do_relogio = 0

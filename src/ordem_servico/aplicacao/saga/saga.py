@@ -32,6 +32,7 @@ from src.ordem_servico.aplicacao.saga.mudanca_da_saga import (
     MudancaDaSaga,
 )
 from src.ordem_servico.aplicacao.saga.prazos import (
+    SEM_RECURSOS,
     ComandoReenviadoEvent,
     PrazoEsgotadoEvent,
     conferir_reenvio,
@@ -226,7 +227,6 @@ class Saga(MudancaDaSaga):
 
     def esgotar_prazo(
         self,
-        marcos: MarcosDaOrdem,
         *,
         agora: datetime,
         ator: str,
@@ -245,7 +245,7 @@ class Saga(MudancaDaSaga):
         """
         transicao = transicao_do_esgotamento(self, agora)
         conferir_envio(
-            transicao, envio, ordem_id=self.id, itens=self._itens, marcos=marcos
+            transicao, envio, ordem_id=self.id, itens=self._itens, marcos=SEM_RECURSOS
         )
         conferir_prazo(envio, agora)
         self._registrar_evento(

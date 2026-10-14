@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
-    from src.ordem_servico.dominio.repository import OrdemDeServicoRepository
 
 
 class ClientePort(Protocol):
@@ -152,20 +151,15 @@ class PresencaDoConsumidor(Protocol):
 
 
 class TransacaoDosPrazos(PublicadorDeComandos, Protocol):
-    """Uma transacao do processo ``prazos``: os repositorios, a outbox e o commit.
+    """Uma transacao do processo ``prazos``: a saga, a outbox e o commit.
 
     Aberta e fechada pelo ``with``: o fim sem ``commit`` desfaz a saga, o
     comando e o que mais a transacao gravou.
     """
 
     @property
-    def ordens(self) -> OrdemDeServicoRepository:
-        """Os repositorios da OS sobre a transacao."""
-        pass
-
-    @property
     def sagas(self) -> SagaRepository:
-        """Os repositorios da saga sobre a transacao."""
+        """O repositorio da saga sobre a transacao."""
         pass
 
     def agora_do_banco(self) -> datetime:

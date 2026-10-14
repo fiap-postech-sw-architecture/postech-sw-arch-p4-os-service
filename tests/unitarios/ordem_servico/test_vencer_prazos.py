@@ -403,22 +403,22 @@ class TestIsolamentoDasSagas:
         assert resultado == ResultadoDoCiclo(recusadas=1)
         assert prazos.transacao.commits == 0
 
-    def test_saga_sem_a_os_e_recusada(self) -> None:
+    def test_recusa_do_dominio_leva_o_motivo_ao_log_sem_dado_de_cliente(self) -> None:
         prazos = _em("aguardando_orcamento")
-        prazos.saga._reenvios = MAXIMO
-        prazos.cenario.ordens.ordens.clear()
+        # Sem comando em voo o dominio recusa o reenvio, dizendo a etapa.
+        prazos.saga._comando_em_voo = None
 
         with capture_logs() as logs:
             resultado = prazos.vencer()
 
         assert resultado == ResultadoDoCiclo(recusadas=1)
         assert prazos.comandos == []
-        # O dominio recusa com etapa e tipo, sem dado de cliente: o motivo vai ao log.
         recusa = next(e for e in logs if e["event"] == "saga deadline refused")
         assert (recusa["erro"], recusa["motivo"]) == (
-            "InvarianteDaSagaError",
-            "saga sem a OS dela",
+            "TransicaoDaSagaInvalidaError",
+            "reenvio sem comando em voo na etapa aguardando_orcamento",
         )
+        assert "onde" not in recusa
 
     def test_erro_do_banco_sobe_para_o_laco_do_processo(
         self, monkeypatch: pytest.MonkeyPatch

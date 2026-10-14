@@ -2,8 +2,8 @@
 
 A cada ciclo, uma transacao por saga: reivindica a de prazo vencido mais antiga
 (``SagaRepository.reivindicar_vencida``, que tambem confere que o envio mais
-recente ja saiu da outbox), le a OS, decide, grava conferindo a ``versao`` e
-comita com o comando na outbox. Com o prazo vencido e reenvios restantes, o
+recente ja saiu da outbox), decide, grava conferindo a ``versao`` e comita com
+o comando na outbox. Com o prazo vencido e reenvios restantes, o
 comando sai de novo com id novo (``Saga.reenviar``); esgotados, a etapa linear
 inicia a compensacao por ``prazo_tecnico`` e a compensacao vai a
 ``falha_na_compensacao`` (``Saga.esgotar_prazo``).
@@ -41,7 +41,6 @@ from src.ordem_servico.aplicacao.saga.prazos import (
     comando_a_reenviar,
     compensacao_do_esgotamento,
 )
-from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -254,12 +253,7 @@ class VencerPrazos:
         agora = self._contexto.instante_do_passo(
             saga, tipo=GatilhoDeProcesso.PRAZO_ESGOTADO
         )
-        ordem = transacao.ordens.obter_por_id(saga.ordem_id)
-        if ordem is None:
-            msg = "saga sem a OS dela"
-            raise InvarianteDaSagaError(msg)
-        marcos = MarcosDaOrdem.da_ordem(ordem)
-        primeira = compensacao_do_esgotamento(saga, marcos, agora)
+        primeira = compensacao_do_esgotamento(saga, agora)
         compensacao = (
             self._contexto.enviar(
                 transacao, primeira, correlation_id=saga.ordem_id, agora=agora
@@ -267,7 +261,7 @@ class VencerPrazos:
             if primeira is not None
             else None
         )
-        saga.esgotar_prazo(marcos, agora=agora, ator=ATOR_PRAZOS, envio=compensacao)
+        saga.esgotar_prazo(agora=agora, ator=ATOR_PRAZOS, envio=compensacao)
         parada = saga.etapa is EtapaSaga.FALHA_NA_COMPENSACAO
         (_log.warning if parada else _log.info)(
             "saga deadline exhausted",
