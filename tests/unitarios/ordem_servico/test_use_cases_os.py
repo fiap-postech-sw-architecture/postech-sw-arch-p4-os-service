@@ -59,6 +59,7 @@ from tests.unitarios.fakes import (
     ConsultaAcompanhamentoEspia,
     ConsultaDaOrdemEmMemoria,
     FakeUnitOfWork,
+    NotificacoesEspia,
     RepoDoBanco,
     RepoEmMemoria,
     SagasDoBanco,
@@ -518,9 +519,9 @@ class TestRegistrarEntrega:
         ordem = ordem_em(StatusOrdem.FINALIZADA)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
-        dto = RegistrarEntrega(repo, uow, SagasEmMemoria()).executar(
-            ordem.id, ator=ATOR_ATENDENTE
-        )
+        dto = RegistrarEntrega(
+            repo, uow, SagasEmMemoria(), NotificacoesEspia()
+        ).executar(ordem.id, ator=ATOR_ATENDENTE)
 
         assert uow.committed
         assert dto.status == "entregue"
@@ -538,7 +539,7 @@ class TestRegistrarEntrega:
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
         with pytest.raises(TransicaoStatusInvalidaException):
-            RegistrarEntrega(repo, uow, SagasEmMemoria()).executar(
+            RegistrarEntrega(repo, uow, SagasEmMemoria(), NotificacoesEspia()).executar(
                 ordem.id, ator=ATOR_ATENDENTE
             )
 

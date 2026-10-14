@@ -34,10 +34,12 @@ _BANCO = "os-postgres.pytstop-os.svc.cluster.local:5432/os"
 _API = ("Deployment", "os-service-api", "api")
 _RELAY = ("Deployment", "os-service-relay", "relay")
 _CONSUMIDOR = ("Deployment", "os-service-consumidor", "consumidor")
+_NOTIFICADOR = ("Deployment", "os-service-notificador", "notificador")
 _PRAZOS = ("Deployment", "os-service-prazos", "prazos")
 _ESPERA_DA_API = ("Deployment", "os-service-api", "aguarda-migracao")
 _ESPERA_DO_RELAY = ("Deployment", "os-service-relay", "aguarda-migracao")
 _ESPERA_DO_CONSUMIDOR = ("Deployment", "os-service-consumidor", "aguarda-migracao")
+_ESPERA_DO_NOTIFICADOR = ("Deployment", "os-service-notificador", "aguarda-migracao")
 _ESPERA_DO_PRAZOS = ("Deployment", "os-service-prazos", "aguarda-migracao")
 _BANCO_DO_POD = ("StatefulSet", "os-postgres", "postgres")
 _EXPORTER = ("StatefulSet", "os-postgres", "exporter")
@@ -64,6 +66,10 @@ SEGREDOS_POR_CONTAINER = {
     _CONSUMIDOR: {**_APP, **_RABBITMQ},
     _ESPERA_DO_PRAZOS: _APP,
     _PRAZOS: {**_APP, **_RABBITMQ},
+    # Banco e SMTP, so: sem broker e sem a chave de cifragem (le o contato em
+    # claro, por projecao de duas colunas).
+    _ESPERA_DO_NOTIFICADOR: _APP,
+    _NOTIFICADOR: _APP,
     _BANCO_DO_POD: {
         chave: ("os-postgres", chave)
         for chave in (
@@ -97,10 +103,12 @@ URL_DO_BANCO_POR_CONTAINER = {
     _CONSUMIDOR: _URL_DA_APLICACAO,
     _ESPERA_DO_PRAZOS: _URL_DA_APLICACAO,
     _PRAZOS: _URL_DA_APLICACAO,
+    _ESPERA_DO_NOTIFICADOR: _URL_DA_APLICACAO,
+    _NOTIFICADOR: _URL_DA_APLICACAO,
     _MIGRACAO: _URL_DO_DONO,
 }
 # Os containers que recebem o ConfigMap do servico por inteiro.
-COM_CONFIGMAP = {_API, _RELAY, _CONSUMIDOR, _PRAZOS, _MIGRACAO}
+COM_CONFIGMAP = {_API, _RELAY, _CONSUMIDOR, _PRAZOS, _NOTIFICADOR, _MIGRACAO}
 
 
 def _referencia(nome: str, chave: str) -> str:
@@ -304,7 +312,7 @@ def test_pod_so_declara_volume_de_tipo_que_o_restricted_permite(overlay: str) ->
         if tipos - VOLUMES_DO_RESTRICTED
     }
 
-    assert len(usados) == 6
+    assert len(usados) == 7
     assert fora == {}
 
 
@@ -320,7 +328,7 @@ def test_nenhum_pod_monta_o_token_da_service_account_nem_usa_a_rede_do_no(
         or any(pod.get(campo) for campo in ("hostNetwork", "hostPID", "hostIPC"))
     ]
 
-    assert len(pods_do_servico) == 6
+    assert len(pods_do_servico) == 7
     assert sem_a_regra == []
 
 
@@ -384,6 +392,7 @@ def test_prazo_de_encerramento_cobre_o_que_cada_processo_tem_em_curso(
         "os-service-relay": 45,
         "os-service-consumidor": 45,
         "os-service-prazos": 30,
+        "os-service-notificador": 45,
     }
 
 
@@ -429,13 +438,18 @@ def _alvos(overlay: str, politica: dict[str, Any]) -> set[str]:
     }
 
 
-def _par(item: dict[str, Any]) -> tuple[str, str]:
-    """(namespace, app) de um item ``from`` com os dois seletores no mesmo item."""
+def _par_de(item: dict[str, Any], rotulo: str) -> tuple[str, str]:
+    """(namespace, valor do ``rotulo``) de um item com os dois seletores juntos."""
     assert item.keys() == {"namespaceSelector", "podSelector"}
     return (
         item["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
-        item["podSelector"]["matchLabels"]["app"],
+        item["podSelector"]["matchLabels"][rotulo],
     )
+
+
+def _par(item: dict[str, Any]) -> tuple[str, str]:
+    """(namespace, app) de um item ``from`` com os dois seletores no mesmo item."""
+    return _par_de(item, "app")
 
 
 _KONG = ("pytstop-plataforma", "kong")
@@ -450,10 +464,23 @@ def test_namespace_nega_toda_entrada_e_so_as_politicas_nomeadas_liberam(
         p["metadata"]["name"]: p for p in do_render_por_tipo(overlay, "NetworkPolicy")
     }
 
-    assert set(politicas) == {"nega-entrada", "api", "metricas-dos-processos", "banco"}
+    assert set(politicas) == {
+        "nega-entrada",
+        "api",
+        "metricas-dos-processos",
+        "banco",
+        "notificador-saida",
+    }
     nega = politicas["nega-entrada"]["spec"]
     assert nega == {"podSelector": {}, "policyTypes": ["Ingress"]}
-    assert all(p["spec"]["policyTypes"] == ["Ingress"] for p in politicas.values())
+    # So a entrada e negada por padrao; a saida so e restrita no notificador.
+    assert {nome: p["spec"]["policyTypes"] for nome, p in politicas.items()} == {
+        "nega-entrada": ["Ingress"],
+        "api": ["Ingress"],
+        "metricas-dos-processos": ["Ingress"],
+        "banco": ["Ingress"],
+        "notificador-saida": ["Egress"],
+    }
 
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
@@ -482,7 +509,12 @@ def test_politica_dos_processos_libera_so_o_prometheus_na_porta_das_metricas(
 ) -> None:
     politica = do_render(overlay, "NetworkPolicy", "metricas-dos-processos")
 
-    processos = {"os-service-relay", "os-service-consumidor", "os-service-prazos"}
+    processos = {
+        "os-service-relay",
+        "os-service-consumidor",
+        "os-service-prazos",
+        "os-service-notificador",
+    }
     assert _alvos(overlay, politica) == processos
     (regra,) = politica["spec"]["ingress"]
     assert [_par(item) for item in regra["from"]] == [_PROMETHEUS]
@@ -508,6 +540,63 @@ def test_politica_do_banco_libera_o_namespace_no_5432_e_so_o_prometheus_no_expor
     assert [_par(item) for item in metricas["from"]] == [_PROMETHEUS]
     assert metricas["ports"] == [{"port": 9187, "protocol": "TCP"}]
     assert {5432, 9187} <= _portas_dos_workloads(overlay)["os-postgres"]
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_politica_do_notificador_fecha_a_saida_no_dns_no_banco_e_no_mailpit(
+    overlay: str,
+) -> None:
+    politica = do_render(overlay, "NetworkPolicy", "notificador-saida")
+
+    assert _alvos(overlay, politica) == {"os-service-notificador"}
+    dns, banco, smtp = politica["spec"]["egress"]
+    # Namespace e pod no mesmo item (E): em itens separados seria OU, e qualquer
+    # pod do kube-system, ou qualquer pod chamado mailpit, passaria.
+    assert [_par_de(item, "k8s-app") for item in dns["to"]] == [
+        ("kube-system", "kube-dns")
+    ]
+    assert dns["ports"] == [
+        {"port": 53, "protocol": "UDP"},
+        {"port": 53, "protocol": "TCP"},
+    ]
+    # O banco e dos pods do proprio namespace, sem namespaceSelector (que de {}
+    # liberaria qualquer namespace).
+    assert banco == {
+        "to": [{"podSelector": {"matchLabels": {"app": "os-postgres"}}}],
+        "ports": [{"port": 5432, "protocol": "TCP"}],
+    }
+    assert [_par(item) for item in smtp["to"]] == [("pytstop-plataforma", "mailpit")]
+    assert smtp["ports"] == [{"port": 1025, "protocol": "TCP"}]
+    # Nem o broker (RabbitMQ) nem o Jaeger: o notificador nao os usa.
+    assert len(politica["spec"]["egress"]) == 3
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_so_o_notificador_tem_politica_de_saida_e_o_prazos_fica_sem(
+    overlay: str,
+) -> None:
+    # O prazos so alcanca o PostgreSQL do namespace e o RabbitMQ da plataforma, dois
+    # destinos fixos; o criterio da saida restrita e ter destino de terceiro
+    # configuravel (o SMTP do notificador).
+    com_saida = {
+        nome
+        for politica in do_render_por_tipo(overlay, "NetworkPolicy")
+        if "Egress" in politica["spec"]["policyTypes"]
+        for nome in _alvos(overlay, politica)
+    }
+
+    assert com_saida == {"os-service-notificador"}
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_smtp_do_servico_e_o_mailpit_da_plataforma_na_1025(overlay: str) -> None:
+    configuracao = _configmap_do_servico(overlay)
+
+    assert configuracao["SMTP_HOST"] == "mailpit.pytstop-plataforma.svc.cluster.local"
+    assert configuracao["SMTP_PORT"] == "1025"
+    assert configuracao["SMTP_FROM"] == "oficina@pytstop.local"
+    # Sem credencial: o Mailpit da demonstracao nao pede, e nenhum Secret de SMTP.
+    assert not [chave for chave in configuracao if "SMTP" in chave and "SENHA" in chave]
 
 
 # O CIDR de pods de cada cluster: o Kong chega a API com o IP de um pod dele, e

@@ -18,6 +18,7 @@ import pytest
 import structlog
 from prometheus_client import REGISTRY, generate_latest
 from sqlalchemy import event, text
+from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
 
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaPermanenteError
@@ -46,6 +47,7 @@ from tests.eventos import envelope_de_evento
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
 from tests.integracao.seed_helpers import (
     criar_cliente_com_veiculo,
+    notificacoes_recusando_no_commit,
     outbox_recusando_no_commit,
 )
 from tests.rastreamento import traceparent
@@ -493,9 +495,9 @@ def test_commit_recusado_depois_das_escritas_desfaz_os_saga_comando_e_registro(
         escritas.append(sql.split("(")[0].split(" SET ")[0].strip())
 
     # O PagamentoConfirmado muda a OS (status, resumo, historico), a saga
-    # (etapa, passo, comando em voo) e grava o AgendarExecucao; o trigger
-    # deferido so falha no COMMIT, depois de tudo isso. Tentativa apos
-    # tentativa, a transacao inteira cai, ate a DLQ.
+    # (etapa, passo, comando em voo), grava o AgendarExecucao e o pedido de
+    # e-mail da nova situacao; o trigger deferido so falha no COMMIT, depois de
+    # tudo isso. Tentativa apos tentativa, a transacao inteira cai, ate a DLQ.
     with outbox_recusando_no_commit(engine):
         event.listen(engine, "before_cursor_execute", registrar)
         try:
@@ -506,12 +508,13 @@ def test_commit_recusado_depois_das_escritas_desfaz_os_saga_comando_e_registro(
         finally:
             event.remove(engine, "before_cursor_execute", registrar)
 
-    # A falha veio depois das escritas pendentes de OS, saga e outbox.
+    # A falha veio depois das escritas pendentes de OS, saga, outbox e e-mail.
     assert {
         "UPDATE ordens_de_servico",
         "INSERT INTO historico_status_ordem",
         "UPDATE sagas",
         "INSERT INTO outbox",
+        "INSERT INTO notificacoes",
     } <= set(escritas)
     assert _estado(engine, ordem_id) == antes
     with engine.connect() as conexao:
@@ -522,8 +525,41 @@ def test_commit_recusado_depois_das_escritas_desfaz_os_saga_comando_e_registro(
     assert registrada == 0
 
 
+def test_entrega_com_commit_recusado_deixa_a_os_finalizada_e_sem_pedido_de_email(
+    atendimento: Atendimento,
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+) -> None:
+    ordem_id = atendimento.abrir()
+    atendimento.ate_aguardando_agendamento()
+    atendimento.responder("AgendarExecucao", "ExecucaoAgendada")
+    atendimento.esperar_passo("ExecucaoAgendada")
+    atendimento.responder("AgendarExecucao", "ExecucaoIniciada")
+    atendimento.esperar_passo("ExecucaoIniciada")
+    atendimento.responder("AgendarExecucao", "ExecucaoFinalizada")
+    esperar_ate(lambda: atendimento.etapa() == "concluida")
+    antes = _estado(engine, ordem_id)
+
+    # O trigger deferido recusa o pedido de e-mail no COMMIT, depois de a OS ter
+    # mudado para `entregue`: so a transacao unica desfaz as duas escritas.
+    with (
+        notificacoes_recusando_no_commit(engine),
+        session_factory() as sess,
+        pytest.raises(DBAPIError, match="notificacoes indisponivel"),
+    ):
+        obter_registrar_entrega(sess).executar(ordem_id, ator=_ATENDENTE)
+
+    assert _estado(engine, ordem_id) == antes
+    with engine.connect() as conexao:
+        status = conexao.execute(
+            text("SELECT status FROM ordens_de_servico WHERE id = :id"),
+            {"id": ordem_id},
+        ).scalar_one()
+    assert status == "finalizada"
+
+
 def _estado(engine: Engine, ordem_id: UUID) -> tuple[object, ...]:
-    """OS, historico, saga e comandos da outbox, lidos do banco."""
+    """OS, historico, saga, comandos da outbox e pedidos de e-mail, do banco."""
     with engine.connect() as conexao:
         os_ = conexao.execute(
             text(
@@ -546,7 +582,20 @@ def _estado(engine: Engine, ordem_id: UUID) -> tuple[object, ...]:
         comandos = conexao.execute(
             text("SELECT envelope ->> 'tipo' FROM outbox ORDER BY id")
         ).scalars()
-        return (tuple(os_), historico, tuple(saga), tuple(comandos))
+        emails = conexao.execute(
+            text(
+                "SELECT modelo, status_da_ordem FROM notificacoes "
+                "WHERE ordem_id = :id ORDER BY id"
+            ),
+            {"id": ordem_id},
+        ).all()
+        return (
+            tuple(os_),
+            historico,
+            tuple(saga),
+            tuple(comandos),
+            tuple(tuple(email) for email in emails),
+        )
 
 
 @pytest.mark.parametrize(

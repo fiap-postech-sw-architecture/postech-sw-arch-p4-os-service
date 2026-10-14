@@ -27,6 +27,7 @@ _TMP_DO_CONTAINER = Path("/tmp")  # noqa: S108  # o /tmp do pod, nao deste proce
 IDADE_MAXIMA = {
     "relay": IDADE_MAXIMA_DO_HEARTBEAT_S,
     "consumidor": IDADE_MAXIMA_DO_HEARTBEAT_S,
+    "notificador": IDADE_MAXIMA_DO_HEARTBEAT_S,
     "prazos": IDADE_MAXIMA_DO_HEARTBEAT_DOS_PRAZOS_S,
 }
 
@@ -34,14 +35,14 @@ IDADE_MAXIMA = {
 def test_aguarda_migracao_e_o_mesmo_nos_deployments_do_servico() -> None:
     especificacoes = [
         container(objeto("Deployment", f"os-service-{processo}"), "aguarda-migracao")
-        for processo in ("api", "relay", "consumidor", "prazos")
+        for processo in ("api", "relay", "consumidor", "notificador", "prazos")
     ]
 
-    assert especificacoes[1:] == [especificacoes[0]] * 3
+    assert especificacoes[1:] == [especificacoes[0]] * 4
     assert especificacoes[0]["command"] == ["python", "-m", "src.banco", "aguardar"]
 
 
-@pytest.mark.parametrize("processo", ["relay", "consumidor", "prazos"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador", "prazos"])
 def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None:
     sinal = Sinalizador(processo, _TMP_DO_CONTAINER)
     principal = container(objeto("Deployment", f"os-service-{processo}"), processo)
@@ -58,7 +59,7 @@ def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None
     ]
 
 
-@pytest.mark.parametrize("processo", ["relay", "consumidor", "prazos"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador", "prazos"])
 def test_startup_do_processo_e_a_liveness(processo: str) -> None:
     # Broker fora no boot nao reinicia o pod (o pronto so existe com a conexao):
     # a startup olha a idade do heartbeat, como a liveness, e nao o pronto.
@@ -75,7 +76,7 @@ def _vida(codigo: str) -> int:
 
 
 @pytest.mark.parametrize("sonda", ["startupProbe", "livenessProbe"])
-@pytest.mark.parametrize("processo", ["relay", "consumidor", "prazos"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador", "prazos"])
 @pytest.mark.parametrize(
     ("idade_do", "viva"),
     [

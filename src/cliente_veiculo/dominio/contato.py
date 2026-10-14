@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from src.compartilhado.dominio.value_object import ValueObject
 
 _TAMANHO_MAXIMO = 255
+# Marcador que o apagamento LGPD grava no lugar do contato: tem forma de e-mail,
+# entao quem envia e-mail precisa conhece-lo para nao escrever para ele.
+CONTATO_ANONIMIZADO: Final = "anonimizado@anonimizado.local"
 
 
 @dataclass(frozen=True, slots=True)

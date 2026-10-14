@@ -46,6 +46,7 @@ from tests.unitarios.fakes import (
     ConsultaAcompanhamentoEspia,
     ConsultaDaOrdemEmMemoria,
     FakeUnitOfWork,
+    NotificacoesEspia,
     RepoDoBanco,
     RepoEmMemoria,
     SagasDoBanco,
@@ -88,7 +89,9 @@ def client_como(
         "obter_cancelar_ordem": CancelarOrdem(
             repo, FakeUnitOfWork(), sagas, ContextoDeEnvio(timedelta(seconds=120))
         ),
-        "obter_registrar_entrega": RegistrarEntrega(repo, FakeUnitOfWork(), sagas),
+        "obter_registrar_entrega": RegistrarEntrega(
+            repo, FakeUnitOfWork(), sagas, NotificacoesEspia()
+        ),
         "obter_retomar_compensacao": RetomarCompensacao(
             FakeUnitOfWork(), sagas, ContextoDeEnvio(timedelta(seconds=120))
         ),

@@ -38,7 +38,9 @@ def iniciar_todos_mapeamentos() -> None:
     iniciar_os()
     iniciar_auth()
 
-    # Tabelas Core da outbox: sem agregado mapeado, o import as registra.
-    import src.compartilhado.infraestrutura.outbox_mapping  # noqa: F401
+    # Tabelas Core da outbox e das notificacoes: sem agregado mapeado, o import
+    # as registra.
+    import src.compartilhado.infraestrutura.outbox_mapping
+    import src.ordem_servico.infraestrutura.notificacoes_mapping  # noqa: F401
 
     _mapeamentos_registrados = True

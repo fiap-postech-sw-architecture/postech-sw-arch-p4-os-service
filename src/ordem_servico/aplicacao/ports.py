@@ -20,7 +20,12 @@ if TYPE_CHECKING:
 
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
-    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
+    from src.ordem_servico.aplicacao.dtos import (
+        AcompanhamentoDTO,
+        ContatoDoCliente,
+        RetratoDoVeiculo,
+    )
+    from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -40,6 +45,15 @@ class ClientePort(Protocol):
 
         ``None`` se o veiculo nao existe ou e de outro cliente (casos que a
         abertura nao distingue).
+        """
+        pass
+
+    def obter_contato(self, cliente_id: UUID) -> ContatoDoCliente | None:
+        """Nome e contato do cliente, por projecao das colunas, sem o agregado.
+
+        Nao carrega o ``Cliente`` nem decifra o ``documento``: o processo do
+        e-mail nao recebe a chave de cifragem (ADR-042). ``None`` se o cliente
+        nao existe ou foi anonimizado (o contato virou marcador).
         """
         pass
 
@@ -113,5 +127,39 @@ class PresencaDoConsumidor(Protocol):
 
         Nos dois casos o ``prazos`` nao reenvia nem esgota prazo no ciclo
         (RFC-004 secao 4.6): quem acusa a demora e o alerta de saga parada.
+        """
+        pass
+
+
+class PublicadorDeNotificacoes(Protocol):
+    """Grava o pedido de e-mail na transacao em curso, sem comita-la.
+
+    Ao lado do ``publicar_comando``: a linha entra no commit da transicao (o
+    consumidor, com ``mensagens_processadas``; a API, com a UoW) e o processo
+    ``notificador`` a entrega depois (RFC-004 secao 7.2).
+    """
+
+    def registrar(self, notificacao: Notificacao) -> None:
+        """Grava o pedido; o commit e de quem chama."""
+        pass
+
+
+class FalhaEnvioEmailError(Exception):
+    """O servidor SMTP nao aceitou o e-mail (conexao, prazo ou protocolo).
+
+    A mensagem da excecao de origem pode trazer o endereco do destinatario:
+    quem a trata registra so o nome da classe.
+    """
+
+
+class EmailPort(Protocol):
+    """Envio de um e-mail de texto (SMTP; Mailpit na demonstracao)."""
+
+    def enviar(self, destinatario: str, assunto: str, corpo: str) -> None:
+        """Entrega o e-mail ao servidor SMTP.
+
+        Raises:
+            FalhaEnvioEmailError: o servidor nao aceitou a mensagem (conexao,
+                prazo ou protocolo); a linha conta uma tentativa.
         """
         pass

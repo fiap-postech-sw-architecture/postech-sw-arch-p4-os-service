@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from src.compartilhado.dominio.value_object import ValueObject
 
 if TYPE_CHECKING:
     from uuid import UUID
+
+# O prefixo do tombstone gravado na coluna ``placa`` do veiculo anonimizado. Um
+# lugar so: quem grava o tombstone (o erasure e o mapeamento do ORM) e quem
+# decide o que ainda guarda a placa original (a consulta dos veiculos a avisar a
+# Execucao) tem de concordar nele.
+PREFIXO_DO_TOMBSTONE: Final = "ANONIMIZADO:"
+
+
+def tombstone_da_placa(veiculo_id: UUID) -> str:
+    """O texto da coluna ``placa`` do veiculo anonimizado: unico por veiculo."""
+    return f"{PREFIXO_DO_TOMBSTONE}{veiculo_id}"
 
 
 @dataclass(frozen=True, slots=True)

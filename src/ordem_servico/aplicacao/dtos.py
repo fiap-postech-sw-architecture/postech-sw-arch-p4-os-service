@@ -43,6 +43,18 @@ class RetratoDoVeiculo:
 
 
 @dataclass(frozen=True, slots=True)
+class ContatoDoCliente:
+    """Nome e contato do cliente, so para o e-mail da notificacao.
+
+    O ``contato`` e o campo livre do cadastro (telefone, e-mail ou os dois):
+    ``emails`` extrai o endereco. Dado pessoal: fora do repr.
+    """
+
+    nome: str = field(repr=False)
+    contato: str = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
 class MudancaDeStatusDTO:
     """Linha da linha do tempo de status (``de`` e ``None`` na abertura)."""
 

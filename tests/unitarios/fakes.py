@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
     from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO
+    from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
@@ -260,3 +261,13 @@ class PresencaFake:
     def ha_consumidor(self) -> bool:
         self.consultas += 1
         return self.ha
+
+
+class NotificacoesEspia:
+    """``PublicadorDeNotificacoes`` que guarda os pedidos, na ordem em que saem."""
+
+    def __init__(self) -> None:
+        self.registradas: list[Notificacao] = []
+
+    def registrar(self, notificacao: Notificacao) -> None:
+        self.registradas.append(notificacao)

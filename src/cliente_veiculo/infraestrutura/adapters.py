@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import case, exists, select, update
+from sqlalchemy import case, exists, select, text, update
 
 from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS
 from src.ordem_servico.infraestrutura.mapping import (
@@ -18,6 +18,19 @@ if TYPE_CHECKING:
 
 # Mesmo sentinela do erasure de clientes e veiculos (repository.py).
 _ANONIMIZADO = "ANONIMIZADO"
+# Na outbox a placa tem de continuar valida no schema do ``SolicitarDiagnostico``
+# (``^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$``): a linha pendente ainda sera publicada, e
+# o relay confere o envelope antes. Um marcador fora do padrao a mataria como
+# ``dead``. A descricao e texto livre e aceita qualquer marcador.
+PLACA_NA_OUTBOX = "AAA0A00"
+DESCRICAO_NA_OUTBOX = "[removido]"
+_SQL_ANONIMIZAR_OUTBOX = text(
+    "UPDATE outbox SET envelope = jsonb_set(jsonb_set(envelope, "
+    "'{dados,veiculo,placa}', to_jsonb(CAST(:placa AS text))), "
+    "'{dados,descricao_problema}', to_jsonb(CAST(:descricao AS text))) "
+    "WHERE envelope ->> 'tipo' = 'SolicitarDiagnostico' AND correlation_id IN "
+    "(SELECT id FROM ordens_de_servico WHERE cliente_id = :cliente_id)"
+)
 
 
 class OrdemDeServicoSQLAlchemyAdapter:
@@ -87,4 +100,20 @@ class OrdemDeServicoSQLAlchemyAdapter:
                 ),
             )
             .values(motivo=_ANONIMIZADO)
+        )
+
+    def anonimizar_comandos_do_cliente_na_outbox(self, cliente_id: UUID) -> None:
+        """Placa e descricao do ``SolicitarDiagnostico`` das OS do cliente (LGPD).
+
+        As linhas saem pelo ``correlation_id``, que e o id da OS, em qualquer
+        estado (pendente, entregue, ``dead``): marca e modelo do veiculo nao
+        identificam o titular e ficam. O relay segue validando o envelope.
+        """
+        self._session.execute(
+            _SQL_ANONIMIZAR_OUTBOX,
+            {
+                "placa": PLACA_NA_OUTBOX,
+                "descricao": DESCRICAO_NA_OUTBOX,
+                "cliente_id": cliente_id,
+            },
         )

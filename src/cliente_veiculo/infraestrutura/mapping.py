@@ -18,7 +18,10 @@ from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
 from src.cliente_veiculo.dominio.contato import Contato
 from src.cliente_veiculo.dominio.documento_anonimizado import DocumentoAnonimizado
-from src.cliente_veiculo.dominio.placa_anonimizada import PlacaAnonimizada
+from src.cliente_veiculo.dominio.placa_anonimizada import (
+    PlacaAnonimizada,
+    tombstone_da_placa,
+)
 from src.cliente_veiculo.dominio.veiculo import Veiculo
 from src.compartilhado.dominio.cnpj import CNPJ
 from src.compartilhado.dominio.cpf import CPF
@@ -202,7 +205,7 @@ def iniciar_mapeamentos() -> None:  # noqa: C901  # mapeamento declarativo coeso
         # PlacaAnonimizada serializa para o tombstone unico (preserva o UNIQUE se
         # um veiculo anonimizado for re-salvo via ORM); Placa real -> ``.valor``.
         target._placa_valor = (
-            f"ANONIMIZADO:{target.id}"
+            tombstone_da_placa(target.id)
             if isinstance(placa, PlacaAnonimizada)
             else placa.valor
         )
