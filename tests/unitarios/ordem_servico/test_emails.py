@@ -163,40 +163,36 @@ def test_o_repr_do_e_mail_nao_mostra_destinatario_nem_corpo() -> None:
     assert "Segredo" not in repr(email)
 
 
-def _sem_resumo_do_pagamento() -> object:
-    return ordem_em(_S.AGUARDANDO_APROVACAO)
-
-
 @pytest.mark.parametrize(
-    ("modelo", "ordem", "contato", "motivo"),
+    ("modelo", "status_da_ordem", "contato", "motivo"),
     [
         pytest.param(
             _M.SITUACAO, None, "maria@cliente.com", "ordem_inexistente", id="sem-ordem"
         ),
         pytest.param(
             _M.SITUACAO,
-            ordem_em(_S.EM_DIAGNOSTICO),
+            _S.EM_DIAGNOSTICO,
             None,
             "cliente_sem_contato",
             id="cliente-anonimizado",
         ),
         pytest.param(
             _M.SITUACAO,
-            ordem_em(_S.EM_DIAGNOSTICO),
+            _S.EM_DIAGNOSTICO,
             "(11) 99999-0000",
             "contato_sem_email",
             id="contato-sem-email",
         ),
         pytest.param(
             _M.PAGAMENTO,
-            ordem_em(_S.AGUARDANDO_APROVACAO),
+            _S.AGUARDANDO_APROVACAO,
             "maria@cliente.com",
             "sem_dados_do_modelo",
             id="sem-checkout",
         ),
         pytest.param(
             _M.ORCAMENTO,
-            ordem_em(_S.EM_DIAGNOSTICO),
+            _S.EM_DIAGNOSTICO,
             "maria@cliente.com",
             "sem_dados_do_modelo",
             id="sem-orcamento",
@@ -205,10 +201,12 @@ def _sem_resumo_do_pagamento() -> object:
 )
 def test_sem_o_que_entregar_devolve_nada_e_avisa_sem_dado_pessoal(
     modelo: ModeloDeNotificacao,
-    ordem,
+    status_da_ordem: StatusOrdem | None,
     contato: str | None,
-    motivo: str,  # type: ignore[no-untyped-def]
+    motivo: str,
 ) -> None:
+    # A OS nasce no teste: o agregado so existe depois do mapeamento do SQLAlchemy.
+    ordem = None if status_da_ordem is None else ordem_em(status_da_ordem)
     ordem_id = uuid4() if ordem is None else ordem.id
     repo = RepoEmMemoria() if ordem is None else RepoEmMemoria(ordem)
     clientes = _Clientes(
