@@ -11,7 +11,7 @@ espelhando o contrato da ``SQLAlchemyUnitOfWork`` real). Quem nao afere
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -20,7 +20,7 @@ from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
     from types import TracebackType
 
     from src.compartilhado.dominio.documento import Documento
@@ -171,6 +171,23 @@ class SagasEmMemoria:
         self.sagas[saga.ordem_id] = saga
         self.salvas.append(saga)
 
+    def reivindicar_vencida(
+        self, agora: datetime, prazo: timedelta, *, ignorar: Collection[UUID] = ()
+    ) -> Saga | None:
+        """A de prazo mais antigo ja vencido, sem as ``ignorar``.
+
+        A guarda da outbox (envio entregue ha ``prazo``) e do SQL real e tem os
+        testes dela no PostgreSQL; aqui o envio conta como entregue.
+        """
+        vencidas = [
+            s
+            for s in self.sagas.values()
+            if s.prazo_resposta_em is not None
+            and s.prazo_resposta_em <= agora
+            and s.ordem_id not in ignorar
+        ]
+        return min(vencidas, key=lambda s: s.prazo_resposta_em or agora, default=None)
+
 
 class SagasDoBanco(SagasEmMemoria):
     """Cada leitura traz a saga do banco, sem as mudancas da tentativa desfeita."""
@@ -189,3 +206,47 @@ class ConsultaDaOrdemEmMemoria:
     def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
         ordem = self._ordens.obter_por_id(ordem_id)
         return None if ordem is None else (ordem, self._sagas.obter(ordem_id))
+
+
+class TransacaoDosPrazosFake(FakeUnitOfWork):
+    """``TransacaoDosPrazos`` sobre os repositorios em memoria e a outbox fake.
+
+    Cada ``with`` e uma transacao: ``commits`` conta os commits e ``rollbacks``, os
+    desfeitos (excecao dentro do bloco). O estado das sagas e da OS e o dos fakes,
+    que nao desfazem sozinhos: os testes de rollback conferem a outbox e o commit.
+    """
+
+    def __init__(self, ordens: RepoEmMemoria, sagas: SagasEmMemoria) -> None:
+        super().__init__()
+        self.ordens = ordens
+        self.sagas = sagas
+        self.commits = 0
+        self.rollbacks = 0
+
+    def __enter__(self) -> TransacaoDosPrazosFake:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not None:
+            self.rollbacks += 1
+
+    def commit(self) -> None:
+        super().commit()
+        self.commits += 1
+
+
+class PresencaFake:
+    """``PresencaDoConsumidor`` com a resposta que o teste escolhe."""
+
+    def __init__(self, *, ha_consumidor: bool = True) -> None:
+        self.ha = ha_consumidor
+        self.consultas = 0
+
+    def ha_consumidor(self) -> bool:
+        self.consultas += 1
+        return self.ha

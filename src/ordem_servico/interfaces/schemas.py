@@ -217,6 +217,13 @@ class PassoDaSagaResponse(BaseModel):
     posicao_na_fila: int | None = Field(
         default=None, description="So no ExecucaoAgendada: a posicao informada."
     )
+    reenvio: int | None = Field(
+        default=None,
+        description=(
+            "So no registro `reenvio`: o numero do reenvio por prazo, de 1 ao "
+            "maximo (`SAGA_MAX_REENVIOS`)."
+        ),
+    )
 
 
 class HistoricoResponse(BaseModel):

@@ -4,7 +4,8 @@ Cada classe expoe ``executar(...)``: compoe repositorio, ``UnitOfWork`` e
 ports; as regras ficam no agregado. A abertura inicia a saga e grava o
 ``SolicitarDiagnostico`` na outbox com ``UnitOfWork.publicar_comando``, no
 mesmo commit da OS, e o cancelamento a leva a compensar, com a primeira
-compensacao no mesmo commit; os passos seguintes sao do ``OrquestradorDaSaga``.
+compensacao no mesmo commit; a retomada reenvia a compensacao parada; os passos
+seguintes sao do ``OrquestradorDaSaga``, e os prazos, do ``VencerPrazos``.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     GatilhoDeProcesso,
     SagaNaoEncontradaException,
 )
+from src.ordem_servico.aplicacao.saga.prazos import comando_a_reenviar
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
     ANTES_DO_PIVOT,
@@ -249,6 +251,29 @@ class ObterOrdem:
         return _ordem_dto(*lida)
 
 
+def _saga_dto(saga: Saga) -> SagaDTO:
+    """Projeta a saga para o ``SagaDTO`` da operacao (RFC-004 secoes 4.7 e 6.1)."""
+    em_voo = saga.comando_em_voo
+    return SagaDTO(
+        ordem_id=saga.ordem_id,
+        etapa=saga.etapa.value,
+        motivo=saga.motivo,
+        falha=saga.falha,
+        plano_compensacao=saga.plano_compensacao,
+        comando_em_voo=(
+            ComandoEmVooDTO(
+                tipo=em_voo["tipo"],
+                enviado_em=datetime.fromisoformat(em_voo["enviado_em"]),
+            )
+            if em_voo is not None
+            else None
+        ),
+        reenvios=saga.reenvios,
+        prazo_resposta_em=saga.prazo_resposta_em,
+        passos=saga.passos,
+    )
+
+
 class ObterSaga:
     """Estado da saga de uma ordem, para a operacao (RFC-004 secao 4.7)."""
 
@@ -260,25 +285,7 @@ class ObterSaga:
         saga = self._sagas.obter(ordem_id)
         if saga is None:
             raise SagaNaoEncontradaException(ordem_id)
-        em_voo = saga.comando_em_voo
-        return SagaDTO(
-            ordem_id=saga.ordem_id,
-            etapa=saga.etapa.value,
-            motivo=saga.motivo,
-            falha=saga.falha,
-            plano_compensacao=saga.plano_compensacao,
-            comando_em_voo=(
-                ComandoEmVooDTO(
-                    tipo=em_voo["tipo"],
-                    enviado_em=datetime.fromisoformat(em_voo["enviado_em"]),
-                )
-                if em_voo is not None
-                else None
-            ),
-            reenvios=saga.reenvios,
-            prazo_resposta_em=saga.prazo_resposta_em,
-            passos=saga.passos,
-        )
+        return _saga_dto(saga)
 
 
 # Respostas do cancelamento recusado (RFC-004 secao 6.1).
@@ -415,6 +422,83 @@ class CancelarOrdem:
             self._uow, primeira, correlation_id=ordem.id, agora=agora
         )
         saga.solicitar_cancelamento(marcos, agora=agora, ator=ator, envio=envio)
+
+
+# Resposta da retomada fora de falha_na_compensacao (RFC-004 secao 6.1).
+RETOMADA_RECUSADA: Final = "Retomada recusada: a saga não está em falha na compensação"
+
+
+class RetomarCompensacao:
+    """Retomada da compensacao parada, pela operacao (RFC-004 secoes 4.7 e 6.1).
+
+    Em ``falha_na_compensacao`` reenvia a compensacao pendente (o comando em voo,
+    com os mesmos ``dados``) com id novo, prazo novo e contador zerado, e a saga
+    volta a ``compensando``. Os ids dos envios anteriores ficam: a resposta
+    tardia ao original ainda casa. Em outra etapa, 409.
+    """
+
+    def __init__(
+        self, uow: UnitOfWork, sagas: SagaRepository, contexto: ContextoDeEnvio
+    ) -> None:
+        self._uow = uow
+        self._sagas = sagas
+        self._contexto = contexto
+
+    def executar(self, ordem_id: UUID, *, ator: str) -> SagaDTO:
+        """Retoma a compensacao; ``ator`` e o sub do JWT do admin.
+
+        Todo desfecho vai para a trilha de auditoria com o ``ator`` e o
+        ``correlation_id`` (a ordem), como o cancelamento (ADR-039).
+
+        Raises:
+            SagaNaoEncontradaException: OS sem saga (404).
+            TransicaoStatusInvalidaException: saga fora de
+                ``falha_na_compensacao`` (409).
+            ConflitoDeConcorrenciaException: o consumidor gravou a saga no meio
+                (409; o operador repete o pedido).
+        """
+        try:
+            dto = self._retomar(ordem_id, ator)
+        except DomainException as exc:
+            _log.warning(
+                "saga resume refused",
+                correlation_id=str(ordem_id),
+                ator=ator,
+                resultado=exc.codigo,
+            )
+            raise
+        _log.info(
+            "saga resumed",
+            correlation_id=str(ordem_id),
+            ator=ator,
+            etapa=dto.etapa,
+            comando=dto.comando_em_voo.tipo if dto.comando_em_voo else None,
+        )
+        return dto
+
+    def _retomar(self, ordem_id: UUID, ator: str) -> SagaDTO:
+        with self._uow:
+            saga = self._sagas.obter(ordem_id)
+            if saga is None:
+                raise SagaNaoEncontradaException(ordem_id)
+            if saga.etapa is not EtapaSaga.FALHA_NA_COMPENSACAO:
+                raise TransicaoStatusInvalidaException(mensagem=RETOMADA_RECUSADA)
+            # O comando e o contexto que a saga passa a guardar nascem no span da
+            # retomada, filho do trace dela, com link para a requisicao.
+            with self._contexto.span("saga retomada", saga.traceparent):
+                agora = self._contexto.instante_do_passo(
+                    saga, tipo=GatilhoDeProcesso.RETOMADA
+                )
+                envio = self._contexto.enviar(
+                    self._uow,
+                    comando_a_reenviar(saga),
+                    correlation_id=saga.ordem_id,
+                    agora=agora,
+                )
+                saga.retomar(envio, agora=agora, ator=ator)
+                self._sagas.salvar(saga)
+                self._uow.commit()
+        return _saga_dto(saga)
 
 
 class RegistrarEntrega:
