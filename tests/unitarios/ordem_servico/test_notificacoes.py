@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.ordem_servico.aplicacao.notificacoes import (
+    EVENTO_DO_CHECKOUT,
     MODELO_DO_STATUS,
     ModeloDeNotificacao,
     Notificacao,
@@ -104,9 +106,27 @@ def test_o_checkout_aberto_pede_o_e_mail_de_pagamento_sem_mudar_o_status() -> No
     espia = NotificacoesEspia()
 
     registrar_transicao(
-        espia, ordem, status_antes=_S.AGUARDANDO_PAGAMENTO, abriu_o_checkout=True
+        espia, ordem, status_antes=_S.AGUARDANDO_PAGAMENTO, evento=EVENTO_DO_CHECKOUT
     )
 
     assert espia.registradas == [
         Notificacao(ordem.id, _M.PAGAMENTO, _S.AGUARDANDO_PAGAMENTO)
     ]
+
+
+def test_o_fato_do_checkout_e_um_evento_que_o_os_consome() -> None:
+    assert EVENTO_DO_CHECKOUT in catalogo().consumidos
+
+
+def test_outro_evento_sem_mudar_o_status_nao_pede_e_mail() -> None:
+    ordem = ordem_em(_S.AGUARDANDO_PAGAMENTO)
+    espia = NotificacoesEspia()
+
+    registrar_transicao(
+        espia,
+        ordem,
+        status_antes=_S.AGUARDANDO_PAGAMENTO,
+        evento="PagamentoEstornado",
+    )
+
+    assert espia.registradas == []

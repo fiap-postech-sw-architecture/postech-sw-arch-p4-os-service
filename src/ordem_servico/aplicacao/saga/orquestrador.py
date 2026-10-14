@@ -147,7 +147,7 @@ class OrquestradorDaSaga:
             self._notificacoes,
             ordem,
             status_antes=status_antes,
-            abriu_o_checkout=evento.tipo == "PagamentoSolicitado",
+            evento=evento.tipo,
             motivo=saga.motivo,
         )
         # A saga parada na compensacao pede atencao (alerta "Saga parada"): aviso,

@@ -53,6 +53,11 @@ class Notificacao:
 
 _M = ModeloDeNotificacao
 
+# O unico fato que pede e-mail sem mudar o status da OS: o Billing informa o link
+# do checkout. E aqui que se decide qual fato pede e-mail; quem chama so diz o
+# tipo do evento que tratou.
+EVENTO_DO_CHECKOUT: Final = "PagamentoSolicitado"
+
 # O modelo do e-mail de cada status em que a OS entra; ``None`` = sem e-mail.
 # Todo status esta aqui (o teste confere): um status novo pede a decisao.
 MODELO_DO_STATUS: Final[Mapping[StatusOrdem, ModeloDeNotificacao | None]] = (
@@ -77,16 +82,17 @@ def registrar_transicao(
     ordem: OrdemDeServico,
     *,
     status_antes: StatusOrdem,
-    abriu_o_checkout: bool = False,
+    evento: str | None = None,
     motivo: str | None = None,
 ) -> None:
     """Grava o e-mail da transicao que a ``ordem`` acabou de fazer, se ela pede um.
 
-    ``status_antes`` e o status de antes do fato; ``abriu_o_checkout`` diz que o
-    fato foi o ``PagamentoSolicitado`` (muda o resumo do pagamento, nao o
-    status). ``motivo`` e o da compensacao que cancelou a OS.
+    ``status_antes`` e o status de antes do fato; ``evento`` e o tipo do evento da
+    saga que o causou, quando houve um: o ``PagamentoSolicitado`` muda o resumo do
+    pagamento e nao o status, e pede o e-mail do checkout. ``motivo`` e o da
+    compensacao que cancelou a OS.
     """
-    if abriu_o_checkout:
+    if evento == EVENTO_DO_CHECKOUT:
         modelo: ModeloDeNotificacao | None = _M.PAGAMENTO
     elif ordem.status is status_antes:
         return
