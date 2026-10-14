@@ -107,9 +107,10 @@ spec:
 # (o SMTP, em SMTP_HOST) e que tem acesso de escrita ao banco inteiro do servico.
 # Alem da entrada de todos (as politicas acima), a saida fica restrita ao que ele
 # usa: o DNS, o banco do servico e o Mailpit da plataforma na 1025. Nao fala com
-# o broker nem com o Jaeger. Quem so fala com o PostgreSQL e o RabbitMQ do proprio
-# namespace (a API, o relay e o consumidor) fica sem politica de saida: o criterio
-# e ter destino externo configuravel, e nenhum outro processo o tem.
+# o broker nem com o Jaeger. A API, o relay e o consumidor ficam sem politica de
+# saida: seus destinos sao fixos (o PostgreSQL do namespace e o RabbitMQ e o Jaeger
+# da plataforma). O criterio e ter destino de terceiro configuravel, e so o
+# notificador o tem.
 #
 # Trocar o SMTP_HOST (ConfigMap) para outro servidor exige ajustar esta politica:
 # o destino fora da regra nao e recusado, so expira (o prazo de 5 s por tentativa
