@@ -8,6 +8,9 @@ name: CD
 # mesmo digest no k3s da Azure quando a variavel da organizacao K3S_HABILITADO
 # estiver ligada. README, secao "CD".
 on:
+  # TEMPORARIO: so para provar o run real antes do merge (reverter).
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   # Reexecuta uma combinacao de commits. O OS Service e sempre o commit do run:
@@ -48,11 +51,13 @@ env:
 
 jobs:
   ci:
+    if: github.event_name != 'pull_request'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
 
   security-scan:
+    if: github.event_name != 'pull_request'
     uses: ./.github/workflows/security.yml
     permissions:
       contents: read
@@ -61,6 +66,7 @@ jobs:
   # o E2E testa e a que foi para o GHCR), e o deploy-k3s implanta o mesmo digest.
   image:
     needs: [ci, security-scan]
+    if: ${{ !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') && (needs.security-scan.result == 'success' || needs.security-scan.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -313,7 +319,7 @@ jobs:
   # o aviso. O platform entra no commit usado no kind.
   deploy-k3s:
     needs: [image, deploy-kind]
-    if: vars.K3S_HABILITADO == 'true'
+    if: vars.K3S_HABILITADO == 'true' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: producao
