@@ -119,6 +119,7 @@ jobs:
           IMAGEM: ${{ steps.meta.outputs.imagem }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
+          set -o pipefail
           docker pull --platform linux/amd64 "$IMAGEM" | tee pull.log
           grep -qxF "Digest: $DIGEST" pull.log \
             || { echo "::error::the digest pulled for $IMAGEM is not the one that was pushed"; exit 1; }
