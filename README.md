@@ -796,7 +796,7 @@ O Jaeger do platform guarda os traces em memória, até cerca de 5.000 (ADR-043)
 
 ### Encerramento com o exportador fora
 
-A API encerra o provider no fim do `lifespan` (`provedor.shutdown()` descarrega o lote de spans; o `atexit` do SDK não roda quando o uvicorn não é o PID 1) e o relay, o consumidor e o `prazos`, na saída do processo. Com o Jaeger fora do ar o SDK ainda tenta enviar a fila inteira (até 2.048 spans, em lotes de 512), e cada lote espera o prazo do exportador. Medido no container da imagem (uvicorn como PID 1), com um listener que aceita a conexão e não responde e a fila cheia:
+A API encerra o provider no fim do `lifespan` (`provedor.shutdown()` descarrega o lote de spans; o `atexit` do SDK não roda quando o uvicorn não é o PID 1) e o relay, o consumidor e o `prazos`, na saída do processo. Com o Jaeger fora do ar o SDK ainda tenta enviar a fila inteira (até 2.048 spans, em lotes de 512), e cada lote espera o prazo do exportador. Medido no container da imagem (uvicorn como PID 1), com um listener que aceita a conexão e não responde e a fila cheia (6.000 requisições em rajada, de dentro do container, a uma rota que não existe):
 
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `OTEL_BSP_EXPORT_TIMEOUT` | `docker stop` da API |
 |---|---|---|
@@ -946,7 +946,7 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
 - `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
-- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`) e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
+- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
 make check
