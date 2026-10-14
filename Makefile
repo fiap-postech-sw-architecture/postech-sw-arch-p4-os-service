@@ -46,7 +46,8 @@ security:
 
 # Suite completa com cobertura (addopts do pyproject liga --cov=src). Gera os
 # relatorios que o CI publica (coverage.xml para o SonarQube, htmlcov/ e o
-# JUnit em reports/). O conftest de integracao acha o socket do colima.
+# JUnit em reports/). O conftest de integracao acha o socket do colima; os
+# testes dos manifestos pedem o kubectl no PATH (sem ele a suite encerra de uma vez).
 test:
 	$(PY) pytest --cov-report=xml:coverage.xml --cov-report=html:htmlcov \
 		--junitxml=reports/junit.xml

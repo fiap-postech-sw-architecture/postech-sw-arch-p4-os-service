@@ -377,7 +377,7 @@ O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_
 
 ## Como rodar local
 
-Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/).
+Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/); o `make test` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`).
 
 O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, as migrações, o admin de demonstração, o relay e o consumidor; o `make compose-down` derruba tudo e apaga os volumes.
 
@@ -426,7 +426,7 @@ Todo pod roda sem root (uid 1001; 999 no banco e 65534 no exporter), sem escalar
 
 ### Implantar no kind
 
-Pré-requisitos: Docker, kind, kubectl, jq e curl (o `implantar-servicos.sh` e o smoke usam os cinco; o `make manifests` precisa só do kubectl e do Docker) e o platform clonado ao lado deste repositório. O primeiro comando sobe o cluster, a plataforma e os Secrets do serviço; o segundo implanta a imagem deste commit, com o Job de migração e os rollouts; o terceiro roda o smoke:
+Pré-requisitos: Docker, kind, kubectl, jq e curl (o `implantar-servicos.sh` e o smoke usam os cinco; o `make manifests` e o `make test` precisam só do kubectl e do Docker) e o platform clonado ao lado deste repositório. O primeiro comando sobe o cluster, a plataforma e os Secrets do serviço; o segundo implanta a imagem deste commit, com o Job de migração e os rollouts; o terceiro roda o smoke:
 
 ```bash
 make -C ../postech-sw-arch-p4-platform kind-up deploy
@@ -516,7 +516,7 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
 - `make smoke`: a imagem pelo entrypoint real, com readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`), o relay e o consumidor prontos (`/metrics` respondendo, `outbox_pendentes` numérico, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), e depois `down -v`.
 
-`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
+`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
 No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira.
 

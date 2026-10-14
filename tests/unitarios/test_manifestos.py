@@ -14,7 +14,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     IDADE_MAXIMA_DO_HEARTBEAT_S,
     Sinalizador,
 )
-from tests.manifestos import container, objeto
+from tests.manifestos import RAIZ, container, objeto
 
 # O temporario do container: TMPDIR nao e definido na imagem.
 _TMP_DO_CONTAINER = Path("/tmp")  # noqa: S108  # o /tmp do pod, nao deste processo
@@ -89,3 +89,33 @@ def test_sonda_tolera_a_idade_maxima_do_heartbeat(
     )
 
     assert (_vida(codigo_local) == 0) is viva
+
+
+def test_sem_kubectl_no_path_o_render_encerra_a_sessao_uma_vez_com_o_motivo(
+    tmp_path: Path,
+) -> None:
+    # PATH sem o kubectl (um diretorio vazio): sem a fixture, cada teste do render
+    # cairia com um FileNotFoundError cru.
+    resultado = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests/unitarios/test_contrato_dos_manifestos.py",
+            "-p",
+            "no:cacheprovider",
+            "--no-cov",
+            "-q",
+        ],
+        cwd=RAIZ,
+        env={**os.environ, "PATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    saida = resultado.stdout + resultado.stderr
+
+    assert resultado.returncode == 1
+    assert saida.count("kubectl nao esta no PATH") == 1
+    assert "FileNotFoundError" not in saida

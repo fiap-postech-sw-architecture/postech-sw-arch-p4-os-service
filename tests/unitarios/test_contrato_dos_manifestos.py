@@ -27,6 +27,9 @@ from tests.manifestos import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+# Todos os testes deste modulo leem o render (kubectl kustomize).
+pytestmark = pytest.mark.usefixtures("kubectl")
+
 _BANCO = "os-postgres.pytstop-os.svc.cluster.local:5432/os"
 _API = ("Deployment", "os-service-api", "api")
 _RELAY = ("Deployment", "os-service-relay", "relay")

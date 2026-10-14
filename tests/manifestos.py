@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import pytest
 import yaml
 
 if TYPE_CHECKING:
@@ -60,6 +62,20 @@ def literais_do_servico(
         {"literals": []},
     )
     return dict(item.split("=", 1) for item in gerador["literals"])
+
+
+def exigir_kubectl() -> None:
+    """Encerra a sessao de testes, uma vez e com o motivo, sem ``kubectl`` no PATH.
+
+    Sem ele cada teste do render falharia com um ``FileNotFoundError`` cru. Nao e
+    ``skip``: o gate dos manifestos nao pode passar sem rodar.
+    """
+    if shutil.which("kubectl") is None:
+        pytest.exit(
+            "kubectl nao esta no PATH: os testes dos manifestos leem o render do "
+            "`kubectl kustomize` (o make test exige o kubectl, ver o README)",
+            returncode=1,
+        )
 
 
 @cache
