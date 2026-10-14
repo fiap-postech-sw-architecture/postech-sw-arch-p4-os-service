@@ -12,6 +12,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from opentelemetry.sdk.environment_variables import (
+    OTEL_BSP_EXPORT_TIMEOUT,
+    OTEL_EXPORTER_OTLP_TIMEOUT,
+)
 
 from tests.manifestos import (
     OVERLAYS,
@@ -628,6 +632,24 @@ def test_confianca_no_x_forwarded_for_e_so_do_cidr_de_pods_do_cluster(
 
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
+def test_configmap_nao_traz_flag_para_o_metrics_da_api(overlay: str) -> None:
+    # O /metrics da API esta sempre ligado (o Prometheus o raspa na porta http):
+    # a flag de antes, desligada, o devolvia como 404 e o alvo virava `up=0`.
+    assert "API_METRICS_ENABLED" not in _configmap_do_servico(overlay)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_configmap_fixa_os_prazos_do_exportador_de_spans(overlay: str) -> None:
+    # Com o Jaeger fora do ar o SDK espera o exportador ate o prazo dele; os
+    # padroes (30 s e 10 s) deixavam a API sair so no SIGKILL do grace period (30 s).
+    configuracao = _configmap_do_servico(overlay)
+
+    assert configuracao["OTEL_ENABLED"] == "true"
+    assert configuracao["OTEL_BSP_EXPORT_TIMEOUT"] == "2000"
+    assert configuracao["OTEL_EXPORTER_OTLP_TIMEOUT"] == "2"
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
 def test_root_path_e_o_prefixo_que_a_borda_roteia_e_producao_nao_cai_em_dev(
     overlay: str,
 ) -> None:
@@ -666,6 +688,12 @@ def test_overlay_dimensiona_a_api_e_o_disco_do_banco(
     assert volume["spec"]["resources"]["requests"]["storage"] == disco_do_banco
 
 
+# Lidas pelo SDK do OpenTelemetry, e nao pelo codigo do servico: os nomes saem das
+# constantes do proprio SDK, e um erro de digitacao no ConfigMap deixaria o padrao
+# dele (30 s para encerrar a API) valendo sem aviso.
+LIDAS_PELO_SDK = frozenset({OTEL_BSP_EXPORT_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT})
+
+
 def test_toda_variavel_do_configmap_e_lida_pelo_codigo() -> None:
     # Uma variavel renomeada no codigo passa no make manifests (o kubeconform so
     # confere o schema) e so cairia no deploy.
@@ -684,7 +712,9 @@ def test_toda_variavel_do_configmap_e_lida_pelo_codigo() -> None:
     sem_leitor = [
         variavel
         for variavel in literais
-        if f'"{variavel}"' not in codigo and "${" + variavel not in entrypoint
+        if variavel not in LIDAS_PELO_SDK
+        and f'"{variavel}"' not in codigo
+        and "${" + variavel not in entrypoint
     ]
 
     assert len(literais) > 19

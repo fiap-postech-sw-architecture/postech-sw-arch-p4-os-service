@@ -45,14 +45,17 @@ configMapGenerator:
       - OTEL_ENABLED=true
       - OTEL_SERVICE_NAME=os-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger.pytstop-plataforma.svc.cluster.local:4317
+      # Com o Jaeger fora do ar, o SDK espera o exportador ate estes prazos (os
+      # padroes sao 30 s e 10 s): sem eles a API levava os 30 s do grace period do
+      # pod para sair. O relay, o consumidor e o prazos tem 45 s.
+      - OTEL_BSP_EXPORT_TIMEOUT=2000
+      - OTEL_EXPORTER_OTLP_TIMEOUT=2
       # /metrics do relay, do consumidor, do prazos e do notificador, a porta
       # `metrics` dos Deployments.
       - METRICS_PORT=9100
       # Migracao e semente sao do Job, que os pods esperam.
       - RUN_MIGRATIONS_ON_STARTUP=false
       - RUN_SEED_ON_STARTUP=false
-      # /metrics da API, na porta http (ADR-043).
-      - API_METRICS_ENABLED=true
       - ADMIN_EMAIL=admin@pytstop.dev
       - CORS_ORIGINS=
       - RATE_LIMIT=60/minute
