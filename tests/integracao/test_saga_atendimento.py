@@ -674,6 +674,7 @@ def _enviado_varias_vezes(atendimento: Atendimento, comando: str, vezes: int) ->
     assert {e["causation_id"] for e in envios[1:]} <= {None}
 
 
+@then(parsers.parse("a saga tem {reenvios:d} reenvio no comando em voo"))
 @then(parsers.parse("a saga tem {reenvios:d} reenvios no comando em voo"))
 def _reenvios(atendimento: Atendimento, reenvios: int) -> None:
     assert atendimento.saga().reenvios == reenvios

@@ -1,4 +1,4 @@
-"""Conexao AMQP (pika) do relay e do consumidor (ADR-036).
+"""Conexao AMQP (pika) do relay, do consumidor e do prazos (ADR-036).
 
 Parametros e propriedades do contrato, e o ciclo de vida da conexao de cada
 processo: conectar com as declaracoes passivas, desconectar e esperar antes de
@@ -136,7 +136,7 @@ def propriedades(
 
 
 class ConexaoDoProcesso:
-    """A conexao de um processo (relay ou consumidor) com o broker.
+    """A conexao de um processo (relay, consumidor ou prazos) com o broker.
 
     ``conectar`` abre conexao e canal com confirms, roda ``declarar`` (as
     declaracoes passivas do que o processo usa) e marca o processo pronto. Na

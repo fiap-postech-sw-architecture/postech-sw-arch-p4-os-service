@@ -449,8 +449,10 @@ class RetomarCompensacao:
     def executar(self, ordem_id: UUID, *, ator: str) -> SagaDTO:
         """Retoma a compensacao; ``ator`` e o sub do JWT do admin.
 
-        Todo desfecho vai para a trilha de auditoria com o ``ator`` e o
-        ``correlation_id`` (a ordem), como o cancelamento (ADR-039).
+        O sucesso e as recusas de dominio (404 e 409) vao para a trilha de
+        auditoria com o ``ator`` e o ``correlation_id`` (a ordem), como o
+        cancelamento (ADR-039). Uma falha inesperada (500) sai so pelo log
+        generico do erro interno, sem o ``ator``.
 
         Raises:
             SagaNaoEncontradaException: OS sem saga (404).

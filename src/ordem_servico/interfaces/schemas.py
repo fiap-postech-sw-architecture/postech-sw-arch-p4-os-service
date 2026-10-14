@@ -276,7 +276,12 @@ class SagaResponse(BaseModel):
             "falha_na_compensacao fica a compensacao pendente, sem prazo."
         )
     )
-    reenvios: int = Field(description="Reenvios do comando em voo (0 no envio).")
+    reenvios: int = Field(
+        description=(
+            "Reenvios do comando em voo (0 no envio). Em falha_na_compensacao "
+            "por reenvios esgotados fica no maximo ate a retomada, que o zera."
+        )
+    )
     prazo_resposta_em: datetime | None = Field(
         description="Prazo tecnico do comando em voo (None sem resposta automatica)."
     )

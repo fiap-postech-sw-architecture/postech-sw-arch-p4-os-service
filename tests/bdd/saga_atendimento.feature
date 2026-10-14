@@ -282,7 +282,7 @@ Funcionalidade: Saga de atendimento orquestrada pelo OS Service
     Quando o consumidor do OS volta
     E o prazo de resposta vence
     Então o comando "GerarOrcamento" foi enviado 2 vezes, com id novo e os mesmos dados
-    E a saga tem 1 reenvios no comando em voo
+    E a saga tem 1 reenvio no comando em voo
 
   Cenário: Comando que ainda espera na outbox não vence
     Dado o relay está parado
@@ -292,7 +292,7 @@ Funcionalidade: Saga de atendimento orquestrada pelo OS Service
     E a saga está na etapa "aguardando_orcamento" com a OS "em_diagnostico"
     Quando o relay volta
     E o prazo de resposta vence
-    Então a saga tem 1 reenvios no comando em voo
+    Então a saga tem 1 reenvio no comando em voo
 
   Cenário: Compensação sem resposta para a saga em falha na compensação e a retomada a conclui
     Dado os eventos do caminho feliz anteriores a "ExecucaoIniciada"

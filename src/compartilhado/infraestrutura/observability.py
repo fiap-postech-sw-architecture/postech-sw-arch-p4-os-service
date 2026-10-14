@@ -190,7 +190,7 @@ def _habilitado() -> bool:
 
 
 def criar_tracer(processo: str) -> Tracer:
-    """Tracer do relay ou do consumidor (spans de mensagem, ADR-043).
+    """Tracer do relay, do consumidor ou do prazos (spans de mensagem, ADR-043).
 
     O SDK fica sempre ligado: os spans dao o ``traceparent`` que segue pela
     outbox e pelo AMQP e o ``trace_id`` dos logs. A exportacao OTLP so liga com

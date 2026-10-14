@@ -1,10 +1,10 @@
-"""Partes comuns aos processos relay, consumidor e notificador: boot, saude e fim.
+"""Partes comuns aos processos relay, consumidor, prazos e notificador.
 
-Prontidao (RFC-004 secao 6, ADR-042): sem HTTP de negocio, cada processo toca um
-arquivo de heartbeat a cada volta do laco (liveness; o processo vivo mas preso
-para de toca-lo) e mantem um arquivo de pronto enquanto a conexao com o broker
-esta estabelecida (readiness). Broker fora tira o processo de pronto sem
-reinicia-lo: reiniciar nao traz o broker de volta.
+Boot, saude e fim de cada um. Prontidao (RFC-004 secao 6, ADR-042): sem HTTP de
+negocio, cada processo toca um arquivo de heartbeat a cada volta do laco
+(liveness; o processo vivo mas preso para de toca-lo) e mantem um arquivo de
+pronto enquanto a conexao com o broker esta estabelecida (readiness). Broker fora
+tira o processo de pronto sem reinicia-lo: reiniciar nao traz o broker de volta.
 """
 
 from __future__ import annotations

@@ -74,8 +74,9 @@ configMapGenerator:
       - SMTP_HOST=mailpit.pytstop-plataforma.svc.cluster.local
       - SMTP_PORT=1025
       - SMTP_FROM=oficina@pytstop.local
-      # Por replica da API; com 3 no HPA do k3s, relay, consumidor, Job e
-      # exporter, ficam abaixo do max_connections 100 do PostgreSQL 16.
+      # Por replica da API; com 3 no HPA do k3s mais relay, consumidor, prazos e
+      # notificador (2 + 2 cada, e o LISTEN do relay e do notificador), Job e
+      # exporter, ficam abaixo do max_connections 100 do PostgreSQL 16 (63 sem eles).
       - DB_POOL_SIZE=5
       - DB_MAX_OVERFLOW=10
   # Papeis do PostgreSQL, que a imagem cria no primeiro init do volume.

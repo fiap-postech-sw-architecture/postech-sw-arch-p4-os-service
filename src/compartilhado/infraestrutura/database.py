@@ -74,8 +74,9 @@ def resolver_database_url(env: Mapping[str, str] | None = None) -> str:
 # Dimensionamento do pool para escala horizontal. Os defaults da API sao os do
 # SQLAlchemy (5 + 10): com ate 5 replicas no HPA, (pool_size + max_overflow) *
 # replicas = 75 conexoes, dentro do max_connections=100 do postgres:16 padrao;
-# relay e consumidor usam 2 + 2 cada (``preparar``), mais a conexao de LISTEN do
-# relay. Sobrescritiveis por env (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_RECYCLE).
+# relay, consumidor, prazos e notificador usam 2 + 2 cada (``preparar``), mais a
+# conexao de LISTEN do relay e a do notificador. Sobrescritiveis por env
+# (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_RECYCLE).
 _DB_POOL_SIZE_PADRAO = "5"
 _DB_MAX_OVERFLOW_PADRAO = "10"
 # Recicla conexoes a cada 30min para evitar conexoes presas/stale em pods

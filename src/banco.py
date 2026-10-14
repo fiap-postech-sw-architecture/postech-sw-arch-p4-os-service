@@ -1,6 +1,7 @@
 """Espera do banco migrado: ``python -m src.banco aguardar``.
 
-E o initContainer ``aguarda-migracao`` dos Deployments (API, relay e consumidor):
+E o initContainer ``aguarda-migracao`` dos Deployments (API, relay, consumidor,
+``prazos`` e notificador):
 o pod so sobe depois do Job de migracao da versao dele, que le o ``alembic_version``
 com o papel da aplicacao. So espera, nao prepara o banco (a migracao e do Job,
 com o dono do schema).

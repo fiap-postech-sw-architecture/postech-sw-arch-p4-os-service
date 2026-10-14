@@ -73,8 +73,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
 # Probe em Python + urllib porque a imagem slim nao tem curl/wget. E a da API
 # (o comando padrao); relay, consumidor, prazos e notificador nao tem HTTP de
 # negocio, e as sondas deles (arquivos de heartbeat e de pronto em /tmp) vem do
-# compose e dos
-# manifestos.
+# compose e dos manifestos.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/saude', timeout=2).status==200 else 1)"]
 
