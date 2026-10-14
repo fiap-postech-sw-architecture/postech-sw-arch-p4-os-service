@@ -146,6 +146,20 @@ def test_um_anonimizar_veiculo_por_veiculo_na_transacao_do_erasure(
         assert _PLACA not in json.dumps(envelope)
 
 
+def test_erasure_repetido_nao_reenvia_o_comando_dos_veiculos_ja_anonimizados(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    titular = Titular(session_factory, _PLACA)
+    _encerrar(engine, titular.ordem_id)
+
+    # O DELETE e idempotente (204 de novo): so a primeira vez avisa a Execucao.
+    for _ in range(3):
+        _excluir(session_factory, titular.cliente_id)
+
+    comandos = _comandos_de_anonimizacao(engine)
+    assert sorted(c.correlation_id for c in comandos) == sorted(titular.veiculos)
+
+
 def test_erasure_recusado_nao_envia_comando_nem_toca_a_outbox(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:

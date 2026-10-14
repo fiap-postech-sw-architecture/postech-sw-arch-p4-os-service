@@ -549,6 +549,36 @@ class TestClienteRepository:
         # Linha preservada (id intacto) -> FK ordens_de_servico.veiculo_id valida.
         assert veiculo.id == veiculo_id
 
+    def test_ids_dos_veiculos_a_anonimizar_so_traz_quem_guarda_a_placa_original(
+        self, session: Session
+    ) -> None:
+        from src.cliente_veiculo.infraestrutura.repository import (
+            ClienteSQLAlchemyRepository,
+        )
+        from src.compartilhado.dominio.placa import Placa
+
+        repo = ClienteSQLAlchemyRepository(session=session)
+        cliente = _criar_cliente_cpf(session, cpf_numero="93214407473")
+        cliente.adicionar_veiculo(
+            placa=Placa(valor="CCC3333"), marca="Fiat", modelo="Uno", ano=2020
+        )
+        cliente.adicionar_veiculo(
+            placa=Placa(valor="DDD4444"), marca="VW", modelo="Gol", ano=2021
+        )
+        outro = _criar_cliente_cnpj(session, cnpj_numero="11222333000181")
+        outro.adicionar_veiculo(
+            placa=Placa(valor="EEE5555"), marca="Ford", modelo="Ka", ano=2019
+        )
+        repo.salvar(cliente)
+        repo.salvar(outro)
+        ids = sorted(v.id for v in cliente.veiculos)
+
+        # Antes: os dois veiculos do cliente (o do outro cliente nao entra).
+        assert repo.ids_dos_veiculos_a_anonimizar(cliente.id) == ids
+        repo.anonimizar_dados(cliente.id)
+        # Depois: ninguem guarda mais a placa, entao nada a avisar.
+        assert repo.ids_dos_veiculos_a_anonimizar(cliente.id) == []
+
     def test_anonimizar_dois_veiculos_preserva_unique_placa(
         self, session: Session
     ) -> None:

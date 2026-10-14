@@ -37,6 +37,7 @@ class FakeClienteRepoLGPD:
         self._clientes: dict[UUID, Cliente] = {}
         self._consentimentos: dict[tuple[UUID, str], ConsentimentoCliente] = {}
         self.anonimizados: set[UUID] = set()
+        self.veiculos_anonimizados: set[UUID] = set()
         self.registro = registro if registro is not None else []
 
     def obter_por_id(self, cliente_id: UUID) -> Cliente | None:
@@ -67,11 +68,18 @@ class FakeClienteRepoLGPD:
     def obter_dados_pessoais(self, cliente_id: UUID) -> Cliente | None:
         return self._clientes.get(cliente_id)
 
-    def anonimizar_dados(self, cliente_id: UUID) -> list[UUID]:
+    def ids_dos_veiculos_a_anonimizar(self, cliente_id: UUID) -> list[UUID]:
+        self.registro.append("ids_dos_veiculos_a_anonimizar")
+        cliente = self._clientes.get(cliente_id)
+        veiculos = [] if cliente is None else [v.id for v in cliente.veiculos]
+        return [v for v in veiculos if v not in self.veiculos_anonimizados]
+
+    def anonimizar_dados(self, cliente_id: UUID) -> None:
         self.registro.append("anonimizar_dados")
         self.anonimizados.add(cliente_id)
         cliente = self._clientes.get(cliente_id)
-        return [] if cliente is None else [v.id for v in cliente.veiculos]
+        if cliente is not None:
+            self.veiculos_anonimizados.update(v.id for v in cliente.veiculos)
 
     def salvar_consentimento(self, consentimento: ConsentimentoCliente) -> None:
         key = (consentimento.cliente_id, consentimento.tipo)
@@ -225,6 +233,29 @@ class TestExcluirDadosPessoais:
         assert "ABC123" not in repr(uow.envelopes)
         assert uow.committed
 
+    def test_erasure_repetido_so_avisa_os_veiculos_ainda_nao_anonimizados(self) -> None:
+        repo = FakeClienteRepoLGPD()
+        uow = FakeUnitOfWork()
+        cliente = Cliente(
+            _nome="Joao",
+            _documento=CPF(numero=CPF_VALIDO),
+            _contato=Contato(valor="11999"),
+        )
+        cliente.adicionar_veiculo(Placa(valor="ABC1230"), "Fiat", "Uno", 2020)
+        cliente.adicionar_veiculo(Placa(valor="ABC1231"), "VW", "Gol", 2021)
+        repo.salvar(cliente)
+        excluir = ExcluirDadosPessoais(
+            repo=repo, uow=uow, os_port=StubOrdemDeServicoPort()
+        )
+
+        for _ in range(3):
+            excluir.executar(cliente.id)
+
+        # Um comando por veiculo no total, e nao por chamada.
+        assert [dados["veiculo_id"] for _, dados, _, _ in uow.comandos] == [
+            v.id for v in cliente.veiculos
+        ]
+
     def test_comando_fora_do_contrato_desfaz_a_transacao(self) -> None:
         repo = FakeClienteRepoLGPD()
         cliente = Cliente(
@@ -267,6 +298,7 @@ class TestExcluirDadosPessoais:
             "inicio",
             "bloquear_cliente",
             "existe_os_ativa_para_cliente",
+            "ids_dos_veiculos_a_anonimizar",
             "anonimizar_dados",
             "anonimizar_textos_livres_do_cliente",
             "anonimizar_comandos_do_cliente_na_outbox",

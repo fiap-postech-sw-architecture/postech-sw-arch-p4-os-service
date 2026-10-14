@@ -23,6 +23,11 @@ if TYPE_CHECKING:
     from src.compartilhado.dominio.placa import Placa
 
 
+# A placa do veiculo anonimizado: ``ANONIMIZADO:{veiculo_id}`` (unica, para
+# preservar o UNIQUE da coluna).
+_PREFIXO_DA_PLACA_ANONIMIZADA = "ANONIMIZADO:"
+
+
 class ClienteSQLAlchemyRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
@@ -100,7 +105,21 @@ class ClienteSQLAlchemyRepository:
             )
         return bool(self._session.scalar(select(condicao)))
 
-    def anonimizar_dados(self, cliente_id: UUID) -> list[UUID]:
+    def ids_dos_veiculos_a_anonimizar(self, cliente_id: UUID) -> list[UUID]:
+        return list(
+            self._session.execute(
+                select(veiculos_table.c.id)
+                .where(
+                    veiculos_table.c.cliente_id == cliente_id,
+                    ~veiculos_table.c.placa.startswith(_PREFIXO_DA_PLACA_ANONIMIZADA),
+                )
+                .order_by(veiculos_table.c.id)
+            )
+            .scalars()
+            .all()
+        )
+
+    def anonimizar_dados(self, cliente_id: UUID) -> None:
         # Bypass SQLAlchemy ORM event listeners via raw UPDATE.
         # The before_update listener recalculates _documento_numero and
         # _documento_hash from _documento on every flush, so any ORM-level
@@ -145,7 +164,7 @@ class ClienteSQLAlchemyRepository:
                 update(veiculos_table)
                 .where(veiculos_table.c.id == veiculo_id)
                 .values(
-                    placa=f"ANONIMIZADO:{veiculo_id}",
+                    placa=f"{_PREFIXO_DA_PLACA_ANONIMIZADA}{veiculo_id}",
                     marca="ANONIMIZADO",
                     modelo="ANONIMIZADO",
                 )
@@ -159,7 +178,6 @@ class ClienteSQLAlchemyRepository:
             for veiculo in cliente.veiculos:
                 self._session.expire(veiculo)
             self._session.expire(cliente)
-        return list(veiculo_ids)
 
     def salvar_consentimento(self, consentimento: ConsentimentoCliente) -> None:
         self._session.add(consentimento)

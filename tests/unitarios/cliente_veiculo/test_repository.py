@@ -127,12 +127,22 @@ class TestClienteSQLAlchemyRepository:
         session.execute.return_value.scalars.return_value.all.return_value = ids
         repo = ClienteSQLAlchemyRepository(session=session)
 
-        # Devolve os ids dos veiculos: a Execucao e avisada por comando.
-        assert repo.anonimizar_dados(uuid4()) == ids
+        repo.anonimizar_dados(uuid4())
 
         session.expire.assert_any_call(veiculo_a)
         session.expire.assert_any_call(veiculo_b)
         session.expire.assert_any_call(cliente)
+
+    def test_ids_dos_veiculos_a_anonimizar_exclui_a_placa_ja_anonimizada(self) -> None:
+        session = MagicMock()
+        ids = [uuid4(), uuid4()]
+        session.execute.return_value.scalars.return_value.all.return_value = ids
+        repo = ClienteSQLAlchemyRepository(session=session)
+
+        assert repo.ids_dos_veiculos_a_anonimizar(uuid4()) == ids
+
+        consulta = str(session.execute.call_args.args[0])
+        assert "veiculos.placa NOT LIKE" in consulta
 
     def test_anonimizar_dados_sem_cliente_na_identity_map_nao_expira(self) -> None:
         session = MagicMock()
@@ -140,6 +150,6 @@ class TestClienteSQLAlchemyRepository:
         session.execute.return_value.scalars.return_value.all.return_value = []
         repo = ClienteSQLAlchemyRepository(session=session)
 
-        assert repo.anonimizar_dados(uuid4()) == []
+        repo.anonimizar_dados(uuid4())
 
         session.expire.assert_not_called()
