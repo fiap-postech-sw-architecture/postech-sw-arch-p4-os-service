@@ -17,7 +17,8 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 - API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409), `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
 - Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
 - Manifestos Kubernetes em `k8s/`, com o PostgreSQL do serviço, o Job de migração e a borda no Kong ([Implantação](#implantação)).
-- Ainda não: o processo `prazos` (reenvio por prazo técnico e a retomada da compensação parada, `POST /api/v1/sagas/{ordem_id}/compensacao`), o e-mail ao cliente e a anonimização do veículo na Execução, desenhados na RFC-004. Sem o `prazos` uma compensação parada não tem saída: a compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
+- E-mail ao cliente a cada mudança de situação da OS, pelo processo `notificador` e o Mailpit, e a eliminação de dados da LGPD que também anonimiza a placa na Execução e nos comandos da outbox ([seção abaixo](#notificações-por-e-mail-e-lgpd)).
+- Ainda não: o processo `prazos` (reenvio por prazo técnico e a retomada da compensação parada, `POST /api/v1/sagas/{ordem_id}/compensacao`), desenhado na RFC-004. Sem o `prazos` uma compensação parada não tem saída: a compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
 
 ## Autenticação
 
@@ -279,7 +280,7 @@ sequenceDiagram
     Note over AT,OS: T10: OS ENTREGUE (fora da saga)
 ```
 
-O e-mail ao cliente aparece no diagrama da RFC e ainda não sai deste serviço.
+O e-mail ao cliente do diagrama sai do processo `notificador`, e não da outbox de comandos ([Notificações por e-mail e LGPD](#notificações-por-e-mail-e-lgpd)).
 
 ### Etapas e status
 
@@ -569,9 +570,62 @@ O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_
   - O cancelamento depois do pagamento, com as cinco compensações uma por vez e o span do cancelamento no trace da saga; a falta de peça (orçamento e diagnóstico compensados, cada um causado pela resposta anterior); o estorno recusado (a sequência para e o comando em voo fica sem prazo).
   - O redrive da DLQ com o shovel do platform: antes de implantar a versão nova, a versão anterior recusa a mensagem de novo; depois, o consumidor novo trata o evento que ela recusou.
 
+## Notificações por e-mail e LGPD
+
+### E-mail ao cliente
+
+O cliente recebe um e-mail a cada mudança de situação da OS ([RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 3 e [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md), "E-mail ao cliente"). O pedido nasce na transação da transição e o envio é de outro processo, então SMTP lento ou fora não atrasa comando, resposta nem a saga.
+
+```mermaid
+flowchart LR
+    t["transição da OS<br/>(consumidor ou API)"] -->|"mesmo commit"| n[("notificacoes")]
+    n -->|"NOTIFY + poll"| nt["notificador<br/>python -m src.notificador"]
+    nt -->|"OS e contato do cliente"| db[("PostgreSQL")]
+    nt -->|"SMTP, prazo de 5 s"| mp["Mailpit"]
+```
+
+- **Quando.** Cada mudança de status da OS pede um e-mail do modelo do novo status, menos a abertura (`recebida`) e `aguardando_pagamento`, cujo e-mail é o do checkout, que o `PagamentoSolicitado` pede (ele não muda o status). O consumidor grava o pedido junto com o fato da saga e `mensagens_processadas`; a API, na entrega. O pedido de cancelamento (202) não muda a OS e não manda e-mail: o da `cancelada` sai quando a última compensação responde.
+
+  | Modelo | Quando | Texto |
+  |---|---|---|
+  | `situacao` | `em_diagnostico`, `aguardando_execucao`, `em_execucao`, `finalizada`, `entregue` | o rótulo da situação |
+  | `orcamento` | `aguardando_aprovacao` | total, validade e o `link_decisao` do Billing |
+  | `pagamento` | `PagamentoSolicitado` | valor, validade e o `checkout_url` do Billing |
+  | `cancelamento` | `cancelada` | o rótulo do código da compensação (nunca o texto do atendente) |
+
+- **O pedido.** A tabela `notificacoes` (migração `004`, só expansão) guarda `ordem_id`, `modelo`, `status_da_ordem` e o `motivo` com o código, mais a situação da linha (`pendente`, `entregue` ou `dead`), as tentativas e o lease. Não tem endereço, nome, link nem texto livre: o nome e o endereço (extraído do campo livre `contato`) saem do cadastro, por uma projeção de duas colunas, sem carregar o agregado nem decifrar o documento, e por isso o `notificador` não recebe a `ENCRYPTION_KEY`; os links saem do resumo do orçamento e do pagamento que a OS guarda. A `outbox` não muda e continua só com comandos AMQP: um relay de uma versão anterior nunca vê um e-mail.
+- **Entrega** (`python -m src.notificador`, a mesma imagem). Uma linha por vez, com o claim da outbox: `FOR UPDATE SKIP LOCKED` e lease com fencing, na ordem de cada OS (um e-mail em espera segura só os seguintes da mesma OS). A OS e o contato são lidos numa transação de leitura que fecha antes do envio. O envio é SMTP puro (`smtplib`, prazo de 5 s por operação); falha conta tentativa e volta depois de 1, 4, 16 e 64 s, e a quinta falha da linha a deixa `dead`, visível na tabela e no log. Não há métrica nem alerta próprios: o e-mail é complementar e não segura a saga. Cliente anonimizado (o contato virou marcador), sem e-mail no contato ou sem o resumo que o modelo pede: a linha é dada como entregue, sem envio, com um aviso no log. Uma vez por hora apaga as linhas entregues há mais de 7 dias e as `dead` há mais de 30.
+- **Sem dado pessoal no log.** O log leva só `correlation_id` (a OS), `modelo` e o resultado: nunca o endereço, o nome, o `link_decisao` ou o `checkout_url`, e o `ultimo_erro` da linha é o nome da exceção. O processo não abre span nem tem métrica própria; o `/metrics` na 9100 traz só as métricas padrão do Python.
+- **Saúde.** Heartbeat a cada volta do laço e arquivo de pronto enquanto o banco responde; SMTP fora não o tira de pronto. Encerramento gracioso no SIGTERM.
+
+| Variável | Padrão | Uso |
+|---|---|---|
+| `SMTP_HOST` | `localhost` | servidor SMTP (`mailpit` no compose; `mailpit.pytstop-plataforma.svc.cluster.local` no cluster) |
+| `SMTP_PORT` | 1025 | porta SMTP (1 ou mais); valor inválido aborta o boot |
+| `SMTP_FROM` | `oficina@pytstop.local` | remetente |
+
+No compose, o Mailpit mostra a caixa de entrada em `http://localhost:8026` (`MAILPIT_UI_PORT`) e recebe o SMTP em `localhost:1026` (`MAILPIT_SMTP_PORT`), fora das portas do compose do platform (8025 e 1025), para os dois conviverem. Sem credencial nem TLS: o Mailpit da demonstração não pede.
+
+### Eliminação de dados (LGPD)
+
+`DELETE /api/v1/clientes/{id}/dados-pessoais` (admin) só vale sem OS ativa e, numa transação só, anonimiza:
+
+- o cliente, os veículos e o texto livre das OS (descrição do problema e motivos de cancelamento);
+- a placa e a descrição do `SolicitarDiagnostico` que ficaram na outbox, em qualquer situação da linha (pendente, entregue ou `dead`), achadas pelo `correlation_id` das OS do cliente: a placa vira `AAA0A00`, que respeita o padrão do schema (a linha pendente continua publicável e o relay segue validando o envelope), e a descrição vira `[removido]`; marca e modelo não identificam o titular e ficam;
+- a placa guardada na Execução, por um comando `AnonimizarVeiculo` por veículo, fora da saga (o `correlation_id` é o `veiculo_id`, sem resposta nem prazo; a falha definitiva vai para a `execucao.comandos.dlq`).
+
+Se a transação desfaz, nenhum comando sai e nada é anonimizado. A cópia do comando na `execucao.comandos.dlq` (7 dias) mantém a placa original: depois de um apagamento, **não faça redrive de DLQ de comando**, que recriaria a placa na Execução.
+
+### Testes
+
+- **Unitários.** O modelo de cada status e a exaustividade da tabela (`test_notificacoes.py`), o texto de cada e-mail, o que fica de fora dele e o aviso sem dado pessoal (`test_emails.py`), o adapter SMTP (`test_email_adapter.py`), o pedido gravado por cada evento do fluxo, de cada compensação e da corrida do pivot (`test_orquestrador_notificacoes.py`), um comando por veículo e a transação desfeita (`test_lgpd_use_cases.py`) e os manifestos e o compose do `notificador`.
+- **Propriedade** (`test_propriedades_da_saga.py`): em mil sementes, com eventos embaralhados, repetidos e atrasados, um pedido de e-mail por transição de status e nunca dois, e o código do motivo só no cancelamento.
+- **BDD** (`tests/bdd/notificacoes_do_cliente.feature`): os pedidos do caminho feliz, o cancelamento, a falha de negócio, o texto de cada modelo e o cliente apagado.
+- **Integração.** A tabela, o claim, o fencing, a ordem por OS, os atrasos até `dead` e a retenção (`test_fila_de_notificacoes.py`); o `notificador` com PostgreSQL e Mailpit reais (`test_notificador.py`); a saga com relay, consumidor, RabbitMQ, notificador e Mailpit, com um e-mail por gatilho, SMTP fora sem atrasar a saga e nenhum dado pessoal no log, nos spans e nas métricas (`test_notificacoes_da_saga.py`); o erasure com um comando por veículo, a outbox anonimizada e a linha anonimizada publicada pelo relay (`test_erasure_outbox.py`).
+
 ## Como rodar local
 
-Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/); o `make test` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`). O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, as migrações, o admin de demonstração, o relay e o consumidor; o `make compose-down` derruba tudo e apaga os volumes.
+Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/); o `make test` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`). O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, o Mailpit, as migrações, o admin de demonstração, o relay, o consumidor e o notificador; o `make compose-down` derruba tudo e apaga os volumes.
 
 ```bash
 make compose-up
@@ -588,9 +642,9 @@ TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
 curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN"
 ```
 
-Fora do compose (API, relay e consumidor no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`). A API sobe em `http://127.0.0.1:8000`; o relay e o consumidor ficam cada um num terminal, com o mesmo `.env` (o `METRICS_PORT` do consumidor tem de ser outro que o do relay):
+Fora do compose (API, relay, consumidor e notificador no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`). A API sobe em `http://127.0.0.1:8000`; o relay, o consumidor e o notificador ficam cada um num terminal, com o mesmo `.env` (o `METRICS_PORT` de cada um tem de ser outro que o dos demais):
 
-A API sobe em `http://127.0.0.1:8000`. O relay e o consumidor rodam cada um em outro terminal, com o mesmo `.env` e, no consumidor, um `METRICS_PORT` diferente do relay:
+A API sobe em `http://127.0.0.1:8000`. O relay, o consumidor e o notificador rodam cada um em outro terminal, com o mesmo `.env` e um `METRICS_PORT` diferente do dos outros; o SMTP do `.env.example` aponta para o Mailpit do compose (`docker compose up -d mailpit`):
 
 ```bash
 docker run -d --name os-postgres -p 127.0.0.1:5432:5432 \
@@ -600,6 +654,7 @@ uv run alembic upgrade head && uv run python scripts/seed_admin.py
 uv run python -m src.main
 uv run python -m src.relay
 uv run python -m src.consumidor
+uv run python -m src.notificador
 ```
 
 ## Implantação
@@ -609,12 +664,12 @@ Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (loca
 | Objeto | O que é |
 |---|---|
 | Deployment e HPA `os-service-api` | A API na porta 8000, com o `/metrics` na mesma porta; o HPA, por CPU (70%), vai de 1 a 2 réplicas no `kind`, a 1 no `kind-ci` e a 3 no `k3s` |
-| Deployments `os-service-relay` e `os-service-consumidor` | Relay e consumidor, uma réplica cada, com o `/metrics` na 9100 |
+| Deployments `os-service-relay`, `os-service-consumidor` e `os-service-notificador` | Relay, consumidor e notificador dos e-mails, uma réplica cada, com o `/metrics` na 9100. O notificador só recebe a senha do banco e o `SMTP_*` do ConfigMap (o Mailpit da plataforma, na 1025): sem `RABBITMQ_URL` e sem `ENCRYPTION_KEY` |
 | StatefulSet e Service headless `os-postgres` | PostgreSQL 16.15 com volume de 1Gi (5Gi no `k3s`) e o `postgres_exporter` como sidecar, na 9187 |
 | Job `os-migracao` | `alembic upgrade head` e a semente do admin, antes dos Deployments |
 | Service `os-service` | O endereço interno da API, o do `JWKS_URL` de Billing e Execução |
 | `borda.yaml` | Os Services e Ingress do Kong, os mesmos objetos do [exemplo do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/k8s/exemplos/borda-os-service.yaml) com o cabeçalho deste repositório: `/os/api/v1`, `/os/docs`, `/os/openapi.json` e o JWKS pela borda, e `/os/api/v1/admin` e `/os/metrics` respondendo 404 sem chegar ao serviço |
-| NetworkPolicy | Nega toda entrada no namespace e libera só a API para o Kong, o Prometheus e as APIs de Billing e Execução (que leem o JWKS), relay e consumidor para o Prometheus, o PostgreSQL para os pods do namespace e o exporter para o Prometheus |
+| NetworkPolicy | Nega toda entrada no namespace e libera só a API para o Kong, o Prometheus e as APIs de Billing e Execução (que leem o JWKS), relay, consumidor e notificador para o Prometheus, o PostgreSQL para os pods do namespace e o exporter para o Prometheus. A saída do notificador também é restrita (`notificador-saida`): só o DNS, o PostgreSQL do namespace e o Mailpit da plataforma na 1025. A regra de entrada no Mailpit é do platform |
 
 Todo pod roda sem root (uid 1001; 999 no banco e 65534 no exporter), sem escalar privilégio, sem capability, com seccomp `RuntimeDefault`, raiz somente leitura (`/tmp` em `emptyDir`) e sem token de ServiceAccount. O `make manifests` valida os três overlays com o kubeconform, contra os schemas do Kubernetes 1.35 e com `Secret` reprovado, e com o `trivy config`, sem achado HIGH nem CRITICAL; o job `build` do CI o roda em todo PR.
 
@@ -709,7 +764,7 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
 - `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
-- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay e o consumidor prontos (`/metrics` respondendo, `outbox_pendentes` numérico, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`); depois, `down -v`.
+- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`) e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
 make check

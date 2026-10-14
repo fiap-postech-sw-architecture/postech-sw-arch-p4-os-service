@@ -60,10 +60,12 @@ def test_notificador_roda_o_modulo_da_imagem_e_espera_o_mailpit() -> None:
     assert str(sinal.heartbeat) in sonda
 
 
-def test_mailpit_usa_a_mesma_imagem_do_platform_e_so_publica_a_caixa_no_loopback() -> (
-    None
-):
+def test_mailpit_usa_a_imagem_do_platform_e_publica_so_no_loopback() -> None:
     mailpit = _servicos()["mailpit"]
 
     assert mailpit["image"] == "axllent/mailpit:v1.31.4"
-    assert mailpit["ports"] == ["127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"]
+    # 1026 e 8026, e nao 1025 e 8025 do compose do platform: os dois convivem.
+    assert mailpit["ports"] == [
+        "127.0.0.1:${MAILPIT_SMTP_PORT:-1026}:1025",
+        "127.0.0.1:${MAILPIT_UI_PORT:-8026}:8025",
+    ]
