@@ -7,37 +7,40 @@ regras, sem I/O: quem le e grava saga e OS e publica os comandos e o
 ``OrquestradorDaSaga`` (ou o caso de uso do cancelamento), pelas portas, numa
 transacao so. A tabela da RFC esta em ``tabela_da_saga``, a classificacao dos
 eventos em ``classificacao``, as transicoes e conferencias em ``transicoes``,
-o plano e as respostas da compensacao em ``compensacao`` e os tipos em
-``modelo``.
+o plano e as respostas da compensacao em ``compensacao``, o reenvio, o
+esgotamento e a retomada em ``prazos``, a aplicacao da transicao conferida em
+``mudanca_da_saga`` e os tipos em ``modelo``.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, cast
 
 from src.compartilhado.aplicacao.mensageria import Comando
-from src.compartilhado.dominio.aggregate_root import AggregateRoot
-from src.ordem_servico.aplicacao.saga.leitura_da_saga import LeituraDaSaga
 from src.ordem_servico.aplicacao.saga.modelo import (
-    CompensacaoIniciadaEvent,
-    EtapaDaSagaAlteradaEvent,
     EtapaSaga,
     Gatilho,
     GatilhoDeProcesso,
-    MotivoCompensacao,
     SagaIniciadaEvent,
     TransicaoDaSagaInvalidaError,
     itens_do_diagnostico,
 )
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
-    ANTES_DO_PIVOT,
+from src.ordem_servico.aplicacao.saga.mudanca_da_saga import (
+    Complemento,
+    MudancaDaSaga,
+)
+from src.ordem_servico.aplicacao.saga.prazos import (
+    ComandoReenviadoEvent,
+    PrazoEsgotadoEvent,
+    conferir_reenvio,
+    transicao_da_retomada,
+    transicao_do_esgotamento,
+    transicao_do_reenvio,
 )
 from src.ordem_servico.aplicacao.saga.transicoes import (
     conferir_envio,
-    conferir_estado,
-    conferir_gatilho,
     conferir_prazo,
     transicao_do_cancelamento,
     transicao_do_evento,
@@ -53,7 +56,6 @@ if TYPE_CHECKING:
         Envio,
         ItemDoDiagnostico,
         RegistroDaSaga,
-        Transicao,
     )
     from src.ordem_servico.dominio.marcos import MarcosDaOrdem
 
@@ -63,12 +65,13 @@ _TRACEPARENT: Final = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}")
 
 
 @dataclass(eq=False)
-class Saga(AggregateRoot, LeituraDaSaga):
+class Saga(MudancaDaSaga):
     """Instancia da saga de uma OS; ``id`` e o ``ordem_id``.
 
-    Construir com ``Saga.iniciar``; os eventos andam com ``avancar`` e o
-    pedido de cancelamento com ``solicitar_cancelamento``, que impoem as tabelas
-    da RFC-004 (secoes 4.1 e 4.4) antes de mudar. A ``versao`` e o lock otimista da
+    Construir com ``Saga.iniciar``; os eventos andam com ``avancar``, o pedido
+    de cancelamento com ``solicitar_cancelamento`` e os prazos com ``reenviar``,
+    ``esgotar_prazo`` e ``retomar``, que impoem as tabelas da RFC-004 (secoes
+    4.1, 4.4, 4.6 e 4.7) antes de mudar. A ``versao`` e o lock otimista da
     persistencia, como na OS. Listas e dicts sao trocados por novos a cada
     mudanca (a coluna JSONB nao detecta mutacao no lugar).
     """
@@ -173,7 +176,7 @@ class Saga(AggregateRoot, LeituraDaSaga):
         conferir_prazo(envio, agora)
         self._itens = itens
         gatilho = Gatilho(evento.tipo, evento.id, agora, ator)
-        self._mudar(transicao, gatilho, envio, posicao)
+        self._mudar(transicao, gatilho, envio, Complemento(posicao=posicao))
 
     def solicitar_cancelamento(
         self, marcos: MarcosDaOrdem, *, agora: datetime, ator: str, envio: Envio
@@ -199,72 +202,75 @@ class Saga(AggregateRoot, LeituraDaSaga):
         )
         self._mudar(transicao, pedido, envio)
 
-    # ----- mecanica interna
+    def reenviar(self, envio: Envio, *, agora: datetime, ator: str) -> None:
+        """O prazo do comando em voo venceu: ele sai de novo, com id novo.
 
-    def _mudar(
-        self,
-        transicao: Transicao,
-        gatilho: Gatilho,
-        envio: Envio | None,
-        posicao: int | None = None,
-    ) -> None:
-        """Aplica a transicao ja conferida e anota o registro dela."""
-        conferir_gatilho(transicao, gatilho)
-        de, agora = self._etapa, gatilho.em
-        if transicao.seguinte is not de:
-            self._registrar_evento(
-                EtapaDaSagaAlteradaEvent(
-                    agregado_id=self.id,
-                    etapa_anterior=de,
-                    etapa_nova=transicao.seguinte,
-                    permanencia=agora - self._etapa_desde,
-                    ocorrido_em=agora,
-                )
-            )
-            self._etapa = transicao.seguinte
-            self._etapa_desde = agora
-        if de in ANTES_DO_PIVOT and transicao.seguinte is EtapaSaga.COMPENSANDO:
-            # A transicao que inicia a compensacao sempre traz o motivo.
-            motivo = MotivoCompensacao(cast("str", transicao.motivo))
-            self._registrar_evento(
-                CompensacaoIniciadaEvent(
-                    agregado_id=self.id, motivo=motivo, ocorrido_em=agora
-                )
-            )
-        self._atualizada_em = agora
-        self._motivo = transicao.motivo
-        self._falha = transicao.falha
-        self._plano_compensacao = [c.value for c in transicao.plano]
-        if transicao.gatilho is not None:
-            gatilho = replace(gatilho, tipo=transicao.gatilho)
-        passo = gatilho.registro(
-            len(self._passos) + 1, de, self._etapa, envio, transicao.motivo
-        )
-        if posicao is not None:
-            passo["posicao_na_fila"] = posicao
-        self._passos = [*self._passos, passo]
-        if transicao.concluido is not None:
-            self._passos_concluidos = [*self._passos_concluidos, transicao.concluido]
-        self._esperar_resposta(envio)
-        self._conferir_invariantes()
+        O ``envio`` e o mesmo comando com os mesmos ``dados`` (a mesma chave de
+        negocio). O id novo passa a casar a resposta, o prazo recomeca e o
+        contador sobe (RFC-004 secao 4.6); a etapa nao muda.
 
-    def _esperar_resposta(self, envio: Envio | None) -> None:
-        """O envio conferido vira o comando em voo; sem ele, nada fica em voo.
-
-        Todo comando enviado depois da abertura tem resposta automatica, entao o
-        envio conferido sempre traz o prazo. Na falha da compensacao o comando
-        em voo permanece, sem prazo, para a retomada reenvia-lo (RFC-004 4.7).
+        Raises:
+            TransicaoDaSagaInvalidaError: sem comando em voo, envio que nao e o
+                dele, prazo invalido ou instante que volta; nada muda.
         """
-        if self._etapa is EtapaSaga.FALHA_NA_COMPENSACAO:
-            self._prazo_resposta_em = None
-        elif envio is None:
-            self._comando_em_voo = None
-            self._prazo_resposta_em = None
-            self._reenvios = 0
-        else:
-            self._comando_em_voo = envio.em_voo(self._atualizada_em)
-            self._prazo_resposta_em = envio.prazo_resposta_em
-            self._reenvios = 0
+        transicao = transicao_do_reenvio(self, agora)
+        anteriores = conferir_reenvio(self, envio, agora)["mensagem_ids"]
+        conferir_prazo(envio, agora)
+        tipo = envio.tipo.value
+        self._registrar_evento(
+            ComandoReenviadoEvent(agregado_id=self.id, comando=tipo, ocorrido_em=agora)
+        )
+        reenvio = Gatilho(GatilhoDeProcesso.REENVIO.value, None, agora, ator)
+        complemento = Complemento(anteriores, reenvio=self._reenvios + 1)
+        self._mudar(transicao, reenvio, envio, complemento)
 
-    def _conferir_invariantes(self) -> None:
-        conferir_estado(self)
+    def esgotar_prazo(
+        self,
+        marcos: MarcosDaOrdem,
+        *,
+        agora: datetime,
+        ator: str,
+        envio: Envio | None = None,
+    ) -> None:
+        """O ultimo reenvio ficou sem resposta (RFC-004 secoes 4.6 e 4.7).
+
+        Em etapa linear a compensacao comeca por ``prazo_tecnico``, com o passo
+        em voo no plano, e o ``envio`` e a primeira compensacao dele; em
+        ``compensando`` a saga vai a ``falha_na_compensacao`` (``reenvios_esgotados``)
+        e nenhum comando sai.
+
+        Raises:
+            TransicaoDaSagaInvalidaError: sem prazo de resposta, envio que nao e
+                o da transicao ou instante que volta; nada muda.
+        """
+        transicao = transicao_do_esgotamento(self, agora)
+        conferir_envio(
+            transicao, envio, ordem_id=self.id, itens=self._itens, marcos=marcos
+        )
+        conferir_prazo(envio, agora)
+        self._registrar_evento(
+            PrazoEsgotadoEvent(
+                agregado_id=self.id,
+                comando=cast("str", self.tipo_do_comando_em_voo),
+                ocorrido_em=agora,
+            )
+        )
+        esgotado = Gatilho(GatilhoDeProcesso.PRAZO_ESGOTADO.value, None, agora, ator)
+        self._mudar(transicao, esgotado, envio)
+
+    def retomar(self, envio: Envio, *, agora: datetime, ator: str) -> None:
+        """O operador retoma a compensacao parada (RFC-004 secao 4.7).
+
+        A saga volta a ``compensando`` e o ``envio`` e a pendente de novo, com id
+        novo, prazo novo e contador zerado; os ids dos envios anteriores ficam
+        em ``mensagem_ids``, e a resposta tardia ao original ainda casa.
+
+        Raises:
+            TransicaoDaSagaInvalidaError: etapa que nao e ``falha_na_compensacao``,
+                envio que nao e a pendente ou instante que volta; nada muda.
+        """
+        transicao = transicao_da_retomada(self, agora)
+        anteriores = conferir_reenvio(self, envio, agora)["mensagem_ids"]
+        conferir_prazo(envio, agora)
+        retomada = Gatilho(GatilhoDeProcesso.RETOMADA.value, None, agora, ator)
+        self._mudar(transicao, retomada, envio, Complemento(anteriores))

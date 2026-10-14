@@ -472,7 +472,7 @@ class TestCancelamento:
             raise InvarianteDaSagaError(interno)
 
         monkeypatch.setattr(
-            "src.ordem_servico.aplicacao.saga.saga.conferir_estado", _viola
+            "src.ordem_servico.aplicacao.saga.mudanca_da_saga.conferir_estado", _viola
         )
         app = criar_app()
         app.dependency_overrides[obter_session] = lambda: MagicMock()
