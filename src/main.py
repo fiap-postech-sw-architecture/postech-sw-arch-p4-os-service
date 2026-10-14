@@ -125,6 +125,14 @@ def criar_app() -> FastAPI:
         # Sem 307 para a variante com/sem barra: atras do Kong o Location
         # absoluto sairia com o esquema errado. Rotas de colecao nao tem barra.
         redirect_slashes=False,
+        # Sem o export OTLP automatico do FastAPI 0.142+: com o endpoint OTLP no
+        # ambiente (o ConfigMap do cluster o leva) ele soma exportadores
+        # http/protobuf na partida, que pedem o extra fastapi[opentelemetry], e
+        # escreve "automatic telemetry configuration failed" no log de boot. A
+        # API exporta por `configurar_otel` (gRPC). No 0.141.1 do lock o
+        # argumento so fica em `app.extra`, sem efeito, e passa a valer quando o
+        # lock subir.
+        telemetry={"auto_configure": False},
     )
 
     # Imports locais: routers so carregam ao fabricar o app (sem instanciacao

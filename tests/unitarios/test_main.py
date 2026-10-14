@@ -18,6 +18,13 @@ class TestMain:
         application = criar_app()
         assert isinstance(application, FastAPI)
 
+    def test_fastapi_nao_monta_o_export_otlp_automatico(self) -> None:
+        """O FastAPI 0.142+ soma exportadores OTLP na partida quando o endpoint
+        esta no ambiente e avisa que a configuracao falhou (falta o extra
+        ``fastapi[opentelemetry]``). A API exporta por ``configurar_otel``; no
+        0.141.1 o argumento so fica em ``extra``, e vale quando o lock subir."""
+        assert criar_app().extra["telemetry"] == {"auto_configure": False}
+
     def test_titulo(self) -> None:
         application = criar_app()
         assert application.title == "PytStop OS Service"
