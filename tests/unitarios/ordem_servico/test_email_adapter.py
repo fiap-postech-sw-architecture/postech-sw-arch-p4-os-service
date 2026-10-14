@@ -73,9 +73,11 @@ def test_configuracao_vem_do_ambiente(
     assert conexao.mensagens[0]["From"] == "nao-responda@pytstop.dev"
 
 
+@pytest.mark.parametrize("ambiente", ["development", "test"])
 def test_sem_ambiente_vale_o_mailpit_local(
-    smtp: type[_SmtpFalso], monkeypatch: pytest.MonkeyPatch
+    smtp: type[_SmtpFalso], monkeypatch: pytest.MonkeyPatch, ambiente: str
 ) -> None:
+    monkeypatch.setenv("ENVIRONMENT", ambiente)
     for nome in ("SMTP_HOST", "SMTP_PORT", "SMTP_FROM"):
         monkeypatch.delenv(nome, raising=False)
 
@@ -84,6 +86,34 @@ def test_sem_ambiente_vale_o_mailpit_local(
     (conexao,) = smtp.instancias
     assert (conexao.host, conexao.port) == ("localhost", 1025)
     assert conexao.mensagens[0]["From"] == "oficina@pytstop.local"
+
+
+@pytest.mark.parametrize("host", [None, ""])
+@pytest.mark.parametrize("ambiente", ["production", "staging", "PRODUCTION"])
+def test_sem_smtp_host_fora_de_development_aborta_o_boot(
+    monkeypatch: pytest.MonkeyPatch, ambiente: str, host: str | None
+) -> None:
+    # O padrao localhost mandaria todo e-mail ao proprio pod, para o `dead`.
+    monkeypatch.setenv("ENVIRONMENT", ambiente)
+    if host is None:
+        monkeypatch.delenv("SMTP_HOST", raising=False)
+    else:
+        monkeypatch.setenv("SMTP_HOST", host)
+
+    with pytest.raises(RuntimeError, match="SMTP_HOST"):
+        SmtpEmailAdapter.do_ambiente()
+
+
+def test_com_smtp_host_a_producao_sobe(
+    smtp: type[_SmtpFalso], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("SMTP_HOST", "mailpit.pytstop-plataforma.svc.cluster.local")
+
+    SmtpEmailAdapter.do_ambiente().enviar("a@b.com", "assunto", "corpo")
+
+    (conexao,) = smtp.instancias
+    assert conexao.host == "mailpit.pytstop-plataforma.svc.cluster.local"
 
 
 @pytest.mark.parametrize("porta", ["nao-numerica", "0", "-1", ""])
