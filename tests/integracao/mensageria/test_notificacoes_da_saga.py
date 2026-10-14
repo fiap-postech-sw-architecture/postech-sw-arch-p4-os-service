@@ -27,10 +27,10 @@ from src.ordem_servico.interfaces.dependencies import (
     obter_registrar_entrega,
 )
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
-from tests.integracao.mensageria.test_saga_com_broker import (
+from tests.integracao.mensageria.apoio_da_saga import (
     Atendimento,
-    _consumidor,
-    _relay,
+    consumidor_de_teste,
+    relay_de_teste,
 )
 
 if TYPE_CHECKING:
@@ -92,8 +92,8 @@ def processos(
     tmp_path: Path,
 ) -> Iterator[Atendimento]:
     """Relay e consumidor reais; o notificador cada teste liga com o SMTP dele."""
-    relay = _relay(engine, broker, rastreador, tmp_path)
-    consumidor = _consumidor(session_factory, broker, rastreador, tmp_path)
+    relay = relay_de_teste(engine, broker, rastreador, tmp_path)
+    consumidor = consumidor_de_teste(session_factory, broker, rastreador, tmp_path)
     with EmSegundoPlano(relay), EmSegundoPlano(consumidor):
         esperar_ate(lambda: (tmp_path / "consumidor-pronto").exists())
         yield Atendimento(engine, session_factory, broker, rastreador)
@@ -180,7 +180,7 @@ def test_um_email_por_mudanca_de_situacao_do_abrir_ate_a_entrega(
         assert dado not in publico
 
 
-def test_smtp_fora_nao_atrasa_a_saga_nem_o_relay(
+def test_smtp_fora_nao_atrasa_a_saga_nem_orelay_de_teste(
     processos: Atendimento,
     engine: Engine,
     session_factory: sessionmaker[Session],

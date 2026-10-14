@@ -24,20 +24,8 @@ from structlog.testing import capture_logs
 from src.compartilhado.aplicacao.mensageria import Desfecho, FalhaPermanenteError
 from src.compartilhado.infraestrutura import observability as observabilidade
 from src.compartilhado.infraestrutura.mensageria import consumidor as modulo_consumidor
-from src.compartilhado.infraestrutura.mensageria.consumidor import (
-    ConfigConsumidor,
-    Consumidor,
-    Handler,
-)
-from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
-from src.compartilhado.infraestrutura.mensageria.relay import ConfigRelay, Relay
-from src.compartilhado.infraestrutura.mensageria.telemetria import (
-    contexto_dos_cabecalhos,
-)
 from src.consumidor import montar_despachante
-from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import (
-    obter_abrir_ordem,
     obter_cancelar_ordem,
     obter_obter_ordem,
     obter_obter_saga,
@@ -45,15 +33,20 @@ from src.ordem_servico.interfaces.dependencies import (
 )
 from tests.eventos import envelope_de_evento
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
+from tests.integracao.mensageria.apoio_da_saga import (
+    ATENDENTE,
+    Atendimento,
+    amostra,
+    consumidor_de_teste,
+    relay_de_teste,
+)
 from tests.integracao.seed_helpers import (
-    criar_cliente_com_veiculo,
     notificacoes_recusando_no_commit,
     outbox_recusando_no_commit,
 )
-from tests.rastreamento import traceparent
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Iterator
     from pathlib import Path
 
     from opentelemetry.sdk.trace import ReadableSpan
@@ -63,21 +56,7 @@ if TYPE_CHECKING:
     from tests.integracao.broker import Broker
     from tests.rastreamento import Rastreador, Saidas
 
-_ATENDENTE = "4c2f8f8e-1b8e-4d5a-9a9e-3f1d2c7b6a55"
 _DLQ = "os.eventos.dlq"
-# Fila de cada comando que o OS publica no caminho feliz.
-_FILA = {
-    "SolicitarDiagnostico": "execucao.comandos",
-    "GerarOrcamento": "billing.comandos",
-    "ReservarPecas": "execucao.comandos",
-    "SolicitarPagamento": "billing.comandos",
-    "AgendarExecucao": "execucao.comandos",
-    "CancelarExecucao": "execucao.comandos",
-    "EstornarPagamento": "billing.comandos",
-    "LiberarReserva": "execucao.comandos",
-    "CancelarOrcamento": "billing.comandos",
-    "DescartarDiagnostico": "execucao.comandos",
-}
 # As cinco compensacoes, na ordem da RFC-004 secao 4.4, e a resposta de cada uma.
 _COMPENSACOES = {
     "CancelarExecucao": "ExecucaoCancelada",
@@ -116,154 +95,8 @@ def _retries() -> float:
     )
 
 
-def _amostra(nome: str, **labels: str) -> float:
-    return REGISTRY.get_sample_value(nome, labels) or 0.0
-
-
 def _consumidas(tipo: str, resultado: str) -> float:
-    return _amostra(
-        "pytstop_mensagens_consumidas_total", tipo=tipo, resultado=resultado
-    )
-
-
-class Atendimento:
-    """Uma OS aberta pelo caso de uso e os participantes respondendo pelo broker."""
-
-    def __init__(
-        self,
-        engine: Engine,
-        session_factory: sessionmaker[Session],
-        broker: Broker,
-        rastreador: Rastreador,
-    ) -> None:
-        self.engine = engine
-        self._session_factory = session_factory
-        self._broker = broker
-        self._rastreador = rastreador
-        self.comandos: dict[str, tuple[Any, dict[str, Any]]] = {}
-        self.ordem_id = UUID(int=0)
-
-    def abrir(
-        self, *, placa: str | None = None, descricao: str = "Barulho na suspensao"
-    ) -> UUID:
-        """POST de abertura: o span dele e a raiz do trace da saga."""
-        with self._session_factory() as sess:
-            cliente = criar_cliente_com_veiculo(sess, placa=placa)
-            sess.commit()
-            cliente_id, veiculo_id = cliente.id, cliente.veiculos[0].id
-        with (
-            self._rastreador.tracer.start_as_current_span(
-                "POST /api/v1/ordens-de-servico"
-            ),
-            self._session_factory() as sess,
-        ):
-            self.ordem_id = (
-                obter_abrir_ordem(sess)
-                .executar(
-                    AbrirOrdemDTO(
-                        cliente_id=cliente_id,
-                        veiculo_id=veiculo_id,
-                        descricao_problema=descricao,
-                        ator=_ATENDENTE,
-                    )
-                )
-                .id
-            )
-        return self.ordem_id
-
-    def receber(self, tipo: str) -> dict[str, Any]:
-        """O participante tira o comando da fila dele e confere o contrato."""
-        props, corpo = esperar_ate(lambda: self._broker.pegar(_FILA[tipo]))
-        envelope = json.loads(corpo)
-        catalogo().validar(envelope)
-        assert (props.type, envelope["tipo"]) == (tipo, tipo)
-        assert envelope["correlation_id"] == str(self.ordem_id)
-        self.comandos[tipo] = (props, envelope)
-        return envelope
-
-    def responder(self, comando: str, tipo: str, **dados: Any) -> dict[str, Any]:
-        """Evento em resposta ao (ou aberto pelo) comando, no trace dele."""
-        props, envelope_do_comando = self.comandos[comando]
-        with self._rastreador.tracer.start_as_current_span(
-            f"participante {tipo}", context=contexto_dos_cabecalhos(props.headers)
-        ) as span:
-            cabecalhos = {"traceparent": traceparent(span)}
-        envelope = envelope_de_evento(
-            tipo,
-            correlation_id=self.ordem_id,
-            causation_id=envelope_do_comando["id"],
-            **dados,
-        )
-        catalogo().validar(envelope)
-        self._broker.publicar_evento(envelope, cabecalhos=cabecalhos)
-        return envelope
-
-    def etapa(self) -> str | None:
-        with self.engine.connect() as conexao:
-            return conexao.execute(
-                text("SELECT etapa FROM sagas WHERE ordem_id = :id"),
-                {"id": self.ordem_id},
-            ).scalar_one_or_none()
-
-    def gatilhos(self) -> list[str]:
-        with self.engine.connect() as conexao:
-            passos = conexao.execute(
-                text("SELECT passos FROM sagas WHERE ordem_id = :id"),
-                {"id": self.ordem_id},
-            ).scalar_one()
-        return [p["gatilho"] for p in passos]
-
-    def esperar_passo(self, gatilho: str) -> None:
-        esperar_ate(lambda: gatilho in self.gatilhos())
-
-    def ate_aguardando_pagamento_com_checkout(self) -> None:
-        """Do pedido de diagnostico ao PagamentoSolicitado, na ordem."""
-        self.receber("SolicitarDiagnostico")
-        self.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
-        self.esperar_passo("DiagnosticoIniciado")
-        self.responder("SolicitarDiagnostico", "DiagnosticoConcluido")
-        self.receber("GerarOrcamento")
-        self.responder("GerarOrcamento", "OrcamentoGerado")
-        self.esperar_passo("OrcamentoGerado")
-        self.responder("GerarOrcamento", "OrcamentoAprovado")
-        self.receber("ReservarPecas")
-        self.responder("ReservarPecas", "PecasReservadas")
-        self.receber("SolicitarPagamento")
-        self.responder("SolicitarPagamento", "PagamentoSolicitado")
-        self.esperar_passo("PagamentoSolicitado")
-
-    def ate_aguardando_agendamento(self) -> None:
-        """Do pedido de diagnostico ao AgendarExecucao, na ordem."""
-        self.ate_aguardando_pagamento_com_checkout()
-        self.responder("SolicitarPagamento", "PagamentoConfirmado")
-        self.receber("AgendarExecucao")
-
-
-def _relay(
-    engine: Engine, broker: Broker, rastreador: Rastreador, pasta: Path
-) -> Relay:
-    return Relay(
-        engine=engine,
-        parametros=broker.parametros("os"),
-        tracer=rastreador.tracer,
-        config=ConfigRelay(poll_s=0.1, diretorio_de_saude=pasta),
-    )
-
-
-def _consumidor(
-    session_factory: sessionmaker[Session],
-    broker: Broker,
-    rastreador: Rastreador,
-    pasta: Path,
-    despachante: Mapping[str, Handler] | None = None,
-) -> Consumidor:
-    return Consumidor(
-        session_factory=session_factory,
-        parametros=broker.parametros("os"),
-        despachante=despachante or montar_despachante(timedelta(seconds=120)),
-        tracer=rastreador.tracer,
-        config=ConfigConsumidor(inatividade_s=0.1, diretorio_de_saude=pasta),
-    )
+    return amostra("pytstop_mensagens_consumidas_total", tipo=tipo, resultado=resultado)
 
 
 @pytest.fixture
@@ -275,8 +108,8 @@ def atendimento(
     tmp_path: Path,
 ) -> Iterator[Atendimento]:
     """Relay e consumidor reais em threads, com o despachante do processo."""
-    relay = _relay(engine, broker, rastreador, tmp_path)
-    consumidor = _consumidor(session_factory, broker, rastreador, tmp_path)
+    relay = relay_de_teste(engine, broker, rastreador, tmp_path)
+    consumidor = consumidor_de_teste(session_factory, broker, rastreador, tmp_path)
     with EmSegundoPlano(relay), EmSegundoPlano(consumidor):
         esperar_ate(lambda: (tmp_path / "consumidor-pronto").exists())
         yield Atendimento(engine, session_factory, broker, rastreador)
@@ -288,8 +121,8 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
     broker: Broker,
     rastreador: Rastreador,
 ) -> None:
-    iniciadas = _amostra("pytstop_saga_iniciadas_total")
-    concluidas = _amostra("pytstop_saga_finalizadas_total", resultado="concluida")
+    iniciadas = amostra("pytstop_saga_iniciadas_total")
+    concluidas = amostra("pytstop_saga_finalizadas_total", resultado="concluida")
     retries = _retries()
 
     ordem_id = atendimento.abrir()
@@ -301,7 +134,7 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
     atendimento.responder("AgendarExecucao", "ExecucaoFinalizada")
     esperar_ate(lambda: atendimento.etapa() == "concluida")
     with session_factory() as sess:
-        entregue = obter_registrar_entrega(sess).executar(ordem_id, ator=_ATENDENTE)
+        entregue = obter_registrar_entrega(sess).executar(ordem_id, ator=ATENDENTE)
 
     assert (entregue.status, entregue.etapa) == ("entregue", "concluida")
     assert atendimento.gatilhos() == [
@@ -346,9 +179,9 @@ def test_caminho_feliz_ate_a_entrega_num_trace_so(
             text("SELECT versao FROM sagas WHERE ordem_id = :id"), {"id": ordem_id}
         ).scalar_one()
     assert versao == 11
-    assert _amostra("pytstop_saga_iniciadas_total") == iniciadas + 1
+    assert amostra("pytstop_saga_iniciadas_total") == iniciadas + 1
     assert (
-        _amostra("pytstop_saga_finalizadas_total", resultado="concluida")
+        amostra("pytstop_saga_finalizadas_total", resultado="concluida")
         == concluidas + 1
     )
 
@@ -433,7 +266,7 @@ def test_placa_e_descricao_so_no_comando_da_execucao(
     atendimento.responder("AgendarExecucao", "ExecucaoFinalizada")
     esperar_ate(lambda: atendimento.etapa() == "concluida")
     with session_factory() as sess:
-        obter_registrar_entrega(sess).executar(ordem_id, ator=_ATENDENTE)
+        obter_registrar_entrega(sess).executar(ordem_id, ator=ATENDENTE)
         saga = obter_obter_saga(sess).executar(ordem_id)
     esperar_ate(lambda: rastreador.spans("process ExecucaoFinalizada"))
 
@@ -547,7 +380,7 @@ def test_entrega_com_commit_recusado_deixa_a_os_finalizada_e_sem_pedido_de_email
         session_factory() as sess,
         pytest.raises(DBAPIError, match="notificacoes indisponivel"),
     ):
-        obter_registrar_entrega(sess).executar(ordem_id, ator=_ATENDENTE)
+        obter_registrar_entrega(sess).executar(ordem_id, ator=ATENDENTE)
 
     assert _estado(engine, ordem_id) == antes
     with engine.connect() as conexao:
@@ -691,7 +524,7 @@ def _cancelar(
         session_factory() as sess,
     ):
         cancelada = obter_cancelar_ordem(sess).executar(
-            atendimento.ordem_id, motivo, ator=_ATENDENTE
+            atendimento.ordem_id, motivo, ator=ATENDENTE
         )
     assert cancelada.etapa == "compensando"
 
@@ -704,8 +537,8 @@ def test_cancelamento_depois_do_pagamento_compensa_uma_por_vez_na_ordem_da_rfc(
     rastreador: Rastreador,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    compensacoes = _amostra("pytstop_saga_compensacoes_total", motivo="cancelamento")
-    compensadas = _amostra("pytstop_saga_finalizadas_total", resultado="compensada")
+    compensacoes = amostra("pytstop_saga_compensacoes_total", motivo="cancelamento")
+    compensadas = amostra("pytstop_saga_finalizadas_total", resultado="compensada")
     ordem_id = atendimento.abrir()
     atendimento.ate_aguardando_agendamento()
     atendimento.responder("AgendarExecucao", "ExecucaoAgendada")
@@ -734,10 +567,10 @@ def test_cancelamento_depois_do_pagamento_compensa_uma_por_vez_na_ordem_da_rfc(
     gatilhos = atendimento.gatilhos()
     assert gatilhos[-6:] == ["cancelamento_solicitado", *_COMPENSACOES.values()]
     assert broker.contar(_DLQ) == 0
-    assert _amostra(
+    assert amostra(
         "pytstop_saga_compensacoes_total", motivo="cancelamento"
     ) == pytest.approx(compensacoes + 1)
-    assert _amostra(
+    assert amostra(
         "pytstop_saga_finalizadas_total", resultado="compensada"
     ) == pytest.approx(compensadas + 1)
 
@@ -770,8 +603,8 @@ def test_falta_de_peca_compensa_o_orcamento_e_o_diagnostico_e_cancela_a_os(
     # Falha de negocio de ponta a ponta no broker real: a reserva falha, e a saga
     # desfaz o orcamento e o diagnostico, um por vez, cada um causado pela
     # resposta anterior (RFC-004 secoes 4.4 e 5.2).
-    compensacoes = _amostra("pytstop_saga_compensacoes_total", motivo="reserva_falhou")
-    compensadas = _amostra("pytstop_saga_finalizadas_total", resultado="compensada")
+    compensacoes = amostra("pytstop_saga_compensacoes_total", motivo="reserva_falhou")
+    compensadas = amostra("pytstop_saga_finalizadas_total", resultado="compensada")
     ordem_id = atendimento.abrir()
     atendimento.receber("SolicitarDiagnostico")
     atendimento.responder("SolicitarDiagnostico", "DiagnosticoIniciado")
@@ -817,10 +650,10 @@ def test_falta_de_peca_compensa_o_orcamento_e_o_diagnostico_e_cancela_a_os(
         "DiagnosticoDescartado",
     ]
     assert broker.contar(_DLQ) == 0
-    assert _amostra(
+    assert amostra(
         "pytstop_saga_compensacoes_total", motivo="reserva_falhou"
     ) == pytest.approx(compensacoes + 1)
-    assert _amostra(
+    assert amostra(
         "pytstop_saga_finalizadas_total", resultado="compensada"
     ) == pytest.approx(compensadas + 1)
 
@@ -921,9 +754,11 @@ def test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova(
     pasta_anterior = tmp_path / "anterior"
     pasta_anterior.mkdir()
     with (
-        EmSegundoPlano(_relay(engine, broker, rastreador, pasta_anterior)),
+        EmSegundoPlano(relay_de_teste(engine, broker, rastreador, pasta_anterior)),
         EmSegundoPlano(
-            _consumidor(session_factory, broker, rastreador, pasta_anterior, anterior)
+            consumidor_de_teste(
+                session_factory, broker, rastreador, pasta_anterior, anterior
+            )
         ),
     ):
         esperar_ate(lambda: (pasta_anterior / "consumidor-pronto").exists())
@@ -943,8 +778,10 @@ def test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova(
     pasta_nova = tmp_path / "nova"
     pasta_nova.mkdir()
     with (
-        EmSegundoPlano(_relay(engine, broker, rastreador, pasta_nova)),
-        EmSegundoPlano(_consumidor(session_factory, broker, rastreador, pasta_nova)),
+        EmSegundoPlano(relay_de_teste(engine, broker, rastreador, pasta_nova)),
+        EmSegundoPlano(
+            consumidor_de_teste(session_factory, broker, rastreador, pasta_nova)
+        ),
     ):
         esperar_ate(lambda: (pasta_nova / "consumidor-pronto").exists())
         # Versao nova implantada: agora o redrive trata o evento.

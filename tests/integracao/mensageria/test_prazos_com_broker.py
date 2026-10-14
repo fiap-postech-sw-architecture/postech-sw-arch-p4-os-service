@@ -40,12 +40,12 @@ from src.ordem_servico.infraestrutura.transacao_dos_prazos import (
 from src.ordem_servico.interfaces.dependencies import obter_cancelar_ordem
 from tests.eventos import envelope_de_evento
 from tests.integracao.broker import EmSegundoPlano, esperar_ate
-from tests.integracao.mensageria.test_saga_com_broker import (
-    _ATENDENTE,
+from tests.integracao.mensageria.apoio_da_saga import (
+    ATENDENTE,
     Atendimento,
-    _amostra,
-    _consumidor,
-    _relay,
+    amostra,
+    consumidor_de_teste,
+    relay_de_teste,
 )
 
 if TYPE_CHECKING:
@@ -130,7 +130,7 @@ def _consumidor_com_prazo(
     pasta: Path,
     prazo: timedelta,
 ) -> Any:
-    return _consumidor(
+    return consumidor_de_teste(
         session_factory, broker, rastreador, pasta, montar_despachante(prazo)
     )
 
@@ -216,14 +216,14 @@ class TestParticipanteMudo:
         rastreador: Rastreador,
         tmp_path: Path,
     ) -> None:
-        reenvios = _amostra("pytstop_saga_reenvios_total", comando="GerarOrcamento")
-        esgotados = _amostra(
+        reenvios = amostra("pytstop_saga_reenvios_total", comando="GerarOrcamento")
+        esgotados = amostra(
             "pytstop_saga_prazos_esgotados_total", comando="GerarOrcamento"
         )
-        compensacoes = _amostra(
+        compensacoes = amostra(
             "pytstop_saga_compensacoes_total", motivo="prazo_tecnico"
         )
-        relay = _relay(atendimento.engine, broker, rastreador, tmp_path)
+        relay = relay_de_teste(atendimento.engine, broker, rastreador, tmp_path)
         consumidor = _consumidor_com_prazo(
             session_factory, broker, rastreador, tmp_path, PRAZO
         )
@@ -261,15 +261,15 @@ class TestParticipanteMudo:
                 esperar_ate(lambda: ordem.saga()["etapa"] == "compensada")
 
         assert (
-            _amostra("pytstop_saga_reenvios_total", comando="GerarOrcamento")
+            amostra("pytstop_saga_reenvios_total", comando="GerarOrcamento")
             == reenvios + MAXIMO
         )
         assert (
-            _amostra("pytstop_saga_prazos_esgotados_total", comando="GerarOrcamento")
+            amostra("pytstop_saga_prazos_esgotados_total", comando="GerarOrcamento")
             == esgotados + 1
         )
         assert (
-            _amostra("pytstop_saga_compensacoes_total", motivo="prazo_tecnico")
+            amostra("pytstop_saga_compensacoes_total", motivo="prazo_tecnico")
             == compensacoes + 1
         )
         assert broker.contar(_DLQ) == 0
@@ -287,7 +287,7 @@ class TestParticipanteMudo:
         rastreador: Rastreador,
         tmp_path: Path,
     ) -> None:
-        relay = _relay(atendimento.engine, broker, rastreador, tmp_path)
+        relay = relay_de_teste(atendimento.engine, broker, rastreador, tmp_path)
         consumidor = _consumidor_com_prazo(
             session_factory, broker, rastreador, tmp_path, PRAZO
         )
@@ -333,7 +333,7 @@ class TestEstornoRecusadoEFalha:
         responde_ao: str,
     ) -> None:
         prazo = timedelta(seconds=3)
-        relay = _relay(atendimento.engine, broker, rastreador, tmp_path)
+        relay = relay_de_teste(atendimento.engine, broker, rastreador, tmp_path)
         consumidor = _consumidor_com_prazo(
             session_factory, broker, rastreador, tmp_path, prazo
         )
@@ -347,7 +347,7 @@ class TestEstornoRecusadoEFalha:
                 atendimento.ate_aguardando_pagamento_com_checkout()
                 with session_factory() as sess:
                     obter_cancelar_ordem(sess).executar(
-                        atendimento.ordem_id, "Cliente desistiu", ator=_ATENDENTE
+                        atendimento.ordem_id, "Cliente desistiu", ator=ATENDENTE
                     )
                 original = atendimento.receber("EstornarPagamento")
                 dados_do_original = atendimento.comandos["EstornarPagamento"]
@@ -373,7 +373,7 @@ class TestEstornoRecusadoEFalha:
                         SagaSQLAlchemyRepository(sess),
                         ContextoDeEnvio(prazo, span=span_da_saga(rastreador.tracer)),
                     )
-                    dto = retomar.executar(atendimento.ordem_id, ator=_ATENDENTE)
+                    dto = retomar.executar(atendimento.ordem_id, ator=ATENDENTE)
                 assert (dto.etapa, dto.falha, dto.reenvios) == ("compensando", None, 0)
                 retomado = atendimento.receber("EstornarPagamento")
                 assert retomado["id"] != original["id"]
@@ -393,7 +393,7 @@ class TestEstornoRecusadoEFalha:
         passos = ordem.saga()["passos"]
         retomada = next(p for p in passos if p["gatilho"] == "retomada")
         assert (retomada["ator"], retomada["comando"]) == (
-            _ATENDENTE,
+            ATENDENTE,
             "EstornarPagamento",
         )
         assert retomada["comando_id"] == retomado["id"]
@@ -412,7 +412,7 @@ class TestSemConsumidorEComRelayParado:
     ) -> None:
         # O logger do modulo, ja em cache, escaparia do `capture_logs`.
         monkeypatch.setattr(vencer_prazos, "_log", structlog.get_logger())
-        relay = _relay(atendimento.engine, broker, rastreador, tmp_path)
+        relay = relay_de_teste(atendimento.engine, broker, rastreador, tmp_path)
         prazos = _processo_dos_prazos(session_factory, broker, rastreador, tmp_path)
         ordem = Ordem(atendimento)
         with EmSegundoPlano(relay), EmSegundoPlano(prazos):
@@ -494,7 +494,7 @@ class TestSemConsumidorEComRelayParado:
 
             # O relay volta, entrega, e o prazo passa a correr dai.
             with EmSegundoPlano(
-                _relay(atendimento.engine, broker, rastreador, tmp_path)
+                relay_de_teste(atendimento.engine, broker, rastreador, tmp_path)
             ):
                 esperar_ate(lambda: ordem.reenvios() >= 1)
                 assert ordem.linhas("GerarOrcamento")[0][0] == "entregue"
@@ -509,7 +509,7 @@ class TestDoisConsumidoresEOPrazos:
         rastreador: Rastreador,
         tmp_path: Path,
     ) -> None:
-        relay = _relay(atendimento.engine, broker, rastreador, tmp_path)
+        relay = relay_de_teste(atendimento.engine, broker, rastreador, tmp_path)
         consumidores = [
             _consumidor_com_prazo(session_factory, broker, rastreador, tmp_path, PRAZO)
             for _ in range(2)
@@ -528,7 +528,7 @@ class TestDoisConsumidoresEOPrazos:
             dados_do_original = atendimento.comandos["GerarOrcamento"]
             reenvio = atendimento.receber("GerarOrcamento")
             assert reenvio["id"] != original["id"]
-            ignoradas = _amostra(
+            ignoradas = amostra(
                 "pytstop_mensagens_consumidas_total",
                 tipo="OrcamentoGerado",
                 resultado="ignorada",
@@ -543,7 +543,7 @@ class TestDoisConsumidoresEOPrazos:
             atendimento.responder("GerarOrcamento", "OrcamentoGerado")
             esperar_ate(
                 lambda: (
-                    _amostra(
+                    amostra(
                         "pytstop_mensagens_consumidas_total",
                         tipo="OrcamentoGerado",
                         resultado="ignorada",
