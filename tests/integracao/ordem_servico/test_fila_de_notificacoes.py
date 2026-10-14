@@ -228,6 +228,34 @@ def test_atrasos_e_dead_na_quinta_falha_sem_bloquear_os_seguintes(
     assert segunda.situacao == "pendente"
 
 
+def test_pedido_de_modelo_desconhecido_espera_o_notificador_da_versao_nova(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    os_a, os_b = _ordem(session_factory), _ordem(session_factory)
+    _gravar(session_factory, os_a)
+    _gravar(session_factory, os_a, status=StatusOrdem.AGUARDANDO_EXECUCAO)
+    _gravar(session_factory, os_b)
+    with engine.begin() as conexao:
+        # Um modelo que so a versao seguinte conhece, no primeiro pedido da OS A.
+        conexao.execute(
+            text(
+                "UPDATE notificacoes SET modelo = 'futuro' "
+                "WHERE ordem_id = :id AND status_da_ordem = 'em_diagnostico'"
+            ),
+            {"id": os_a},
+        )
+    fila = FilaDeNotificacoes(engine)
+
+    linha = fila.reivindicar(_LEASE)
+
+    # A versao antiga nao quebra nem toma o pedido: o da OS B segue, e o seguinte
+    # da OS A espera o que ficou pendente (a ordem por OS).
+    assert linha is not None
+    assert linha.notificacao.ordem_id == os_b
+    assert fila.reivindicar(_LEASE) is None
+    assert sorted(linha.situacao for linha in _linhas(engine)) == ["pendente"] * 3
+
+
 def test_duas_replicas_nunca_pegam_a_mesma_linha(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:

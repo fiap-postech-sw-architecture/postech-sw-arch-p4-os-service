@@ -43,10 +43,19 @@ _SQL_CLAIM: Final = text(
     "SELECT n.id, n.ordem_id, n.modelo, n.status_da_ordem, n.motivo, n.tentativas "
     "FROM notificacoes n "
     "WHERE n.situacao = 'pendente' AND n.proxima_tentativa_em <= now() "
+    "AND n.modelo = ANY(:modelos) AND n.status_da_ordem = ANY(:status) "
     "AND NOT EXISTS (SELECT 1 FROM notificacoes p WHERE p.ordem_id = n.ordem_id "
     "AND p.id < n.id AND p.situacao = 'pendente') "
     "ORDER BY n.id FOR UPDATE OF n SKIP LOCKED LIMIT 1"
 )
+# So reivindica o que esta versao sabe escrever: o pedido de um modelo ou de um
+# status novo (a API ja na versao seguinte, o notificador ainda na anterior) fica
+# pendente para o notificador novo, em vez de derrubar este no laco do claim. A
+# ordem por OS segue valendo: o pedido que fica segura os seguintes da mesma OS.
+_CONHECIDOS: Final = {
+    "modelos": [modelo.value for modelo in ModeloDeNotificacao],
+    "status": [status.value for status in StatusOrdem],
+}
 _SQL_LEASE: Final = text(
     "UPDATE notificacoes SET proxima_tentativa_em = now() + :lease WHERE id = :id "
     "RETURNING proxima_tentativa_em"
@@ -106,7 +115,7 @@ class FilaDeNotificacoes:
     def reivindicar(self, lease: timedelta) -> LinhaDeNotificacao | None:
         """A proxima linha vencida, segura pelo ``lease``; ``None`` sem nenhuma."""
         with self._engine.begin() as conexao:
-            linha = conexao.execute(_SQL_CLAIM).first()
+            linha = conexao.execute(_SQL_CLAIM, _CONHECIDOS).first()
             if linha is None:
                 return None
             lease_ate: datetime = conexao.execute(

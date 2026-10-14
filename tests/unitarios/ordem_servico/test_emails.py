@@ -5,8 +5,10 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
+from src.ordem_servico.aplicacao import emails as modulo_emails
 from src.ordem_servico.aplicacao.dtos import ContatoDoCliente
 from src.ordem_servico.aplicacao.emails import Email, MontarEmail, extrair_email
 from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notificacao
@@ -204,7 +206,11 @@ def test_sem_o_que_entregar_devolve_nada_e_avisa_sem_dado_pessoal(
     status_da_ordem: StatusOrdem | None,
     contato: str | None,
     motivo: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Um logger ja usado numa suite maior guarda a configuracao da primeira vez:
+    # o logger novo e o que o capture_logs enxerga.
+    monkeypatch.setattr(modulo_emails, "_log", structlog.get_logger())
     # A OS nasce no teste: o agregado so existe depois do mapeamento do SQLAlchemy.
     ordem = None if status_da_ordem is None else ordem_em(status_da_ordem)
     ordem_id = uuid4() if ordem is None else ordem.id
