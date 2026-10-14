@@ -327,6 +327,57 @@ def test_namespace_aplica_o_restricted_em_enforce_warn_e_audit(overlay: str) -> 
     } == dict.fromkeys(("enforce", "warn", "audit"), "restricted")
 
 
+def _container_do_render(overlay: str, chave: tuple[str, str, str]) -> dict[str, Any]:
+    return next(e for c, e, _ in containers(overlay) if c == chave)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_readiness_da_api_olha_a_prontidao_e_a_liveness_olha_so_o_processo(
+    overlay: str,
+) -> None:
+    # A liveness na rota de prontidao reiniciaria a API a cada queda do banco.
+    api = _container_do_render(overlay, _API)
+
+    assert api["readinessProbe"]["httpGet"] == {
+        "path": "/api/v1/saude/pronto",
+        "port": "http",
+    }
+    for sonda in ("startupProbe", "livenessProbe"):
+        assert api[sonda]["httpGet"] == {"path": "/api/v1/saude", "port": "http"}
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_service_interno_da_api_e_o_da_8000_que_billing_e_execucao_leem_no_jwks(
+    overlay: str,
+) -> None:
+    # JWKS_URL deles: http://os-service.pytstop-os.svc.cluster.local:8000.
+    servico = do_render(overlay, "Service", "os-service")["spec"]
+    api = _container_do_render(overlay, _API)
+
+    assert servico["selector"] == {"app": "os-service-api"}
+    assert servico["ports"] == [{"name": "http", "port": 8000, "targetPort": "http"}]
+    assert api["ports"] == [{"name": "http", "containerPort": 8000}]
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_prazo_de_encerramento_cobre_o_que_cada_processo_tem_em_curso(
+    overlay: str,
+) -> None:
+    # Relay e consumidor: 45 s cobrem o publish que espera o confirm do broker (ate
+    # 30 s com o broker em alarme) e a mensagem em curso, que o SIGTERM conclui.
+    prazos = {
+        nome: pod["terminationGracePeriodSeconds"]
+        for tipo, nome, pod in pods(overlay)
+        if tipo == "Deployment"
+    }
+
+    assert prazos == {
+        "os-service-api": 30,
+        "os-service-relay": 45,
+        "os-service-consumidor": 45,
+    }
+
+
 def _rotulos_dos_templates(overlay: str) -> dict[str, dict[str, str]]:
     """Os rotulos do template de cada workload, pelo nome do objeto."""
     return {
