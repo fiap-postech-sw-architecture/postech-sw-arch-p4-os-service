@@ -8,11 +8,15 @@ anotados dentro dele), conflito de versao ou commit que falha os descartam: a
 mensagem que volta pela retry nao conta duas vezes. Quem emite e o processo que
 tira a saga da etapa (API na abertura e no cancelamento, consumidor nos eventos).
 
-Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` na hora
-da raspagem, numa conexao propria e com prazo curto, e continua certo com os
-outros processos fora do ar; as replicas repetem o valor, e os paineis agregam
-com ``max``. A serie ``pytstop_saga_coletor_disponivel`` diz se a leitura deu
-certo.
+Contadores do processo ``prazos`` (``pytstop_saga_reenvios_total`` e
+``pytstop_saga_prazos_esgotados_total``, por tipo de comando): vem dos fatos
+``ComandoReenviadoEvent`` e ``PrazoEsgotadoEvent``, com a mesma regra do commit.
+
+Gauges: o ``ColetorDaSaga``, registrado so na API, consulta ``sagas`` (e, no
+prazo vencido, ``outbox``) na hora da raspagem, numa conexao propria e com prazo
+curto, e continua certo com os outros processos fora do ar; as replicas repetem o
+valor, e os paineis agregam com ``max``. A serie
+``pytstop_saga_coletor_disponivel`` diz se a leitura deu certo.
 
 Series de rotulo fechado comecam em zero no boot de cada processo, para o
 ``increase()`` dos paineis nao perder o primeiro evento.
@@ -35,14 +39,22 @@ from src.ordem_servico.aplicacao.saga.modelo import (
     MotivoCompensacao,
     SagaIniciadaEvent,
 )
+from src.ordem_servico.aplicacao.saga.prazos import (
+    ComandoReenviadoEvent,
+    PrazoEsgotadoEvent,
+)
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    COMANDOS_COM_PRAZO,
     ETAPAS_FINAIS,
     ETAPAS_NAO_FINAIS,
 )
+from src.ordem_servico.infraestrutura.envio_em_voo import ULTIMO_ENVIO
 from src.ordem_servico.infraestrutura.mapping import sagas_table
+from src.ordem_servico.infraestrutura.prazo_da_saga import prazo_de_resposta_da_saga
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Sequence
+    from datetime import timedelta
     from typing import Any
 
     from prometheus_client.registry import Collector
@@ -77,8 +89,21 @@ COMPENSACOES: Final = Counter(
     "Compensacoes iniciadas, por motivo (codigo da RFC-004 secao 9).",
     ["motivo"],
 )
+REENVIOS: Final = Counter(
+    "pytstop_saga_reenvios_total",
+    "Comandos reenviados pelo prazos depois do prazo de resposta, por tipo.",
+    ["comando"],
+)
+PRAZOS_ESGOTADOS: Final = Counter(
+    "pytstop_saga_prazos_esgotados_total",
+    "Comandos que ficaram sem resposta depois do ultimo reenvio, por tipo.",
+    ["comando"],
+)
 for _etapa in ETAPAS_FINAIS:
     SAGAS_FINALIZADAS.labels(resultado=_etapa.value)
+for _comando in COMANDOS_COM_PRAZO:
+    REENVIOS.labels(comando=_comando.value)
+    PRAZOS_ESGOTADOS.labels(comando=_comando.value)
 for _motivo in MotivoCompensacao:
     COMPENSACOES.labels(motivo=_motivo.value)
 for _etapa in ETAPAS_NAO_FINAIS:
@@ -113,6 +138,10 @@ def _observacao(fato: DomainEvent) -> Callable[[], None]:
             return partial(_etapa_alterada, fato)
         case CompensacaoIniciadaEvent():
             return COMPENSACOES.labels(motivo=fato.motivo.value).inc
+        case ComandoReenviadoEvent():
+            return REENVIOS.labels(comando=fato.comando).inc
+        case PrazoEsgotadoEvent():
+            return PRAZOS_ESGOTADOS.labels(comando=fato.comando).inc
     msg = f"fato da saga sem metrica: {type(fato).__name__}"
     raise TypeError(msg)
 
@@ -178,30 +207,52 @@ def _ao_encerrar(sessao: Session, transacao: SessionTransaction) -> None:
         sessao.info.pop(_FATOS, None)
 
 
-class ColetorDaSaga:
-    """Gauges por consulta: ``pytstop_saga_ativas``, ``..._etapa_mais_antiga_segundos``.
+# O maior atraso do prazo tecnico (RFC-004 secao 9): a saga com prazo cujo
+# envio mais recente (o ultimo de ``mensagem_ids``) a outbox ja entregou, e a
+# entrega mais o prazo ja passou. A mesma condicao com que o processo ``prazos``
+# reivindica a saga; pendente ou ``dead`` nao conta (quem acusa e a outbox
+# parada), nem a saga parada em ``falha_na_compensacao`` (sem prazo). Zero sem
+# atraso.
+_ATRASO_DO_PRAZO: Final = text(
+    "SELECT COALESCE(EXTRACT(EPOCH FROM max(now() - (o.entregue_em + :prazo))), 0) "  # noqa: S608  # nosec B608 - so constantes
+    f"FROM sagas s JOIN outbox o ON o.mensagem_id = {ULTIMO_ENVIO} "
+    "WHERE s.prazo_resposta_em <= now() AND o.status = 'entregue' "
+    "AND o.entregue_em + :prazo <= now()"
+)
 
-    Uma consulta por raspagem, pelo indice parcial ``ix_sagas_ativas``, numa
-    conexao propria (fora do pool das requisicoes) e com prazo de 2 s para a
-    consulta e de 1 s para esperar um lock. Qualquer falha (banco fora, tabela
-    travada, prazo esgotado) omite os dois gauges, que ficam ausentes e nunca
-    zero, conta em ``pytstop_saga_coletor_falhas_total`` e publica
+
+class ColetorDaSaga:
+    """Gauges por consulta: ``pytstop_saga_ativas`` e mais dois.
+
+    ``..._etapa_mais_antiga_segundos`` sai da mesma consulta de ``ativas``, pelo
+    indice parcial ``ix_sagas_ativas``; ``..._prazo_vencido_segundos``, de uma
+    segunda, que junta ``sagas`` e ``outbox`` pelo indice ``ix_sagas_prazo``. As
+    duas rodam numa conexao propria (fora do pool das requisicoes) e com prazo de
+    2 s por consulta e de 1 s para esperar um lock. Qualquer falha (banco fora,
+    tabela travada, prazo esgotado) omite os tres gauges, que ficam ausentes e
+    nunca zero, conta em ``pytstop_saga_coletor_falhas_total`` e publica
     ``pytstop_saga_coletor_disponivel`` em 0: o alerta "Saga parada" nao fica
     mudo com o coletor quebrado. Etapa que esta versao nao conhece (rollout com
     versoes misturadas) fica fora da contagem, sem derrubar a raspagem.
     """
 
-    def __init__(self, abrir_conexao: Callable[[], Connection]) -> None:
+    def __init__(
+        self,
+        abrir_conexao: Callable[[], Connection],
+        prazo: Callable[[], timedelta] = prazo_de_resposta_da_saga,
+    ) -> None:
         self._abrir_conexao = abrir_conexao
+        self._prazo = prazo
 
     def describe(self) -> Iterator[GaugeMetricFamily]:
         """Nomes dos gauges sem consultar o banco (registro antes do boot)."""
         yield from _gauges()
+        yield _prazo_vencido()
         yield _disponibilidade()
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
         try:
-            linhas = self._consultar()
+            linhas, atraso = self._consultar()
         except Exception as exc:  # noqa: BLE001  # a raspagem nunca cai pelo coletor
             FALHAS_DO_COLETOR.inc()
             _log.warning("saga gauges unavailable", erro=type(exc).__name__)
@@ -215,9 +266,10 @@ class ColetorDaSaga:
             mais_antiga.add_metric([etapa.value], idade)
         yield ativas
         yield mais_antiga
+        yield _prazo_vencido(float(atraso))
         yield _disponibilidade(1)
 
-    def _consultar(self) -> Sequence[Row[Any]]:
+    def _consultar(self) -> tuple[Sequence[Row[Any]], float]:
         t = sagas_table
         consulta = (
             select(
@@ -232,7 +284,11 @@ class ColetorDaSaga:
         with self._abrir_conexao() as conexao, conexao.begin():
             conexao.execute(text("SET LOCAL statement_timeout = '2s'"))
             conexao.execute(text("SET LOCAL lock_timeout = '1s'"))
-            return conexao.execute(consulta).all()
+            linhas = conexao.execute(consulta).all()
+            atraso = conexao.execute(
+                _ATRASO_DO_PRAZO, {"prazo": self._prazo()}
+            ).scalar_one()
+            return linhas, float(atraso)
 
 
 def _gauges() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
@@ -245,6 +301,14 @@ def _gauges() -> tuple[GaugeMetricFamily, GaugeMetricFamily]:
             "Idade, na etapa, da saga mais antiga de cada etapa nao final.",
             labels=["etapa"],
         ),
+    )
+
+
+def _prazo_vencido(valor: float | None = None) -> GaugeMetricFamily:
+    return GaugeMetricFamily(
+        "pytstop_saga_prazo_vencido_segundos",
+        "Maior atraso do prazo tecnico de um comando ja entregue (0 sem atraso).",
+        value=valor,
     )
 
 

@@ -3,11 +3,11 @@
 Auto-instrumentation de FastAPI + SQLAlchemy exportando traces OTLP/gRPC
 direto para o Jaeger all-in-one do cluster de demo. Telemetria e detalhe de
 borda (ADR-015): nenhuma camada interna importa OTel. ``configurar_otel`` e
-chamado pelo lifespan em ``src/main.py``; ``criar_tracer``, pelo relay e pelo
-consumidor, que abrem os spans de mensagem (ADR-043).
+chamado pelo lifespan em ``src/main.py``; ``criar_tracer``, pelo relay, pelo
+consumidor e pelo prazos, que abrem os spans de mensagem e da saga (ADR-043).
 
-O SDK do OpenTelemetry e dependencia principal (o relay e o consumidor abrem
-spans sempre, para o ``traceparent`` seguir pela outbox e pelo AMQP). O extra
+O SDK do OpenTelemetry e dependencia principal (o relay, o consumidor e o prazos
+abrem spans sempre, para o ``traceparent`` seguir pela outbox e pelo AMQP). O extra
 ``otel``, opcional, traz so o exportador OTLP (com o grpcio) e as
 instrumentacoes da API: os imports deles sao lazy, e a flag
 ``OTEL_ENABLED=true`` sem o extra instalado degrada para warning, sem
@@ -190,7 +190,7 @@ def _habilitado() -> bool:
 
 
 def criar_tracer(processo: str) -> Tracer:
-    """Tracer do relay ou do consumidor (spans de mensagem, ADR-043).
+    """Tracer do relay, do consumidor ou do prazos (spans de mensagem, ADR-043).
 
     O SDK fica sempre ligado: os spans dao o ``traceparent`` que segue pela
     outbox e pelo AMQP e o ``trace_id`` dos logs. A exportacao OTLP so liga com

@@ -109,6 +109,8 @@ class RegistroDaSaga(TypedDict):
     ator: str
     # So no registro do ExecucaoAgendada: a fila viva e a da Execucao.
     posicao_na_fila: NotRequired[int]
+    # So no registro do reenvio por prazo: o numero dele (1 a SAGA_MAX_REENVIOS).
+    reenvio: NotRequired[int]
 
 
 # JSON ja validado pelo schema do contrato (contratos/, RFC-004 secao 5.5): os

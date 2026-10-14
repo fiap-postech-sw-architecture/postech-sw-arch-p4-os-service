@@ -230,3 +230,121 @@ Funcionalidade: Saga de atendimento orquestrada pelo OS Service
     Então o evento "PagamentoConfirmado" é ignorado
     E a saga está na etapa "compensando" com a OS "aguardando_pagamento"
     E nenhum comando saiu em seguida
+
+  Esquema do Cenário: Comando sem resposta é reenviado até o máximo e depois a saga compensa
+    Dado os eventos do caminho feliz anteriores a "<proximo>"
+    Quando o prazo de resposta vence 5 vezes
+    Então o comando "<comando>" foi enviado 6 vezes, com id novo e os mesmos dados
+    E a saga tem 5 reenvios no comando em voo
+    E a saga está na etapa "<etapa>" com a OS "<status>"
+    Quando o prazo de resposta vence
+    Então a saga está na etapa "compensando" com a OS "<status>"
+    E os registros da saga terminam em:
+      | gatilho        |
+      | reenvio        |
+      | prazo_esgotado |
+    E a saga tem 0 reenvios no comando em voo
+    Quando os participantes respondem a cada compensação
+    Então as compensações enviadas, em ordem, são "<compensacoes>"
+    E a OS fica cancelada pela saga com o motivo "Serviço sem resposta no prazo técnico"
+    E nenhuma mensagem ficou na fila do OS
+
+    Exemplos:
+      | proximo             | comando            | etapa                  | status               | compensacoes                                                                                 |
+      | OrcamentoGerado     | GerarOrcamento     | aguardando_orcamento   | em_diagnostico       | CancelarOrcamento, DescartarDiagnostico                                                      |
+      | PecasReservadas     | ReservarPecas      | aguardando_reserva     | aguardando_aprovacao | LiberarReserva, CancelarOrcamento, DescartarDiagnostico                                      |
+      | PagamentoSolicitado | SolicitarPagamento | aguardando_pagamento   | aguardando_pagamento | EstornarPagamento, LiberarReserva, CancelarOrcamento, DescartarDiagnostico                   |
+      | ExecucaoAgendada    | AgendarExecucao    | aguardando_agendamento | aguardando_execucao  | CancelarExecucao, EstornarPagamento, LiberarReserva, CancelarOrcamento, DescartarDiagnostico |
+
+  Cenário: A resposta dentro do prazo não gasta reenvio
+    Dado os eventos do caminho feliz anteriores a "OrcamentoGerado"
+    Quando o Billing publica "OrcamentoGerado"
+    E o prazo de resposta vence
+    Então nenhum comando foi reenviado
+    E a saga está na etapa "aguardando_decisao" com a OS "aguardando_aprovacao"
+
+  Cenário: A resposta ao envio original vale depois do reenvio e a repetida ao reenvio é ignorada
+    Dado os eventos do caminho feliz anteriores a "OrcamentoGerado"
+    E o prazo de resposta vence
+    Quando o Billing responde "OrcamentoGerado" ao envio original do "GerarOrcamento"
+    E o Billing publica "OrcamentoGerado"
+    Então o evento "OrcamentoGerado" é ignorado
+    E a saga está na etapa "aguardando_decisao" com a OS "aguardando_aprovacao"
+    E o comando "GerarOrcamento" foi enviado 2 vezes, com id novo e os mesmos dados
+    E nenhuma mensagem ficou na fila do OS
+
+  Cenário: Sem consumidor do OS o prazo vencido não reenvia nem esgota
+    Dado os eventos do caminho feliz anteriores a "OrcamentoGerado"
+    E o consumidor do OS está fora
+    Quando o prazo de resposta vence 8 vezes
+    Então nenhum comando foi reenviado
+    E a saga está na etapa "aguardando_orcamento" com a OS "em_diagnostico"
+    Quando o consumidor do OS volta
+    E o prazo de resposta vence
+    Então o comando "GerarOrcamento" foi enviado 2 vezes, com id novo e os mesmos dados
+    E a saga tem 1 reenvio no comando em voo
+
+  Cenário: Comando que ainda espera na outbox não vence
+    Dado o relay está parado
+    E os eventos do caminho feliz anteriores a "OrcamentoGerado"
+    Quando o prazo de resposta vence 8 vezes
+    Então nenhum comando foi reenviado
+    E a saga está na etapa "aguardando_orcamento" com a OS "em_diagnostico"
+    Quando o relay volta
+    E o prazo de resposta vence
+    Então a saga tem 1 reenvio no comando em voo
+
+  Cenário: Compensação sem resposta para a saga em falha na compensação e a retomada a conclui
+    Dado os eventos do caminho feliz anteriores a "ExecucaoIniciada"
+    E o atendente pede o cancelamento com o motivo "Cliente desistiu"
+    Quando o prazo de resposta vence 6 vezes
+    Então a saga está na etapa "falha_na_compensacao" com a OS "aguardando_execucao"
+    E a falha da saga é "reenvios_esgotados" com a compensação pendente "CancelarExecucao"
+    E o comando "CancelarExecucao" foi enviado 6 vezes, com id novo e os mesmos dados
+    Quando o prazo de resposta vence 3 vezes
+    Então nenhum comando saiu em seguida
+    Quando o operador retoma a compensação
+    Então a retomada é aceita com a saga na etapa "compensando"
+    E o comando "CancelarExecucao" foi enviado 7 vezes, com id novo e os mesmos dados
+    E os registros da saga terminam em:
+      | gatilho        |
+      | prazo_esgotado |
+      | retomada       |
+    Quando os participantes respondem a cada compensação
+    Então a OS fica cancelada pela saga com o motivo "Cliente desistiu"
+    E nenhuma mensagem ficou na fila do OS
+
+  Cenário: Retomada depois do estorno recusado segue o plano até a OS cancelada
+    Dado os eventos do caminho feliz anteriores a "ExecucaoIniciada"
+    E o atendente pede o cancelamento com o motivo "Cliente desistiu"
+    E a Execução responde "ExecucaoCancelada" ao "CancelarExecucao"
+    E o Billing responde "EstornoDePagamentoFalhou" ao "EstornarPagamento"
+    Quando o operador retoma a compensação
+    Então a retomada é aceita com a saga na etapa "compensando"
+    E o comando enviado em seguida é "EstornarPagamento"
+    Quando o Billing responde "PagamentoEstornado" ao "EstornarPagamento"
+    E os participantes respondem a cada compensação
+    Então a OS fica cancelada pela saga com o motivo "Cliente desistiu"
+    E nenhuma mensagem ficou na fila do OS
+
+  Cenário: A resposta tardia ao envio original conclui a compensação depois da retomada
+    Dado os eventos do caminho feliz anteriores a "ExecucaoIniciada"
+    E o atendente pede o cancelamento com o motivo "Cliente desistiu"
+    E a Execução responde "ExecucaoCancelada" ao "CancelarExecucao"
+    E o Billing responde "EstornoDePagamentoFalhou" ao "EstornarPagamento"
+    E o operador retoma a compensação
+    Quando o Billing responde "PagamentoEstornado" ao envio original do "EstornarPagamento"
+    Então as compensações enviadas, em ordem, são "CancelarExecucao, EstornarPagamento, EstornarPagamento, LiberarReserva"
+
+  Esquema do Cenário: Retomada só vale em falha na compensação
+    Dado os eventos do caminho feliz anteriores a "<proximo>"
+    Quando o operador retoma a compensação
+    Então a retomada é recusada com 409 e a mensagem "Retomada recusada: a saga não está em falha na compensação"
+    E nenhum comando saiu em seguida
+    E a saga está na etapa "<etapa>" com a OS "<status>"
+
+    Exemplos:
+      | proximo             | etapa                  | status               |
+      | DiagnosticoIniciado | aguardando_diagnostico | recebida             |
+      | OrcamentoAprovado   | aguardando_decisao     | aguardando_aprovacao |
+      | ExecucaoFinalizada  | em_execucao            | em_execucao          |

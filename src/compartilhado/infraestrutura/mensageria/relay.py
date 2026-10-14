@@ -35,6 +35,7 @@ from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter, Gauge
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.compartilhado.aplicacao.diagnostico import onde
 from src.compartilhado.aplicacao.mensageria import ContratoInvalidoError
 from src.compartilhado.infraestrutura.ambiente import (
     inteiro_do_ambiente,
@@ -53,7 +54,6 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
     INTERVALO_DE_LIMPEZA_S,
     Agenda,
     Sinalizador,
-    onde,
 )
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,

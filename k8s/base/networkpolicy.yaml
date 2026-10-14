@@ -51,7 +51,7 @@ spec:
         - port: 8000
           protocol: TCP
 ---
-# Relay, consumidor e notificador: so o Prometheus, no /metrics.
+# Relay, consumidor, prazos e notificador: so o Prometheus, no /metrics.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -61,7 +61,7 @@ spec:
     matchExpressions:
       - key: processo
         operator: In
-        values: [relay, consumidor, notificador]
+        values: [relay, consumidor, prazos, notificador]
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -107,10 +107,12 @@ spec:
 # (o SMTP, em SMTP_HOST) e que tem acesso de escrita ao banco inteiro do servico.
 # Alem da entrada de todos (as politicas acima), a saida fica restrita ao que ele
 # usa: o DNS, o banco do servico e o Mailpit da plataforma na 1025. Nao fala com
-# o broker nem com o Jaeger. A API, o relay e o consumidor ficam sem politica de
-# saida: seus destinos sao fixos (o PostgreSQL do namespace e o RabbitMQ e o Jaeger
-# da plataforma). O criterio e ter destino de terceiro configuravel, e so o
-# notificador o tem.
+# o broker nem com o Jaeger. A API, o relay, o consumidor e o prazos ficam sem
+# politica de saida: seus destinos sao fixos (o PostgreSQL do namespace e o
+# RabbitMQ e o Jaeger da plataforma; o prazos tambem usa os tres, porque exporta
+# o span `saga prazo`). Quem escrever uma politica de saida para eles deve incluir
+# o Jaeger, ou o processo fica mudo no kind. O criterio e ter destino de terceiro
+# configuravel, e so o notificador o tem.
 #
 # Trocar o SMTP_HOST (ConfigMap) para outro servidor exige ajustar esta politica:
 # o destino fora da regra nao e recusado, so expira (o prazo de 5 s por tentativa

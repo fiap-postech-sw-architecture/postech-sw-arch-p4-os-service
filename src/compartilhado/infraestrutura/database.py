@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from urllib.parse import quote, unquote, urlsplit
 
 from sqlalchemy import MetaData, create_engine
+from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as TimeoutDoPool
 from sqlalchemy.orm import sessionmaker
 
 if TYPE_CHECKING:
@@ -14,6 +16,12 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 metadata = MetaData()
+
+# O banco fora do alcance: conexao recusada ou caida e pool sem conexao livre. Os
+# processos de fundo (notificador, prazos) deixam essa falha subir ao laco, que
+# tenta de novo no ciclo seguinte; qualquer outro erro do SQLAlchemy (dado
+# invalido, SQL recusado, restricao) se repetiria igual e e da linha ou da saga.
+BANCO_FORA: Final = (OperationalError, InterfaceError, TimeoutDoPool)
 
 # Ambientes em que a URL do banco pode ser montada das variaveis POSTGRES_*
 # (compose e dev local); qualquer outro exige DATABASE_URL explicita.
@@ -66,8 +74,9 @@ def resolver_database_url(env: Mapping[str, str] | None = None) -> str:
 # Dimensionamento do pool para escala horizontal. Os defaults da API sao os do
 # SQLAlchemy (5 + 10): com ate 5 replicas no HPA, (pool_size + max_overflow) *
 # replicas = 75 conexoes, dentro do max_connections=100 do postgres:16 padrao;
-# relay e consumidor usam 2 + 2 cada (``preparar``), mais a conexao de LISTEN do
-# relay. Sobrescritiveis por env (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_RECYCLE).
+# relay, consumidor, prazos e notificador usam 2 + 2 cada (``preparar``), mais a
+# conexao de LISTEN do relay e a do notificador. Sobrescritiveis por env
+# (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_RECYCLE).
 _DB_POOL_SIZE_PADRAO = "5"
 _DB_MAX_OVERFLOW_PADRAO = "10"
 # Recicla conexoes a cada 30min para evitar conexoes presas/stale em pods

@@ -1,10 +1,11 @@
 """Routers HTTP do contexto Ordem de Servico (RFC-004 secao 6.1, parte OS).
 
 ``router`` (JWT + papel): abertura, fila por prioridade, consulta, historico,
-cancelamento e entrega. ``router_sagas`` (admin): estado da saga para a
-operacao. ``router_publico`` (sem token, rate limit por IP): acompanhamento
-por placa + documento. As transicoes da saga (diagnostico, orcamento,
-pagamento, execucao) chegam por mensageria, nao por rota HTTP.
+cancelamento e entrega. ``router_sagas`` (admin): estado da saga e retomada da
+compensacao parada, para a operacao. ``router_publico`` (sem token, rate limit
+por IP): acompanhamento por placa + documento. As transicoes da saga
+(diagnostico, orcamento, pagamento, execucao) chegam por mensageria, nao por
+rota HTTP.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from src.ordem_servico.interfaces.dependencies import (
     obter_obter_ordem,
     obter_obter_saga,
     obter_registrar_entrega,
+    obter_retomar_compensacao,
 )
 from src.ordem_servico.interfaces.schemas import (
     AbrirOrdemRequest,
@@ -273,6 +275,47 @@ def obter_saga(ordem_id: UUID, usuario: _Admin, session: _Sessao) -> SagaRespons
     E a primeira consulta do runbook da saga (RFC-004 secao 4.7).
     """
     return SagaResponse.model_validate(obter_obter_saga(session).executar(ordem_id))
+
+
+@router_sagas.post(
+    "/{ordem_id}/compensacao",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Retoma a compensacao parada (falha_na_compensacao)",
+    responses={
+        202: {
+            "description": (
+                "Retomada aceita: a compensacao pendente sai de novo, com id novo, "
+                "prazo novo e contador de reenvios zerado, e a saga volta a "
+                "`compensando`."
+            )
+        },
+        404: _erro(
+            "Ordem sem saga.",
+            "ENTIDADE_NAO_ENCONTRADA",
+            "Saga da ordem 5f0c7a52-3d0e-4c39-9d76-0f2b8f4f6a11 nao encontrada",
+        ),
+        409: _erro(
+            "`TRANSICAO_STATUS_INVALIDA`: a saga nao esta em "
+            "`falha_na_compensacao`. `CONFLITO_DE_CONCORRENCIA`: o consumidor "
+            "gravou a saga no meio; repita o pedido.",
+            "TRANSICAO_STATUS_INVALIDA",
+            "Retomada recusada: a saga não está em falha na compensação",
+        ),
+    },
+)
+def retomar_compensacao(
+    ordem_id: UUID, usuario: _Admin, session: _Sessao
+) -> SagaResponse:
+    """Reenvia a compensacao pendente da saga parada (RFC-004 secao 4.7).
+
+    So em `falha_na_compensacao`, depois de o operador resolver a causa (runbook da
+    saga): o comando sai de novo com `id` novo, a saga volta a `compensando` e
+    segue o plano ate `compensada`. O participante que ja tinha feito a
+    compensacao responde com o desfecho registrado. Fora da falha, 409.
+    """
+    return SagaResponse.model_validate(
+        obter_retomar_compensacao(session).executar(ordem_id, ator=ator_de(usuario))
+    )
 
 
 @router_publico.post(

@@ -1,10 +1,10 @@
-"""Partes comuns aos processos relay, consumidor e notificador: boot, saude e fim.
+"""Partes comuns aos processos relay, consumidor, prazos e notificador.
 
-Prontidao (RFC-004 secao 6, ADR-042): sem HTTP de negocio, cada processo toca um
-arquivo de heartbeat a cada volta do laco (liveness; o processo vivo mas preso
-para de toca-lo) e mantem um arquivo de pronto enquanto a conexao com o broker
-esta estabelecida (readiness). Broker fora tira o processo de pronto sem
-reinicia-lo: reiniciar nao traz o broker de volta.
+Boot, saude e fim de cada um. Prontidao (RFC-004 secao 6, ADR-042): sem HTTP de
+negocio, cada processo toca um arquivo de heartbeat a cada volta do laco
+(liveness; o processo vivo mas preso para de toca-lo) e mantem um arquivo de
+pronto enquanto a conexao com o broker esta estabelecida (readiness). Broker fora
+tira o processo de pronto sem reinicia-lo: reiniciar nao traz o broker de volta.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import os
 import signal
 import tempfile
 import time
-import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -46,13 +45,16 @@ _PORTA_DE_METRICAS: Final = 9100
 # (k8s/base/relay.yaml e consumidor.yaml; um teste confere os manifestos): acima
 # dos cerca de 70 s de um publish preso no broker mudo (mensageria/amqp.py).
 IDADE_MAXIMA_DO_HEARTBEAT_S: Final = 90
+# A do prazos (k8s/base/prazos.yaml): o ciclo trata uma saga por transacao, com
+# o banco sob o statement_timeout de 15 s, e toca o heartbeat a cada uma.
+IDADE_MAXIMA_DO_HEARTBEAT_DOS_PRAZOS_S: Final = 120
 # Limpezas da outbox e de `mensagens_processadas`: uma vez por hora.
 INTERVALO_DE_LIMPEZA_S: Final = 3600.0
-# Relay e consumidor: no maximo 4 conexoes do pool cada, e nenhum comando nem
-# espera por lock passa de segundos. O laco e unico (um comando preso para o
-# processo inteiro) e o handler roda na thread da conexao AMQP: o banco devolve
-# o erro antes de o heartbeat do broker vencer, e a mensagem segue a escada de
-# retry.
+# Relay, consumidor, prazos e notificador: no maximo 4 conexoes do pool cada, e
+# nenhum comando nem espera por lock passa de segundos. O laco e unico (um comando
+# preso para o processo inteiro) e o handler roda na thread da conexao AMQP: o
+# banco devolve o erro antes de o heartbeat do broker vencer, e a mensagem segue a
+# escada de retry.
 _POOL_DOS_PROCESSOS: Final = 2
 _OPCOES_DO_BANCO: Final = "-c statement_timeout=15000 -c lock_timeout=10000"
 # Senha de demonstracao do usuario `os` (compose e .env.example): proibida fora
@@ -183,18 +185,6 @@ def preparar_sem_broker(processo: str) -> Engine:
     url_do_banco = resolver_database_url()
     _recusar_senha_de_demonstracao(("DATABASE_URL", url_do_banco, SENHA_DO_BANCO_DEMO))
     return _abrir_banco(url_do_banco)
-
-
-def onde(exc: BaseException) -> str:
-    """Arquivo e linha em que a excecao nasceu, para o log (sem a mensagem dela).
-
-    A mensagem de uma excecao pode trazer dado da mensagem (placa, texto livre):
-    os logs de falha levam so o tipo e este ``arquivo:linha``.
-    """
-    quadros = traceback.extract_tb(exc.__traceback__)
-    if not quadros:
-        return "desconhecido"
-    return f"{quadros[-1].filename.rsplit('/', 1)[-1]}:{quadros[-1].lineno}"
 
 
 def subir_metricas() -> int:

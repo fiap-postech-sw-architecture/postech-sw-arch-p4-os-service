@@ -11,16 +11,17 @@ espelhando o contrato da ``SQLAlchemyUnitOfWork`` real). Quem nao afere
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.ordem_servico.aplicacao.dtos import RetratoDoVeiculo
+from src.ordem_servico.aplicacao.ports import SituacaoDaFila
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Collection, Mapping
     from types import TracebackType
 
     from src.compartilhado.dominio.documento import Documento
@@ -172,6 +173,23 @@ class SagasEmMemoria:
         self.sagas[saga.ordem_id] = saga
         self.salvas.append(saga)
 
+    def reivindicar_vencida(
+        self, agora: datetime, prazo: timedelta, *, ignorar: Collection[UUID] = ()
+    ) -> Saga | None:
+        """A de prazo mais antigo ja vencido, sem as ``ignorar``.
+
+        A guarda da outbox (envio entregue ha ``prazo``) e do SQL real e tem os
+        testes dela no PostgreSQL; aqui o envio conta como entregue.
+        """
+        vencidas = [
+            s
+            for s in self.sagas.values()
+            if s.prazo_resposta_em is not None
+            and s.prazo_resposta_em <= agora
+            and s.ordem_id not in ignorar
+        ]
+        return min(vencidas, key=lambda s: s.prazo_resposta_em or agora, default=None)
+
 
 class SagasDoBanco(SagasEmMemoria):
     """Cada leitura traz a saga do banco, sem as mudancas da tentativa desfeita."""
@@ -190,6 +208,83 @@ class ConsultaDaOrdemEmMemoria:
     def com_saga(self, ordem_id: UUID) -> tuple[OrdemDeServico, Saga | None] | None:
         ordem = self._ordens.obter_por_id(ordem_id)
         return None if ordem is None else (ordem, self._sagas.obter(ordem_id))
+
+
+class TransacaoDosPrazosFake(FakeUnitOfWork):
+    """``TransacaoDosPrazos`` sobre o repositorio de sagas em memoria e a outbox fake.
+
+    Cada ``with`` e uma transacao: ``commits`` conta os commits e ``rollbacks``, os
+    desfeitos (excecao dentro do bloco). O estado das sagas e o dos fakes, que nao
+    desfazem sozinhos: os testes de rollback conferem a outbox e o commit.
+    """
+
+    def __init__(
+        self,
+        sagas: SagasEmMemoria,
+        outbox: FakeUnitOfWork | None = None,
+        *,
+        banco: Callable[[], datetime],
+    ) -> None:
+        super().__init__()
+        self.sagas = sagas
+        self._banco = banco
+        self.leituras_do_relogio = 0
+        self.commits = 0
+        self.rollbacks = 0
+        if outbox is not None:
+            # A mesma outbox do orquestrador: os comandos de todos os processos
+            # juntos, na ordem em que saem.
+            self.comandos = outbox.comandos
+            self.envelopes = outbox.envelopes
+
+    def __enter__(self) -> TransacaoDosPrazosFake:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not None:
+            self.rollbacks += 1
+
+    def agora_do_banco(self) -> datetime:
+        self.leituras_do_relogio += 1
+        return self._banco()
+
+    def commit(self) -> None:
+        super().commit()
+        self.commits += 1
+
+
+class PresencaFake:
+    """``PresencaDoConsumidor`` com a resposta que o teste escolhe.
+
+    ``prontas`` sao as respostas esperando em ``os.eventos``; ``cai_na_consulta``
+    e a consulta (a primeira e a 1) a partir da qual o consumidor some.
+    """
+
+    def __init__(
+        self,
+        *,
+        ha_consumidor: bool = True,
+        prontas: int = 0,
+        broker_fora: bool = False,
+    ) -> None:
+        self.ha = ha_consumidor
+        self.prontas = prontas
+        self.broker_fora = broker_fora
+        self.cai_na_consulta: int | None = None
+        self.consultas = 0
+
+    def situacao_da_fila(self) -> SituacaoDaFila | None:
+        self.consultas += 1
+        if self.cai_na_consulta is not None and self.consultas >= self.cai_na_consulta:
+            self.ha = False
+        if self.broker_fora:
+            return None
+        return SituacaoDaFila(consumidores=1 if self.ha else 0, prontas=self.prontas)
 
 
 class NotificacoesEspia:

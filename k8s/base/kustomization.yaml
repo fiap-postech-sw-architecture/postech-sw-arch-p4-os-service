@@ -25,6 +25,7 @@ resources:
   - api.yaml
   - relay.yaml
   - consumidor.yaml
+  - prazos.yaml
   - notificador.yaml
   - servico.yaml
   - hpa.yaml
@@ -32,8 +33,9 @@ resources:
   - borda.yaml
 
 configMapGenerator:
-  # Ambiente da API, do relay, do consumidor, do notificador e do Job (envFrom);
-  # os overlays acrescentam o TRUSTED_PROXIES, o CIDR de pods do cluster.
+  # Ambiente da API, do relay, do consumidor, do prazos, do notificador e do Job
+  # (envFrom); os overlays acrescentam o TRUSTED_PROXIES, o CIDR de pods do
+  # cluster.
   - name: os-service
     literals:
       # Guardas de boot ligadas tambem no kind: os segredos sao gerados.
@@ -43,8 +45,8 @@ configMapGenerator:
       - OTEL_ENABLED=true
       - OTEL_SERVICE_NAME=os-service
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger.pytstop-plataforma.svc.cluster.local:4317
-      # /metrics do relay, do consumidor e do notificador, a porta `metrics` dos
-      # Deployments.
+      # /metrics do relay, do consumidor, do prazos e do notificador, a porta
+      # `metrics` dos Deployments.
       - METRICS_PORT=9100
       # Migracao e semente sao do Job, que os pods esperam.
       - RUN_MIGRATIONS_ON_STARTUP=false
@@ -59,6 +61,12 @@ configMapGenerator:
       - OUTBOX_POLL_SEGUNDOS=5
       - OUTBOX_LOTE=10
       - OUTBOX_LEASE_SEGUNDOS=60
+      # Prazos da saga (RFC-004 secoes 4.6 e 10.3). O prazo de resposta vale na
+      # API e no consumidor, que o gravam no envio de cada comando, e no prazos,
+      # que o compara com o instante em que o relay entregou o comando.
+      - SAGA_PRAZO_RESPOSTA_SEGUNDOS=120
+      - SAGA_MAX_REENVIOS=5
+      - PRAZOS_INTERVALO_SEGUNDOS=30
       # SMTP do notificador: o Mailpit da plataforma, sem credencial (a demonstracao).
       # Trocar o servidor exige ajustar a politica `notificador-saida`
       # (networkpolicy.yaml): ela so deixa o notificador alcancar o Mailpit da
@@ -66,8 +74,9 @@ configMapGenerator:
       - SMTP_HOST=mailpit.pytstop-plataforma.svc.cluster.local
       - SMTP_PORT=1025
       - SMTP_FROM=oficina@pytstop.local
-      # Por replica da API; com 3 no HPA do k3s, relay, consumidor, Job e
-      # exporter, ficam abaixo do max_connections 100 do PostgreSQL 16.
+      # Por replica da API; com 3 no HPA do k3s mais relay, consumidor, prazos e
+      # notificador (2 + 2 cada, e o LISTEN do relay e do notificador), Job e
+      # exporter, ficam abaixo do max_connections 100 do PostgreSQL 16 (63 sem eles).
       - DB_POOL_SIZE=5
       - DB_MAX_OVERFLOW=10
   # Papeis do PostgreSQL, que a imagem cria no primeiro init do volume.

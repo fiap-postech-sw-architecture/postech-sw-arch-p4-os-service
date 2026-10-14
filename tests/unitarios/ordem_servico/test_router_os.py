@@ -33,6 +33,7 @@ from src.ordem_servico.aplicacao.use_cases import (
     ObterOrdem,
     ObterSaga,
     RegistrarEntrega,
+    RetomarCompensacao,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.dominio.texto_livre import (
@@ -90,6 +91,9 @@ def client_como(
         ),
         "obter_registrar_entrega": RegistrarEntrega(
             repo, FakeUnitOfWork(), sagas, NotificacoesEspia()
+        ),
+        "obter_retomar_compensacao": RetomarCompensacao(
+            FakeUnitOfWork(), sagas, ContextoDeEnvio(timedelta(seconds=120))
         ),
         "obter_consultar_acompanhamento": ConsultarAcompanhamento(consulta),
     }
@@ -329,6 +333,7 @@ class TestConsultas:
                 "motivo": None,
                 "ator": ATOR_ATENDENTE,
                 "posicao_na_fila": None,
+                "reenvio": None,
             }
         ]
         assert detalhe["etapa"] == "aguardando_diagnostico"
@@ -475,7 +480,7 @@ class TestCancelamento:
             raise InvarianteDaSagaError(interno)
 
         monkeypatch.setattr(
-            "src.ordem_servico.aplicacao.saga.saga.conferir_estado", _viola
+            "src.ordem_servico.aplicacao.saga.mudanca_da_saga.conferir_estado", _viola
         )
         app = criar_app()
         app.dependency_overrides[obter_session] = lambda: MagicMock()
@@ -797,6 +802,7 @@ def test_openapi_documenta_401_403_e_404_das_rotas_de_os() -> None:
         ("/api/v1/ordens-de-servico/{ordem_id}/cancelamento", "post"),
         ("/api/v1/ordens-de-servico/{ordem_id}/entrega", "post"),
         ("/api/v1/sagas/{ordem_id}", "get"),
+        ("/api/v1/sagas/{ordem_id}/compensacao", "post"),
     ]:
         assert {"401", "403", "404"} <= set(caminhos[rota][metodo]["responses"])
     assert {"401", "403"} <= set(
@@ -936,3 +942,126 @@ class TestSaga:
 
         assert resp.status_code == 404
         assert resp.json()["erro"]["codigo"] == "ENTIDADE_NAO_ENCONTRADA"
+
+
+class TestRetomada:
+    """``POST /api/v1/sagas/{ordem_id}/compensacao``: so o admin."""
+
+    def _parada(self, sagas: SagasEmMemoria, repo: RepoEmMemoria) -> UUID:
+        cenario = CenarioDaSaga.em_compensacao(
+            ("EstornarPagamento", "DescartarDiagnostico"), falha="estorno_recusado"
+        )
+        sagas.sagas.update(cenario.sagas.sagas)
+        repo.ordens.update(cenario.ordens.ordens)
+        return cenario.ordem_id
+
+    def test_admin_retoma_e_recebe_202_com_a_etapa(
+        self,
+        client_como: Callable[[str], TestClient],
+        repo: RepoEmMemoria,
+        sagas: SagasEmMemoria,
+    ) -> None:
+        ordem_id = self._parada(sagas, repo)
+
+        resp = client_como("admin").post(f"/api/v1/sagas/{ordem_id}/compensacao")
+
+        assert resp.status_code == 202
+        corpo = resp.json()
+        assert (corpo["etapa"], corpo["falha"], corpo["reenvios"]) == (
+            "compensando",
+            None,
+            0,
+        )
+        assert corpo["comando_em_voo"]["tipo"] == "EstornarPagamento"
+        assert corpo["plano_compensacao"] == [
+            "EstornarPagamento",
+            "DescartarDiagnostico",
+        ]
+        assert corpo["passos"][-1]["gatilho"] == "retomada"
+        assert corpo["passos"][-1]["ator"] == "u-123"
+        assert sagas.sagas[ordem_id].etapa.value == "compensando"
+
+    def test_fora_da_falha_na_compensacao_409_no_envelope(
+        self,
+        client_como: Callable[[str], TestClient],
+        repo: RepoEmMemoria,
+        sagas: SagasEmMemoria,
+    ) -> None:
+        cenario = CenarioDaSaga.em("aguardando_orcamento")
+        sagas.sagas.update(cenario.sagas.sagas)
+
+        resp = client_como("admin").post(
+            f"/api/v1/sagas/{cenario.ordem_id}/compensacao"
+        )
+
+        assert resp.status_code == 409
+        erro = resp.json()["erro"]
+        assert (erro["codigo"], erro["mensagem"]) == (
+            "TRANSICAO_STATUS_INVALIDA",
+            "Retomada recusada: a saga não está em falha na compensação",
+        )
+        assert sagas.sagas[cenario.ordem_id].etapa.value == "aguardando_orcamento"
+
+    def test_ordem_sem_saga_404_no_envelope(
+        self, client_como: Callable[[str], TestClient]
+    ) -> None:
+        resp = client_como("admin").post(f"/api/v1/sagas/{uuid4()}/compensacao")
+
+        assert resp.status_code == 404
+        assert resp.json()["erro"]["codigo"] == "ENTIDADE_NAO_ENCONTRADA"
+
+    @pytest.mark.parametrize("papel", ["atendente", "mecanico"])
+    def test_outros_papeis_recebem_403_e_nada_muda(
+        self,
+        client_como: Callable[[str], TestClient],
+        repo: RepoEmMemoria,
+        sagas: SagasEmMemoria,
+        papel: str,
+    ) -> None:
+        ordem_id = self._parada(sagas, repo)
+
+        resp = client_como(papel).post(f"/api/v1/sagas/{ordem_id}/compensacao")
+
+        assert resp.status_code == 403
+        assert resp.json()["erro"]["codigo"] == "ACESSO_NEGADO"
+        assert sagas.sagas[ordem_id].etapa.value == "falha_na_compensacao"
+
+    def test_sem_token_401_no_envelope(self) -> None:
+        app = criar_app()
+        app.dependency_overrides[obter_session] = lambda: MagicMock()
+
+        resp = TestClient(app).post(f"/api/v1/sagas/{uuid4()}/compensacao")
+
+        assert resp.status_code == 401
+        assert resp.json()["erro"]["codigo"] == "NAO_AUTENTICADO"
+
+    def test_conflito_de_versao_409_conflito_de_concorrencia(
+        self,
+        client_como: Callable[[str], TestClient],
+        repo: RepoEmMemoria,
+        sagas: SagasEmMemoria,
+    ) -> None:
+        ordem_id = self._parada(sagas, repo)
+        sagas.provocar_conflito()
+
+        resp = client_como("admin").post(f"/api/v1/sagas/{ordem_id}/compensacao")
+
+        assert resp.status_code == 409
+        assert resp.json()["erro"]["codigo"] == "CONFLITO_DE_CONCORRENCIA"
+
+    def test_openapi_diz_o_que_cada_resposta_da_retomada_significa(self) -> None:
+        documento = TestClient(criar_app()).get("/openapi.json").json()
+        rota = documento["paths"]["/api/v1/sagas/{ordem_id}/compensacao"]["post"]
+        respostas = rota["responses"]
+
+        assert {"202", "401", "403", "404", "409"} <= set(respostas)
+        assert "compensando" in respostas["202"]["description"]
+        for codigo, erro in [
+            ("404", "ENTIDADE_NAO_ENCONTRADA"),
+            ("409", "TRANSICAO_STATUS_INVALIDA"),
+        ]:
+            exemplo = respostas[codigo]["content"]["application/json"]["example"]
+            assert exemplo["erro"]["codigo"] == erro
+        assert "CONFLITO_DE_CONCORRENCIA" in respostas["409"]["description"]
+        passo = documento["components"]["schemas"]["PassoDaSagaResponse"]
+        assert "reenvio" in passo["properties"]

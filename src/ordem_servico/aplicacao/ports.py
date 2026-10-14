@@ -4,14 +4,23 @@ Definidas no contexto consumidor e implementadas na infraestrutura:
 ``ClientePort`` em ``adapters.py`` (Anti-Corruption Layer: consulta o contexto
 Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento`` e
 ``ConsultaDaOrdem`` em ``consultas.py`` (query services de leitura, fora do
-repositorio do agregado) e ``SagaRepository`` em ``repository.py``.
+repositorio do agregado), ``SagaRepository`` em ``repository.py`` e
+``PresencaDoConsumidor`` em ``presenca_do_consumidor.py`` (a unica que fala com
+o broker, para a camada de aplicacao nao importar o cliente AMQP) e
+``TransacaoDosPrazos`` em ``transacao_dos_prazos.py``.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from src.compartilhado.aplicacao.unit_of_work import PublicadorDeComandos
+
 if TYPE_CHECKING:
+    from collections.abc import Callable, Collection
+    from contextlib import AbstractContextManager
+    from datetime import datetime, timedelta
     from uuid import UUID
 
     from src.compartilhado.dominio.documento import Documento
@@ -95,6 +104,74 @@ class SagaRepository(Protocol):
                 saga desde a leitura.
         """
         pass
+
+    def reivindicar_vencida(
+        self, agora: datetime, prazo: timedelta, *, ignorar: Collection[UUID] = ()
+    ) -> Saga | None:
+        """A saga de prazo vencido mais antiga, travada para esta transacao.
+
+        So vence a saga cujo envio mais recente (o ultimo de
+        ``comando_em_voo.mensagem_ids``) ja saiu da outbox: a linha esta
+        entregue e ``entregue_em + prazo <= agora``. Envio pendente ou ``dead``
+        nao conta (RFC-004 secao 4.6). Duas replicas nunca recebem a mesma saga
+        (``FOR UPDATE SKIP LOCKED``): a travada fica de fora da consulta da outra
+        ate o commit ou o rollback. ``ignorar`` tira da consulta as sagas que
+        falharam neste ciclo.
+
+        Returns:
+            A saga travada, ou ``None`` quando nenhuma venceu.
+        """
+        pass
+
+
+@dataclass(frozen=True, slots=True)
+class SituacaoDaFila:
+    """O que a declaracao passiva de ``os.eventos`` mostra."""
+
+    consumidores: int
+    prontas: int
+
+    @property
+    def em_dia(self) -> bool:
+        """Com consumidor e sem resposta esperando na fila."""
+        return self.consumidores > 0 and self.prontas == 0
+
+
+class PresencaDoConsumidor(Protocol):
+    """Se o consumidor do OS esta de pe e em dia: a resposta pode estar na fila."""
+
+    def situacao_da_fila(self) -> SituacaoDaFila | None:
+        """Consumidores e mensagens prontas de ``os.eventos``; ``None`` sem o broker.
+
+        Sem consumidor, com mensagem pronta na fila (o consumidor voltou e ainda
+        nao a drenou) ou sem o broker, o ``prazos`` nao reenvia nem esgota prazo
+        (RFC-004 secao 4.6): quem acusa a demora e o alerta de saga parada.
+        """
+        pass
+
+
+class TransacaoDosPrazos(PublicadorDeComandos, Protocol):
+    """Uma transacao do processo ``prazos``: a saga, a outbox e o commit.
+
+    Aberta e fechada pelo ``with``: o fim sem ``commit`` desfaz a saga, o
+    comando e o que mais a transacao gravou.
+    """
+
+    @property
+    def sagas(self) -> SagaRepository:
+        """O repositorio da saga sobre a transacao."""
+        pass
+
+    def agora_do_banco(self) -> datetime:
+        """O relogio do banco (``clock_timestamp()``), o que grava o ``entregue_em``."""
+        pass
+
+    def commit(self) -> None:
+        """Comita a saga e os comandos gravados na outbox, juntos."""
+        pass
+
+
+type AbrirTransacao = Callable[[], AbstractContextManager[TransacaoDosPrazos]]
 
 
 class PublicadorDeNotificacoes(Protocol):

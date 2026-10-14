@@ -1,8 +1,8 @@
 """Parametros lidos do ambiente, com a validacao do boot.
 
-Modulo sem efeito colateral no import: a API, o relay e o consumidor o leem sem
-puxar o cliente AMQP nem as metricas dos processos (a API nunca as importa, ou
-o ``/metrics`` dela mostraria series do relay zeradas).
+Modulo sem efeito colateral no import: a API, o relay, o consumidor, o prazos e o
+notificador o leem sem puxar o cliente AMQP nem as metricas dos processos (a API
+nunca as importa, ou o ``/metrics`` dela mostraria series do relay zeradas).
 """
 
 from __future__ import annotations

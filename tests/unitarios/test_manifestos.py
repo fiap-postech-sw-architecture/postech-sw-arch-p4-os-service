@@ -7,30 +7,42 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from src.compartilhado.infraestrutura.mensageria.processo import (
+    IDADE_MAXIMA_DO_HEARTBEAT_DOS_PRAZOS_S,
     IDADE_MAXIMA_DO_HEARTBEAT_S,
     Sinalizador,
 )
 from tests.manifestos import RAIZ, container, objeto
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 # O temporario do container: TMPDIR nao e definido na imagem.
 _TMP_DO_CONTAINER = Path("/tmp")  # noqa: S108  # o /tmp do pod, nao deste processo
+# A idade maxima do heartbeat que a liveness de cada processo aceita.
+IDADE_MAXIMA = {
+    "relay": IDADE_MAXIMA_DO_HEARTBEAT_S,
+    "consumidor": IDADE_MAXIMA_DO_HEARTBEAT_S,
+    "notificador": IDADE_MAXIMA_DO_HEARTBEAT_S,
+    "prazos": IDADE_MAXIMA_DO_HEARTBEAT_DOS_PRAZOS_S,
+}
 
 
-def test_aguarda_migracao_e_o_mesmo_nos_quatro_deployments() -> None:
+def test_aguarda_migracao_e_o_mesmo_nos_deployments_do_servico() -> None:
     especificacoes = [
         container(objeto("Deployment", f"os-service-{processo}"), "aguarda-migracao")
-        for processo in ("api", "relay", "consumidor", "notificador")
+        for processo in ("api", "relay", "consumidor", "notificador", "prazos")
     ]
 
-    assert especificacoes[1:] == [especificacoes[0]] * 3
+    assert especificacoes[1:] == [especificacoes[0]] * 4
     assert especificacoes[0]["command"] == ["python", "-m", "src.banco", "aguardar"]
 
 
-@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador", "prazos"])
 def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None:
     sinal = Sinalizador(processo, _TMP_DO_CONTAINER)
     principal = container(objeto("Deployment", f"os-service-{processo}"), processo)
@@ -39,7 +51,7 @@ def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None
         python, opcao, codigo = principal[sonda]["exec"]["command"]
         assert (python, opcao) == ("python", "-c")
         assert f"'{sinal.heartbeat}'" in codigo
-        assert f">{IDADE_MAXIMA_DO_HEARTBEAT_S})" in codigo
+        assert f">{IDADE_MAXIMA[processo]})" in codigo
     assert principal["readinessProbe"]["exec"]["command"] == [
         "test",
         "-f",
@@ -47,7 +59,7 @@ def test_sondas_do_processo_leem_os_arquivos_que_ele_toca(processo: str) -> None
     ]
 
 
-@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador", "prazos"])
 def test_startup_do_processo_e_a_liveness(processo: str) -> None:
     # Broker fora no boot nao reinicia o pod (o pronto so existe com a conexao):
     # a startup olha a idade do heartbeat, como a liveness, e nao o pronto.
@@ -64,19 +76,25 @@ def _vida(codigo: str) -> int:
 
 
 @pytest.mark.parametrize("sonda", ["startupProbe", "livenessProbe"])
-@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador"])
+@pytest.mark.parametrize("processo", ["relay", "consumidor", "notificador", "prazos"])
 @pytest.mark.parametrize(
-    ("idade_s", "viva"),
+    ("idade_do", "viva"),
     [
-        pytest.param(0, True, id="heartbeat-recente"),
-        pytest.param(IDADE_MAXIMA_DO_HEARTBEAT_S - 5, True, id="abaixo-do-limite"),
-        pytest.param(IDADE_MAXIMA_DO_HEARTBEAT_S + 5, False, id="acima-do-limite"),
-        pytest.param(None, False, id="sem-heartbeat"),
+        pytest.param(lambda limite: 0, True, id="heartbeat-recente"),
+        pytest.param(lambda limite: limite - 5, True, id="abaixo-do-limite"),
+        pytest.param(lambda limite: limite + 5, False, id="acima-do-limite"),
+        pytest.param(lambda limite: None, False, id="sem-heartbeat"),
     ],
 )
 def test_sonda_tolera_a_idade_maxima_do_heartbeat(
-    tmp_path: Path, processo: str, sonda: str, idade_s: int | None, viva: bool
+    tmp_path: Path,
+    processo: str,
+    sonda: str,
+    idade_do: Callable[[int], int | None],
+    viva: bool,
 ) -> None:
+    # A idade e em relacao ao limite do processo (90 s; 120 s no prazos).
+    idade_s = idade_do(IDADE_MAXIMA[processo])
     padrao = container(objeto("Deployment", f"os-service-{processo}"), processo)
     codigo = padrao[sonda]["exec"]["command"][2]
     heartbeat = tmp_path / f"{processo}-heartbeat"

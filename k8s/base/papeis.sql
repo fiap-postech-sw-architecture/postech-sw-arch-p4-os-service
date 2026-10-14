@@ -29,7 +29,9 @@ ALTER SCHEMA public OWNER TO os;
 REVOKE ALL ON DATABASE os FROM PUBLIC;
 REVOKE ALL ON DATABASE postgres FROM PUBLIC;
 
--- Aplicacao (API, relay e consumidor): so DML nas tabelas que o dono criar.
+-- Aplicacao (API, relay, consumidor, prazos e notificador): so DML nas tabelas
+-- que o dono criar. E um papel por uso da aplicacao (ADR-042): o prazos tem DML
+-- em todas elas, embora so use sagas, outbox e ordens_de_servico.
 -- As tabelas nascem depois, no Job, e por isso o privilegio vem por default
 -- privileges. Elas cobrem tambem a alembic_version, lida pelo aguarda-migracao:
 -- o env.py das migracoes tira a escrita dela a cada upgrade.

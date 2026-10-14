@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from sqlalchemy import case, func, select
+from sqlalchemy import Uuid, bindparam, case, func, select, text
 from sqlalchemy.orm.exc import StaleDataError
 
 from src.compartilhado.dominio.exceptions import ConflitoDeConcorrenciaException
@@ -12,9 +12,12 @@ from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura import metricas_da_saga
+from src.ordem_servico.infraestrutura.envio_em_voo import ULTIMO_ENVIO
 from src.ordem_servico.infraestrutura.mapping import ordens_de_servico_table
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+    from datetime import datetime, timedelta
     from uuid import UUID
 
     from sqlalchemy.orm import Session
@@ -38,6 +41,21 @@ _PRIORIDADE_STATUS: Final = {
     StatusOrdem.RECEBIDA: 5,
 }
 _PRIORIDADE_ENCERRADAS: Final = 9
+
+# Candidata a prazo vencido (RFC-004 secoes 4.6 e 7.2): o prazo gravado pela saga
+# no envio e o limite inferior que o indice parcial ``ix_sagas_prazo`` acha; quem
+# decide e a linha da outbox do envio mais recente (o ultimo de ``mensagem_ids``),
+# que tem de estar entregue ha pelo menos o prazo. Pendente ou ``dead`` nao vence.
+# A linha da saga fica travada ate o fim da transacao e a travada por outra
+# replica e pulada.
+_SQL_VENCIDA: Final = text(
+    "SELECT s.ordem_id FROM sagas s "  # noqa: S608  # nosec B608 - so constantes
+    f"JOIN outbox o ON o.mensagem_id = {ULTIMO_ENVIO} "
+    "WHERE s.prazo_resposta_em <= :agora AND o.status = 'entregue' "
+    "AND o.entregue_em + :prazo <= :agora "
+    "AND s.ordem_id NOT IN :ignorar "
+    "ORDER BY s.prazo_resposta_em LIMIT 1 FOR UPDATE OF s SKIP LOCKED"
+).bindparams(bindparam("ignorar", expanding=True, type_=Uuid))
 
 
 class OrdemDeServicoSQLAlchemyRepository:
@@ -117,3 +135,14 @@ class SagaSQLAlchemyRepository:
         # Metricas so depois do commit: rollback ou conflito descartam os fatos.
         metricas_da_saga.anotar(self._session, saga.coletar_eventos())
         saga.limpar_eventos()
+
+    def reivindicar_vencida(
+        self, agora: datetime, prazo: timedelta, *, ignorar: Collection[UUID] = ()
+    ) -> Saga | None:
+        ordem_id = self._session.execute(
+            _SQL_VENCIDA, {"agora": agora, "prazo": prazo, "ignorar": list(ignorar)}
+        ).scalar_one_or_none()
+        if ordem_id is None:
+            return None
+        # A linha esta travada por esta transacao: nada a muda ate o commit.
+        return self._session.get(Saga, ordem_id, populate_existing=True)

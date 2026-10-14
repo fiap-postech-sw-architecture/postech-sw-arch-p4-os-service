@@ -34,7 +34,7 @@ ARG GIT_DATE=unknown
 
 LABEL org.opencontainers.image.title="pytstop-os-service" \
       org.opencontainers.image.source="https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service" \
-      org.opencontainers.image.description="PytStop fase 4 - OS Service: API (FastAPI), relay da outbox, consumidor de os.eventos e notificador de e-mails." \
+      org.opencontainers.image.description="PytStop fase 4 - OS Service: API (FastAPI), relay da outbox, consumidor de os.eventos, prazos da saga e notificador de e-mails." \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.created="${GIT_DATE}"
 
@@ -47,7 +47,7 @@ RUN apt-get update \
 
 # UID/GID numericos (1001): o kubelet so verifica runAsNonRoot com UID numerico.
 # Sem shell de login: o usuario so roda os processos do servico (a API, o relay,
-# o consumidor e o notificador, a mesma imagem com comandos diferentes).
+# o consumidor, o prazos e o notificador, a mesma imagem com comandos diferentes).
 RUN groupadd -r -g 1001 pytstop \
     && useradd -r -u 1001 -g pytstop -s /usr/sbin/nologin pytstop
 
@@ -71,9 +71,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTSTOP_GIT_DATE="${GIT_DATE}"
 
 # Probe em Python + urllib porque a imagem slim nao tem curl/wget. E a da API
-# (o comando padrao); relay, consumidor e notificador nao tem HTTP de negocio, e
-# as sondas deles (arquivos de heartbeat e de pronto em /tmp) vem do compose e dos
-# manifestos.
+# (o comando padrao); relay, consumidor, prazos e notificador nao tem HTTP de
+# negocio, e as sondas deles (arquivos de heartbeat e de pronto em /tmp) vem do
+# compose e dos manifestos.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
   CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/saude', timeout=2).status==200 else 1)"]
 

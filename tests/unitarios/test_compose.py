@@ -19,14 +19,15 @@ def _servicos() -> dict[str, Any]:
     return yaml.safe_load(COMPOSE.read_text())["services"]
 
 
-def test_prazo_de_resposta_da_saga_e_o_mesmo_na_api_e_no_consumidor() -> None:
-    # A API grava o prazo da primeira compensacao e o consumidor o das seguintes:
-    # um ponto so no compose, para nao gravarem prazos diferentes para a saga.
+def test_prazo_de_resposta_da_saga_e_o_mesmo_na_api_no_consumidor_e_no_prazos() -> None:
+    # A API grava o prazo da primeira compensacao, o consumidor o das seguintes e
+    # o `prazos` mede todos: um ponto so no compose, para nao gravarem prazos
+    # diferentes para a saga.
     servicos = _servicos()
 
     prazos = {
         nome: servicos[nome]["environment"]["SAGA_PRAZO_RESPOSTA_SEGUNDOS"]
-        for nome in ("api", "consumidor")
+        for nome in ("api", "consumidor", "prazos")
     }
 
     assert set(prazos.values()) == {"${SAGA_PRAZO_RESPOSTA_SEGUNDOS:-120}"}
@@ -34,6 +35,26 @@ def test_prazo_de_resposta_da_saga_e_o_mesmo_na_api_e_no_consumidor() -> None:
         r"^\s+SAGA_PRAZO_RESPOSTA_SEGUNDOS:", COMPOSE.read_text(), re.MULTILINE
     )
     assert len(definicoes) == 1
+
+
+def test_prazos_roda_o_modulo_da_imagem_com_a_sonda_de_120_segundos() -> None:
+    servicos = _servicos()
+    prazos = servicos["prazos"]
+
+    assert prazos["command"] == ["python", "-m", "src.prazos"]
+    assert prazos["image"] == servicos["relay"]["image"]
+    assert prazos["depends_on"]["rabbitmq-usuarios"] == {"condition": "service_healthy"}
+    # O pronto e o heartbeat dele; a liveness tolera 120 s, como o manifesto.
+    sonda = prazos["healthcheck"]["test"][-1]
+    sinal = Sinalizador("prazos", _TMP_DO_CONTAINER)
+    assert str(sinal.pronto) in sonda
+    assert str(sinal.heartbeat) in sonda
+    assert "< 120" in sonda
+    ambiente = prazos["environment"]
+    assert ambiente["SAGA_MAX_REENVIOS"] == "${SAGA_MAX_REENVIOS:-5}"
+    assert ambiente["PRAZOS_INTERVALO_SEGUNDOS"] == "${PRAZOS_INTERVALO_SEGUNDOS:-30}"
+    # Sem a chave de cifragem: o `prazos` nao decifra dado de cliente.
+    assert not {"ENCRYPTION_KEY", "JWT_PRIVATE_KEY"} & ambiente.keys()
 
 
 def test_notificador_so_enxerga_o_banco_e_o_smtp() -> None:
@@ -77,7 +98,7 @@ def test_mailpit_e_os_processos_rodam_endurecidos() -> None:
     # imagem nao define usuario) e com o /tmp, onde ele guarda o banco, em tmpfs.
     servicos = _servicos()
 
-    for nome in ("relay", "consumidor", "notificador", "mailpit"):
+    for nome in ("relay", "consumidor", "prazos", "notificador", "mailpit"):
         servico = servicos[nome]
         assert servico["read_only"] is True, nome
         assert servico["tmpfs"] == ["/tmp"], nome  # noqa: S108

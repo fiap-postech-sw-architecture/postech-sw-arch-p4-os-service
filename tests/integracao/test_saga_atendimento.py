@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Final
 from uuid import UUID
 
 from pytest_bdd import given, parsers, scenarios, then, when
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 
 from src.compartilhado.aplicacao.mensageria import (
     Desfecho,
@@ -27,6 +27,7 @@ from src.compartilhado.dominio.exceptions import (
     ConflitoDeConcorrenciaException,
     TransicaoStatusInvalidaException,
 )
+from src.compartilhado.infraestrutura.database import BANCO_FORA
 from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.compartilhado.infraestrutura.outbox_mapping import (
     outbox_table,
@@ -35,15 +36,22 @@ from src.compartilhado.infraestrutura.outbox_mapping import (
 from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 from src.consumidor import montar_despachante
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
+from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
+from src.ordem_servico.aplicacao.saga.vencer_prazos import VencerPrazos
+from src.ordem_servico.infraestrutura.transacao_dos_prazos import (
+    TransacaoDosPrazosSQLAlchemy,
+)
 from src.ordem_servico.interfaces.dependencies import (
     obter_abrir_ordem,
     obter_cancelar_ordem,
     obter_obter_ordem,
     obter_obter_saga,
     obter_registrar_entrega,
+    obter_retomar_compensacao,
 )
 from tests.eventos import envelope_de_evento
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
+from tests.unitarios.fakes import PresencaFake
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
@@ -53,6 +61,10 @@ if TYPE_CHECKING:
 scenarios("saga_atendimento.feature")
 
 _ATENDENTE: Final = "0f8e2d7c-6b5a-4c3d-9e1f-a2b3c4d5e6f7"
+_ADMIN: Final = "7c1d9a3e-2b4f-4e8a-b6c5-d0e1f2a3b4c5"
+# Prazo de resposta e reenvios do `prazos` nos cenarios: os padroes da RFC-004 4.6.
+_PRAZO: Final = timedelta(seconds=120)
+_MAX_REENVIOS: Final = 5
 # Usuario do broker de cada participante, como o catalogo diz quem publica.
 _PARTICIPANTE: Final = {"o Billing": "billing", "a Execução": "execucao"}
 # A copia de retry volta cinco vezes; a falha seguinte iria para a DLQ.
@@ -115,6 +127,10 @@ class Barramento:
         self.fila_do_os: deque[tuple[dict[str, Any], int]] = deque()
         self.comandos: dict[str, dict[str, Any]] = {}
         self.entregues: list[str] = []
+        # Cada envelope que saiu da outbox, na ordem, inclusive os reenvios.
+        self.envelopes: list[dict[str, Any]] = []
+        # Com o relay parado, os comandos esperam `pendente` na outbox.
+        self.relay_parado = False
         self.caixas: dict[str, list[str]] = {"billing": [], "execucao": []}
         self.eventos: dict[str, dict[str, Any]] = {}
         self.desfechos: dict[str, str] = {}
@@ -122,6 +138,8 @@ class Barramento:
 
     def levar_a_outbox(self) -> None:
         """O relay: comandos pendentes vao, validados, a fila do participante."""
+        if self.relay_parado:
+            return
         with self._session_factory() as sessao:
             linhas = sessao.execute(
                 select(outbox_table.c.id, outbox_table.c.envelope)
@@ -134,11 +152,12 @@ class Barramento:
                 destino = catalogo().destino(envelope["tipo"]).routing_key
                 self.caixas[destino.split(".")[1]].append(envelope["tipo"])
                 self.comandos[envelope["tipo"]] = envelope
+                self.envelopes.append(envelope)
                 self.entregues.append(envelope["tipo"])
             sessao.execute(
                 update(outbox_table)
                 .where(outbox_table.c.id.in_([linha.id for linha in linhas]))
-                .values(status="entregue")
+                .values(status="entregue", entregue_em=func.clock_timestamp())
             )
             sessao.commit()
 
@@ -201,6 +220,9 @@ class Atendimento:
         self.comandos_antes = 0
         self.cancelamento: OrdemDeServicoDTO | None = None
         self.recusa: TransicaoStatusInvalidaException | None = None
+        self.retomada: SagaDTO | None = None
+        # O consumidor do OS esta de pe (o `prazos` so age com ele).
+        self.presenca = PresencaFake()
 
     def publicar(
         self,
@@ -239,6 +261,55 @@ class Atendimento:
             try:
                 self.cancelamento = obter_cancelar_ordem(sessao).executar(
                     self.ordem_id, motivo, ator=_ATENDENTE
+                )
+            except TransicaoStatusInvalidaException as exc:
+                self.recusa = exc
+        self.barramento.levar_a_outbox()
+
+    def vencer_prazo(self) -> None:
+        """O prazo de resposta passa e o `prazos` roda um ciclo.
+
+        O tempo anda no banco: o prazo gravado pela saga e a entrega de cada
+        comando recuam um prazo e um segundo, e o ciclo roda com o relogio real,
+        o mesmo do consumidor. Os comandos que ele gera saem da outbox em seguida.
+        """
+        recuo = _PRAZO.total_seconds() + 1
+        with self.session_factory() as sessao:
+            sessao.execute(
+                text(
+                    "UPDATE sagas SET prazo_resposta_em = "
+                    "prazo_resposta_em - make_interval(secs => :recuo)"
+                ),
+                {"recuo": recuo},
+            )
+            sessao.execute(
+                text(
+                    "UPDATE outbox SET entregue_em = "
+                    "entregue_em - make_interval(secs => :recuo) "
+                    "WHERE status = 'entregue'"
+                ),
+                {"recuo": recuo},
+            )
+            sessao.commit()
+        self.comandos_antes = len(self.barramento.entregues)
+        VencerPrazos(
+            abrir=lambda: TransacaoDosPrazosSQLAlchemy(self.session_factory),
+            presenca=self.presenca,
+            contexto=ContextoDeEnvio(_PRAZO),
+            max_reenvios=_MAX_REENVIOS,
+            banco_fora=BANCO_FORA,
+        ).executar()
+        self.barramento.levar_a_outbox()
+
+    def retomar(self) -> None:
+        """O admin retoma a compensacao parada pelo caso de uso da API."""
+        self.comandos_antes = len(self.barramento.entregues)
+        self.retomada = None
+        self.recusa = None
+        with self.session_factory() as sessao:
+            try:
+                self.retomada = obter_retomar_compensacao(sessao).executar(
+                    self.ordem_id, ator=_ADMIN
                 )
             except TransicaoStatusInvalidaException as exc:
                 self.recusa = exc
@@ -525,4 +596,106 @@ def _fila_vazia(atendimento: Atendimento) -> None:
     assert (list(atendimento.barramento.fila_do_os), atendimento.barramento.dlq) == (
         [],
         [],
+    )
+
+
+@given("o prazo de resposta vence")
+@when("o prazo de resposta vence")
+def _prazo_vence(atendimento: Atendimento) -> None:
+    atendimento.vencer_prazo()
+
+
+@when(parsers.parse("o prazo de resposta vence {vezes:d} vezes"))
+def _prazo_vence_varias_vezes(atendimento: Atendimento, vezes: int) -> None:
+    for _ in range(vezes):
+        atendimento.vencer_prazo()
+
+
+@given("o relay está parado")
+def _relay_parado(atendimento: Atendimento) -> None:
+    atendimento.barramento.relay_parado = True
+
+
+@when("o relay volta")
+def _relay_volta(atendimento: Atendimento) -> None:
+    atendimento.barramento.relay_parado = False
+    atendimento.barramento.levar_a_outbox()
+
+
+@given("o consumidor do OS está fora")
+def _consumidor_fora(atendimento: Atendimento) -> None:
+    atendimento.presenca.ha = False
+
+
+@when("o consumidor do OS volta")
+def _consumidor_volta(atendimento: Atendimento) -> None:
+    atendimento.presenca.ha = True
+
+
+@given("o operador retoma a compensação")
+@when("o operador retoma a compensação")
+def _retomar(atendimento: Atendimento) -> None:
+    atendimento.retomar()
+
+
+@then(parsers.parse('a retomada é aceita com a saga na etapa "{etapa}"'))
+def _retomada_aceita(atendimento: Atendimento, etapa: str) -> None:
+    assert atendimento.recusa is None
+    assert atendimento.retomada is not None
+    assert (atendimento.retomada.etapa, atendimento.retomada.falha) == (etapa, None)
+
+
+@then(parsers.parse('a retomada é recusada com 409 e a mensagem "{mensagem}"'))
+def _retomada_recusada(atendimento: Atendimento, mensagem: str) -> None:
+    assert atendimento.retomada is None
+    assert atendimento.recusa is not None
+    assert (atendimento.recusa.codigo, atendimento.recusa.mensagem) == (
+        "TRANSICAO_STATUS_INVALIDA",
+        mensagem,
+    )
+
+
+def _envios(atendimento: Atendimento, comando: str) -> list[dict[str, Any]]:
+    return [e for e in atendimento.barramento.envelopes if e["tipo"] == comando]
+
+
+@then(
+    parsers.parse(
+        'o comando "{comando}" foi enviado {vezes:d} vezes, com id novo e os '
+        "mesmos dados"
+    )
+)
+def _enviado_varias_vezes(atendimento: Atendimento, comando: str, vezes: int) -> None:
+    envios = _envios(atendimento, comando)
+    assert len(envios) == vezes
+    assert len({e["id"] for e in envios}) == vezes
+    assert all(e["dados"] == envios[0]["dados"] for e in envios)
+    # O reenvio nao tem causa (a causa e o prazo); o original, a de quem o abriu.
+    assert {e["causation_id"] for e in envios[1:]} <= {None}
+
+
+@then(parsers.parse("a saga tem {reenvios:d} reenvio no comando em voo"))
+@then(parsers.parse("a saga tem {reenvios:d} reenvios no comando em voo"))
+def _reenvios(atendimento: Atendimento, reenvios: int) -> None:
+    assert atendimento.saga().reenvios == reenvios
+
+
+@then("nenhum comando foi reenviado")
+def _nenhum_reenvio(atendimento: Atendimento) -> None:
+    assert atendimento.saga().reenvios == 0
+    assert atendimento.barramento.entregues[atendimento.comandos_antes :] == []
+    assert "reenvio" not in [p["gatilho"] for p in atendimento.ordem().passos]
+
+
+@given(parsers.parse('o Billing responde "{tipo}" ao envio original do "{comando}"'))
+@when(parsers.parse('o Billing responde "{tipo}" ao envio original do "{comando}"'))
+def _responder_ao_original(atendimento: Atendimento, tipo: str, comando: str) -> None:
+    original = _envios(atendimento, comando)[0]
+    atendimento.comandos_antes = len(atendimento.barramento.entregues)
+    atendimento.barramento.publicar(
+        envelope_de_evento(
+            tipo,
+            correlation_id=atendimento.ordem_id,
+            causation_id=original["id"],
+        )
     )

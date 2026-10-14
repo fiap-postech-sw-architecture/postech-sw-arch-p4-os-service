@@ -20,6 +20,7 @@ from src.ordem_servico.aplicacao.use_cases import (
     ObterOrdem,
     ObterSaga,
     RegistrarEntrega,
+    RetomarCompensacao,
 )
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
 from src.ordem_servico.infraestrutura.consultas import (
@@ -94,6 +95,17 @@ def obter_obter_saga(session: Session) -> ObterSaga:
 def obter_cancelar_ordem(session: Session) -> CancelarOrdem:
     return CancelarOrdem(
         repo=_repo(session),
+        uow=_uow(session),
+        sagas=_sagas(session),
+        contexto=ContextoDeEnvio(
+            _prazo_de_resposta or prazo_de_resposta_da_saga(),
+            span=span_da_saga(tracer_da_api()),
+        ),
+    )
+
+
+def obter_retomar_compensacao(session: Session) -> RetomarCompensacao:
+    return RetomarCompensacao(
         uow=_uow(session),
         sagas=_sagas(session),
         contexto=ContextoDeEnvio(

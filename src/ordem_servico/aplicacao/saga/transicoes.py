@@ -80,7 +80,7 @@ def transicao_do_evento(
         msg = f"{tipo} de outra ordem"
     elif classificacao is not Classificacao.PROCESSAR:
         msg = f"{tipo} nao avanca a saga na etapa {saga.etapa.value}"
-    elif not _instante_valido(saga, agora):
+    elif not instante_valido(saga, agora):
         msg = f"{tipo} num instante sem fuso ou anterior ao ultimo registro"
     elif tipo in MOTIVO_DA_FALHA:
         return inicio_da_compensacao(
@@ -105,7 +105,7 @@ def transicao_do_cancelamento(saga: LeituraDaSaga, agora: datetime) -> Transicao
     """
     if saga.etapa not in ANTES_DO_PIVOT:
         msg = f"cancelamento pela saga na etapa {saga.etapa.value}"
-    elif not _instante_valido(saga, agora):
+    elif not instante_valido(saga, agora):
         msg = "cancelamento num instante sem fuso ou anterior ao ultimo registro"
     else:
         return inicio_da_compensacao(
@@ -116,7 +116,8 @@ def transicao_do_cancelamento(saga: LeituraDaSaga, agora: datetime) -> Transicao
     raise TransicaoDaSagaInvalidaError(msg)
 
 
-def _instante_valido(saga: LeituraDaSaga, agora: datetime) -> bool:
+def instante_valido(saga: LeituraDaSaga, agora: datetime) -> bool:
+    """O instante tem fuso e nao volta antes do ultimo registro da saga."""
     return agora.tzinfo is not None and agora >= saga.atualizada_em
 
 

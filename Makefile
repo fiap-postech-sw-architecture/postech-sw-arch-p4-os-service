@@ -71,14 +71,17 @@ audit:
 # volumes, inclusive em falha (depois de mostrar os logs). Projeto e portas
 # proprios para nao derrubar a stack do compose-up.
 #
-# Relay, consumidor e notificador sobem da mesma imagem com o RabbitMQ do compose (a
-# topologia do platform e o usuario `os`) e tem de ficar saudaveis (healthcheck
-# conferido no `docker inspect`, nao so o `up --wait`): conectados ao broker
-# depois da declaracao passiva do que usam e com o heartbeat em dia. O consumidor
+# Relay, consumidor, prazos e notificador sobem da mesma imagem com o RabbitMQ do
+# compose (a topologia do platform e o usuario `os`; o notificador nao usa o
+# broker) e tem de ficar saudaveis (healthcheck conferido no `docker inspect`, nao
+# so o `up --wait`): conectados ao broker depois da declaracao passiva do que
+# usam e com o heartbeat em dia. O consumidor
 # tem de aparecer no `rabbitmqctl list_consumers` de os.eventos, com prefetch 1
 # (numa fila quorum o `list_queues` mostra 0 consumidores mesmo com um ativo), e
 # o `outbox_pendentes` do /metrics do relay tem de ser um numero: NaN e o banco
-# fora do alcance dele.
+# fora do alcance dele. O prazos so confere essa fila (declaracao passiva, sem
+# consumir): fica pronto com o broker de pe, e o /metrics dele traz as series
+# de reenvio da saga em zero.
 #
 # O notificador (sem broker nem chave de cifragem) tem de entregar um e-mail ao
 # Mailpit: o smoke abre uma OS pela API, grava um pedido na tabela `notificacoes`
@@ -162,6 +165,11 @@ smoke:
 		|| { echo "smoke: o /metrics do notificador nao respondeu" >&2; false; }; } \
 	&& { $(SMOKE_COMPOSE) exec -T relay $(SMOKE_METRICAS) | grep -Eq '^outbox_pendentes [0-9]' \
 		|| { echo "smoke: o /metrics do relay nao traz outbox_pendentes (ou o banco esta fora: NaN)" >&2; false; }; } \
+	&& { [ "$$(docker inspect -f '{{.State.Health.Status}}' "$$($(SMOKE_COMPOSE) ps -q prazos)")" = healthy ] \
+		|| { echo "smoke: o prazos nao ficou pronto" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T prazos $(SMOKE_METRICAS) \
+			| grep -Eq '^pytstop_saga_reenvios_total\{comando="GerarOrcamento"\} 0(\.0)?$$' \
+		|| { echo "smoke: o /metrics do prazos nao traz as series de reenvio da saga em zero" >&2; false; }; } \
 	&& { $(SMOKE_COMPOSE) exec -T rabbitmq rabbitmqctl -q list_consumers queue_name prefetch_count \
 			| grep -Eq '^os\.eventos[[:space:]]+1$$' \
 		|| { echo "smoke: o consumidor nao esta inscrito em os.eventos com prefetch 1" >&2; false; }; } \
@@ -198,7 +206,7 @@ smoke:
 		|| { echo "smoke: o uvicorn escreveu o access log dele" >&2; false; }; } \
 	&& { printf '%s\n' "$$logs" | grep '"event": "http_request"' | grep -q '"request_id": "' \
 		|| { echo "smoke: o access log estruturado (http_request com request_id) nao saiu" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay, consumidor e notificador prontos, e-mail entregue ao Mailpit" \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay, consumidor, prazos e notificador prontos, e-mail entregue ao Mailpit" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \
@@ -248,8 +256,8 @@ PLATFORM ?= ../postech-sw-arch-p4-platform
 kind-deploy:
 	$(PLATFORM)/scripts/ci/implantar-servicos.sh --overlay kind os-service=$(CURDIR)
 
-# Stack local do servico: API, relay, consumidor e notificador + PostgreSQL 16,
-# RabbitMQ e Mailpit (migracoes e admin seed no boot).
+# Stack local do servico: API, relay, consumidor, prazos e notificador +
+# PostgreSQL 16, RabbitMQ e Mailpit (migracoes e admin seed no boot).
 compose-up:
 	$(DOCKER_COMPOSE) up -d --build --wait
 

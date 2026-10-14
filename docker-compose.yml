@@ -1,12 +1,13 @@
-# Stack local do OS Service: API, relay da outbox, consumidor de `os.eventos` e
-# notificador dos e-mails (a mesma imagem, com comandos diferentes), PostgreSQL
-# 16 proprio (banco `os`), um RabbitMQ 4 com a topologia do platform
-# (contratos/rabbitmq/) e o Mailpit, o SMTP de demonstracao com caixa de entrada.
+# Stack local do OS Service: API, relay da outbox, consumidor de `os.eventos`,
+# processo dos prazos da saga e notificador dos e-mails (a mesma imagem, com
+# comandos diferentes), PostgreSQL 16 proprio (banco `os`), um RabbitMQ 4 com a
+# topologia do platform (contratos/rabbitmq/) e o Mailpit, o SMTP de demonstracao
+# com caixa de entrada.
 # Uso: `make compose-up` (build + migracoes + admin seed) e `make compose-down`.
 # Todos os valores abaixo sao de DEMONSTRACAO para dev local; em qualquer
 # ambiente exposto entram por Secret e o boot com ENVIRONMENT=production
 # recusa estes literais (validar_segredos_no_startup, para a chave RSA do JWT
-# validar_chave_jwt_no_startup e, no relay e no consumidor, a senha do broker).
+# validar_chave_jwt_no_startup e, nos processos com broker, a senha dele).
 # Credenciais do Postgres de demo num lugar so: o banco as usa para se criar e
 # a API (e o Alembic e o seed) monta a URL com elas (ENVIRONMENT=development).
 x-banco-demo: &banco-demo
@@ -14,13 +15,18 @@ x-banco-demo: &banco-demo
   POSTGRES_USER: pytstop
   POSTGRES_PASSWORD: pytstop  # gitleaks:allow (senha do banco de demo)
 
-# Prazo tecnico de resposta da saga (segundos): o mesmo valor na API (a primeira
-# compensacao do cancelamento) e no consumidor (os comandos seguintes); um ponto
-# so, para os dois nao gravarem prazos diferentes para a mesma saga.
+# Prazos da saga: o prazo tecnico de resposta (segundos) vale igual na API (a
+# primeira compensacao do cancelamento e a retomada), no consumidor (os comandos
+# seguintes) e no prazos (que o compara com a entrega do comando); um ponto so,
+# para ninguem gravar prazos diferentes para a mesma saga. Os reenvios e o
+# intervalo dos ciclos so o prazos le. O original e os cinco reenvios (6 x 120 s)
+# ficam acima dos 381 s do retry do consumidor.
 x-saga: &saga
   SAGA_PRAZO_RESPOSTA_SEGUNDOS: ${SAGA_PRAZO_RESPOSTA_SEGUNDOS:-120}
+  SAGA_MAX_REENVIOS: ${SAGA_MAX_REENVIOS:-5}
+  PRAZOS_INTERVALO_SEGUNDOS: ${PRAZOS_INTERVALO_SEGUNDOS:-30}
 
-# Relay e consumidor: banco (montado das POSTGRES_* em development) e o usuario
+# Relay, consumidor e prazos: banco (montado das POSTGRES_* em development) e o usuario
 # `os` do RabbitMQ, com a mesma senha de demonstracao do platform.
 x-mensageria: &mensageria
   <<: [*banco-demo, *saga]
@@ -39,11 +45,11 @@ x-notificador: &notificador
   SMTP_PORT: "1025"
   SMTP_FROM: ${SMTP_FROM:-oficina@pytstop.local}
 
-# Relay, consumidor, notificador e Mailpit: sistema de arquivos so leitura (o /tmp
-# dos arquivos de saude, e do banco do Mailpit, e um tmpfs), sem capabilities nem
-# escalada de privilegio e com teto de memoria, CPU e processos. Cada processo da
-# OS usa ate 4 conexoes com o banco (pool de 2 + 2), e o relay e o notificador mais
-# 1, a do LISTEN.
+# Relay, consumidor, prazos, notificador e Mailpit: sistema de arquivos so leitura
+# (o /tmp dos arquivos de saude, e do banco do Mailpit, e um tmpfs), sem
+# capabilities nem escalada de privilegio e com teto de memoria, CPU e processos.
+# Cada processo da OS usa ate 4 conexoes com o banco (pool de 2 + 2), e o relay e o
+# notificador mais 1, a do LISTEN.
 x-processo-endurecido: &processo-endurecido
   read_only: true
   tmpfs:
@@ -144,6 +150,34 @@ services:
         - python
         - -c
         - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/consumidor-pronto') and time.time() - os.path.getmtime('/tmp/consumidor-heartbeat') < 90 else 1)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # Prazos da saga (python -m src.prazos): reenvia o comando sem resposta e,
+  # esgotados os reenvios, compensa ou para a saga em falha_na_compensacao
+  # (README, "Prazos, falha na compensacao e retomada"). Saudavel = conectado ao
+  # RabbitMQ (arquivo de pronto) e laco vivo; a liveness tolera 120 s sem
+  # heartbeat, como no Kubernetes.
+  prazos:
+    image: ${APP_IMAGE:-pytstop-os-service:dev}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["python", "-m", "src.prazos"]
+    environment: *mensageria
+    <<: *processo-endurecido
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq-usuarios:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import os,sys,time; sys.exit(0 if os.path.exists('/tmp/prazos-pronto') and time.time() - os.path.getmtime('/tmp/prazos-heartbeat') < 120 else 1)"
       interval: 5s
       timeout: 3s
       retries: 12
