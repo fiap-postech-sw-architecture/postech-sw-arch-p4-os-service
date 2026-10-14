@@ -20,6 +20,7 @@ from src.ordem_servico.aplicacao.notificacoes import ModeloDeNotificacao, Notifi
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.email_adapter import SmtpEmailAdapter
 from src.ordem_servico.infraestrutura.notificacoes_mapping import (
+    CANAL_NOTIFICACAO,
     NotificacoesSQLAlchemy,
 )
 from src.ordem_servico.infraestrutura.notificador import (
@@ -104,8 +105,38 @@ def _linha(engine: Engine, ordem_id: UUID) -> Any:
         ).first()
 
 
+def _tentativas(engine: Engine) -> list[tuple[str, int]]:
+    """(status da OS, tentativas) de cada pedido, na ordem em que foram feitos."""
+    with engine.connect() as conexao:
+        return [
+            (linha.status_da_ordem, linha.tentativas)
+            for linha in conexao.execute(
+                text("SELECT status_da_ordem, tentativas FROM notificacoes ORDER BY id")
+            )
+        ]
+
+
+def _escutando(engine: Engine) -> bool:
+    """Alguma conexao ja terminou o ``LISTEN`` do canal dos pedidos."""
+    with engine.connect() as conexao:
+        return bool(
+            conexao.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle' "
+                    "AND query = :listen"
+                ),
+                {"listen": f"LISTEN {CANAL_NOTIFICACAO}"},
+            ).scalar_one()
+        )
+
+
 def _notificador(
-    engine: Engine, pasta: Path, *, porta_smtp: int, host: str = "127.0.0.1"
+    engine: Engine,
+    pasta: Path,
+    *,
+    porta_smtp: int,
+    host: str = "127.0.0.1",
+    atrasos: tuple[float, ...] = _ATRASOS,
 ) -> Notificador:
     return Notificador(
         engine=engine,
@@ -113,7 +144,7 @@ def _notificador(
         config=ConfigNotificador(
             poll_s=0.1,
             lease=timedelta(seconds=30),
-            atrasos_s=_ATRASOS,
+            atrasos_s=atrasos,
             diretorio_de_saude=pasta,
         ),
     )
@@ -179,7 +210,37 @@ def test_cliente_anonimizado_fecha_a_linha_sem_enviar(
     assert len(mailpit.mensagens()) == 1
 
 
-def test_smtp_fora_conta_tentativa_ate_dead_e_nao_trava_outra_os(
+def test_smtp_fora_nao_trava_outra_os_enquanto_o_primeiro_da_os_esta_em_backoff(
+    engine: Engine,
+    session_factory: sessionmaker[Session],
+    mailpit: Mailpit,
+    tmp_path: Path,
+) -> None:
+    os_a = _ordem(session_factory, _S.EM_DIAGNOSTICO)
+    os_b = _ordem(session_factory, _S.EM_DIAGNOSTICO)
+    # Os tres pedidos existem antes de o notificador ligar: a ordem so vale dentro
+    # da OS A, e o seu segundo e-mail espera o primeiro.
+    _pedir(session_factory, os_a, _M.SITUACAO, _S.EM_DIAGNOSTICO)
+    _pedir(session_factory, os_a, _M.SITUACAO, _S.EM_EXECUCAO)
+    _pedir(session_factory, os_b, _M.SITUACAO, _S.AGUARDANDO_EXECUCAO)
+    # Porta fechada (um SMTP fora do ar) e atraso longo: o primeiro da A fica em
+    # backoff durante todo o teste.
+    sem_smtp = _notificador(engine, tmp_path, porta_smtp=1, atrasos=(60, 60, 60, 60))
+
+    with EmSegundoPlano(sem_smtp):
+        esperar_ate(lambda: _tentativas(engine)[2][1] == 1)
+
+    # O da OS B foi tentado e o segundo da A ainda nao: a ordem da A o segura.
+    assert _tentativas(engine) == [
+        ("em_diagnostico", 1),
+        ("em_execucao", 0),
+        ("aguardando_execucao", 1),
+    ]
+    assert _situacoes(engine) == ["pendente"] * 3
+    assert mailpit.mensagens() == []
+
+
+def test_smtp_fora_conta_tentativa_ate_dead_e_o_log_so_leva_o_nome_da_excecao(
     engine: Engine,
     session_factory: sessionmaker[Session],
     mailpit: Mailpit,
@@ -191,13 +252,12 @@ def test_smtp_fora_conta_tentativa_ate_dead_e_nao_trava_outra_os(
     os_b = _ordem(session_factory, _S.EM_DIAGNOSTICO)
     _pedir(session_factory, os_a, _M.SITUACAO, _S.EM_DIAGNOSTICO)
     _pedir(session_factory, os_a, _M.SITUACAO, _S.EM_EXECUCAO)
+    _pedir(session_factory, os_b, _M.SITUACAO, _S.EM_DIAGNOSTICO)
     # Porta fechada: conexao recusada, como um SMTP fora do ar.
     sem_smtp = _notificador(engine, tmp_path, porta_smtp=1)
 
     with EmSegundoPlano(sem_smtp):
-        esperar_ate(lambda: _situacoes(engine)[0] == "dead")
-        # O segundo e-mail da OS A esperou o primeiro desistir; so entao falha.
-        _pedir(session_factory, os_b, _M.SITUACAO, _S.EM_DIAGNOSTICO)
+        # Cada pedido gasta as suas cinco tentativas, um depois do outro na OS A.
         esperar_ate(lambda: _situacoes(engine) == ["dead", "dead", "dead"])
 
     primeira = _linha(engine, os_a)
@@ -262,7 +322,7 @@ def test_o_notify_acorda_o_notificador_sem_esperar_o_poll(
 
     with EmSegundoPlano(notificador):
         esperar_ate(lambda: (tmp_path / "notificador-pronto").exists())
-        time.sleep(0.3)  # o laco chegou na espera do LISTEN
+        esperar_ate(lambda: _escutando(engine))
         inicio = time.monotonic()
         _pedir(session_factory, ordem_id, _M.SITUACAO, _S.EM_DIAGNOSTICO)
         mailpit.esperar(1, prazo_s=3)
@@ -302,11 +362,17 @@ def test_banco_fora_tira_o_notificador_de_pronto_sem_derruba_lo(
     )
     processo = EmSegundoPlano(notificador)
 
+    batida = tmp_path / "notificador-heartbeat"
     try:
         with processo:
             esperar_ate(lambda: not (tmp_path / "notificador-pronto").exists())
-            time.sleep(0.5)  # varios ciclos com o banco fora: o processo segue
+            esperar_ate(batida.exists)
+            # Cada ciclo bate o heartbeat de novo: o processo atravessa varios
+            # ciclos com o banco fora, sem cair e sem voltar a pronto.
+            for _ in range(3):
+                antes = batida.stat().st_mtime_ns
+                esperar_ate(lambda antes=antes: batida.stat().st_mtime_ns > antes)
             assert processo.vivo
-            assert (tmp_path / "notificador-heartbeat").exists()
+            assert not (tmp_path / "notificador-pronto").exists()
     finally:
         fora.dispose()
