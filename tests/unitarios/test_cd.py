@@ -99,7 +99,7 @@ def test_gatilhos_sao_o_push_na_main_e_o_dispatch() -> None:
     gatilhos = _gatilhos(_carrega())
 
     assert set(gatilhos) == {"push", "workflow_dispatch"}
-    assert gatilhos["push"]["branches"] == ["main", "ci/cd"]  # TEMPORARIO
+    assert gatilhos["push"] == {"branches": ["main"]}
     entradas = gatilhos["workflow_dispatch"]["inputs"]
     assert list(entradas) == [
         "sha_platform",

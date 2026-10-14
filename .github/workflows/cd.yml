@@ -9,8 +9,7 @@ name: CD
 # cluster persistente, e opcional e vem desligado. README, secao "CD".
 on:
   push:
-    # TEMPORARIO: ci/cd so para provar o run real antes do merge (reverter).
-    branches: [main, ci/cd]
+    branches: [main]
   # Reexecuta uma combinacao de commits. O OS Service e sempre o commit do run:
   # sha_os_service so aceita esse valor e existe para os quatro workflows de CD
   # terem as mesmas entradas.
