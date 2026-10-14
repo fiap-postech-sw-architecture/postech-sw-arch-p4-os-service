@@ -48,6 +48,11 @@ def _logger_fresco(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestAmostrador:
+    def test_o_provider_descreve_o_amostrador_da_raiz(
+        self, rastreador: Rastreador
+    ) -> None:
+        assert "RaizSemClienteOrfao" in rastreador.provedor.sampler.get_description()
+
     def test_cliente_sem_pai_nao_vira_trace(self, rastreador: Rastreador) -> None:
         # A consulta do poll, da raspagem ou do ciclo ocioso: o unico span do trace.
         with rastreador.tracer.start_as_current_span("SELECT", kind=SpanKind.CLIENT):
@@ -399,6 +404,27 @@ class TestTracerDosProcessos:
 
         assert valido
         assert otlp_falso["exportados"] == []
+
+    @pytest.mark.parametrize("ligada", [True, False], ids=["ligada", "desligada"])
+    def test_o_banco_so_e_instrumentado_com_a_exportacao_ligada(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        otlp_falso: dict[str, Any],
+        finalizadores: list[Any],
+        ligada: bool,
+    ) -> None:
+        monkeypatch.setenv("OTEL_ENABLED", "true" if ligada else "false")
+        instrumentados: list[object] = []
+        monkeypatch.setattr(
+            observability_modulo,
+            "instrumentar_banco",
+            lambda engine, _provedor: instrumentados.append(engine),
+        )
+        engine = object()
+
+        criar_tracer("prazos", engine)  # type: ignore[arg-type]  # o engine nao e usado
+
+        assert instrumentados == ([engine] if ligada else [])
 
     def test_com_flag_exporta_com_o_recurso_do_processo(
         self,
