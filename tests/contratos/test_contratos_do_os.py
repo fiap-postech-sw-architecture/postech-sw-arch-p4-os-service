@@ -159,7 +159,14 @@ def _alvo(exemplo: dict[str, Any], caminho: tuple[str | int, ...]) -> Any:
     return no
 
 
-@pytest.mark.parametrize(("tipo", "caminho"), _COM_QUEBRA_DE_LINHA)
+@pytest.mark.parametrize(
+    ("tipo", "caminho"),
+    _COM_QUEBRA_DE_LINHA,
+    ids=[
+        f"{tipo}.{'.'.join(map(str, caminho))}"
+        for tipo, caminho in _COM_QUEBRA_DE_LINHA
+    ],
+)
 def test_quebra_de_linha_no_fim_do_valor_e_recusada(
     tipo: str, caminho: tuple[str | int, ...]
 ) -> None:
