@@ -128,6 +128,7 @@ jobs:
           docker buildx imagetools inspect "$IMAGEM" --format '{{ json .SBOM }}' > "sbom-${SERVICO}.spdx.json"
           pacotes=$(jq '[.. | objects | select(has("packages")) | .packages | length] | add // 0' "sbom-${SERVICO}.spdx.json")
           [ "$pacotes" -gt 0 ] || { echo "::error::the SBOM of $IMAGEM lists no package"; exit 1; }
+          echo "image $IMAGEM digest $DIGEST, SBOM with $pacotes packages"
           {
             echo "### Image"
             echo

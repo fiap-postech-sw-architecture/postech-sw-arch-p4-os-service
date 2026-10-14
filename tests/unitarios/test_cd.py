@@ -250,6 +250,11 @@ def test_image_exporta_o_tar_amd64_e_confere_o_digest() -> None:
     assert "--format '{{ json .SBOM }}'" in sbom["run"]
     assert "sbom-${SERVICO}.spdx.json" in sbom["run"]
     assert "$GITHUB_STEP_SUMMARY" in sbom["run"]
+    # O summary so abre para quem tem login: a mesma linha vai para o log.
+    assert (
+        'echo "image $IMAGEM digest $DIGEST, SBOM with $pacotes packages"'
+        in sbom["run"]
+    )
 
 
 def test_artefatos_e_retencoes() -> None:
