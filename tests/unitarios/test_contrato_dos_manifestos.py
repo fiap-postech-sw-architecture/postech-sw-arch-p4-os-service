@@ -78,9 +78,10 @@ SEGREDOS_POR_CONTAINER = {
 }
 
 # A DATABASE_URL de cada container que fala com o banco, com a senha escrita
-# como <Secret/chave>: o papel e a chave da senha de cada processo (D87). A API,
-# o relay, o consumidor e a espera da migracao usam o papel da aplicacao; so o
-# Job de migracao usa o dono.
+# como <Secret/chave>: o papel e a chave da senha de cada processo (ADR-042: um
+# papel do banco por uso, para uma injecao de SQL nao chegar ao superusuario). A
+# API, o relay, o consumidor e a espera da migracao usam o papel da aplicacao; so
+# o Job de migracao usa o dono.
 _URL_DA_APLICACAO = f"postgresql://os_app:<os-postgres/POSTGRES_APP_PASSWORD>@{_BANCO}"
 _URL_DO_DONO = f"postgresql://os:<os-postgres/POSTGRES_OWNER_PASSWORD>@{_BANCO}"
 URL_DO_BANCO_POR_CONTAINER = {
@@ -149,8 +150,8 @@ def test_exporter_entra_no_banco_como_os_exporter_pelo_loopback(overlay: str) ->
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
 def test_so_a_api_recebe_a_chave_de_cifragem(overlay: str) -> None:
-    # D94: so a API decifra o documento do cliente; relay e consumidor leem o
-    # contato do e-mail por projecao SQL e nao recebem a chave.
+    # So a API decifra o documento do cliente; relay e consumidor leem o contato
+    # do e-mail por projecao SQL e nao recebem a chave (ENCRYPTION_KEY, ADR-042).
     com_a_chave = {
         chave
         for chave, especificacao, _ in containers(overlay)
