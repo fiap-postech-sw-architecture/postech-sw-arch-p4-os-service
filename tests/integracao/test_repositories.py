@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.orm.attributes import flag_modified
 
 from src.autenticacao.dominio.papel import Papel
 from src.autenticacao.dominio.usuario import Usuario
@@ -585,6 +586,14 @@ class TestClienteRepository:
             {"id": cliente.id},
         ).scalars()
         assert list(placas) == [f"ANONIMIZADO:{id_}" for id_ in ids]
+        # Um veiculo anonimizado re-salvo pelo ORM grava o mesmo tombstone, entao
+        # nao volta a ser candidato ao comando.
+        anonimizado = repo.obter_por_id(cliente.id)
+        assert anonimizado is not None
+        for veiculo in anonimizado.veiculos:
+            flag_modified(veiculo, "_marca")
+        session.flush()
+        assert repo.ids_dos_veiculos_a_anonimizar(cliente.id) == []
 
     def test_anonimizar_dois_veiculos_preserva_unique_placa(
         self, session: Session

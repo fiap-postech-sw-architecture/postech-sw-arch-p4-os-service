@@ -7,6 +7,10 @@ from sqlalchemy import exists, func, select, update
 from src.cliente_veiculo.dominio.cliente import Cliente
 from src.cliente_veiculo.dominio.consentimento import ConsentimentoCliente
 from src.cliente_veiculo.dominio.contato import CONTATO_ANONIMIZADO
+from src.cliente_veiculo.dominio.placa_anonimizada import (
+    PREFIXO_DO_TOMBSTONE,
+    tombstone_da_placa,
+)
 from src.cliente_veiculo.infraestrutura.mapping import (
     clientes_table,
     consentimentos_table,
@@ -21,11 +25,6 @@ if TYPE_CHECKING:
 
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
-
-
-# A placa do veiculo anonimizado: ``ANONIMIZADO:{veiculo_id}`` (unica, para
-# preservar o UNIQUE da coluna).
-_PREFIXO_DA_PLACA_ANONIMIZADA = "ANONIMIZADO:"
 
 
 class ClienteSQLAlchemyRepository:
@@ -111,7 +110,7 @@ class ClienteSQLAlchemyRepository:
                 select(veiculos_table.c.id)
                 .where(
                     veiculos_table.c.cliente_id == cliente_id,
-                    ~veiculos_table.c.placa.startswith(_PREFIXO_DA_PLACA_ANONIMIZADA),
+                    ~veiculos_table.c.placa.startswith(PREFIXO_DO_TOMBSTONE),
                 )
                 .order_by(veiculos_table.c.id)
             )
@@ -164,7 +163,7 @@ class ClienteSQLAlchemyRepository:
                 update(veiculos_table)
                 .where(veiculos_table.c.id == veiculo_id)
                 .values(
-                    placa=f"{_PREFIXO_DA_PLACA_ANONIMIZADA}{veiculo_id}",
+                    placa=tombstone_da_placa(veiculo_id),
                     marca="ANONIMIZADO",
                     modelo="ANONIMIZADO",
                 )
