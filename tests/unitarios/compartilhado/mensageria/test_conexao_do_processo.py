@@ -321,7 +321,7 @@ def test_cada_espera_conta_uma_reconexao_do_processo(
     conexao = _conexao(tmp_path, monkeypatch)
     antes = (
         REGISTRY.get_sample_value(
-            "pytstop_reconexoes_ao_broker_total", {"processo": "teste"}
+            "pytstop_reconexoes_ao_broker_total", {"componente": "teste"}
         )
         or 0.0
     )
@@ -331,7 +331,7 @@ def test_cada_espera_conta_uma_reconexao_do_processo(
 
     assert (
         REGISTRY.get_sample_value(
-            "pytstop_reconexoes_ao_broker_total", {"processo": "teste"}
+            "pytstop_reconexoes_ao_broker_total", {"componente": "teste"}
         )
         == antes + 2
     )

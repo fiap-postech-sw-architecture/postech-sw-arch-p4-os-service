@@ -178,6 +178,11 @@ class Relay:
             }
         )
         self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
+        # Series de rotulo fechado nascem com zero: o `increase()` perderia a
+        # primeira publicacao de cada tipo.
+        for tipo in self._catalogo.publicados:
+            MENSAGENS_PUBLICADAS.labels(tipo=tipo)
+        amqp.RECONEXOES.labels(componente="relay")
         OUTBOX_PENDENTES.set_function(lambda: self._outbox.contar("pendente"))
         OUTBOX_DEAD.set_function(lambda: self._outbox.contar("dead"))
 

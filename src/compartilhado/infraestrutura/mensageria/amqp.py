@@ -66,13 +66,15 @@ RECONEXAO_TETO_S: Final = 30.0
 # backoff do minimo. Um canal que o broker fecha a cada mensagem cai antes.
 CONEXAO_ESTAVEL_S: Final = 60.0
 
-# Metrica do alerta de processo preso em reconexao (mensagem que o pika nao
-# decodifica, permissao revogada, broker fora): uma por espera antes de
-# reconectar, no /metrics do proprio processo.
+# Metrica do processo preso em reconexao (mensagem que o pika nao decodifica,
+# permissao revogada, broker fora): uma por espera antes de reconectar, no
+# /metrics do proprio processo. O rotulo e `componente` (`relay` ou `consumidor`),
+# e nao `processo`, porque o Prometheus ja poe `processo` em todo alvo e o rotulo
+# da metrica viraria `exported_processo`.
 RECONEXOES: Final = Counter(
     "pytstop_reconexoes_ao_broker_total",
     "Esperas antes de reconectar ao RabbitMQ (conexao perdida ou recusada).",
-    ["processo"],
+    ["componente"],
 )
 
 
@@ -213,7 +215,7 @@ class ConexaoDoProcesso:
         conectada_em, self._conectada_em = self._conectada_em, None
         if conectada_em is not None and _relogio() - conectada_em >= CONEXAO_ESTAVEL_S:
             self._atraso = RECONEXAO_BASE_S
-        RECONEXOES.labels(processo=self._processo).inc()
+        RECONEXOES.labels(componente=self._processo).inc()
         parar.wait(_sortear(self._atraso))
         self._atraso = min(self._atraso * 2, RECONEXAO_TETO_S)
 

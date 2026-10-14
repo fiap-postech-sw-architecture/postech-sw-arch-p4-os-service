@@ -1070,7 +1070,7 @@ class _CabecalhoIlegivel(pika.BasicProperties):
 
 def _reconexoes() -> float:
     valor = REGISTRY.get_sample_value(
-        "pytstop_reconexoes_ao_broker_total", {"processo": "consumidor"}
+        "pytstop_reconexoes_ao_broker_total", {"componente": "consumidor"}
     )
     return valor or 0.0
 

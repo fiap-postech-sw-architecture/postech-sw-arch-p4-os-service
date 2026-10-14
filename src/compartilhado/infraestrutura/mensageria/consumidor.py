@@ -95,6 +95,10 @@ MENSAGENS_CONSUMIDAS: Final = Counter(
     ["tipo", "resultado"],
 )
 
+# Os cinco resultados da metrica de consumo (o `Desfecho` do handler mais a
+# repeticao, o retry e a DLQ), todos pre-inicializados para cada tipo.
+RESULTADOS: Final = ("processada", "duplicada", "ignorada", "retry", "dlq")
+
 type Handler = Callable[[MensagemRecebida, TransacaoDaMensagem], Desfecho]
 
 # Fila de retry de cada tentativa (`os.eventos.retry.<nivel>`, TTL no
@@ -222,6 +226,13 @@ class Consumidor:
         )
         self._catalogo = catalogo()
         self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
+        # Series de rotulo fechado nascem com zero: o `increase()` perderia a
+        # primeira mensagem de cada tipo e resultado. O tipo fora do catalogo e o
+        # rotulo `desconhecido`.
+        for tipo in (*self._catalogo.consumidos, _TIPO_DESCONHECIDO):
+            for resultado in RESULTADOS:
+                MENSAGENS_CONSUMIDAS.labels(tipo=tipo, resultado=resultado)
+        amqp.RECONEXOES.labels(componente="consumidor")
 
     def executar(self, parar: threading.Event) -> None:
         """Laco principal; queda do broker nao derruba o processo.
