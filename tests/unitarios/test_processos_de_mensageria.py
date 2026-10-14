@@ -102,12 +102,41 @@ def test_handler_monta_o_orquestrador_na_transacao_e_marca_o_span(
 
     assert desfecho is tratamento.desfecho
     assert falso.montado_com["publicador"] is transacao
-    assert falso.montado_com["prazo_resposta"] == timedelta(seconds=9)
+    assert falso.montado_com["contexto"].prazo_resposta == timedelta(seconds=9)
     (span,) = rastreador.spans()
     assert span.attributes == {
         "pytstop.saga.etapa": tratamento.etapa.value,
         "pytstop.saga.etapa_nova": tratamento.etapa_nova.value,
         "pytstop.saga.desfecho": tratamento.desfecho.value,
+    }
+
+
+def test_handler_marca_a_falha_da_compensacao_no_span(
+    monkeypatch: pytest.MonkeyPatch, rastreador: Rastreador
+) -> None:
+    tratamento = Tratamento(
+        Desfecho.PROCESSADA,
+        EtapaSaga.COMPENSANDO,
+        EtapaSaga.FALHA_NA_COMPENSACAO,
+        "estorno_recusado",
+    )
+    monkeypatch.setattr(
+        processo_consumidor, "OrquestradorDaSaga", _OrquestradorFalso(tratamento)
+    )
+
+    with rastreador.tracer.start_as_current_span("process EstornoDePagamentoFalhou"):
+        processo_consumidor.tratar_evento_da_saga(
+            _mensagem(),
+            TransacaoDaMensagem(MagicMock()),
+            prazo_resposta=timedelta(seconds=9),
+        )
+
+    (span,) = rastreador.spans()
+    assert span.attributes == {
+        "pytstop.saga.etapa": "compensando",
+        "pytstop.saga.etapa_nova": "falha_na_compensacao",
+        "pytstop.saga.desfecho": "processada",
+        "pytstop.saga.falha": "estorno_recusado",
     }
 
 
@@ -138,9 +167,7 @@ def test_handler_marca_o_adiantado_no_span_e_relanca(
     ("recusa", "atributos"),
     [
         pytest.param(
-            EventoRecusadoError(
-                "sem_tratador_nesta_versao", EtapaSaga.AGUARDANDO_DECISAO
-            ),
+            EventoRecusadoError("transicao_invalida", EtapaSaga.AGUARDANDO_DECISAO),
             {
                 "pytstop.saga.desfecho": "recusada",
                 "pytstop.saga.etapa": "aguardando_decisao",

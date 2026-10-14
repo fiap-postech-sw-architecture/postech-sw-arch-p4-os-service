@@ -1,4 +1,4 @@
-"""Tipos da saga de atendimento: etapas, passos, envio, fatos e erros.
+"""Tipos da saga de atendimento: etapas, registros, envio, transicao, fatos e erros.
 
 A saga guarda so codigos (etapa, gatilho, comando, motivo): texto livre e dado
 pessoal ficam na OS (RFC-004 secao 7.2).
@@ -11,7 +11,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Any, Final, NotRequired, TypedDict
 
 from src.compartilhado.dominio.events import DomainEvent
 from src.compartilhado.dominio.exceptions import EntidadeNaoEncontradaException
@@ -45,13 +45,56 @@ class EtapaSaga(StrEnum):
     FALHA_NA_COMPENSACAO = "falha_na_compensacao"
 
 
+class MotivoCompensacao(StrEnum):
+    """Por que a saga compensa (RFC-004 secao 9): um codigo, nunca texto livre.
+
+    Vai no ``motivo`` dos comandos de compensacao (RFC-004 secao 5.3), na saga
+    e no label ``motivo`` de ``pytstop_saga_compensacoes_total``. O texto que o
+    atendente escreve no cancelamento fica so na OS.
+    """
+
+    ORCAMENTO_RECUSADO = "orcamento_recusado"
+    ORCAMENTO_EXPIRADO = "orcamento_expirado"
+    GERACAO_FALHOU = "geracao_falhou"
+    RESERVA_FALHOU = "reserva_falhou"
+    PAGAMENTO_RECUSADO = "pagamento_recusado"
+    PAGAMENTO_EXPIRADO = "pagamento_expirado"
+    CANCELAMENTO = "cancelamento"
+    PRAZO_TECNICO = "prazo_tecnico"
+
+
+class GatilhoDeProcesso(StrEnum):
+    """As palavras do ``gatilho`` que nao sao tipo de mensagem (RFC-004 secao 7.2).
+
+    O gatilho de um registro e o tipo da mensagem que o provocou (um dos eventos
+    de ``ETAPA_ESPERADA``) ou uma destas palavras, quando o pedido ou a decisao
+    e do proprio OS. A lista e fechada: a saga recusa outra palavra
+    (``GATILHOS_VALIDOS``) e e a que o ``GET /sagas`` documenta.
+    """
+
+    ABERTURA = "abertura"
+    CANCELAMENTO_SOLICITADO = "cancelamento_solicitado"
+    CANCELAMENTO_RECUSADO = "cancelamento_recusado"
+    REENVIO = "reenvio"
+    PRAZO_ESGOTADO = "prazo_esgotado"
+    RETOMADA = "retomada"
+
+
+# Quem provoca os fatos que o consumidor aplica (historico da OS e registros da
+# saga), e a falha da compensacao pelo estorno que o provedor recusou (RFC-004
+# secao 4.7).
+ATOR_CONSUMIDOR: Final = "consumidor"
+ESTORNO_RECUSADO: Final = "estorno_recusado"
+
+
 class RegistroDaSaga(TypedDict):
     """Registro da linha do tempo da saga (coluna ``passos``): so codigos.
 
     Um por transicao aplicada, inclusive as que nao concluem um passo T (o
     ``DiagnosticoIniciado``, o ``PagamentoSolicitado``): ``gatilho`` e o tipo
-    do evento ou ``abertura``; ``comando`` e ``comando_id``, o comando que a
-    transicao enviou. ``em`` e ISO 8601 em UTC. Nunca texto livre.
+    do evento ou uma das palavras de ``GatilhoDeProcesso``; ``comando`` e
+    ``comando_id``, o comando que a transicao enviou. ``em`` e ISO 8601 em
+    UTC. Nunca texto livre.
     """
 
     seq: int
@@ -106,12 +149,79 @@ class Envio:
 
     tipo: Comando
     id: UUID
-    dados: DadosDoContrato = field(default_factory=dict, hash=False)
+    dados: DadosDoContrato = field(default_factory=dict, hash=False, repr=False)
     prazo_resposta_em: datetime | None = None
 
     def __post_init__(self) -> None:
         congelados = MappingProxyType(deepcopy(dict(self.dados)))
         object.__setattr__(self, "dados", congelados)
+
+    def em_voo(self, enviado_em: datetime) -> ComandoEmVoo:
+        """O comando em voo que este envio abre: o id dele e o primeiro envio."""
+        return {
+            "tipo": self.tipo.value,
+            "dados": deepcopy(dict(self.dados)),
+            "mensagem_ids": [str(self.id)],
+            "enviado_em": enviado_em.isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Gatilho:
+    """O que mudou a saga, quando e por quem: o cabecalho de cada registro.
+
+    ``tipo`` e o tipo do evento ou uma palavra de ``GatilhoDeProcesso``
+    (``abertura`` e ``cancelamento_solicitado`` nos pedidos pela API);
+    ``mensagem_id``, o id do evento (``None`` nos pedidos); ``ator``, o
+    processo ou o ``sub`` de quem pediu.
+    """
+
+    tipo: str
+    mensagem_id: UUID | None
+    em: datetime
+    ator: str
+
+    def registro(
+        self,
+        seq: int,
+        de: EtapaSaga | None,
+        para: EtapaSaga,
+        envio: Envio | None,
+        motivo: str | None,
+    ) -> RegistroDaSaga:
+        """O registro da saga deste gatilho: de que etapa para qual e o que enviou."""
+        return {
+            "seq": seq,
+            "em": self.em.isoformat(),
+            "de": de.value if de is not None else None,
+            "para": para.value,
+            "gatilho": self.tipo,
+            "mensagem_id": str(self.mensagem_id) if self.mensagem_id else None,
+            "comando": envio.tipo.value if envio is not None else None,
+            "comando_id": str(envio.id) if envio is not None else None,
+            "motivo": motivo,
+            "ator": self.ator,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Transicao:
+    """O que um gatilho faz com a saga (RFC-004 secoes 4.1 e 4.4).
+
+    ``seguinte`` e a etapa depois dele; ``comando``, o que o envio tem de ser
+    (nenhum envio com ``None``); ``concluido``, o passo T que ele conclui, que
+    a compensacao desfaz. ``motivo``, ``plano`` e ``falha`` sao os da
+    compensacao depois dele (vazios no fluxo normal), e ``gatilho``, a palavra
+    que o registro leva no lugar do tipo do evento (``cancelamento_recusado``).
+    """
+
+    seguinte: EtapaSaga
+    comando: Comando | None = None
+    concluido: str | None = None
+    motivo: str | None = None
+    plano: tuple[Comando, ...] = ()
+    falha: str | None = None
+    gatilho: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,8 +238,24 @@ class EtapaDaSagaAlteradaEvent(DomainEvent):
     permanencia: timedelta = field(kw_only=True)
 
 
+@dataclass(frozen=True, slots=True)
+class CompensacaoIniciadaEvent(DomainEvent):
+    """A saga saiu do fluxo normal para compensar, pelo ``motivo``."""
+
+    motivo: MotivoCompensacao = field(kw_only=True)
+
+
 class TransicaoDaSagaInvalidaError(Exception):
     """Evento aplicado fora da etapa em que ele e esperado: bug de quem chama."""
+
+
+class InvarianteDaSagaError(Exception):
+    """Estado contraditorio da saga: bug, ou linha gravada por outra versao.
+
+    Nao e ``ValueError`` de proposito: o handler da API devolveria o texto do
+    estado interno como 422 de entrada invalida. Aqui vira 500 com o erro no
+    log, e no consumidor, a DLQ com o motivo ``erro_no_handler``.
+    """
 
 
 class SagaNaoEncontradaException(EntidadeNaoEncontradaException):

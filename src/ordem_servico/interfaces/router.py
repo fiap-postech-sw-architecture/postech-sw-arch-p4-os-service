@@ -12,7 +12,6 @@ from __future__ import annotations
 from typing import Annotated, Any
 from uuid import UUID  # noqa: TC003
 
-import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 # Imports de runtime (nao TYPE_CHECKING): o FastAPI avalia as annotations
@@ -49,8 +48,6 @@ from src.ordem_servico.interfaces.schemas import (
     SagaResponse,
 )
 
-_log = structlog.get_logger(__name__)
-
 # Respostas documentadas no OpenAPI (Any: e o tipo do parametro `responses`
 # do FastAPI). 401 e 403 valem para toda rota autenticada do router.
 _RESPOSTAS_AUTENTICADAS: dict[int | str, dict[str, Any]] = {
@@ -68,6 +65,25 @@ _RESPOSTA_409: dict[int | str, dict[str, Any]] = {
         )
     }
 }
+
+
+def _erro(descricao: str, codigo: str, mensagem: str) -> dict[str, Any]:
+    """Resposta de erro documentada, com o envelope de exemplo."""
+    return {
+        "description": descricao,
+        "content": {
+            "application/json": {
+                "example": {
+                    "erro": {
+                        "codigo": codigo,
+                        "mensagem": mensagem,
+                        "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11",
+                    }
+                }
+            }
+        },
+    }
+
 
 router = APIRouter(
     prefix="/api/v1/ordens-de-servico",
@@ -182,18 +198,53 @@ def obter_historico(
 
 @router.post(
     "/{ordem_id}/cancelamento",
-    summary="Cancela a ordem antes do inicio da execucao",
-    responses={**_RESPOSTA_404, **_RESPOSTA_409},
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Pede o cancelamento: a saga desfaz os passos e cancela a ordem",
+    responses={
+        202: {
+            "description": (
+                "Cancelamento aceito: a OS mantem o status e a saga entra em "
+                "`compensando`. O pedido repetido, com a compensacao em curso ou "
+                "parada, tambem responde 202, sem efeito."
+            )
+        },
+        404: _erro(
+            "Ordem inexistente (ou sem saga, o que uma OS aberta nao deveria ser).",
+            "ENTIDADE_NAO_ENCONTRADA",
+            "Ordem de servico 5f0c7a52-3d0e-4c39-9d76-0f2b8f4f6a11 nao encontrada",
+        ),
+        409: _erro(
+            "`TRANSICAO_STATUS_INVALIDA`: execucao ja iniciada (o ponto sem "
+            "retorno) ou ordem ja cancelada. `CONFLITO_DE_CONCORRENCIA`: escrita "
+            "concorrente que voltou nas tres leituras.",
+            "TRANSICAO_STATUS_INVALIDA",
+            "Cancelamento recusado: execução já iniciada",
+        ),
+        422: _erro(
+            "`VALOR_INVALIDO`: motivo vazio, longo demais ou com caractere de "
+            "controle ou de formatacao. O corpo fora do schema (sem `motivo`, campo "
+            "extra) sai no formato de validacao de schema, `{detail, id_requisicao}`.",
+            "VALOR_INVALIDO",
+            "motivo de cancelamento e obrigatorio",
+        ),
+    },
 )
 def cancelar_ordem(
     ordem_id: UUID, body: CancelarOrdemRequest, usuario: _Atendente, session: _Sessao
 ) -> OrdemDeServicoResponse:
-    """Cancela com motivo; 409 com a saga em andamento, depois do inicio da
-    execucao ou se encerrada (o cancelamento pela saga vem com as compensacoes).
+    """Pede o cancelamento antes do inicio da execucao (RFC-004 secao 4.4).
+
+    202 com a ordem e a etapa ``compensando``: a OS guarda o motivo e mantem o
+    status ate a saga desfazer os passos feitos, um por vez; so entao fica
+    ``cancelada`` (acompanhe pela etapa e pelo historico). Com a compensacao em
+    curso ou parada, o pedido repetido devolve 202 com a etapa atual, sem
+    efeito. Depois do inicio da execucao, 409 ("Cancelamento recusado:
+    execução já iniciada"); ordem ja cancelada, 409 ("Ordem já cancelada").
+    Toda OS tem saga desde a abertura: sem ela, 404.
     """
-    ator = ator_de(usuario)
-    resultado = obter_cancelar_ordem(session).executar(ordem_id, body.motivo, ator=ator)
-    _log.info("order_cancelled_via_api", ordem_id=str(ordem_id), ator=ator)
+    resultado = obter_cancelar_ordem(session).executar(
+        ordem_id, body.motivo, ator=ator_de(usuario)
+    )
     return OrdemDeServicoResponse.model_validate(resultado)
 
 

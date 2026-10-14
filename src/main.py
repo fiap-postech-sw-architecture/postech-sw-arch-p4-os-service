@@ -73,6 +73,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     # RSA e a validade, no contexto que o usa). Rodam antes de criar o engine.
     validar_segredos_no_startup()
     validar_chave_jwt_no_startup()
+    # O cancelamento grava o prazo da primeira compensacao: valor invalido
+    # aborta o boot, como no consumidor, e nao a primeira requisicao. Lido uma
+    # vez aqui; a rota usa o valor guardado.
+    from src.ordem_servico.infraestrutura.prazo_da_saga import (
+        prazo_de_resposta_da_saga,
+    )
+    from src.ordem_servico.interfaces.dependencies import (
+        configurar_prazo_de_resposta,
+    )
+
+    configurar_prazo_de_resposta(prazo_de_resposta_da_saga())
 
     engine = criar_engine(database_url)
     configurar_session_factory(criar_session_factory(engine))

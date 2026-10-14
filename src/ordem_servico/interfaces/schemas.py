@@ -12,11 +12,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from src.ordem_servico.dominio.ordem_de_servico import (
+from src.ordem_servico.aplicacao.saga.modelo import GatilhoDeProcesso
+from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.dominio.texto_livre import (
     TAMANHO_MAXIMO_DESCRICAO,
     TAMANHO_MAXIMO_MOTIVO,
 )
-from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.interfaces.situacoes import situacao_de
 
 _DESCRICAO_STATUS = (
@@ -39,6 +40,15 @@ class _ComSituacao(BaseModel):
         return situacao_de(StatusOrdem(self.status))
 
 
+# O que a validacao do texto livre recusa (dominio/texto_livre.py), incluindo o
+# falso positivo conhecido que o README ("Texto livre") explica e mantem.
+_SEM_CARACTERE_OCULTO = (
+    "sem caractere de controle ou de formatacao (override bidirecional, espaco de "
+    "largura zero, separador de linha e, como efeito colateral, o emoji composto "
+    "por juncao de largura zero, o hifen condicional e a marca de direcao)"
+)
+
+
 class AbrirOrdemRequest(BaseModel):
     """Corpo de ``POST /api/v1/ordens-de-servico``."""
 
@@ -49,19 +59,30 @@ class AbrirOrdemRequest(BaseModel):
     descricao_problema: str = Field(
         min_length=1,
         max_length=TAMANHO_MAXIMO_DESCRICAO,
-        description="Problema relatado pelo cliente na recepcao.",
+        description=(
+            "Problema relatado pelo cliente na recepcao, de 1 a "
+            f"{TAMANHO_MAXIMO_DESCRICAO} caracteres, {_SEM_CARACTERE_OCULTO}."
+        ),
     )
 
 
 class CancelarOrdemRequest(BaseModel):
     """Corpo de ``POST /api/v1/ordens-de-servico/{id}/cancelamento``."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"motivo": "Cliente vendeu o veiculo"}]},
+    )
 
+    # Sem min_length nem max_length: o vazio, o tamanho e os caracteres que nao se
+    # leem valem no dominio, e todos voltam no mesmo 422 (envelope VALOR_INVALIDO);
+    # o OpenAPI anuncia os limites.
     motivo: str = Field(
-        min_length=1,
-        max_length=TAMANHO_MAXIMO_MOTIVO,
-        description="Motivo do cancelamento (obrigatorio).",
+        description=(
+            f"Motivo do cancelamento, de 1 a {TAMANHO_MAXIMO_MOTIVO} caracteres, "
+            f"{_SEM_CARACTERE_OCULTO}: o atendente o le na tela e a LGPD o alcanca."
+        ),
+        json_schema_extra={"minLength": 1, "maxLength": TAMANHO_MAXIMO_MOTIVO},
     )
 
 
@@ -109,7 +130,13 @@ class OrdemDeServicoResponse(_ComSituacao):
     pagamento: ResumoPagamentoResponse | None = Field(
         description="Resumo do pagamento solicitado ao Billing (None antes dele)."
     )
-    motivo_cancelamento: str | None
+    motivo_cancelamento: str | None = Field(
+        description=(
+            "Texto do pedido de cancelamento, guardado ja no 202: a OS segue com o "
+            "status que tinha e so fica cancelada quando a saga termina de desfazer "
+            "os passos. Volta a null se o inicio da execucao vencer o pedido."
+        )
+    )
     versao: int = Field(description="Versao do lock otimista (muda a cada escrita).")
     criado_em: datetime
     atualizado_em: datetime
@@ -169,8 +196,18 @@ class PassoDaSagaResponse(BaseModel):
     em: datetime = Field(description="Instante em que a saga aplicou o gatilho.")
     de: str | None = Field(description="Etapa anterior (None na abertura).")
     para: str = Field(description="Etapa depois do passo.")
-    gatilho: str = Field(description="Tipo do evento recebido ou abertura.")
-    mensagem_id: UUID | None = Field(description="Id do evento recebido.")
+    gatilho: str = Field(
+        description=(
+            "Tipo da mensagem que mudou a saga (um dos eventos que o OS consome) "
+            f"ou uma palavra do processo: {', '.join(GatilhoDeProcesso)}."
+        )
+    )
+    mensagem_id: UUID | None = Field(
+        description=(
+            "Id do evento recebido (None nos pedidos da API e nos registros do "
+            "processo de prazos)."
+        )
+    )
     comando: str | None = Field(description="Comando enviado no passo.")
     comando_id: UUID | None = Field(description="Id do envelope do comando.")
     motivo: str | None = Field(description="Codigo da compensacao, quando houver.")
@@ -228,7 +265,8 @@ class SagaResponse(BaseModel):
     comando_em_voo: ComandoEmVooResponse | None = Field(
         description=(
             "Comando com resposta automatica a espera dela (tipo e envio); "
-            "None nas esperas humanas e depois da resposta."
+            "None nas esperas humanas e depois da resposta. Em "
+            "falha_na_compensacao fica a compensacao pendente, sem prazo."
         )
     )
     reenvios: int = Field(description="Reenvios do comando em voo (0 no envio).")

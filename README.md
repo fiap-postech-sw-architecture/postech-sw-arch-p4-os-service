@@ -13,10 +13,10 @@ Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT
 ## O que já existe
 
 - OS da fase 4: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
-- Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, e o consumidor conduz o caminho feliz até `FINALIZADA`, com a etapa visível na OS e na rota de operação ([seção abaixo](#saga)).
-- API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento`, `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
+- Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, o consumidor conduz o caminho feliz até `FINALIZADA`, e as falhas de negócio e o cancelamento levam as compensações, uma por vez, até a OS `CANCELADA` ou até a falha da compensação, com a etapa visível na OS e na rota de operação ([seção abaixo](#saga)).
+- API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409), `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s) e `GET /metrics` (com `API_METRICS_ENABLED=true`, ligado no compose). Swagger em `/docs`.
 - Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
-- Ainda não: as compensações (falhas de negócio e respostas de compensação vão para a DLQ com o motivo `sem_tratador_nesta_versao`, para o redrive na versão que as trata, e o cancelamento de OS com a saga em andamento responde 409 até passar pela saga), o processo `prazos`, o e-mail ao cliente e os manifestos Kubernetes, desenhados na RFC-004.
+- Ainda não: o processo `prazos` (reenvio por prazo técnico e a retomada da compensação parada, `POST /api/v1/sagas/{ordem_id}/compensacao`), o e-mail ao cliente, a anonimização do veículo na Execução e os manifestos Kubernetes, desenhados na RFC-004. Sem o `prazos` uma compensação parada não tem saída: a compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
 
 ## Autenticação
 
@@ -42,13 +42,12 @@ Fora de `development` e `test`, o boot aborta se a chave estiver ausente, ilegí
 
 ### Rotação da chave
 
-A chave privada não entra no repositório nem na imagem (`*.pem` e `*.key` são ignorados pelo git e pelo Docker); gere as chaves num diretório temporário e leve-as direto para o Secret:
+A chave privada não entra no repositório nem na imagem (`*.pem` e `*.key` são ignorados pelo git e pelo Docker); gere as chaves num diretório temporário, fora do repositório, e leve-as direto para o Secret (apague o diretório depois de atualizar o Secret). O primeiro `openssl pkey` mostra a pública da nova; o segundo, a da atual, que sai da chave que está no Secret, gravada no mesmo diretório como `atual.pem`:
 
 ```bash
-chaves="$(mktemp -d)"   # fora do repositório; apague depois de atualizar o Secret
+chaves="$(mktemp -d)"
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$chaves/nova.pem"
-openssl pkey -in "$chaves/nova.pem" -pubout     # pública da nova
-# A pública da atual sai da chave que está no Secret, gravada no mesmo diretório:
+openssl pkey -in "$chaves/nova.pem" -pubout
 openssl pkey -in "$chaves/atual.pem" -pubout
 ```
 
@@ -184,7 +183,7 @@ Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como
 | `OUTBOX_LEASE_SEGUNDOS` | 60 | lease de cada linha reivindicada (45 ou mais: cobre o publish bloqueado por alarme do broker, de até 30 s, e a marcação da linha) |
 | `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `false`, `http://jaeger:4317` | exportação OTLP dos spans |
 | `OTEL_SERVICE_NAME` | `pytstop-os-service` | `service.name` dos spans |
-| `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | prazo técnico gravado pela saga no envio de cada comando com resposta automática (1 ou mais; [seção Saga](#saga)) |
+| `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | prazo técnico gravado pela saga no envio de cada comando com resposta automática (1 ou mais; [seção Saga](#saga)). Tem de ser o mesmo valor na API (a primeira compensação do cancelamento), no consumidor e no processo `prazos`; no compose é um ponto só (`x-saga`) |
 
 Valor fora da faixa aborta o boot com a variável e o valor na mensagem.
 
@@ -296,16 +295,18 @@ Etapa (o estado do orquestrador) e status (o que cliente e atendente veem) são 
 | `em_execucao` | `em_execucao` | `ExecucaoFinalizada` | nenhum |
 | `concluida` | `finalizada`; `entregue` com a entrega (T10, fora da saga) | nenhum | nenhum |
 
-As etapas `compensando`, `compensada` e `falha_na_compensacao` já existem no enum, na API e nos gauges, e chegam com as compensações: esta versão não as produz.
+A falha de negócio e o cancelamento levam a saga às etapas `compensando`, `compensada` e `falha_na_compensacao` (seção [Compensações e cancelamento](#compensações-e-cancelamento)); nelas o status da OS não muda, até a OS ficar `cancelada`.
 
-- **O agregado `Saga` impõe a tabela** (`tabela_da_saga.py`). Antes de mudar, ele confere que o evento é da OS, que se classifica para ser processado (com os marcos da OS de antes do fato), que o instante não volta antes do último registro (o orquestrador passa o maior entre o relógio e esse registro, que pode ter vindo de outra réplica com o relógio um pouco adiantado: com mais de 1 s de defasagem ele avisa no log `saga clock behind last record`, e com mais de 60 s o evento vai para a DLQ, ver "Evento fora de ordem") e que o comando enviado é o da linha, com o `ordem_id` da OS, os itens ou as peças que a saga guarda, o orçamento da OS no `SolicitarPagamento`, a prioridade `normal` no `AgendarExecucao` e o prazo técnico. O orquestrador só traduz cada evento em chamadas: o fato na OS, o comando na outbox e o registro na saga.
+- **O agregado `Saga` impõe a tabela** (`tabela_da_saga.py`, `transicoes.py`). Antes de mudar, ele confere que o evento é da OS e se classifica para ser processado (com os marcos da OS de antes do fato), que o instante não volta antes do último registro e que o gatilho do registro é do vocabulário fechado.
+- **Confere o comando.** O comando enviado tem de ser o da linha, com o `ordem_id` da OS, os itens ou as peças que a saga guarda, o orçamento da OS no `SolicitarPagamento`, a prioridade `normal` no `AgendarExecucao`, os ids dos recursos nas compensações e o prazo técnico. O orquestrador só traduz cada evento em chamadas: o fato na OS, o comando na outbox e o registro na saga.
+- **Um só caminho de envio.** A abertura, o orquestrador e o cancelamento gravam o comando pela mesma função (`enviar`, em `contexto_de_envio.py`), e o `ContextoDeEnvio` leva o prazo técnico, o relógio e o span da ação. O instante de cada passo nunca fica antes do último registro da saga, que pode ter vindo de outra réplica ou da API com o relógio um pouco adiantado; é a mesma política no consumidor e na API: com mais de 1 s de defasagem avisa no log `saga clock behind last record`, e com mais de 60 s recusa o passo (no consumidor, DLQ com o motivo `relogio_defasado`; no cancelamento, 500).
 - **Causa.** Cada comando sai com `causation_id` = id do evento que o causou; o `SolicitarDiagnostico` da abertura, causado pela requisição, sai sem ele.
 - **Comando em voo.** O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado` e `AgendarExecucao`) fica registrado na saga como o comando em voo, o que espera a resposta, com o prazo técnico (`prazo_resposta_em`, `SAGA_PRAZO_RESPOSTA_SEGUNDOS` depois do envio) e o id de cada envio (`mensagem_ids`), com que a resposta casa pelo `causation_id`. O `SolicitarDiagnostico` e as esperas humanas não têm prazo.
 - **Só códigos.** A saga guarda etapa, gatilho, comando e ator; texto livre e placa ficam na OS e na mensagem.
 
 ### Evento fora de ordem
 
-O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa antes de tocar no domínio (RFC-004 seção 4.5):
+O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa antes de tocar no domínio (RFC-004 seção 4.5). Os eventos que chegam durante uma compensação têm a tabela própria, em [Compensações e cancelamento](#compensações-e-cancelamento).
 
 | Situação | Exemplo | Desfecho |
 |---|---|---|
@@ -314,20 +315,151 @@ O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa an
 | Mesma etapa, fato já aplicado | `DiagnosticoIniciado` com a OS já em diagnóstico; `PagamentoSolicitado` com o resumo gravado | ignorado com log |
 | Etapa à frente da atual | `ExecucaoIniciada` antes da `ExecucaoAgendada` | adiantado (`FalhaTransitoriaError`): volta pela fila de retry até a saga alcançá-lo |
 | Mesma etapa, antes do fato que o habilita | `DiagnosticoConcluido` com a OS ainda `recebida`; `PagamentoConfirmado` antes do `PagamentoSolicitado` | adiantado |
-| Saga concluída ou fora do fluxo normal | `ExecucaoFinalizada` repetida em `concluida` | ignorado com log |
-| OS sem saga, ou `ordem_id` dos dados diferente do `correlation_id` | | erro permanente: DLQ com o motivo `saga_inexistente` ou `ordem_id_divergente` |
-| OS cancelada ou entregue com a saga viva (estado que o cancelamento recusa) | | DLQ com o motivo `ordem_encerrada`: nenhum comando para OS encerrada |
-| Falha de negócio ou resposta de compensação na etapa em que caberia tratá-la | `OrcamentoRecusado` em `aguardando_decisao` | DLQ com o motivo `sem_tratador_nesta_versao` (nesta versão, sem compensações) |
-| Fato que a OS ou a saga recusam | | DLQ com o motivo `transicao_invalida` |
-| Relógio desta réplica mais de 60 s atrás do último registro da saga (de outra réplica ou da API) | | DLQ com o motivo `relogio_defasado`: não é jitter, e gravaria `em` e prazos no futuro; até 60 s o registro fica no instante do anterior |
+| Saga concluída | `ExecucaoFinalizada` repetida em `concluida` | ignorado com log |
+| OS sem saga, ou `ordem_id` dos dados diferente do `correlation_id` | `DiagnosticoIniciado` de uma OS que não tem saga | erro permanente: DLQ com o motivo `saga_inexistente` ou `ordem_id_divergente` |
+| OS cancelada ou entregue com a saga viva (estado que o cancelamento recusa) | `PagamentoConfirmado` de uma OS que um `UPDATE` por fora deixou `cancelada` | DLQ com o motivo `ordem_encerrada`: nenhum comando para OS encerrada |
+| Fato que a OS ou a saga recusam | `PagamentoSolicitado` com a OS fora de `aguardando_pagamento` | DLQ com o motivo `transicao_invalida` |
+| Relógio desta réplica mais de 60 s atrás do último registro da saga (de outra réplica ou da API) | réplica com o relógio 90 s atrás do `em` do último registro | DLQ com o motivo `relogio_defasado`: não é jitter, e gravaria `em` e prazos no futuro; até 60 s o registro fica no instante do anterior |
 
-O descompasso de estado (etapa já passada, fato repetido, saga encerrada) é ignorado com log e nunca vai para a DLQ. O adiantado volta pela fila de retry nas cinco cópias (1, 5, 15, 60 e 300 s, 381 s ao todo), bem mais que o atraso entre eventos do mesmo passo; se a saga ainda não o tiver alcançado, a sexta falha vai para a DLQ, com alerta (RFC-004 seção 4.5, ADR-035). Falhas de negócio (`GeracaoDeOrcamentoFalhou`, `OrcamentoRecusado`, `OrcamentoExpirado`, `ReservaDePecasFalhou`, `PagamentoRecusado`, `PagamentoExpirado`) e respostas de compensação passam pela mesma classificação; nesta versão, a que chega na etapa em que caberia tratá-la vai para a DLQ, onde o alerta a mostra, em vez de ser consumida sem efeito: o `id` dela não entra em `mensagens_processadas`, e o redrive na versão com as compensações a processa. A `os.eventos.dlq` guarda cada mensagem por 7 dias (`message-ttl` da política `dlq`, em `contratos/rabbitmq/definitions.json`): o redrive tem de acontecer nesse prazo, e depois dele o evento de negócio se perde e a saga fica parada na etapa. O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
+O descompasso de estado (etapa já passada, fato repetido, saga encerrada) é ignorado com log e nunca vai para a DLQ. O adiantado volta pela fila de retry nas cinco cópias (1, 5, 15, 60 e 300 s, 381 s ao todo), bem mais que o atraso entre eventos do mesmo passo; se a saga ainda não o tiver alcançado, a sexta falha vai para a DLQ, com alerta (RFC-004 seção 4.5, ADR-035). O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
 
-### Cancelamento nesta versão
+A mensagem que o consumidor recusa não entra em `mensagens_processadas` (ADR-036): o redrive da DLQ a trata de novo. A `os.eventos.dlq` guarda cada mensagem por 7 dias (`message-ttl` da política `dlq` em `contratos/rabbitmq/definitions.json`); o procedimento está em [Implantação e DLQ](#implantação-e-dlq).
 
-O `POST /api/v1/ordens-de-servico/{id}/cancelamento` de OS com a saga em andamento responde 409 (`TRANSICAO_STATUS_INVALIDA`, "Cancelamento de OS com atendimento em andamento ainda nao disponivel") sem mudar a OS: o cancelamento passa pela saga, que dispara as compensações (RFC-004 seção 4.4), e esta versão ainda não as tem. Assim a OS nunca fica cancelada com a saga viva, que seguiria emitindo comandos para uma OS encerrada. OS sem saga (anterior a ela) é cancelada direto, como antes, e a entrega só passa com a OS finalizada, que só chega lá pela saga concluída.
+### Compensações e cancelamento
 
-A guarda alcança o cliente: enquanto ele tem OS em andamento, `DELETE /api/v1/clientes/{id}` (desativação) e `DELETE /api/v1/clientes/{id}/dados-pessoais` (apagamento LGPD) respondem 409, porque `existe_os_ativa_para_cliente` só libera a OS entregue ou cancelada. A saída é a entrega da OS ou, com as compensações, o cancelamento pela saga.
+Termos desta seção:
+
+- **Plano:** as compensações que a saga ainda tem de enviar, na ordem fixa `CancelarExecucao`, `EstornarPagamento`, `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico`. É uma função pura (`aplicacao/saga/compensacao.py`), calculada quando a saga entra em `compensando` e gravada em `plano_compensacao`.
+- **Pendente:** a primeira compensação do plano, a que espera resposta (é o comando em voo).
+- **Resposta casada:** a resposta cujo `causation_id` é o id de um envio do comando em voo (um dos `comando_em_voo.mensagem_ids`).
+- **Estorno automático:** o `PagamentoEstornado` que o Billing publica sozinho, com o `motivo` `pagamento_apos_encerramento`, quando o cliente paga depois de a cobrança ser cancelada, expirada ou recusada (ADR-040). A causa dele é o `SolicitarPagamento`, e não o `EstornarPagamento`.
+- **Corrida do pivot:** o `ExecucaoIniciada` que chega com a compensação em curso ou parada, porque a Execução iniciou antes de receber o `CancelarExecucao`.
+
+Entra no plano a compensação de cada passo concluído ou em voo, menos o que a falha de negócio já encerrou no participante; o `DescartarDiagnostico` entra sempre ([RFC-004 seção 4.4](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md)):
+
+| Etapa | Gatilho | Compensações, em ordem |
+|---|---|---|
+| `aguardando_diagnostico` | cancelamento | `DescartarDiagnostico` |
+| `aguardando_orcamento` | `GeracaoDeOrcamentoFalhou` | `DescartarDiagnostico` |
+| `aguardando_orcamento` | cancelamento (ou prazo técnico), com o `GerarOrcamento` em voo | `CancelarOrcamento`, `DescartarDiagnostico` |
+| `aguardando_decisao` | `OrcamentoRecusado` ou `OrcamentoExpirado` | `DescartarDiagnostico` |
+| `aguardando_decisao` | cancelamento | `CancelarOrcamento`, `DescartarDiagnostico` |
+| `aguardando_reserva` | `ReservaDePecasFalhou` | `CancelarOrcamento`, `DescartarDiagnostico` |
+| `aguardando_reserva` | cancelamento (ou prazo técnico), com o `ReservarPecas` em voo | `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico` |
+| `aguardando_pagamento` | `PagamentoRecusado` ou `PagamentoExpirado` | `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico` |
+| `aguardando_pagamento` | cancelamento (antes do `PagamentoSolicitado` ou com o checkout aberto) | `EstornarPagamento`, `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico` |
+| `aguardando_agendamento` | cancelamento (ou prazo técnico), com o `AgendarExecucao` em voo | as cinco |
+| `aguardando_inicio` | cancelamento | as cinco |
+
+Os estados da compensação e o que move a saga entre eles:
+
+```mermaid
+stateDiagram-v2
+    [*] --> compensando: falha de negócio ou cancelamento (antes do pivot)
+    compensando --> compensando: resposta casada da pendente, a seguinte sai
+    compensando --> compensada: resposta da última, OS cancelada
+    compensando --> falha_na_compensacao: EstornoDePagamentoFalhou
+    compensando --> em_execucao: ExecucaoIniciada, só o CancelarExecucao pendente
+    falha_na_compensacao --> em_execucao: ExecucaoIniciada, só o CancelarExecucao pendente
+    compensada --> [*]
+```
+
+O cancelamento depois do pagamento, com o estorno (RFC-004 seção 4.8d, sem a retomada do admin):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor AT as Atendente
+    participant OS as os-service
+    participant EX as execution-service
+    participant BI as billing-service
+
+    Note over OS,BI: saga AGUARDANDO_INICIO, OS AGUARDANDO_EXECUCAO (paga e na fila)
+    AT->>OS: POST /api/v1/ordens-de-servico/{id}/cancelamento com o motivo
+    OS->>OS: OS guarda o texto, saga COMPENSANDO (plano das cinco)
+    OS-->>AT: 202 Accepted, etapa compensando
+    OS-)EX: CancelarExecucao
+    EX-)OS: ExecucaoCancelada
+    OS-)BI: EstornarPagamento
+    alt estorno aceito
+        BI-)OS: PagamentoEstornado
+        OS-)EX: LiberarReserva
+        EX-)OS: ReservaLiberada
+        OS-)BI: CancelarOrcamento
+        BI-)OS: OrcamentoCancelado
+        OS-)EX: DescartarDiagnostico
+        EX-)OS: DiagnosticoDescartado
+        OS->>OS: OS CANCELADA com o texto do atendente, saga COMPENSADA
+    else estorno recusado pelo provedor
+        BI-)OS: EstornoDePagamentoFalhou
+        OS->>OS: saga FALHA_NA_COMPENSACAO, sequência suspensa, comando em voo sem prazo
+    end
+    Note over AT,BI: depois de ExecucaoIniciada (pivot), o mesmo POST responde 409
+```
+
+Os eventos que chegam durante a compensação:
+
+| Situação | Exemplo | Desfecho |
+|---|---|---|
+| Falha de negócio na etapa do passo que falha | `OrcamentoRecusado` em `aguardando_decisao` | processado: a compensação começa pela primeira do plano |
+| Resposta da compensação pendente | `ExecucaoCancelada` com o `CancelarExecucao` pendente; as três do `EstornarPagamento` só se forem casadas | processado: a seguinte sai, ou a saga termina |
+| Resposta de compensação que não é a da pendente, ou fora de `compensando` | `ReservaLiberada` com o `EstornarPagamento` pendente; qualquer resposta em `falha_na_compensacao` | ignorado com log |
+| Evento do fluxo normal com a saga em compensação ou compensada | `OrcamentoAprovado` ou `PagamentoConfirmado` atrasados | ignorado com log: a compensação já cancela o orçamento e devolve o pagamento |
+| Estorno automático, em qualquer etapa | `PagamentoEstornado` com `pagamento_apos_encerramento` e o `causation_id` do `SolicitarPagamento` | só o resumo do pagamento passa a `estornado`, se a OS o tiver: sem etapa nova, sem comando e sem registro, com o log `late payment refunded` (sem resumo, ou já estornado, ignorado com log) |
+| Corrida do pivot | `ExecucaoIniciada` com só o `CancelarExecucao` pendente | a saga volta a `em_execucao`, e a OS descarta o texto do pedido |
+| `ExecucaoIniciada` com outra compensação pendente | `ExecucaoIniciada` com o `EstornarPagamento` pendente | ignorado com log de erro: o `CancelarExecucao` já foi respondido |
+| `ExecucaoFinalizada` com o `CancelarExecucao` pendente | | adiantado: volta pela retry até o `ExecucaoIniciada` chegar |
+
+Como a saga se comporta:
+
+- **Uma por vez.** Cada compensação espera a resposta da anterior, com o prazo técnico gravado pela saga no envio. A resposta da última leva a saga a `compensada` e a OS a `cancelada`.
+- **Dados do comando.** `{ordem_id, motivo}`, em que `motivo` é o código da compensação e nunca o texto do atendente, mais o `orcamento_id` no `CancelarOrcamento` e o `pagamento_id` no `EstornarPagamento` quando a OS já os tem (sem eles o participante acha o recurso pelo `ordem_id`).
+- **A OS cancelada.** Tem origem `saga` e o motivo que o atendente escreveu ou, nas falhas de negócio, o rótulo do código (`ROTULO_DO_MOTIVO`: "Orçamento recusado pelo cliente", "Falta de peça para a reserva", "Pagamento não realizado no prazo"...). O `ator` da mudança é o `sub` do atendente que pediu o cancelamento e, nas falhas de negócio, o processo `consumidor` (ADR-039).
+- **Resposta casada.** Com o `EstornarPagamento` pendente, concluem a compensação o `PagamentoCancelado` e o `PagamentoEstornado` (de qualquer `motivo`) casados, e o `EstornoDePagamentoFalhou` casado leva a saga a `falha_na_compensacao`. O `motivo` não serve de chave: o Billing responde ao comando com `pagamento_apos_encerramento` quando a aprovação tardia já tinha sido estornada.
+- **Resumo do pagamento.** A OS passa o resumo a `cancelado` ou `estornado` com a resposta, quando o tem (`ResumoPagamento.cancelado()` e `.estornado()`). O cancelamento só atinge a cobrança em aberto e o estorno aceita qualquer origem; nenhuma das duas recusa a resposta do Billing. Se o estorno automático chegou antes e o resumo já está `estornado`, a resposta casada deixa o resumo como está e a compensação avança, em qualquer ordem de chegada entre as réplicas do consumidor.
+- **Falha na compensação.** O `EstornoDePagamentoFalhou` para a sequência: o compensado fica compensado, o resto como estava e a OS mantém o status. A saga guarda `falha=estorno_recusado`, o plano com a pendente em primeiro lugar e o comando em voo **sem prazo**, com os ids de todos os envios (a resposta tardia ao original ainda casa depois da retomada). A resposta que chega em `falha_na_compensacao` é ignorada, salvo o estorno automático (só o resumo) e o `ExecucaoIniciada` com o `CancelarExecucao` parado. A retomada pelo admin e o reenvio por prazo ainda não existem.
+- **Corrida do pivot.** Se o `ExecucaoIniciada` vence o cancelamento, a saga e a OS voltam a `em_execucao`: o texto do pedido é descartado, motivo, plano e falha se limpam, e o registro tem o gatilho `cancelamento_recusado` com o `mensagem_id` do evento. Se o cancelamento venceu, o `ExecucaoIniciada` que chega depois é ignorado com log de erro.
+- **Registros.** O gatilho de cada registro é o tipo da mensagem ou uma palavra da lista fechada `abertura`, `cancelamento_solicitado`, `cancelamento_recusado`, `reenvio`, `prazo_esgotado` e `retomada`; a saga recusa outro, e o `GET /api/v1/sagas/{ordem_id}` documenta a lista.
+
+`POST /api/v1/ordens-de-servico/{id}/cancelamento` (atendente, corpo `{"motivo": "texto livre"}`) responde:
+
+| Etapa | Resposta |
+|---|---|
+| `aguardando_*` (antes do pivot) | **202** com a OS e `etapa: "compensando"`: a OS guarda o texto em `motivo_cancelamento` sem mudar o status, a saga entra em `compensando` com `motivo=cancelamento` e a primeira compensação sai no mesmo commit, com o registro `cancelamento_solicitado` |
+| `compensando` ou `falha_na_compensacao` | **202** com a etapa atual, sem efeito: o pedido repetido não grava texto, registro nem comando |
+| `em_execucao` ou `concluida` | **409** `TRANSICAO_STATUS_INVALIDA`, "Cancelamento recusado: execução já iniciada" (RN-029) |
+| `compensada` | **409** `TRANSICAO_STATUS_INVALIDA`, "Ordem já cancelada" |
+| Conflito de versão com o consumidor que persiste nas três leituras | **409** `CONFLITO_DE_CONCORRENCIA` |
+| OS inexistente, ou sem saga (toda OS tem saga desde a migração `003`) | **404** `ENTIDADE_NAO_ENCONTRADA`; não há cancelamento direto |
+| Motivo vazio, em branco, com mais de 500 caracteres ou com caractere de controle ou de formatação (ver "Texto livre", abaixo) | **422** `VALOR_INVALIDO`, no envelope do domínio, antes de qualquer efeito |
+| Corpo fora do schema (sem `motivo`, campo a mais, tipo errado) | **422** no formato da validação de schema dos três serviços, `{detail, id_requisicao}` |
+
+```bash
+curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/cancelamento \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"motivo": "Cliente vendeu o veículo"}' | jq '{status, etapa, motivo_cancelamento}'
+```
+
+Com a OS recém-aberta (sem resposta dos participantes ainda), a resposta é `{"status": "recebida", "etapa": "compensando", "motivo_cancelamento": "Cliente vendeu o veículo"}`; repetido o mesmo `POST`, vem outro 202, sem efeito, e depois do início da execução vem o 409 da tabela.
+
+- **Conflito de versão.** Quando o consumidor grava a mesma OS ou saga no meio, a requisição relê as duas e decide de novo, até três leituras (*reread value*, RFC-004 seção 4.5).
+- **O texto do atendente.** O `motivo_cancelamento` é o texto do pedido, guardado já no 202, enquanto a OS segue com o status anterior. Quem lê a OS vê o texto com a etapa `compensando`, e ele volta a `null` se o início da execução vencer o pedido. As OS canceladas diretamente, antes de o cancelamento passar pela saga, guardam o texto no mesmo campo.
+- **Onde o texto fica.** Em `ordens_de_servico.motivo_cancelamento` e, depois de a OS ser cancelada, em `historico_status_ordem.motivo` (devolvido por `GET /{id}/historico`). O apagamento LGPD do cliente anonimiza as duas colunas, e a saga guarda só códigos.
+- **Texto livre.** A descrição do problema (`POST /api/v1/ordens-de-servico`, até 1000 caracteres) e o motivo do cancelamento (até 500) passam pela mesma validação, no domínio: o texto entra aparado (CRLF vira LF), e a violação volta como 422 `VALOR_INVALIDO`.
+  - **Recusa:** o texto vazio, o que passa do limite e os caracteres das categorias Unicode `Cc` (controle, como o NUL e o CR solto), `Cf` (formatação: espaço de largura zero, override bidirecional, marca de direção), `Zl` e `Zp` (separador de linha e de parágrafo). A quebra de linha e a tabulação passam.
+  - **Passa:** acentos, o espaço sem quebra e o emoji simples, com tom de pele, bandeira ou variação de apresentação.
+  - **Falso positivo conhecido:** o emoji composto por junção de largura zero (`👨‍🔧`, `👩‍💻`, as famílias), o hífen condicional e a marca esquerda-direita também são `Cf` e voltam 422 com `<campo> tem caractere de controle ou de formatacao`, sem dizer qual. Texto colado do WhatsApp ou do Word pode trazê-los.
+  - **Decisão:** manter a categoria `Cf` inteira recusada. O atendente lê o texto na tela e a LGPD o alcança, e o override bidirecional e o espaço de largura zero escondem ou reordenam o que se lê. Liberar só a junção entre dois pictogramas pediria a propriedade Emoji do Unicode, que o `unicodedata` do Python não tem, e uma lista de pictogramas que cresce a cada versão do Unicode. O custo é o atendente tirar o caractere ou trocar o emoji composto pelo simples; `test_texto_livre.py` fixa os dois lados.
+- **Auditoria (ADR-039).** Cada pedido deixa uma linha de log com `correlation_id` (a OS), `ator` (o `sub` de quem pediu) e `resultado`: `order cancellation requested` com `aceito` ou `repetido` (e a `etapa`), ou `order cancellation refused` com o código do erro. Nunca o texto do motivo. O `sub` fica também no registro `cancelamento_solicitado` da saga e no `ator` da mudança `cancelada` do histórico. Só o que chega ao caso de uso é auditado: o corpo fora do schema (422 de schema) e as falhas inesperadas (500, como o relógio defasado ou a invariante da saga violada) saem apenas pelo log genérico da requisição ou do erro, sem `ator` nem `correlation_id`.
+- **Cliente com OS em andamento.** Enquanto a OS tem compensação em andamento ela segue ativa, e a desativação e o apagamento do cliente respondem 409 até a saga terminar (`existe_os_ativa_para_cliente` só libera a OS entregue ou cancelada).
+
+### Implantação e DLQ
+
+- **Ordem.** A API, o relay e o consumidor sobem juntos (no cluster, o mesmo `kubectl apply -k` aplica os três) ou o consumidor antes: a compensação que a API inicia é respondida na `os.eventos`, e uma réplica do consumidor de versão anterior, sem tratador para a falha de negócio e para a resposta de compensação, a recusa com o motivo `sem_tratador_nesta_versao`. Durante o rollout, as respostas que uma réplica antiga consumir vão para a DLQ.
+- **Redrive depois da versão nova, em todas as réplicas.** Antes disso a versão antiga recusa as mesmas mensagens de novo e o prazo de 7 dias recomeça. No clone do platform, `make redrive FILA=os.eventos`; se a implantação conviveu com réplicas antigas, repita-o no fim. O teste `test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova` mostra a ordem com o shovel do platform.
+- **Inspecione a DLQ antes.** O redrive devolve a fila inteira, sem filtrar por motivo: anote o `type`, o `message_id`, o `user_id` e o `correlation_id` de cada mensagem, como o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md) manda.
+- **Rollback.** Não volte a imagem com saga em `compensando` ou em `falha_na_compensacao`: a réplica anterior que tentar mudar essa saga viola a invariante dela, que exige prazo junto do comando em voo (`ValueError`, e a mensagem vai para a DLQ com `erro_no_handler`), e manda a resposta da compensação para a DLQ com `sem_tratador_nesta_versao`. Se voltar, faça o redrive depois de implantar de novo.
+- **Compensação sem o processo `prazos`.** O reenvio por prazo e a retomada (`POST /api/v1/sagas/{ordem_id}/compensacao`) vêm com o processo `prazos`, que ainda não existe. Sem ele, um participante que nunca responde deixa a saga em `compensando` sem reenvio nem alerta de prazo, e a saga em `falha_na_compensacao` dispara o alerta "Saga parada" cujo procedimento termina na retomada. Por isso a compensação só vai para o cluster junto com o processo `prazos`; até lá ela vale no compose local.
 
 ### Consulta e operação
 
@@ -359,29 +491,90 @@ Logo depois do `DiagnosticoConcluido`, a resposta fica assim (registros abreviad
 }
 ```
 
+Depois do cancelamento com o pagamento já feito e da `ExecucaoCancelada`, a saga está em `compensando`: `plano_compensacao` traz o que falta (a primeira é a pendente), `comando_em_voo` é essa pendente e `prazo_resposta_em` é o prazo técnico dela (só os três últimos registros, abreviados como acima):
+
+```json
+{
+  "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
+  "etapa": "compensando",
+  "motivo": "cancelamento",
+  "falha": null,
+  "plano_compensacao": ["EstornarPagamento", "LiberarReserva", "CancelarOrcamento", "DescartarDiagnostico"],
+  "comando_em_voo": {"tipo": "EstornarPagamento", "enviado_em": "2026-10-07T15:21:14Z"},
+  "reenvios": 0,
+  "prazo_resposta_em": "2026-10-07T15:23:14Z",
+  "passos": [
+    {"seq": 9, "gatilho": "ExecucaoAgendada", "de": "aguardando_agendamento", "para": "aguardando_inicio", "comando": null, "ator": "consumidor"},
+    {"seq": 10, "gatilho": "cancelamento_solicitado", "de": "aguardando_inicio", "para": "compensando", "comando": "CancelarExecucao", "ator": "<sub do atendente>"},
+    {"seq": 11, "gatilho": "ExecucaoCancelada", "de": "compensando", "para": "compensando", "comando": "EstornarPagamento", "ator": "consumidor"}
+  ]
+}
+```
+
+Se o provedor recusa o estorno, o Billing publica o `EstornoDePagamentoFalhou` e a saga para em `falha_na_compensacao`: `falha` traz a causa, o plano segue com a pendente em primeiro lugar, o `comando_em_voo` continua sendo o `EstornarPagamento` e o `prazo_resposta_em` é `null`, porque o comando parado não tem prazo (registros abreviados também):
+
+```json
+{
+  "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
+  "etapa": "falha_na_compensacao",
+  "motivo": "cancelamento",
+  "falha": "estorno_recusado",
+  "plano_compensacao": ["EstornarPagamento", "LiberarReserva", "CancelarOrcamento", "DescartarDiagnostico"],
+  "comando_em_voo": {"tipo": "EstornarPagamento", "enviado_em": "2026-10-07T15:21:14Z"},
+  "reenvios": 0,
+  "prazo_resposta_em": null,
+  "passos": [
+    {"seq": 10, "gatilho": "cancelamento_solicitado", "de": "aguardando_inicio", "para": "compensando", "comando": "CancelarExecucao", "ator": "<sub do atendente>"},
+    {"seq": 11, "gatilho": "ExecucaoCancelada", "de": "compensando", "para": "compensando", "comando": "EstornarPagamento", "ator": "consumidor"},
+    {"seq": 12, "gatilho": "EstornoDePagamentoFalhou", "de": "compensando", "para": "falha_na_compensacao", "comando": null, "ator": "consumidor"}
+  ]
+}
+```
+
 O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_id` (o id da OS, atributo dos spans de mensagem); no Loki, pelo campo `correlation_id` dos logs.
 
 ### Observabilidade da saga
 
-- Trace: o span da requisição de abertura é a raiz do trace da saga; a outbox guarda o contexto, o relay publica como filho, e o `process <tipo>` do consumidor ganha `pytstop.saga.etapa`, `pytstop.saga.etapa_nova` e `pytstop.saga.desfecho` (`processada`, `ignorada`, `adiantada` ou `recusada`, com o motivo no status de erro). A saga guarda o `traceparent` da última transição.
-- Métricas ([ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md)): `pytstop_saga_iniciadas_total` (API), `pytstop_saga_finalizadas_total{resultado}` e `pytstop_saga_etapa_duracao_segundos{etapa}` (quem tira a saga da etapa), contadas só depois do commit da transação raiz (rollback, conflito de versão, commit que falha, savepoint liberado e savepoint desfeito não contam, e a retry não conta duas vezes); `pytstop_saga_ativas{etapa}` e `pytstop_saga_etapa_mais_antiga_segundos{etapa}`, gauges que o coletor da API calcula numa consulta por raspagem (só com `API_METRICS_ENABLED=true`, que liga o `/metrics` da API), numa conexão própria, fora do pool das requisições, com 2 s de prazo para a consulta e 1 s para esperar um lock. Se a consulta falha, os dois gauges ficam ausentes (nunca zero), `pytstop_saga_coletor_falhas_total` conta a falha e `pytstop_saga_coletor_disponivel` vai a 0, para o alerta "Saga parada" não ficar mudo com o coletor quebrado. As séries de rótulo fechado nascem em zero em cada processo.
-- Logs JSON em inglês com `correlation_id`, `etapa` e `tipo`: `saga started`, `saga transition`, `saga event ignored` (com a classificação), `saga event ahead` e `saga clock behind last record` (com a defasagem em segundos), sem texto livre, placa nem links.
+- **Trace.**
+  - O span da requisição de abertura é a raiz do trace da saga: a outbox guarda o contexto, o relay publica como filho, e o `process <tipo>` do consumidor ganha `pytstop.saga.etapa`, `pytstop.saga.etapa_nova` e `pytstop.saga.desfecho` (`processada`, `ignorada`, `adiantada` ou `recusada`, com o motivo no status de erro), mais `pytstop.saga.falha` quando o evento leva a saga a `falha_na_compensacao`.
+  - A saga guarda o `traceparent` da última transição. O cancelamento chega com trace próprio (a requisição do atendente): o caso de uso abre o span `saga cancelamento` como filho desse contexto, com span link para a requisição, e a primeira compensação e o novo `traceparent` da saga nascem nele, de modo que a compensação segue no trace da saga.
+  - O span `saga cancelamento` fica com status de erro (o tipo da exceção, sem a mensagem) só numa falha inesperada; as recusas de negócio (404, 409, 422) não o marcam.
+- **Métricas** ([ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md)).
+  - Contadores e histograma, contados só depois do commit da transação raiz (rollback, conflito de versão, commit que falha, savepoint liberado e savepoint desfeito não contam, e a retry não conta duas vezes): `pytstop_saga_iniciadas_total` (API), `pytstop_saga_finalizadas_total{resultado}` (`concluida` ou `compensada`), `pytstop_saga_compensacoes_total{motivo}` (quem inicia a compensação: o consumidor nas falhas de negócio e a API no cancelamento; os oito códigos) e `pytstop_saga_etapa_duracao_segundos{etapa}` (quem tira a saga da etapa).
+  - Gauges `pytstop_saga_ativas{etapa}` e `pytstop_saga_etapa_mais_antiga_segundos{etapa}`: o coletor da API os calcula numa consulta por raspagem (só com `API_METRICS_ENABLED=true`, que liga o `/metrics` da API), numa conexão própria, fora do pool das requisições, com 2 s de prazo para a consulta e 1 s para esperar um lock.
+  - Se a consulta falha, os dois gauges ficam ausentes (nunca zero), `pytstop_saga_coletor_falhas_total` conta a falha e `pytstop_saga_coletor_disponivel` vai a 0, para o alerta "Saga parada" não ficar mudo com o coletor quebrado. As séries de rótulo fechado nascem em zero em cada processo.
+- **Logs** JSON em inglês, com `correlation_id`, `etapa` e `tipo`.
+  - `saga started`, `saga transition` (com o `motivo` da compensação; em aviso e com a `falha` quando a saga para na compensação), `saga event ignored` (com a classificação), `saga event ahead`, `late payment refunded` (o estorno automático) e `saga clock behind last record` (com a defasagem em segundos).
+  - O pedido de cancelamento audita em `order cancellation requested` e `order cancellation refused`, com o `ator` e o `resultado`, sem texto livre, placa nem links.
 
 ### Testes da saga
 
-- Unitários: cada linha da tabela de etapas no agregado e no handler (etapa, status, comando e `dados`, prazo, resumos da OS e ator), as recusas do agregado e a matriz da classificação, gerada de um oráculo escrito a partir da RFC: 12 etapas x 10 perfis da OS x 23 tipos no agregado, e o handler com a OS de cada etapa e com a OS encerrada (`tests/unitarios/ordem_servico/test_saga.py` e `test_orquestrador.py`).
-- Propriedade: em mil sementes, participantes simulados respondem a cada comando com eventos embaralhados, repetidos com id novo e atrasados, com retry nos atrasos das filas, e o atendente tenta cancelar e entregar a OS em pontos aleatórios; só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada, a OS nunca fica encerrada com a saga viva e nada vai para a DLQ. Uma guarda confere que o gerador produz de fato obsoletos, repetidos, adiantados e eventos fora do fluxo (`test_propriedades_da_saga.py`).
-- BDD de componente: `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ; os passos ficam em `tests/integracao/test_saga_atendimento.py`, ao lado das fixtures do banco.
-- Integração: relay, consumidor e RabbitMQ reais com participantes falsos: o caminho feliz até `ENTREGUE` num trace só (com a árvore de spans conferida), o adiantado passando pela retry, a reentrega do mesmo evento sem repetir o comando, as recusas na DLQ com o motivo, a placa e a descrição só no comando da Execução e a transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga e o comando desfaz tudo, inclusive o registro da mensagem (`tests/integracao/mensageria/test_saga_com_broker.py`).
+- **Unitários.**
+  - Cada linha da tabela de etapas no agregado e no handler (etapa, status, comando e `dados`, prazo, resumos da OS e ator) e as recusas do agregado: `tests/unitarios/ordem_servico/test_saga.py` e `test_orquestrador.py`.
+  - A matriz da classificação, gerada de um oráculo escrito a partir da RFC: 12 etapas x 10 perfis da OS x 23 tipos no agregado (`test_classificacao.py`) e, no handler, com a OS de cada etapa e com a OS encerrada (`test_orquestrador.py`).
+  - As conferências do agregado, as invariantes e o vocabulário do gatilho (`test_transicoes.py`); o envio e a política do relógio (`test_contexto_de_envio.py`).
+  - As compensações: as 11 linhas da tabela da RFC-004 seção 4.4 (`test_compensacao.py`), cada compensação pendente por cada resposta, casada ou não pelo `causation_id` (`test_orquestrador_compensacoes.py`), as 12 células das transições do resumo do pagamento (`test_resumos.py`) e o cancelamento em cada etapa, com o rótulo dos oito códigos (202, repetido, 409 e 422: `test_use_cases_os.py`).
+- **Limites.** `test_limites_do_dominio.py` mede o que o desenho manda: no máximo 300 linhas por módulo de `aplicacao/saga/` e da `OrdemDeServico`, e 10 métodos públicos que mudam estado em cada um dos dois agregados (a conta inclui os mixins de leitura; as propriedades e as duas consultas da `LeituraDaSaga` não contam).
+- **Propriedade** (`test_propriedades_da_saga.py`).
+  - Em mil sementes, participantes simulados respondem a cada comando com eventos embaralhados, repetidos com id novo e atrasados, com retry nos atrasos das filas, e o atendente tenta cancelar e entregar a OS em pontos aleatórios.
+  - Cada roteiro escolhe uma falha de negócio (ou nenhuma), se o provedor recusa o estorno, se o cliente paga depois de a cobrança ser encerrada e se o estorno automático chega antes da resposta ao `EstornarPagamento` (a ordem trocada entre duas réplicas do consumidor).
+  - Só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada, a OS fica cancelada se e só se a saga está compensada, a compensação seguinte só sai depois da resposta da anterior (o estorno nunca antes da execução cancelada), o gatilho de todo registro é do vocabulário, o plano é o da tabela da RFC e nada vai para a DLQ.
+  - Uma guarda confere que o gerador produz de fato obsoletos, repetidos, adiantados, estornos automáticos, a ordem trocada e eventos fora do fluxo.
+- **BDD de componente.** `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ; os passos ficam em `tests/integracao/test_saga_atendimento.py`, ao lado das fixtures do banco. Cobre o caminho feliz, o adiantado, o repetido e o obsoleto, cada falha de negócio, o cancelamento em cada etapa (plano da RFC, passo em voo e ordem das compensações), repetido, recusado depois do início e com a OS já cancelada, a corrida do pivot nos dois sentidos, o estorno recusado, a resposta atrasada e o estorno automático.
+- **Integração** (`tests/integracao/mensageria/test_saga_com_broker.py`): relay, consumidor e RabbitMQ reais com participantes falsos.
+  - O caminho feliz até `ENTREGUE` num trace só (com a árvore de spans conferida), o adiantado passando pela retry, a reentrega do mesmo evento sem repetir o comando, as recusas na DLQ com o motivo e a placa e a descrição só no comando da Execução.
+  - A transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga e o comando desfaz tudo, inclusive o registro da mensagem.
+  - O cancelamento depois do pagamento, com as cinco compensações uma por vez e o span do cancelamento no trace da saga; a falta de peça (orçamento e diagnóstico compensados, cada um causado pela resposta anterior); o estorno recusado (a sequência para e o comando em voo fica sem prazo).
+  - O redrive da DLQ com o shovel do platform: antes de implantar a versão nova, a versão anterior recusa a mensagem de novo; depois, o consumidor novo trata o evento que ela recusou.
 
 ## Como rodar local
 
-Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/).
+Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/). O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, as migrações, o admin de demonstração, o relay e o consumidor; o `make compose-down` derruba tudo e apaga os volumes.
 
 ```bash
-make compose-up      # build da imagem, PostgreSQL 16, RabbitMQ, migrações, admin de demonstração, relay e consumidor
+make compose-up
 curl -s localhost:8000/api/v1/saude
-make compose-down    # derruba e apaga os volumes
+make compose-down
 ```
 
 A API sobe em `http://localhost:8000` (porta configurável com `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O RabbitMQ do compose carrega a topologia de `contratos/rabbitmq/` e cria os usuários dos três serviços; o console fica em `http://localhost:15674` (usuário `admin`, senha de demonstração em `contratos/rabbitmq/rabbitmq-admin.json`) e o AMQP em `localhost:5674`, fora das portas do compose do platform. O usuário de demonstração é `admin@pytstop.dev` com a senha de `ADMIN_PASSWORD` no `docker-compose.yml` (valores só de dev; o boot com `ENVIRONMENT=production` recusa esses literais).
@@ -395,26 +588,28 @@ curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN
 
 Fora do compose (API, relay e consumidor no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`):
 
+A API sobe em `http://127.0.0.1:8000`. O relay e o consumidor rodam cada um em outro terminal, com o mesmo `.env` e, no consumidor, um `METRICS_PORT` diferente do relay:
+
 ```bash
 docker run -d --name os-postgres -p 127.0.0.1:5432:5432 \
   -e POSTGRES_DB=os -e POSTGRES_USER=pytstop -e POSTGRES_PASSWORD=pytstop postgres:16
 cp .env.example .env && set -a && . ./.env && set +a
 uv run alembic upgrade head && uv run python scripts/seed_admin.py
-uv run python -m src.main         # API em http://127.0.0.1:8000
-uv run python -m src.relay        # outro terminal, com o mesmo .env
-uv run python -m src.consumidor   # outro terminal (METRICS_PORT diferente do relay)
+uv run python -m src.main
+uv run python -m src.relay
+uv run python -m src.consumidor
 ```
 
 ## Qualidade
 
+- `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
+- `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
+- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay e o consumidor prontos (`/metrics` respondendo, `outbox_pendentes` numérico, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`); depois, `down -v`.
+
 ```bash
-make check   # uv.lock em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest
-make audit   # pip-audit das dependências de runtime (com os extras da imagem)
-make smoke   # imagem pelo entrypoint real: readiness, login do admin semeado validado pelo JWKS
-             # (e a assinatura adulterada recusada), log de boot em JSON, a imagem de produção
-             # (usuário 1001, ENVIRONMENT=production, sem header server), relay e consumidor
-             # prontos (/metrics respondendo, outbox_pendentes numerico, consumidor inscrito
-             # em os.eventos com prefetch 1 no list_consumers), depois down -v
+make check
+make audit
+make smoke
 ```
 
 `make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.

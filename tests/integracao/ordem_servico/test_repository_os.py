@@ -34,6 +34,7 @@ from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
 from tests.fabricas import (
+    ATOR_PROCESSO,
     CHECKOUT_URL,
     EXPIRA_EM,
     FLUXO,
@@ -215,7 +216,11 @@ class TestMapping:
         lida = _recarregar(session, ordem)
         versao = lida.versao
 
-        lida.registrar_pagamento_solicitado(resumo_do_pagamento())
+        lida.registrar_estado_do_pagamento(
+            StatusPagamento.SOLICITADO,
+            ator=ATOR_PROCESSO,
+            resumo=resumo_do_pagamento(),
+        )
 
         # O composite leva o VO novo para a coluna na hora (sem esperar um
         # flush disparado por outra mudanca da instancia).
@@ -414,7 +419,11 @@ class TestMetricasDeNegocio:
         instrumentar_metricas_de_ordens()
 
         # So o resumo do pagamento muda (escrita sem transicao de status).
-        ordem.registrar_pagamento_solicitado(resumo_do_pagamento())
+        ordem.registrar_estado_do_pagamento(
+            StatusPagamento.SOLICITADO,
+            ator=ATOR_PROCESSO,
+            resumo=resumo_do_pagamento(),
+        )
         OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
 
         assert duracoes == []

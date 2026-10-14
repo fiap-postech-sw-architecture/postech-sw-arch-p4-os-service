@@ -50,11 +50,7 @@ from src.compartilhado.infraestrutura.mensageria.telemetria import (
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.historico import MudancaDeStatus, OrigemMudanca
-from src.ordem_servico.dominio.ordem_de_servico import (
-    TAMANHO_MAXIMO_DESCRICAO,
-    TAMANHO_MAXIMO_MOTIVO,
-    OrdemDeServico,
-)
+from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.resumos import (
     TAMANHO_MAXIMO_URL,
     ResumoOrcamento,
@@ -62,6 +58,10 @@ from src.ordem_servico.dominio.resumos import (
     StatusPagamento,
 )
 from src.ordem_servico.dominio.status import StatusOrdem
+from src.ordem_servico.dominio.texto_livre import (
+    TAMANHO_MAXIMO_DESCRICAO,
+    TAMANHO_MAXIMO_MOTIVO,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable

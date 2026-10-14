@@ -13,10 +13,16 @@ x-banco-demo: &banco-demo
   POSTGRES_USER: pytstop
   POSTGRES_PASSWORD: pytstop  # gitleaks:allow (senha do banco de demo)
 
+# Prazo tecnico de resposta da saga (segundos): o mesmo valor na API (a primeira
+# compensacao do cancelamento) e no consumidor (os comandos seguintes); um ponto
+# so, para os dois nao gravarem prazos diferentes para a mesma saga.
+x-saga: &saga
+  SAGA_PRAZO_RESPOSTA_SEGUNDOS: ${SAGA_PRAZO_RESPOSTA_SEGUNDOS:-120}
+
 # Relay e consumidor: banco (montado das POSTGRES_* em development) e o usuario
 # `os` do RabbitMQ, com a mesma senha de demonstracao do platform.
 x-mensageria: &mensageria
-  <<: *banco-demo
+  <<: [*banco-demo, *saga]
   POSTGRES_HOST: postgres
   ENVIRONMENT: development
   RABBITMQ_URL: amqp://os:pytstop-os-demo-2026@rabbitmq:5672/%2F  # gitleaks:allow (senha de demo)
@@ -53,7 +59,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      <<: *banco-demo
+      <<: [*banco-demo, *saga]
       POSTGRES_HOST: postgres
       ENVIRONMENT: development
       # Chave RSA de assinatura do JWT, so de desenvolvimento (escapes \n do YAML).

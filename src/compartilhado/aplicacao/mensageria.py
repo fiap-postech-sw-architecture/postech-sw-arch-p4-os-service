@@ -98,11 +98,10 @@ class FalhaTransitoriaError(Exception):
 class FalhaPermanenteError(Exception):
     """Falha que nenhuma nova tentativa resolve: a mensagem vai direto para a DLQ.
 
-    ``motivo`` e um codigo fixo (``saga_inexistente``, ``sem_tratador_nesta_versao``)
+    ``motivo`` e um codigo fixo (``saga_inexistente``, ``transicao_invalida``)
     que o consumidor leva ao log e ao span: cada causa pede uma acao do operador
-    (corrigir o dado, esperar a versao que trata o evento e fazer o redrive). A
-    mensagem nao entra em ``mensagens_processadas``, entao o redrive a trata de
-    novo.
+    (corrigir o dado ou a causa e fazer o redrive). A mensagem nao entra em
+    ``mensagens_processadas``, entao o redrive a trata de novo.
     """
 
     def __init__(self, motivo: str) -> None:
