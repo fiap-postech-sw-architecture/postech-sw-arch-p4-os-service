@@ -212,9 +212,17 @@ def registrar_processada(session: Session, mensagem_id: UUID) -> bool:
     return inserida is not None
 
 
-def pg_notify_outbox(session: Session) -> None:
-    """Emite ``pg_notify('outbox_novo','')`` na transacao corrente (so Postgres)."""
+def pg_notify(session: Session, canal: str) -> None:
+    """Emite ``pg_notify(canal, '')`` na transacao corrente (so Postgres).
+
+    O NOTIFY e transacional: so chega a quem escuta quando o COMMIT conclui.
+    """
     bind = session.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    session.execute(text("SELECT pg_notify(:canal, '')"), {"canal": CANAL_NOTIFY})
+    session.execute(text("SELECT pg_notify(:canal, '')"), {"canal": canal})
+
+
+def pg_notify_outbox(session: Session) -> None:
+    """Acorda o relay: ``pg_notify('outbox_novo','')`` na transacao corrente."""
+    pg_notify(session, CANAL_NOTIFY)

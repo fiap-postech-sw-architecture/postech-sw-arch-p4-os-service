@@ -28,10 +28,10 @@ from sqlalchemy import (
     Text,
     Uuid,
     func,
-    text,
 )
 
 from src.compartilhado.infraestrutura.database import metadata
+from src.compartilhado.infraestrutura.outbox_mapping import pg_notify
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -99,6 +99,7 @@ class NotificacoesSQLAlchemy:
         self._session = session
 
     def registrar(self, notificacao: Notificacao) -> None:
+        """Insere o pedido na transacao e emite o NOTIFY que acorda o notificador."""
         self._session.execute(
             notificacoes_table.insert().values(
                 ordem_id=notificacao.ordem_id,
@@ -107,7 +108,4 @@ class NotificacoesSQLAlchemy:
                 motivo=notificacao.motivo,
             )
         )
-        if self._session.get_bind().dialect.name == "postgresql":
-            self._session.execute(
-                text("SELECT pg_notify(:canal, '')"), {"canal": CANAL_NOTIFICACAO}
-            )
+        pg_notify(self._session, CANAL_NOTIFICACAO)
