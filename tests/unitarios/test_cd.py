@@ -301,7 +301,7 @@ def test_image_publica_com_sbom_e_proveniencia_e_cache_do_gha() -> None:
     com = build["with"]
     assert com["push"] is True
     assert com["sbom"].startswith("generator=docker/buildkit-syft-scanner@")
-    assert com["provenance"] == "mode=max"
+    assert com["provenance"] == "mode=min"
     assert com["tags"] == "${{ steps.meta.outputs.imagem }}"
     assert "GIT_SHA=${{ github.sha }}" in com["build-args"]
     assert "GIT_DATE=" in com["build-args"]
@@ -323,8 +323,22 @@ def test_buildkit_e_gerador_do_sbom_entram_por_digest() -> None:
     buildx = _passo_que_usa("image", "docker/setup-buildx-action")
     sbom = _passo_com_id("image", "build")["with"]["sbom"]
 
-    assert re.fullmatch(f"image=moby/buildkit@{DIGEST}", buildx["with"]["driver-opts"])
+    assert re.fullmatch(
+        f"image=moby/buildkit@{DIGEST}\nprovenance-add-gha=false\n",
+        buildx["with"]["driver-opts"],
+    )
     assert re.fullmatch(f"generator=docker/buildkit-syft-scanner@{DIGEST}", sbom)
+
+
+def test_proveniencia_minima_e_sem_o_contexto_do_github() -> None:
+    # O mode=min sozinho nao basta: o buildx grava o payload do evento do push
+    # (nome e e-mail dos autores) na proveniencia em qualquer mode, e ela fica
+    # no registro publico. So o provenance-add-gha=false o tira.
+    buildx = _passo_que_usa("image", "docker/setup-buildx-action")
+    build = _passo_com_id("image", "build")
+
+    assert build["with"]["provenance"] == "mode=min"
+    assert "provenance-add-gha=false" in buildx["with"]["driver-opts"].splitlines()
 
 
 def test_imagem_do_actionlint_do_makefile_por_digest() -> None:
