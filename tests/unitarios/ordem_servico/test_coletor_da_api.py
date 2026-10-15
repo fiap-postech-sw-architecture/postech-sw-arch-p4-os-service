@@ -76,6 +76,13 @@ def _raspar(coletor: ColetorDaApi) -> dict[str, list[float]]:
     return {f.name: [a.value for a in f.samples] for f in coletor.collect()}
 
 
+def _esperar_a_thread_de_leitura() -> None:
+    """Espera a thread de leitura acabar: a vez volta no fim dela."""
+    for thread in threading.enumerate():
+        if thread.name == "coletor-da-api":
+            thread.join(5)
+
+
 @pytest.fixture
 def liberar() -> Iterator[threading.Event]:
     """Solta as leituras presas ao fim do teste: nenhuma thread fica pendurada."""
@@ -201,7 +208,7 @@ class TestPrazo:
     def test_com_a_leitura_anterior_presa_a_raspagem_nem_tenta(
         self, liberar: threading.Event
     ) -> None:
-        coletor = _coletor(orcamento_s=0.2)
+        coletor = _coletor(orcamento_s=0.6)
         chamadas: list[int] = []
 
         def presa(_leitura: _Leitura) -> None:
@@ -216,8 +223,9 @@ class TestPrazo:
             raspagem = _raspar(coletor)
         decorrido = time.monotonic() - inicio
 
-        # Uma thread presa por vez: a segunda raspagem sai na hora, sem gauges.
-        assert decorrido < 0.15
+        # Uma thread presa por vez: a segunda raspagem sai na hora, sem gauges (nem
+        # a metade do prazo de espera).
+        assert decorrido < 0.3
         assert raspagem == {"pytstop_saga_coletor_disponivel": [0]}
         assert chamadas == [1]
         assert [log["motivo"] for log in logs] == ["raspagem_anterior_presa"]
@@ -238,14 +246,32 @@ class TestPrazo:
         _raspar(coletor)
         livre.set()
         liberar.set()
-        # A thread presa termina e devolve a vez.
-        for _ in range(100):
-            if coletor._ocupado.acquire(blocking=False):
-                coletor._ocupado.release()
-                break
-            time.sleep(0.02)
+        _esperar_a_thread_de_leitura()
 
         assert _raspar(coletor)["pytstop_outbox_mais_antiga_segundos"] == [5.0]
+
+    def test_o_prazo_padrao_da_raspagem_cabe_na_metade_do_scrape_timeout(self) -> None:
+        # O Prometheus do platform desiste em 10 s. Os outros testes de prazo
+        # injetam um orcamento proprio, entao so este fixa o valor padrao (o que o
+        # coletor usa em producao); o efeito esta no teste de integracao do banco
+        # mudo com o orcamento padrao.
+        assert 0 < coletor_da_api.ORCAMENTO_S <= 5.0
+
+    def test_thread_de_leitura_e_daemon(self, liberar: threading.Event) -> None:
+        # Uma leitura presa num socket mudo nao pode segurar a saida do processo: com
+        # a thread nao-daemon o interpretador espera por ela no encerramento (medido:
+        # 8,7 s contra 1,1 s), e o pod passaria o grace period.
+        daemon: list[bool] = []
+        coletor = _coletor(orcamento_s=0.2)
+
+        def presa(_leitura: _Leitura) -> None:
+            daemon.append(threading.current_thread().daemon)
+            liberar.wait(30)
+
+        _trocar_a_leitura(coletor, presa)
+        _raspar(coletor)
+
+        assert daemon == [True]
 
     def test_raspagem_nao_espera_alem_do_necessario(self) -> None:
         coletor = _coletor(orcamento_s=30)

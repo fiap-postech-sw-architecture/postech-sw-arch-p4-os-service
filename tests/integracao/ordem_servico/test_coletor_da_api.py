@@ -421,6 +421,26 @@ class TestBancoComProblema:
         proxy.fechar()
         via_proxy.dispose()
 
+    def test_banco_que_emudece_com_a_conexao_aberta_responde_no_orcamento_padrao(
+        self, engine: Engine, proxy: ProxyTcp
+    ) -> None:
+        # Os outros testes de prazo injetam um orcamento curto. Este deixa o PADRAO do
+        # coletor, o que roda em producao: o /metrics responde bem antes dos 10 s do
+        # scrape_timeout do Prometheus, mesmo com o banco mudo depois do aquecimento.
+        via_proxy = _metricas_via(proxy, engine)
+        coletor = ColetorDaApi(via_proxy.connect)
+        assert "pytstop_saga_ativas" in _raspar(coletor)  # aquece a conexao do pool
+        proxy.calar()
+
+        inicio = time.monotonic()
+        mudo = _raspar(coletor)
+        decorrido = time.monotonic() - inicio
+
+        assert mudo == _SO_A_DISPONIBILIDADE
+        assert 4.5 <= decorrido < 7
+        proxy.fechar()
+        via_proxy.dispose()
+
     def test_banco_lento_em_todas_as_consultas_responde_antes_do_prazo(
         self, engine: Engine, metricas: Engine
     ) -> None:
