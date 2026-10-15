@@ -251,7 +251,7 @@ def test_ref_que_nao_e_a_main_nao_publica_imagem(tmp_path: Path, ref: str) -> No
 
 def test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor() -> None:
     # Ligar o deploy remoto acrescenta o passo de acesso ao cluster (README,
-    # "Deploy remoto") e relaxa estas asserções de proposito.
+    # "Deploy remoto") e relaxa estas assercoes de proposito.
     job = _jobs()["deploy-remote"]
     workflow = yaml.safe_dump(_carrega()).lower()
 
