@@ -16,7 +16,7 @@ import structlog
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
-from src.ordem_servico.aplicacao.dtos import MetricasDasOrdens
+from src.ordem_servico.aplicacao.dtos import MetricasDasOrdensDTO
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura import coletor_da_api
 from src.ordem_servico.infraestrutura.coletor_da_api import (
@@ -46,7 +46,7 @@ _NOMES = {
     "pytstop_os_tempo_medio_status_segundos",
 }
 _SAGA = LeituraDaSaga(por_etapa={"em_execucao": (2, 30.0)}, atraso_do_prazo=0.0)
-_ORDENS = MetricasDasOrdens(
+_ORDENS = MetricasDasOrdensDTO(
     total=1,
     por_status={"recebida": 1},
     tempo_medio_por_status_segundos={"recebida": 12.5},

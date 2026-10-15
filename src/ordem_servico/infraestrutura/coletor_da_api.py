@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from prometheus_client.registry import Collector
     from sqlalchemy import Connection
 
-    from src.ordem_servico.aplicacao.dtos import MetricasDasOrdens
+    from src.ordem_servico.aplicacao.dtos import MetricasDasOrdensDTO
 
 _log = structlog.get_logger(__name__)
 
@@ -100,7 +100,7 @@ def _tempo_medio_por_status() -> GaugeMetricFamily:
     )
 
 
-def _familias_das_ordens(leitura: MetricasDasOrdens) -> Iterator[GaugeMetricFamily]:
+def _familias_das_ordens(leitura: MetricasDasOrdensDTO) -> Iterator[GaugeMetricFamily]:
     por_status, tempo_medio = _os_por_status(), _tempo_medio_por_status()
     for status in StatusOrdem:
         por_status.add_metric([status.value], leitura.por_status.get(status.value, 0))
@@ -118,7 +118,7 @@ class _Leitura:
         self.pronta = threading.Event()
         self.saga: LeituraDaSaga | None = None
         self.outbox: float | None = None
-        self.ordens: MetricasDasOrdens | None = None
+        self.ordens: MetricasDasOrdensDTO | None = None
 
 
 class ColetorDaApi:
@@ -142,7 +142,7 @@ class ColetorDaApi:
         self._validade_das_ordens_s = validade_das_ordens_s
         # Uma thread de leitura por vez: so ela mexe no cache.
         self._ocupado = threading.Lock()
-        self._ordens_em_cache: tuple[float, MetricasDasOrdens] | None = None
+        self._ordens_em_cache: tuple[float, MetricasDasOrdensDTO] | None = None
 
     def describe(self) -> Iterator[GaugeMetricFamily]:
         """Os nomes, sem consultar o banco (o registro roda antes do boot terminar)."""
@@ -209,7 +209,7 @@ class ColetorDaApi:
             )
             leitura.ordens = self._ordens(conexao)
 
-    def _ordens(self, conexao: Connection) -> MetricasDasOrdens | None:
+    def _ordens(self, conexao: Connection) -> MetricasDasOrdensDTO | None:
         agora = self._relogio()
         if (
             self._ordens_em_cache is not None

@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.dtos import (
         AcompanhamentoDTO,
         ContatoDoCliente,
-        MetricasDasOrdens,
+        MetricasDasOrdensDTO,
         RetratoDoVeiculo,
     )
     from src.ordem_servico.aplicacao.notificacoes import Notificacao
@@ -81,7 +81,7 @@ class ConsultaAcompanhamento(Protocol):
 class ConsultaDeMetricas(Protocol):
     """Query service das metricas das OS: contagem e permanencia por status."""
 
-    def ler(self, agora: datetime) -> MetricasDasOrdens:
+    def ler(self, agora: datetime) -> MetricasDasOrdensDTO:
         """Total, OS por status e permanencia media nos 30 dias ate ``agora``."""
         pass
 

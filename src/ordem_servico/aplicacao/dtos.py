@@ -135,7 +135,7 @@ class AcompanhamentoDTO:
 
 
 @dataclass(frozen=True, slots=True)
-class MetricasDasOrdens:
+class MetricasDasOrdensDTO:
     """Total, OS por status e permanencia media por status (RF-027 da fase 3).
 
     Os mesmos numeros do ``GET /api/v1/ordens-de-servico/metricas`` e dos gauges

@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from src.compartilhado.dominio.documento import Documento
     from src.compartilhado.dominio.placa import Placa
-    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, MetricasDasOrdens
+    from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, MetricasDasOrdensDTO
     from src.ordem_servico.aplicacao.notificacoes import Notificacao
     from src.ordem_servico.aplicacao.saga.saga import Saga
     from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
@@ -142,11 +142,11 @@ class ConsultaAcompanhamentoEspia:
 class ConsultaDeMetricasEspia:
     """Registra o instante de cada leitura e devolve o resultado combinado."""
 
-    def __init__(self, resultado: MetricasDasOrdens) -> None:
+    def __init__(self, resultado: MetricasDasOrdensDTO) -> None:
         self.resultado = resultado
         self.chamadas: list[datetime] = []
 
-    def ler(self, agora: datetime) -> MetricasDasOrdens:
+    def ler(self, agora: datetime) -> MetricasDasOrdensDTO:
         self.chamadas.append(agora)
         return self.resultado
 

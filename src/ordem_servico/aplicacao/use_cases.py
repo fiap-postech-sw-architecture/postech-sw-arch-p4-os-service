@@ -64,7 +64,7 @@ if TYPE_CHECKING:
 
     from src.compartilhado.aplicacao.unit_of_work import UnitOfWork
     from src.compartilhado.dominio.documento import Documento
-    from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, MetricasDasOrdens
+    from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO, MetricasDasOrdensDTO
     from src.ordem_servico.aplicacao.ports import (
         ClientePort,
         ConsultaAcompanhamento,
@@ -569,7 +569,7 @@ class ObterMetricas:
         self._consulta = consulta
         self._relogio = relogio
 
-    def executar(self) -> MetricasDasOrdens:
+    def executar(self) -> MetricasDasOrdensDTO:
         """Le a contagem por status e a permanencia media dos ultimos 30 dias."""
         return self._consulta.ler(self._relogio())
 

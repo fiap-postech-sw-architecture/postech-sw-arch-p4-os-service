@@ -21,7 +21,7 @@ from src.ordem_servico.aplicacao.dtos import (
     AbrirOrdemDTO,
     AcompanhamentoDTO,
     ComandoEmVooDTO,
-    MetricasDasOrdens,
+    MetricasDasOrdensDTO,
     SagaDTO,
 )
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
@@ -640,7 +640,7 @@ class TestConsultarAcompanhamento:
         assert len(espia.chamadas) == 1
 
 
-_METRICAS = MetricasDasOrdens(
+_METRICAS = MetricasDasOrdensDTO(
     total=2,
     por_status={"recebida": 2},
     tempo_medio_por_status_segundos={"recebida": 150.375},

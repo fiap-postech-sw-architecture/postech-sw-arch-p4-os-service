@@ -15,7 +15,7 @@ from sqlalchemy import String, func, select, type_coerce
 
 from src.cliente_veiculo.infraestrutura.mapping import clientes_table, veiculos_table
 from src.compartilhado.infraestrutura.encryption import EncryptionService
-from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, MetricasDasOrdens
+from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, MetricasDasOrdensDTO
 from src.ordem_servico.aplicacao.saga.saga import Saga
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.status import StatusOrdem
@@ -98,7 +98,7 @@ class ConsultaDaOrdemSQLAlchemy:
 
 def ler_metricas_das_ordens(
     origem: Session | Connection, agora: datetime
-) -> MetricasDasOrdens:
+) -> MetricasDasOrdensDTO:
     """Total, OS por status e permanencia media por status (RF-027 da fase 3).
 
     A permanencia no status e o tempo da linha do historico em que a OS entrou
@@ -142,7 +142,7 @@ def ler_metricas_das_ordens(
         .all()
     )
     por_status = {s.value: int(contagem.get(s.value, 0)) for s in StatusOrdem}
-    return MetricasDasOrdens(
+    return MetricasDasOrdensDTO(
         total=sum(por_status.values()),
         por_status=por_status,
         tempo_medio_por_status_segundos={
@@ -157,5 +157,5 @@ class ConsultaDeMetricasSQLAlchemy:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def ler(self, agora: datetime) -> MetricasDasOrdens:
+    def ler(self, agora: datetime) -> MetricasDasOrdensDTO:
         return ler_metricas_das_ordens(self._session, agora)
