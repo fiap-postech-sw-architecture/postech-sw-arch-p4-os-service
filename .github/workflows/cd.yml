@@ -77,7 +77,7 @@ jobs:
         run: |
           [ "$GITHUB_REF" = refs/heads/main ] \
             || { echo "::error::images are published from main only"; exit 1; }
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: meta
@@ -149,12 +149,12 @@ jobs:
             echo "| Digest | \`$DIGEST\` |"
             echo "| SBOM (SPDX) | $pacotes packages, artifact \`sbom-${SERVICO}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: imagem
           path: imagem.tar
           retention-days: 1
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-${{ env.SERVICO }}
           path: sbom-${{ env.SERVICO }}.spdx.json

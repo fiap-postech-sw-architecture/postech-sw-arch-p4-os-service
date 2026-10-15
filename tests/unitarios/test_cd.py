@@ -604,7 +604,10 @@ def test_nenhum_arquivo_do_workflow_interpola_input_em_run() -> None:
                 assert "${{ inputs." not in run, arquivo.name
 
 
-# --- actions de terceiro por SHA ------------------------------------------
+# --- actions por SHA -------------------------------------------------------
+# O teste abaixo confere a forma (SHA de 40 hexadecimais e a tag em comentario).
+# Que o SHA seja mesmo o commit da tag so se sabe perguntando ao GitHub, entao
+# essa conferencia e o teste `rede` mais adiante.
 
 _USES = re.compile(r"^\s*(?:-\s+)?uses:\s*(?P<ref>\S+)(?:\s+#\s*(?P<tag>\S.*))?$")
 
@@ -627,12 +630,69 @@ def test_action_de_terceiro_por_sha_de_commit_com_a_tag_em_comentario(
         if ref.startswith("./"):
             continue
         dono, _, versao = ref.partition("@")
-        if dono.startswith("actions/"):
-            assert re.fullmatch(r"v\d+(\.\d+)*", versao), ref
-        else:
-            assert SHA_PADRAO.match(versao), f"{ref}: action de terceiro sem SHA"
+        if SHA_PADRAO.match(versao):
             assert uso["tag"], f"{ref}: sem a tag em comentario"
             assert re.match(r"v\d+(\.\d+)*", uso["tag"]), ref
+        else:
+            # Sem SHA, so as oficiais, pela tag de versao.
+            assert dono.startswith("actions/"), f"{ref}: action de terceiro sem SHA"
+            assert re.fullmatch(r"v\d+(\.\d+)*", versao), ref
+
+
+def test_job_que_escreve_pacote_so_usa_actions_por_sha() -> None:
+    # O image e o unico job com packages: write, entao ate as oficiais (que nos
+    # outros jobs entram pela tag de versao) entram aqui pelo SHA do commit.
+    usos = [passo["uses"] for passo in _passos("image") if "uses" in passo]
+
+    assert usos
+    for uso in usos:
+        assert SHA_PADRAO.match(uso.partition("@")[2]), uso
+
+
+def _commit_da_tag(repositorio: str, tag: str) -> str | None:
+    git = shutil.which("git") or "git"
+    saida = subprocess.run(  # noqa: S603 - git, com argumentos fixos
+        [
+            git,
+            "ls-remote",
+            f"https://github.com/{repositorio}.git",
+            f"refs/tags/{tag}",
+            f"refs/tags/{tag}^{{}}",
+        ],
+        env=os.environ | {"GIT_TERMINAL_PROMPT": "0"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    refs = {
+        referencia: sha
+        for sha, referencia in (
+            linha.split("\t") for linha in saida.stdout.splitlines()
+        )
+    }
+    # A tag anotada aponta para o objeto da tag; o commit esta no `^{}`.
+    return refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+
+
+@pytest.mark.rede
+def test_sha_de_cada_action_e_o_commit_da_tag_do_comentario() -> None:
+    fixadas = {
+        (acao, versao, uso["tag"].split()[0])
+        for arquivo in sorted(WORKFLOWS.glob("*.yml"))
+        for linha in arquivo.read_text().splitlines()
+        if (uso := _USES.match(linha))
+        for acao, _, versao in [uso["ref"].partition("@")]
+        if SHA_PADRAO.match(versao)
+    }
+
+    assert len(fixadas) > 3
+    obtidos = {
+        (acao, tag): (versao, _commit_da_tag("/".join(acao.split("/")[:2]), tag))
+        for acao, versao, tag in sorted(fixadas)
+    }
+    divergentes = {chave: par for chave, par in obtidos.items() if par[0] != par[1]}
+    assert divergentes == {}
 
 
 # --- o passo dos commits, executado ---------------------------------------
