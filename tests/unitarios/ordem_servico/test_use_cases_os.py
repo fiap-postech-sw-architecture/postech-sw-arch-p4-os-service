@@ -21,6 +21,7 @@ from src.ordem_servico.aplicacao.dtos import (
     AbrirOrdemDTO,
     AcompanhamentoDTO,
     ComandoEmVooDTO,
+    MetricasDasOrdens,
     SagaDTO,
 )
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import (
@@ -35,6 +36,7 @@ from src.ordem_servico.aplicacao.use_cases import (
     CancelarOrdem,
     ConsultarAcompanhamento,
     ListarOrdens,
+    ObterMetricas,
     ObterOrdem,
     ObterSaga,
     RegistrarEntrega,
@@ -58,6 +60,7 @@ from tests.unitarios.fakes import (
     ClientePortFake,
     ConsultaAcompanhamentoEspia,
     ConsultaDaOrdemEmMemoria,
+    ConsultaDeMetricasEspia,
     FakeUnitOfWork,
     NotificacoesEspia,
     RepoDoBanco,
@@ -635,3 +638,47 @@ class TestConsultarAcompanhamento:
 
         assert ConsultarAcompanhamento(espia).executar("ABC1D23", _CPF) is None
         assert len(espia.chamadas) == 1
+
+
+_METRICAS = MetricasDasOrdens(
+    total=2,
+    por_status={"recebida": 2},
+    tempo_medio_por_status_segundos={"recebida": 150.375},
+)
+
+
+class TestObterMetricas:
+    def test_le_a_consulta_no_instante_do_relogio_injetado(self) -> None:
+        espia = ConsultaDeMetricasEspia(_METRICAS)
+        agora = datetime(2026, 10, 14, 12, tzinfo=UTC)
+
+        dto = ObterMetricas(espia, relogio=lambda: agora).executar()
+
+        assert dto is _METRICAS
+        assert espia.chamadas == [agora]
+
+    def test_cada_execucao_le_o_relogio_de_novo(self) -> None:
+        espia = ConsultaDeMetricasEspia(_METRICAS)
+        instantes = iter(
+            [
+                datetime(2026, 10, 14, 12, tzinfo=UTC),
+                datetime(2026, 10, 14, 12, 0, 15, tzinfo=UTC),
+            ]
+        )
+        caso_de_uso = ObterMetricas(espia, relogio=lambda: next(instantes))
+
+        caso_de_uso.executar()
+        caso_de_uso.executar()
+
+        assert [c.second for c in espia.chamadas] == [0, 15]
+
+    def test_sem_relogio_injetado_usa_o_agora_em_utc(self) -> None:
+        espia = ConsultaDeMetricasEspia(_METRICAS)
+        antes = datetime.now(UTC)
+
+        ObterMetricas(espia).executar()
+
+        (lido,) = espia.chamadas
+        # Comparar com o instante de antes e com fuso: um datetime ingenuo levantaria.
+        assert lido >= antes
+        assert lido.utcoffset() == timedelta(0)
