@@ -309,6 +309,24 @@ def _registro(engine: Engine, **kwargs: object) -> CollectorRegistry:
     return registro
 
 
+def test_gauge_do_tempo_medio_guarda_a_fracao(
+    engine: Engine, session_factory: sessionmaker[Session]
+) -> None:
+    # Duas permanencias em "recebida", 100,25 s e 200,5 s: a media e 150,375 s, e o
+    # gauge nao pode truncar para 150 (a rota e a mesma leitura, com a fracao).
+    criar_ordens_com_historicos(
+        session_factory,
+        [("recebida", AGORA - _s(500)), ("em_diagnostico", AGORA - _s(500 - 100.25))],
+        [("recebida", AGORA - _s(400)), ("em_diagnostico", AGORA - _s(400 - 200.5))],
+    )
+
+    registro = _registro(engine, agora=lambda: AGORA)
+
+    assert registro.get_sample_value(
+        "pytstop_os_tempo_medio_status_segundos", {"status": "recebida"}
+    ) == pytest.approx(150.375, abs=1e-3)
+
+
 def test_gauges_do_coletor_sao_os_numeros_da_rota(
     api_client: TestClient,
     admin: dict[str, str],

@@ -17,6 +17,7 @@ from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
 from src.ordem_servico.aplicacao.dtos import MetricasDasOrdens
+from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura import coletor_da_api
 from src.ordem_servico.infraestrutura.coletor_da_api import (
     ColetorDaApi,
@@ -122,6 +123,31 @@ class TestRaspagem:
         assert set(raspagem) == _NOMES
         assert raspagem["pytstop_saga_coletor_disponivel"] == [1]
         assert raspagem["pytstop_outbox_mais_antiga_segundos"] == [42.0]
+
+    def test_os_gauges_das_ordens_levam_os_valores_da_leitura_sem_arredondar(
+        self,
+    ) -> None:
+        coletor = _coletor()
+
+        def ler(leitura: _Leitura) -> None:
+            leitura.saga, leitura.ordens = _SAGA, _ORDENS
+
+        _trocar_a_leitura(coletor, ler)
+
+        familias = {f.name: f for f in coletor.collect()}
+
+        por_status = {
+            a.labels["status"]: a.value
+            for a in familias["pytstop_os_por_status"].samples
+        }
+        medias = {
+            a.labels["status"]: a.value
+            for a in familias["pytstop_os_tempo_medio_status_segundos"].samples
+        }
+        # Os nove status saem, com zero onde nao ha OS; a media so onde houve
+        # permanencia concluida, e com a fracao (12,5 s, nao 12).
+        assert por_status == {s.value: int(s.value == "recebida") for s in StatusOrdem}
+        assert medias == {"recebida": 12.5}
 
     def test_so_o_que_foi_lido_sai_e_o_resto_fica_ausente(self) -> None:
         coletor = _coletor()
