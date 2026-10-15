@@ -19,6 +19,7 @@ from src.ordem_servico.aplicacao.saga.prazos import (
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
 from src.ordem_servico.infraestrutura import metricas_da_saga
+from tests.subprocesso import executar_python
 
 
 def test_fato_sem_metrica_levanta_antes_do_commit() -> None:
@@ -113,3 +114,16 @@ def test_rollback_descarta_o_reenvio_anotado() -> None:
     sessao.rollback()
 
     assert _contador("pytstop_saga_reenvios_total", "ReservarPecas") == antes
+
+
+def test_a_os_criada_conta_depois_do_commit_sem_carregar_as_metricas_da_saga() -> None:
+    # A regra "conta depois do commit" mora em `metricas_apos_commit`: a metrica da
+    # OS criada nao herda as series da saga (nem a proxima metrica de sessao).
+    carregados = executar_python(
+        "import sys\n"
+        "import src.ordem_servico.infraestrutura.metrics\n"
+        "print(sorted(m for m in sys.modules if 'infraestrutura.metricas' in m))"
+    )
+
+    assert "metricas_apos_commit" in carregados
+    assert "metricas_da_saga" not in carregados

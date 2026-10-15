@@ -7,7 +7,7 @@ uso; dominio e aplicacao ficam livres de observabilidade.
 - ``pytstop_os_criadas_total``: uma por ``OrdemDeServico`` em ``session.new``.
 
 O contador so conta depois do commit da transacao raiz, a regra das metricas da
-saga (``metricas_da_saga.registrar``): rollback, conflito de versao ou commit
+saga (``metricas_apos_commit.registrar``): rollback, conflito de versao ou commit
 que falha descartam a abertura, e o painel "Volume diario de OS" nao conta OS que
 nao foi gravada. As transicoes de status nao sao medidas aqui: a permanencia em
 cada status vem do historico, no coletor da API (``coletor_da_api.py``).
@@ -22,7 +22,7 @@ from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
-from src.ordem_servico.infraestrutura import metricas_da_saga
+from src.ordem_servico.infraestrutura.metricas_apos_commit import registrar
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import UOWTransaction
@@ -46,4 +46,4 @@ def _observar_flush(
 ) -> None:
     for novo in session.new:
         if isinstance(novo, OrdemDeServico):
-            metricas_da_saga.registrar(session, [OS_CRIADAS.inc])
+            registrar(session, [OS_CRIADAS.inc])

@@ -2,13 +2,11 @@
 
 Contadores e histograma: a ``Saga`` registra os fatos (``SagaIniciadaEvent``,
 ``EtapaDaSagaAlteradaEvent``, ``CompensacaoIniciadaEvent``), o repositorio os
-entrega a sessao no ``salvar`` e eles so viram metrica no ``after_commit`` da
-transacao raiz. Rollback (o da raiz e o de um SAVEPOINT, que descarta os fatos
-anotados dentro dele), conflito de versao ou commit que falha os descartam: a
-mensagem que volta pela retry nao conta duas vezes. Quem emite e o processo que
-tira a saga da etapa (API na abertura e no cancelamento, consumidor nos eventos).
-A mesma regra do commit vale para outra metrica da sessao (``registrar``): a OS
-criada (``ordem_servico/infraestrutura/metrics.py``).
+entrega a sessao no ``salvar`` e eles so viram metrica no commit da transacao raiz
+(``metricas_apos_commit``, a mesma regra da OS criada): rollback, conflito de versao
+ou commit que falha os descartam, e a mensagem que volta pela retry nao conta duas
+vezes. Quem emite e o processo que tira a saga da etapa (API na abertura e no
+cancelamento, consumidor nos eventos).
 
 Contadores do processo ``prazos`` (``pytstop_saga_reenvios_total`` e
 ``pytstop_saga_prazos_esgotados_total``, por tipo de comando): vem dos fatos
@@ -33,8 +31,7 @@ from typing import TYPE_CHECKING, Final
 
 from prometheus_client import Counter, Histogram
 from prometheus_client.core import GaugeMetricFamily
-from sqlalchemy import String, event, func, select, text, type_coerce
-from sqlalchemy.orm import Session
+from sqlalchemy import String, func, select, text, type_coerce
 
 from src.ordem_servico.aplicacao.saga.modelo import (
     CompensacaoIniciadaEvent,
@@ -53,13 +50,14 @@ from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
 )
 from src.ordem_servico.infraestrutura.envio_em_voo import ULTIMO_ENVIO
 from src.ordem_servico.infraestrutura.mapping import sagas_table
+from src.ordem_servico.infraestrutura.metricas_apos_commit import registrar
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
     from datetime import timedelta
 
     from sqlalchemy import Connection
-    from sqlalchemy.orm import SessionTransaction
+    from sqlalchemy.orm import Session
 
     from src.compartilhado.dominio.events import DomainEvent
 
@@ -107,12 +105,6 @@ for _motivo in MotivoCompensacao:
 for _etapa in ETAPAS_NAO_FINAIS:
     DURACAO_DA_ETAPA.labels(etapa=_etapa.value)
 
-# Fatos da transacao em curso, na sessao: so valem depois do commit. Cada um
-# leva o SAVEPOINT em que foi anotado (``None`` fora de qualquer um), para o
-# rollback do SAVEPOINT o descartar.
-_FATOS: Final = "pytstop_fatos_da_saga"
-_sessoes_instrumentadas = False
-
 
 def anotar(sessao: Session, fatos: Iterable[DomainEvent]) -> None:
     """Guarda a metrica de cada fato da saga ate o commit da transacao da ``sessao``.
@@ -122,17 +114,6 @@ def anotar(sessao: Session, fatos: Iterable[DomainEvent]) -> None:
             dele), antes do commit: nada se perde em silencio.
     """
     registrar(sessao, [_observacao(fato) for fato in fatos])
-
-
-def registrar(sessao: Session, observacoes: Iterable[Callable[[], None]]) -> None:
-    """Guarda cada observacao ate o commit da transacao da ``sessao``.
-
-    Rodam no commit da transacao raiz; o rollback da raiz ou do SAVEPOINT em que
-    foram guardadas as descarta.
-    """
-    _instrumentar_sessoes()
-    savepoint = sessao.get_nested_transaction()
-    sessao.info.setdefault(_FATOS, []).extend((savepoint, o) for o in observacoes)
 
 
 def _observacao(fato: DomainEvent) -> Callable[[], None]:
@@ -158,59 +139,6 @@ def _etapa_alterada(fato: EtapaDaSagaAlteradaEvent) -> None:
     )
     if fato.etapa_nova in ETAPAS_FINAIS:
         SAGAS_FINALIZADAS.labels(resultado=fato.etapa_nova.value).inc()
-
-
-def _instrumentar_sessoes() -> None:
-    global _sessoes_instrumentadas  # noqa: PLW0603  # init-once flag
-    if _sessoes_instrumentadas:
-        return
-    _sessoes_instrumentadas = True
-    event.listen(Session, "after_commit", _ao_comitar)
-    event.listen(Session, "after_soft_rollback", _ao_desfazer)
-    event.listen(Session, "after_transaction_end", _ao_encerrar)
-
-
-def _ao_comitar(sessao: Session) -> None:
-    """Commit da transacao raiz: as metricas dos fatos valem.
-
-    Liberar um SAVEPOINT tambem dispara o ``after_commit``; a transacao raiz
-    ainda pode ser desfeita, entao ali nada conta.
-    """
-    if sessao.in_nested_transaction():
-        return
-    for _, observar in sessao.info.pop(_FATOS, ()):
-        observar()
-
-
-def _ao_desfazer(sessao: Session, desfeita: SessionTransaction) -> None:
-    """Rollback de um SAVEPOINT: descarta os fatos anotados dentro dele.
-
-    Vale tambem para o SAVEPOINT interno que um SAVEPOINT desfeito ja tinha
-    liberado. Os fatos anotados fora dele seguem para o commit da raiz.
-    """
-    fatos = sessao.info.get(_FATOS)
-    if fatos:
-        sessao.info[_FATOS] = [
-            (savepoint, observar)
-            for savepoint, observar in fatos
-            if not _dentro_de(savepoint, desfeita)
-        ]
-
-
-def _dentro_de(
-    savepoint: SessionTransaction | None, desfeita: SessionTransaction
-) -> bool:
-    while savepoint is not None:
-        if savepoint is desfeita:
-            return True
-        savepoint = savepoint.parent
-    return False
-
-
-def _ao_encerrar(sessao: Session, transacao: SessionTransaction) -> None:
-    """Transacao raiz encerrada sem commit (rollback ou close): descarta os fatos."""
-    if transacao.parent is None:
-        sessao.info.pop(_FATOS, None)
 
 
 # O maior atraso do prazo tecnico (RFC-004 secao 9): a saga com prazo cujo

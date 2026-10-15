@@ -2,7 +2,7 @@
 
 O painel "Volume diario de OS" (o pedido da banca da fase 3) soma este contador:
 uma OS que nao foi gravada nao pode contar. A regra e a das metricas da saga
-(``metricas_da_saga.registrar``): so o commit da transacao raiz conta.
+(``metricas_apos_commit.registrar``): so o commit da transacao raiz conta.
 """
 
 from __future__ import annotations
