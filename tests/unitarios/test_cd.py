@@ -392,7 +392,7 @@ def test_artefatos_e_retencoes() -> None:
         "name": "imagem"
     }
     e2e = _passo_que_usa("deploy-kind", "actions/upload-artifact", "e2e-kind")
-    assert e2e["with"]["path"] == "platform/reports/"
+    assert e2e["with"]["path"] == "platform/reports/e2e/"
     assert e2e["if"] == "always()"
 
 
@@ -537,6 +537,20 @@ def test_resumo_e_upload_sempre_e_diagnostico_na_falha_ou_cancelamento() -> None
     assert upload["if"] == "always()"
     # O diagnostico e o ultimo passo: roda com o cluster ainda de pe.
     assert passos[-1] is diagnostico
+
+
+def test_relatorios_do_e2e_passam_pela_varredura_antes_do_upload() -> None:
+    passos = _passos("deploy-kind")
+    varredura = next(p for p in passos if "e2e.varredura" in p.get("run", ""))
+    upload = _passo_que_usa("deploy-kind", "actions/upload-artifact", "e2e-kind")
+
+    assert varredura["run"] == "uv run --group e2e python -m e2e.varredura reports/e2e"
+    assert varredura["working-directory"] == "platform"
+    # Com ou sem falha do E2E, desde que haja relatorio a varrer.
+    assert varredura["if"] == "always() && hashFiles('platform/reports/e2e/**') != ''"
+    assert passos.index(varredura) < passos.index(upload)
+    # Sobe so a pasta que a varredura olha.
+    assert upload["with"]["path"] == "platform/reports/e2e/"
 
 
 def test_passo_pos_falha_so_roda_com_o_script_do_platform_no_disco() -> None:

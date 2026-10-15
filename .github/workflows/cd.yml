@@ -332,12 +332,20 @@ jobs:
       - name: Minutos e memoria no summary
         if: always() && hashFiles('platform/scripts/medir-kind.sh') != ''
         run: platform/scripts/medir-kind.sh resumo
+      # O E2E mascara segredo no junit, no cucumber e no trace, mas o artefato
+      # fica 90 dias num repositorio publico: a varredura final do platform
+      # (a que o make mp-sandbox usa) apaga o arquivo que ainda tenha segredo,
+      # e o passo reprova. Sobe so a pasta que ela olha.
+      - name: Varredura de segredos nos relatorios do E2E
+        if: always() && hashFiles('platform/reports/e2e/**') != ''
+        working-directory: platform
+        run: uv run --group e2e python -m e2e.varredura reports/e2e
       - name: Publica os relatorios do E2E
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-kind
-          path: platform/reports/
+          path: platform/reports/e2e/
           retention-days: 90
       # Tambem no cancelamento, inclusive o do timeout-minutes.
       - name: Pods, eventos e logs (diagnostico)
