@@ -394,7 +394,9 @@ jobs:
           persist-credentials: false
       # O acesso ao cluster entra aqui, antes do deploy: gravar o kubeconfig do
       # segredo KUBECONFIG_REMOTO num arquivo e exportar KUBECONFIG, ou usar a
-      # action de login do provedor. Sem isso o script nao enxerga o contexto.
+      # action de login do provedor. Sem isso o script nao enxerga o contexto. O
+      # passo pronto e o environment restrito a main, que guarda o segredo, estao
+      # no README, secao "Deploy remoto (opcional)".
       - name: Acesso ao cluster remoto (a configurar)
         run: echo "::notice::remote cluster access is not configured in this step, add the kubeconfig (secret KUBECONFIG_REMOTO) or the provider login before the deploy"
       - name: Deploy no cluster remoto (mesmo digest do kind)

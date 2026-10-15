@@ -975,7 +975,7 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 ## CD
 
-O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) roda a cada push na `main`, depois do merge de cada PR, e sob demanda (`workflow_dispatch`). **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: ele sobe a plataforma e os três serviços, valida o deploy com o E2E de 13 cenários e some com o job; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). O CI e a varredura de segurança não rodam duas vezes: o `cd.yml` chama o `ci.yml` e o `security.yml` como workflows reutilizáveis, e o PR continua rodando os dois pelo próprio gatilho. Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório): o GitHub guarda um único run pendente por grupo, então o push seguinte substitui o pendente e aquele commit fica sem CD. O run que sobra testa o estado mais novo da `main`.
+O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) roda a cada push na `main`, depois do merge de cada PR, e sob demanda (`workflow_dispatch`). **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: ele sobe a plataforma e os três serviços, valida o deploy com o E2E de 13 cenários e some com o job; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). Ele substitui o `deploy-k3s` do ADR-042, e a emenda do ADR (com a da RFC-004) sai em PR de documentos do platform, a abrir. O CI e a varredura de segurança não rodam duas vezes: o `cd.yml` chama o `ci.yml` e o `security.yml` como workflows reutilizáveis, e o PR continua rodando os dois pelo próprio gatilho. Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório): o GitHub guarda um único run pendente por grupo, então o push seguinte substitui o pendente e aquele commit fica sem CD. O run que sobra testa o estado mais novo da `main`.
 
 ### Jobs
 
@@ -985,7 +985,7 @@ O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.
 | `security-scan` | Chama o `security.yml`: `pip-audit`, `gitleaks` e `trivy` | | | `contents: read` |
 | `image` | Constrói a imagem uma vez e a publica em `ghcr.io/<organização>/pytstop-os-service:<sha do commit>`, com SBOM em SPDX e proveniência (`provenance: mode=max`). Confere o digest com um `docker pull`, salva o tar `linux/amd64` e o SBOM | `ci`, `security-scan` | 30 min | `contents: read`, `packages: write` |
 | `deploy-kind` | Sobe a plataforma e os três serviços num kind do runner, roda o smoke de cada namespace e o E2E da saga (abaixo) | `image` | 45 min | `contents: read`, `actions: read` |
-| `deploy-remote` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
+| `deploy-remote` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda na `main` e com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
 | `remote-skipped` | O oposto: com a variável desligada, só registra o aviso de que o deploy remoto não rodou | `deploy-kind` | 5 min | nenhuma |
 
 O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`. Nenhum job pede token de identidade, e o arquivo não guarda credencial de provedor nenhum.
@@ -1038,13 +1038,29 @@ O CD de cada serviço usa o outro no último CD verde. Se o OS e o Billing mudam
 
 ### Deploy remoto (opcional)
 
-O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente, que é o estado de hoje), o `deploy-remote` fica de fora e o `remote-skipped` registra um `::notice::` no run. Para ligar:
+O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Ele substitui o `deploy-k3s` do ADR-042, e o `DEPLOY_REMOTO_HABILITADO` ocupa o lugar do `K3S_HABILITADO`: a emenda do ADR-042, da RFC-004 e da análise de lacunas sai em PR de documentos do platform, a abrir. Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente), o `deploy-remote` fica de fora e o `remote-skipped` registra um `::notice::` no run.
 
-1. Criar as variáveis do repositório (ou da organização) `DEPLOY_REMOTO_HABILITADO` com o valor `true`, `DEPLOY_REMOTO_CONTEXTO` com o nome do contexto do kubeconfig e, se não for o overlay `k3s` dos manifestos, `DEPLOY_REMOTO_OVERLAY`.
-2. Guardar o kubeconfig do cluster no segredo `KUBECONFIG_REMOTO` e, no passo "Acesso ao cluster remoto" do `deploy-remote`, gravá-lo num arquivo e exportar o `KUBECONFIG` (ou usar a action de login do provedor). O passo vem só com um aviso porque a credencial depende do provedor, e o `cd.yml` não guarda nenhuma.
-3. Ter o script `platform/scripts/ci/deploy-remoto.sh` no platform. Ele chega num PR próprio do platform, com a interface que o job já chama: `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`, no contexto já ativo, com o overlay deste serviço, as imagens por digest do GHCR, a ordem de implantação e o smoke. Enquanto ele não existir no commit do platform usado no run, o job reprova dizendo isso, em vez de um erro de arquivo no meio do log.
+O `deploy-remote` só roda na `main`. Antes do checkout ele compara o commit do platform usado no kind com a `main` do platform (`compare main...<sha>`) e só aceita `identical` ou `behind`: o `deploy-remoto.sh` desse commit roda com a credencial do cluster, e um dispatch pode apontar para qualquer commit do platform. O job no repositório não tem segredo nem `environment`. Para ligar:
 
-O job pede só `contents: read` e `packages: read`, e o platform entra no commit usado no kind.
+1. Criar as variáveis do repositório (ou da organização): `DEPLOY_REMOTO_HABILITADO` com o valor `true`, `DEPLOY_REMOTO_CONTEXTO` com o nome do contexto do kubeconfig (sem ela o job reprova nomeando-a) e, se não for o overlay `k3s` dos manifestos, `DEPLOY_REMOTO_OVERLAY`.
+2. Criar um `environment` (por exemplo, `cluster-remoto`) com as branches de deploy restritas à `main` (Settings, Environments, Deployment branches and tags, Selected branches and tags) e guardar nele o kubeconfig do cluster, no segredo `KUBECONFIG_REMOTO`. Um segredo de repositório não serve: qualquer workflow de qualquer branch o lê. O do `environment` só chega ao job que o declara e só a partir da `main`.
+3. No job `deploy-remote`, declarar `environment: cluster-remoto` e trocar o passo "Acesso ao cluster remoto (a configurar)" por este, que grava o kubeconfig só para o dono, fora do workspace, e o exporta para o passo seguinte:
+
+   ```yaml
+   - name: Acesso ao cluster remoto
+     env:
+       KUBECONFIG_REMOTO: ${{ secrets.KUBECONFIG_REMOTO }}
+     run: |
+       umask 077
+       printf '%s' "$KUBECONFIG_REMOTO" > "$RUNNER_TEMP/kubeconfig"
+       echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+   ```
+
+   Com a identidade federada do provedor (OIDC) no lugar do kubeconfig, o passo é a action de login dele, e o job ganha `id-token: write`.
+4. Relaxar de propósito o teste `test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor` (`tests/unitarios/test_cd.py`), que hoje proíbe `secrets.`, `environment`, `id-token` e qualquer action que não seja o checkout no job. A proibição guarda o estado desligado: ligar o deploy remoto é a mudança que a desfaz, no mesmo PR.
+5. Ter o script `platform/scripts/ci/deploy-remoto.sh` no platform. Ele chega num PR próprio do platform, com a interface que o job já chama: `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`, no contexto já ativo, com o overlay deste serviço, as imagens por digest do GHCR, a ordem de implantação e o smoke. Enquanto ele não existir no commit do platform usado no run, o job reprova dizendo isso, em vez de um erro de arquivo no meio do log.
+
+O job pede só `contents: read` e `packages: read`. Se o pacote do GHCR deixar de ser público, o cluster precisa de um segredo de pull do `ghcr.io`.
 
 ### Conferir o workflow sem empurrar
 
