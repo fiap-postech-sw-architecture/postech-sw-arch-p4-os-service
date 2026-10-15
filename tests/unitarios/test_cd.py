@@ -639,6 +639,25 @@ def test_action_de_terceiro_por_sha_de_commit_com_a_tag_em_comentario(
             assert re.fullmatch(r"v\d+(\.\d+)*", versao), ref
 
 
+def test_dependabot_sobe_as_actions_toda_semana_num_grupo_so() -> None:
+    # As actions entram por SHA: sem isto nada as atualiza, e o SHA e a tag do
+    # comentario sobem juntos no PR dele (o teste `rede` confere o par).
+    config = yaml.safe_load((RAIZ / ".github" / "dependabot.yml").read_text())
+
+    assert config == {
+        "version": 2,
+        "updates": [
+            {
+                "package-ecosystem": "github-actions",
+                "directory": "/",
+                "schedule": {"interval": "weekly"},
+                "commit-message": {"prefix": "ci"},
+                "groups": {"github-actions": {"patterns": ["*"]}},
+            }
+        ],
+    }
+
+
 def test_job_que_escreve_pacote_so_usa_actions_por_sha() -> None:
     # O image e o unico job com packages: write, entao ate as oficiais (que nos
     # outros jobs entram pela tag de versao) entram aqui pelo SHA do commit.
