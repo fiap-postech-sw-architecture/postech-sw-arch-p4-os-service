@@ -302,8 +302,11 @@ jobs:
         run: |
           platform/scripts/medir-kind.sh etapa e2e
           make -C platform e2e
+      # Os dois passos que rodam script do platform depois de uma falha so
+      # rodam se o checkout dele aconteceu: com um sha_* invalido o passo shas
+      # reprova antes de qualquer checkout e eles dariam mais dois vermelhos.
       - name: Minutos e memoria no summary
-        if: always()
+        if: always() && hashFiles('platform/scripts/medir-kind.sh') != ''
         run: platform/scripts/medir-kind.sh resumo
       - name: Publica os relatorios do E2E
         if: always()
@@ -314,7 +317,7 @@ jobs:
           retention-days: 90
       # Tambem no cancelamento, inclusive o do timeout-minutes.
       - name: Pods, eventos e logs (diagnostico)
-        if: failure() || cancelled()
+        if: (failure() || cancelled()) && hashFiles('platform/scripts/ci/diagnostico.sh') != ''
         run: platform/scripts/ci/diagnostico.sh
 
   # Opcional e desligado: o ambiente do deploy automatizado e o kind do runner.

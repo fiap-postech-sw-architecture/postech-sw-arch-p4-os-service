@@ -463,10 +463,33 @@ def test_resumo_e_upload_sempre_e_diagnostico_na_falha_ou_cancelamento() -> None
     )
     diagnostico = next(p for p in passos if "diagnostico.sh" in p.get("run", ""))
 
-    assert resumo["if"] == "always()"
-    assert diagnostico["if"] == "failure() || cancelled()"
+    assert (
+        resumo["if"] == "always() && hashFiles('platform/scripts/medir-kind.sh') != ''"
+    )
+    assert diagnostico["if"] == (
+        "(failure() || cancelled()) "
+        "&& hashFiles('platform/scripts/ci/diagnostico.sh') != ''"
+    )
+    upload = _passo_que_usa("deploy-kind", "actions/upload-artifact", "e2e-kind")
+    assert upload["if"] == "always()"
     # O diagnostico e o ultimo passo: roda com o cluster ainda de pe.
     assert passos[-1] is diagnostico
+
+
+def test_passo_pos_falha_so_roda_com_o_script_do_platform_no_disco() -> None:
+    # Sem o checkout do platform (o passo shas reprovou) nao ha script a rodar:
+    # o passo seria um "No such file" a mais, nao um diagnostico.
+    apos_falha = re.compile(r"always\(\)|failure\(\)|cancelled\(\)")
+    verificados = 0
+    for passo in _passos("deploy-kind"):
+        condicao = passo.get("if", "")
+        if not apos_falha.search(condicao):
+            continue
+        for script in re.findall(r"platform/scripts/\S+\.sh", passo.get("run", "")):
+            assert f"hashFiles('{script}') != ''" in condicao, passo["name"]
+            verificados += 1
+
+    assert verificados == 2
 
 
 def test_checkouts_do_platform_e_dos_vizinhos_nos_shas_e_sem_credencial() -> None:
