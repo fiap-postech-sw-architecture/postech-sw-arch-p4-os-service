@@ -370,6 +370,7 @@ jobs:
           IMAGEM: ${{ needs.image.outputs.imagem }}
           DIGEST: ${{ needs.image.outputs.digest }}
         run: |
+          [ -n "$CONTEXTO" ] || { echo "::error::DEPLOY_REMOTO_CONTEXTO is not set"; exit 1; }
           [ -x platform/scripts/ci/deploy-remoto.sh ] \
             || { echo "::error::platform/scripts/ci/deploy-remoto.sh does not exist in the platform commit used by this run: keep DEPLOY_REMOTO_HABILITADO off until it is merged"; exit 1; }
           platform/scripts/ci/deploy-remoto.sh --contexto "$CONTEXTO" --overlay "$OVERLAY" \

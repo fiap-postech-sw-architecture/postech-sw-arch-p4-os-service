@@ -950,3 +950,57 @@ def test_commit_que_o_github_nao_conhece_reprova(tmp_path: Path) -> None:
     assert resultado.returncode == 1
     assert "::error::could not compare the platform commit" in resultado.stdout
     assert "HTTP 404" in resultado.stderr
+
+
+def _roda_deploy_remote(
+    pasta: Path, contexto: str, *, com_script: bool = True
+) -> subprocess.CompletedProcess[str]:
+    """Roda o ultimo passo do deploy-remote com um script que grava os argumentos."""
+    if com_script:
+        script = pasta / "platform" / "scripts" / "ci" / "deploy-remoto.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" > args.txt\n')
+        script.chmod(0o755)
+    env = {
+        "CONTEXTO": contexto,
+        "OVERLAY": "k3s",
+        "IMAGEM": "ghcr.io/org/pytstop-os-service:abc",
+        "DIGEST": "sha256:def",
+        "SERVICO": _carrega()["env"]["SERVICO"],
+    }
+    return _executa(_passos("deploy-remote")[-1], pasta, env)
+
+
+def test_deploy_remote_chama_o_script_do_platform_com_o_digest(tmp_path: Path) -> None:
+    resultado = _roda_deploy_remote(tmp_path, "meu-cluster")
+
+    assert resultado.returncode == 0, resultado.stderr
+    assert (tmp_path / "args.txt").read_text().splitlines() == [
+        "--contexto",
+        "meu-cluster",
+        "--overlay",
+        "k3s",
+        "--servico",
+        _carrega()["env"]["SERVICO"],
+        "--imagem",
+        "ghcr.io/org/pytstop-os-service:abc@sha256:def",
+    ]
+
+
+def test_deploy_remote_sem_contexto_falha_cedo_nomeando_a_variavel(
+    tmp_path: Path,
+) -> None:
+    resultado = _roda_deploy_remote(tmp_path, "")
+
+    assert resultado.returncode == 1
+    assert "::error::DEPLOY_REMOTO_CONTEXTO is not set" in resultado.stdout
+    assert not (tmp_path / "args.txt").exists()
+
+
+def test_deploy_remote_sem_o_script_no_platform_reprova_nomeando_o_arquivo(
+    tmp_path: Path,
+) -> None:
+    resultado = _roda_deploy_remote(tmp_path, "meu-cluster", com_script=False)
+
+    assert resultado.returncode == 1
+    assert "deploy-remoto.sh does not exist in the platform commit" in resultado.stdout
