@@ -1,8 +1,9 @@
 """Routers HTTP do contexto Ordem de Servico (RFC-004 secao 6.1, parte OS).
 
 ``router`` (JWT + papel): abertura, fila por prioridade, consulta, historico,
-cancelamento e entrega. ``router_sagas`` (admin): estado da saga e retomada da
-compensacao parada, para a operacao. ``router_publico`` (sem token, rate limit
+cancelamento, entrega e, so para admin, as metricas das ordens (``/metricas``).
+``router_sagas`` (admin): estado da saga e retomada da compensacao parada, para a
+operacao. ``router_publico`` (sem token, rate limit
 por IP): acompanhamento por placa + documento. As transicoes da saga
 (diagnostico, orcamento, pagamento, execucao) chegam por mensageria, nao por
 rota HTTP.
@@ -165,6 +166,7 @@ def listar_ordens(
     )
 
 
+# Declarada antes de `/{ordem_id}`: do contrario "metricas" cairia no UUID.
 @router.get(
     "/metricas",
     summary="Total, ordens por status e tempo medio em cada status",
@@ -176,7 +178,7 @@ def obter_metricas(usuario: _Admin, session: _Sessao) -> MetricasResponse:
     A permanencia media de cada status e a do historico: da entrada no status ate
     a transicao seguinte da mesma ordem, nas entradas dos ultimos 30 dias. E a
     mesma leitura dos gauges `pytstop_os_por_status` e
-    `pytstop_os_tempo_medio_status_segundos`. Declarada antes de `/{ordem_id}`.
+    `pytstop_os_tempo_medio_status_segundos`.
     """
     return MetricasResponse.model_validate(obter_obter_metricas(session).executar())
 
