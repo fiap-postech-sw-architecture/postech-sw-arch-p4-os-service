@@ -21,7 +21,6 @@ from opentelemetry.trace import SpanKind, StatusCode
 
 from src.compartilhado.infraestrutura.observability import (
     _ATRIBUTOS_DE_URL,
-    _ATRIBUTOS_DO_CHAMADOR,
     instrumentar_api,
     redigir_url_da_span,
 )
@@ -34,6 +33,17 @@ if TYPE_CHECKING:
 
 ORDEM = str(uuid4())
 TEMPLATE = "/api/v1/ordens-de-servico/{ordem_id}"
+# O que o instrumentador grava de quem chama, nas tres convencoes semanticas.
+# Escritas a mao, de proposito: o oraculo nao e a constante do modulo (tirar um nome
+# dela, a porta do par por exemplo, sobreviveria a um teste que a lesse de la).
+TEXTOS_DO_CHAMADOR = (
+    "http.user_agent",
+    "user_agent.original",
+    "http.server_name",
+    "net.peer.ip",
+    "client.address",
+)
+PORTAS_DO_CHAMADOR = ("net.peer.port", "client.port")
 # Cada valor identifica quem chama ou o que ele pediu: nenhum pode chegar a um span.
 CANARIOS = (
     ORDEM,
@@ -128,11 +138,16 @@ class TestHookDeUrl:
         assert servidor.name == f"GET {TEMPLATE}"
         assert {atributos[n] for n in _ATRIBUTOS_DE_URL} == {TEMPLATE}
         assert atributos["url.query"] == "REDACTED"
-        do_chamador = [n for n in _ATRIBUTOS_DO_CHAMADOR if n in atributos]
-        # Ha atributo de user-agent e de endereco do par em qualquer convencao.
-        assert any("user_agent" in n for n in do_chamador)
-        assert any(n.endswith(("ip", "address")) for n in do_chamador)
-        assert {atributos[n] for n in do_chamador} == {"REDACTED"}
+        textos = {n: atributos[n] for n in TEXTOS_DO_CHAMADOR if n in atributos}
+        portas = {n: atributos[n] for n in PORTAS_DO_CHAMADOR if n in atributos}
+        # Ha user-agent, endereco e porta do par em qualquer convencao.
+        assert any("user_agent" in n for n in textos)
+        assert {"net.peer.ip", "client.address"} & textos.keys()
+        assert portas
+        assert set(textos.values()) == {"REDACTED"}
+        # A porta e inteiro no instrumentador; o span a guarda como o inteiro 0.
+        assert set(portas.values()) == {0}
+        assert all(type(v) is int for v in portas.values())
         _sem_canarios(servidor)
 
     def test_sem_query_nao_marca_a_query(self, rastreador: Rastreador) -> None:

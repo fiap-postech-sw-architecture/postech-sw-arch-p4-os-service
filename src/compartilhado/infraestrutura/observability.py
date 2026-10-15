@@ -91,16 +91,18 @@ _REDIGIDO: Final = "REDACTED"
 # URL da requisicao nas duas convencoes semanticas do OpenTelemetry (a antiga e a
 # padrao; ``url.path`` e ``url.query`` sao as da nova).
 _ATRIBUTOS_DE_URL: Final = ("url.path", "http.target", "http.url", "url.full")
-# Quem chama: user-agent (texto livre), IP e porta do par e o ``Host`` cru.
-_ATRIBUTOS_DO_CHAMADOR: Final = (
+# Quem chama: user-agent (texto livre), IP do par e o ``Host`` cru.
+_TEXTOS_DO_CHAMADOR: Final = (
     "http.user_agent",
     "user_agent.original",
     "http.server_name",
     "net.peer.ip",
-    "net.peer.port",
     "client.address",
-    "client.port",
 )
+# A porta do par. O instrumentador a grava como inteiro, e o span a guarda como
+# ``0``: o mesmo tipo, para o backend que valida o tipo do atributo (o Billing e a
+# Execucao fazem igual).
+_PORTAS_DO_CHAMADOR: Final = ("net.peer.port", "client.port")
 # Regex sobre a URL que o instrumentador monta (``scheme://<Host><path>``, sem a
 # query), ancorada: o ``Host`` e do chamador, e um ``Host: x/api/v1/saude`` nao
 # pode tirar da trace uma requisicao de outra rota. O prefixo de um segmento e o
@@ -269,8 +271,8 @@ def redigir_url_da_span(span: Span, scope: Mapping[str, Any]) -> None:
     rota (``http.route``, que o proprio instrumentador resolveu; sem rota casada,
     ``nao_roteada``, como a metrica HTTP), sem montar nem interpretar a URL, que
     leva o ``Host`` do chamador. ``url.query`` vira ``REDACTED`` quando ha query.
-    Quem chama (user-agent, IP e porta do par, ``Host``) tambem vira
-    ``REDACTED``, nas duas convencoes.
+    Quem chama (user-agent, IP do par, ``Host``) tambem vira ``REDACTED`` e a
+    porta do par, ``0``, nas duas convencoes.
 
     O template so e certo com a instrumentacao 0.66b ou mais nova: a 0.63b nao
     acha as rotas de ``include_router`` do FastAPI 0.137 em diante, grava o
@@ -283,9 +285,12 @@ def redigir_url_da_span(span: Span, scope: Mapping[str, Any]) -> None:
     rota = atributos.get("http.route", ROTA_NAO_ROTEADA)
     for nome in _ATRIBUTOS_DE_URL:
         span.set_attribute(nome, rota)
-    for nome in _ATRIBUTOS_DO_CHAMADOR:
+    for nome in _TEXTOS_DO_CHAMADOR:
         if nome in atributos:
             span.set_attribute(nome, _REDIGIDO)
+    for nome in _PORTAS_DO_CHAMADOR:
+        if nome in atributos:
+            span.set_attribute(nome, 0)
     if scope.get("query_string"):
         span.set_attribute("url.query", _REDIGIDO)
 
