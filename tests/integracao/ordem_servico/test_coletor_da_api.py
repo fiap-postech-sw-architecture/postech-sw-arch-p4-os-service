@@ -21,7 +21,7 @@ from structlog.testing import capture_logs
 from src.compartilhado.infraestrutura.database import criar_engine_de_metricas
 from src.ordem_servico.infraestrutura import coletor_da_api
 from src.ordem_servico.infraestrutura.coletor_da_api import ColetorDaApi
-from src.ordem_servico.infraestrutura.metricas_da_saga import FALHAS_DO_COLETOR
+from tests.coletor import falhas_do_coletor, raspar
 from tests.integracao.proxy_tcp import ProxyTcp
 from tests.integracao.seed_helpers import criar_ordens_com_historicos
 from tests.relogio import RelogioFixo
@@ -54,12 +54,19 @@ def _banco_limpo(session_factory: sessionmaker[Session]) -> None:
     """Os testes escrevem direto no engine: o teardown da factory trunca as tabelas."""
 
 
-def _raspar(coletor: ColetorDaApi) -> dict[str, list[float]]:
-    return {f.name: [a.value for a in f.samples] for f in coletor.collect()}
-
-
-def _falhas() -> float:
-    return FALHAS_DO_COLETOR._value.get()  # contador do cliente
+def _na_outbox(engine: Engine, *linhas: tuple[str, int]) -> None:
+    """Uma linha por (status, idade em segundos); o banco calcula o ``criado_em``."""
+    with engine.begin() as conexao:
+        for status, segundos in linhas:
+            conexao.execute(
+                text(
+                    "INSERT INTO outbox (mensagem_id, correlation_id, exchange, "
+                    "routing_key, envelope, status, criado_em) VALUES "
+                    "(gen_random_uuid(), gen_random_uuid(), 'x', 'y', '{}', "
+                    ":status, now() - make_interval(secs => :segundos))"
+                ),
+                {"status": status, "segundos": segundos},
+            )
 
 
 def _url(engine: Engine) -> str:
@@ -98,7 +105,7 @@ class TestLeitura:
             session_factory, [("recebida", _AGORA), ("em_diagnostico", _AGORA)]
         )
 
-        raspagem = _raspar(ColetorDaApi(metricas.connect, agora=lambda: _AGORA))
+        raspagem = raspar(ColetorDaApi(metricas.connect, agora=lambda: _AGORA))
 
         assert set(raspagem) == _DA_SAGA | _DAS_ORDENS | _DA_OUTBOX | {
             "pytstop_saga_coletor_disponivel"
@@ -109,24 +116,15 @@ class TestLeitura:
         self, engine: Engine, metricas: Engine
     ) -> None:
         # O banco grava a idade (`now() - intervalo`), e o relogio do teste nao entra.
-        with engine.begin() as conexao:
-            for status, segundos in (
-                ("pendente", 120),
-                ("pendente", 10),
-                ("entregue", 5000),
-                ("dead", 9000),
-            ):
-                conexao.execute(
-                    text(
-                        "INSERT INTO outbox (mensagem_id, correlation_id, exchange, "
-                        "routing_key, envelope, status, criado_em) VALUES "
-                        "(gen_random_uuid(), gen_random_uuid(), 'x', 'y', '{}', "
-                        ":status, now() - make_interval(secs => :segundos))"
-                    ),
-                    {"status": status, "segundos": segundos},
-                )
+        _na_outbox(
+            engine,
+            ("pendente", 120),
+            ("pendente", 10),
+            ("entregue", 5000),
+            ("dead", 9000),
+        )
 
-        raspagem = _raspar(ColetorDaApi(metricas.connect))
+        raspagem = raspar(ColetorDaApi(metricas.connect))
 
         (idade,) = raspagem["pytstop_outbox_mais_antiga_segundos"]
         # So a pendente mais antiga conta (120 s, e nao a de 10 s); a entregue
@@ -136,7 +134,7 @@ class TestLeitura:
     def test_sem_pendente_a_idade_vale_zero_e_a_serie_existe(
         self, metricas: Engine
     ) -> None:
-        raspagem = _raspar(ColetorDaApi(metricas.connect))
+        raspagem = raspar(ColetorDaApi(metricas.connect))
 
         assert raspagem["pytstop_outbox_mais_antiga_segundos"] == [0.0]
 
@@ -148,7 +146,7 @@ class TestLeitura:
             aberturas.append(1)
             return engine.connect()
 
-        _raspar(ColetorDaApi(abrir))
+        raspar(ColetorDaApi(abrir))
 
         assert aberturas == [1]
 
@@ -178,13 +176,13 @@ class TestCache:
         coletor = ColetorDaApi(engine.connect, relogio=relogio, agora=lambda: _AGORA)
         por_status = "pytstop_os_por_status"
 
-        primeira = _raspar(coletor)
+        primeira = raspar(coletor)
         # Muda o banco: a leitura em cache nao o ve.
         criar_ordens_com_historicos(session_factory, [("recebida", _AGORA)])
         relogio.avancar(29)
-        dentro_da_validade = _raspar(coletor)
+        dentro_da_validade = raspar(coletor)
         relogio.avancar(2)
-        depois = _raspar(coletor)
+        depois = raspar(coletor)
 
         # Duas raspagens de replicas diferentes, 15 s uma da outra, leem uma vez.
         assert len(leituras_do_historico) == 2
@@ -199,18 +197,10 @@ class TestCache:
     ) -> None:
         relogio = RelogioFixo()
         coletor = ColetorDaApi(engine.connect, relogio=relogio)
-        antes = _raspar(coletor)["pytstop_outbox_mais_antiga_segundos"]
-        with engine.begin() as conexao:
-            conexao.execute(
-                text(
-                    "INSERT INTO outbox (mensagem_id, correlation_id, exchange, "
-                    "routing_key, envelope, status, criado_em) VALUES "
-                    "(gen_random_uuid(), gen_random_uuid(), 'x', 'y', '{}', "
-                    "'pendente', now() - interval '60 seconds')"
-                )
-            )
+        antes = raspar(coletor)["pytstop_outbox_mais_antiga_segundos"]
+        _na_outbox(engine, ("pendente", 60))
 
-        depois = _raspar(coletor)["pytstop_outbox_mais_antiga_segundos"]
+        depois = raspar(coletor)["pytstop_outbox_mais_antiga_segundos"]
 
         # Sem avancar o relogio: o alerta "Outbox parada" nao espera 30 s.
         assert antes == [0.0]
@@ -225,11 +215,11 @@ class TestCache:
             trava.execute(
                 text("LOCK TABLE historico_status_ordem IN ACCESS EXCLUSIVE MODE")
             )
-            travada = _raspar(coletor)
+            travada = raspar(coletor)
 
         # Destravado, a raspagem seguinte (no mesmo instante do relogio) le de novo:
         # a falha nao ficou guardada como se fosse a leitura.
-        destravada = _raspar(coletor)
+        destravada = raspar(coletor)
 
         assert not _DAS_ORDENS & set(travada)
         assert set(destravada) >= _DAS_ORDENS
@@ -243,7 +233,7 @@ class TestConexaoDaEngine:
         # engine das metricas a descarta e abre outra, e a raspagem nao perde os
         # gauges (sem ele, a primeira raspagem depois da queda sairia vazia).
         coletor = ColetorDaApi(metricas.connect)
-        assert "pytstop_saga_ativas" in _raspar(coletor)
+        assert "pytstop_saga_ativas" in raspar(coletor)
         with engine.connect() as admin:
             admin.execute(
                 text(
@@ -254,7 +244,7 @@ class TestConexaoDaEngine:
             )
             admin.commit()
 
-        raspagem = _raspar(coletor)
+        raspagem = raspar(coletor)
 
         assert raspagem["pytstop_saga_coletor_disponivel"] == [1]
 
@@ -265,23 +255,23 @@ class TestBancoComProblema:
             msg = "Engine de metricas nao configurada"
             raise RuntimeError(msg)
 
-        falhas = _falhas()
+        falhas = falhas_do_coletor()
 
-        raspagem = _raspar(ColetorDaApi(sem_engine))
+        raspagem = raspar(ColetorDaApi(sem_engine))
 
         assert raspagem == _SO_A_DISPONIBILIDADE
-        assert _falhas() == falhas + 1
+        assert falhas_do_coletor() == falhas + 1
 
     def test_banco_fora_do_ar_deixa_tudo_ausente_conta_a_falha_e_loga(self) -> None:
         # Porta sem servidor: a conexao e recusada na hora.
         fora = criar_engine_de_metricas("postgresql://os:os@127.0.0.1:1/os")
-        falhas = _falhas()
+        falhas = falhas_do_coletor()
 
         with capture_logs() as logs:
-            raspagem = _raspar(ColetorDaApi(fora.connect))
+            raspagem = raspar(ColetorDaApi(fora.connect))
 
         assert raspagem == _SO_A_DISPONIBILIDADE
-        assert _falhas() == falhas + 1
+        assert falhas_do_coletor() == falhas + 1
         assert {
             "event": "api gauges unavailable",
             "log_level": "warning",
@@ -293,12 +283,12 @@ class TestBancoComProblema:
         self, engine: Engine, metricas: Engine
     ) -> None:
         coletor = ColetorDaApi(metricas.connect)
-        falhas = _falhas()
+        falhas = falhas_do_coletor()
 
         with engine.connect() as trava, trava.begin():
             trava.execute(text("LOCK TABLE sagas IN ACCESS EXCLUSIVE MODE"))
             inicio = time.monotonic()
-            raspagem = _raspar(coletor)
+            raspagem = raspar(coletor)
             decorrido = time.monotonic() - inicio
 
         # O lock_timeout (1 s) corta a espera, bem antes do prazo da raspagem. Os
@@ -308,14 +298,14 @@ class TestBancoComProblema:
         assert raspagem["pytstop_saga_coletor_disponivel"] == [0]
         assert not _DA_SAGA & set(raspagem)
         assert set(raspagem) >= (_DA_OUTBOX | _DAS_ORDENS)
-        assert _falhas() == falhas + 1
+        assert falhas_do_coletor() == falhas + 1
 
     def test_tabela_das_ordens_travada_omite_so_os_gauges_das_ordens(
         self, engine: Engine, metricas: Engine
     ) -> None:
         with engine.connect() as trava, trava.begin():
             trava.execute(text("LOCK TABLE ordens_de_servico IN ACCESS EXCLUSIVE MODE"))
-            raspagem = _raspar(ColetorDaApi(metricas.connect))
+            raspagem = raspar(ColetorDaApi(metricas.connect))
 
         assert raspagem["pytstop_saga_coletor_disponivel"] == [1]
         assert not _DAS_ORDENS & set(raspagem)
@@ -327,7 +317,7 @@ class TestBancoComProblema:
         # O prazo vencido da saga junta `sagas` e `outbox`.
         with engine.connect() as trava, trava.begin():
             trava.execute(text("LOCK TABLE outbox IN ACCESS EXCLUSIVE MODE"))
-            raspagem = _raspar(ColetorDaApi(metricas.connect))
+            raspagem = raspar(ColetorDaApi(metricas.connect))
 
         assert raspagem["pytstop_saga_coletor_disponivel"] == [0]
         assert not (_DA_SAGA | _DA_OUTBOX) & set(raspagem)
@@ -340,7 +330,7 @@ class TestBancoComProblema:
             # A unica conexao da engine das metricas esta em uso: o coletor espera
             # o pool_timeout (1 s) e desiste.
             inicio = time.monotonic()
-            raspagem = _raspar(ColetorDaApi(metricas.connect))
+            raspagem = raspar(ColetorDaApi(metricas.connect))
             decorrido = time.monotonic() - inicio
 
         assert raspagem == _SO_A_DISPONIBILIDADE
@@ -370,7 +360,7 @@ class TestBancoComProblema:
         coletor = ColetorDaApi(metricas.connect)
 
         inicio = time.monotonic()
-        raspagem = _raspar(coletor)
+        raspagem = raspar(coletor)
         decorrido = time.monotonic() - inicio
 
         assert 1.9 <= decorrido < 4.5
@@ -385,15 +375,15 @@ class TestBancoComProblema:
         # particao de rede). A conexao de 1 s corta, e conta uma vez so.
         proxy.calar()
         mudo = _metricas_via(proxy, engine)
-        falhas = _falhas()
+        falhas = falhas_do_coletor()
 
         inicio = time.monotonic()
-        raspagem = _raspar(ColetorDaApi(mudo.connect))
+        raspagem = raspar(ColetorDaApi(mudo.connect))
         decorrido = time.monotonic() - inicio
 
         assert raspagem == _SO_A_DISPONIBILIDADE
         assert decorrido < 4
-        assert _falhas() == falhas + 1
+        assert falhas_do_coletor() == falhas + 1
         mudo.dispose()
 
     def test_banco_que_emudece_com_a_conexao_aberta_nao_pendura_a_raspagem(
@@ -404,14 +394,14 @@ class TestBancoComProblema:
         # prazo da propria raspagem devolve a resposta.
         via_proxy = _metricas_via(proxy, engine)
         coletor = ColetorDaApi(via_proxy.connect, orcamento_s=1.5)
-        assert "pytstop_saga_ativas" in _raspar(coletor)  # aquece a conexao do pool
+        assert "pytstop_saga_ativas" in raspar(coletor)  # aquece a conexao do pool
         proxy.calar()
 
         inicio = time.monotonic()
-        mudo = _raspar(coletor)
+        mudo = raspar(coletor)
         decorrido = time.monotonic() - inicio
         inicio = time.monotonic()
-        seguinte = _raspar(coletor)
+        seguinte = raspar(coletor)
         segunda = time.monotonic() - inicio
 
         assert mudo == _SO_A_DISPONIBILIDADE
@@ -430,11 +420,11 @@ class TestBancoComProblema:
         # scrape_timeout do Prometheus, mesmo com o banco mudo depois do aquecimento.
         via_proxy = _metricas_via(proxy, engine)
         coletor = ColetorDaApi(via_proxy.connect)
-        assert "pytstop_saga_ativas" in _raspar(coletor)  # aquece a conexao do pool
+        assert "pytstop_saga_ativas" in raspar(coletor)  # aquece a conexao do pool
         proxy.calar()
 
         inicio = time.monotonic()
-        mudo = _raspar(coletor)
+        mudo = raspar(coletor)
         decorrido = time.monotonic() - inicio
 
         assert mudo == _SO_A_DISPONIBILIDADE
@@ -452,7 +442,7 @@ class TestBancoComProblema:
             for tabela in ("sagas", "outbox", "ordens_de_servico"):
                 trava.execute(text(f"LOCK TABLE {tabela} IN ACCESS EXCLUSIVE MODE"))
             inicio = time.monotonic()
-            raspagem = _raspar(ColetorDaApi(metricas.connect))
+            raspagem = raspar(ColetorDaApi(metricas.connect))
             decorrido = time.monotonic() - inicio
 
         assert raspagem == _SO_A_DISPONIBILIDADE

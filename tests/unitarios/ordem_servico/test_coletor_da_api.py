@@ -24,9 +24,12 @@ from src.ordem_servico.infraestrutura.coletor_da_api import (
     desregistrar_coletor,
     registrar_coletor,
 )
-from src.ordem_servico.infraestrutura.metricas_da_saga import (
-    FALHAS_DO_COLETOR,
-    LeituraDaSaga,
+from src.ordem_servico.infraestrutura.metricas_da_saga import LeituraDaSaga
+from tests.coletor import (
+    THREAD_DE_LEITURA,
+    esperar_a_thread_de_leitura,
+    falhas_do_coletor,
+    raspar,
 )
 
 if TYPE_CHECKING:
@@ -73,17 +76,6 @@ def _trocar_a_leitura(
     coletor._ler_tudo = leitura  # type: ignore[method-assign,assignment]  # troca no teste
 
 
-def _raspar(coletor: ColetorDaApi) -> dict[str, list[float]]:
-    return {f.name: [a.value for a in f.samples] for f in coletor.collect()}
-
-
-def _esperar_a_thread_de_leitura() -> None:
-    """Espera a thread de leitura acabar: a vez volta no fim dela."""
-    for thread in threading.enumerate():
-        if thread.name == "coletor-da-api":
-            thread.join(5)
-
-
 @pytest.fixture
 def liberar() -> Iterator[threading.Event]:
     """Solta as leituras presas ao fim do teste: nenhuma thread fica pendurada."""
@@ -94,10 +86,13 @@ def liberar() -> Iterator[threading.Event]:
 
 class TestDescribe:
     def test_o_registro_conhece_todos_os_nomes_sem_consultar_o_banco(self) -> None:
-        registro = CollectorRegistry()
-        registro.register(_coletor())
+        coletor = _coletor()
 
-        assert set(registro._names_to_collectors) == _NOMES  # nomes do registro
+        # O registro pede so os nomes: `_sem_conexao` reprova o teste se abrirem
+        # uma conexao.
+        CollectorRegistry().register(coletor)
+
+        assert {familia.name for familia in coletor.describe()} == _NOMES
 
     def test_dois_coletores_no_mesmo_registro_levantam(self) -> None:
         # O describe devolve os nomes: o registro recusa a serie duplicada, em vez
@@ -118,7 +113,7 @@ class TestRaspagem:
 
         _trocar_a_leitura(coletor, ler)
 
-        raspagem = _raspar(coletor)
+        raspagem = raspar(coletor)
 
         assert set(raspagem) == _NOMES
         assert raspagem["pytstop_saga_coletor_disponivel"] == [1]
@@ -157,7 +152,7 @@ class TestRaspagem:
 
         _trocar_a_leitura(coletor, ler)
 
-        raspagem = _raspar(coletor)
+        raspagem = raspar(coletor)
 
         # Gauge que nao foi lido nunca vira zero.
         assert "pytstop_outbox_mais_antiga_segundos" not in raspagem
@@ -172,14 +167,14 @@ class TestRaspagem:
             leitura.outbox = 1.0
 
         _trocar_a_leitura(coletor, ler)
-        falhas = FALHAS_DO_COLETOR._value.get()  # contador do cliente
+        falhas = falhas_do_coletor()
 
-        raspagem = _raspar(coletor)
+        raspagem = raspar(coletor)
 
         assert raspagem["pytstop_saga_coletor_disponivel"] == [0]
         assert "pytstop_saga_ativas" not in raspagem
         assert raspagem["pytstop_outbox_mais_antiga_segundos"] == [1.0]
-        assert FALHAS_DO_COLETOR._value.get() == falhas + 1
+        assert falhas_do_coletor() == falhas + 1
 
     def test_excecao_na_leitura_nao_derruba_a_raspagem_e_devolve_a_vez(self) -> None:
         coletor = _coletor()
@@ -191,8 +186,8 @@ class TestRaspagem:
         _trocar_a_leitura(coletor, ler)
 
         with capture_logs() as logs:
-            primeira = _raspar(coletor)
-            segunda = _raspar(coletor)
+            primeira = raspar(coletor)
+            segunda = raspar(coletor)
 
         assert primeira == segunda == {"pytstop_saga_coletor_disponivel": [0]}
         # A segunda raspagem tentou de novo: a vez voltou depois da falha.
@@ -205,7 +200,7 @@ class TestRaspagem:
 
         coletor = ColetorDaApi(sem_engine)
 
-        assert _raspar(coletor) == {"pytstop_saga_coletor_disponivel": [0]}
+        assert raspar(coletor) == {"pytstop_saga_coletor_disponivel": [0]}
 
 
 class TestPrazo:
@@ -222,7 +217,7 @@ class TestPrazo:
 
         inicio = time.monotonic()
         with capture_logs() as logs:
-            raspagem = _raspar(coletor)
+            raspagem = raspar(coletor)
         decorrido = time.monotonic() - inicio
 
         assert 0.3 <= decorrido < 3
@@ -242,11 +237,11 @@ class TestPrazo:
             liberar.wait(30)
 
         _trocar_a_leitura(coletor, presa)
-        _raspar(coletor)  # a primeira fica presa depois do prazo
+        raspar(coletor)  # a primeira fica presa depois do prazo
 
         inicio = time.monotonic()
         with capture_logs() as logs:
-            raspagem = _raspar(coletor)
+            raspagem = raspar(coletor)
         decorrido = time.monotonic() - inicio
 
         # Uma thread presa por vez: a segunda raspagem sai na hora, sem gauges (nem
@@ -269,12 +264,12 @@ class TestPrazo:
             leitura.saga, leitura.outbox, leitura.ordens = _SAGA, 5.0, _ORDENS
 
         _trocar_a_leitura(coletor, ler)
-        _raspar(coletor)
+        raspar(coletor)
         livre.set()
         liberar.set()
-        _esperar_a_thread_de_leitura()
+        esperar_a_thread_de_leitura()
 
-        assert _raspar(coletor)["pytstop_outbox_mais_antiga_segundos"] == [5.0]
+        assert raspar(coletor)["pytstop_outbox_mais_antiga_segundos"] == [5.0]
 
     def test_o_prazo_padrao_da_raspagem_cabe_na_metade_do_scrape_timeout(self) -> None:
         # O Prometheus do platform desiste em 10 s. Os outros testes de prazo
@@ -295,7 +290,7 @@ class TestPrazo:
             liberar.wait(30)
 
         _trocar_a_leitura(coletor, presa)
-        _raspar(coletor)
+        raspar(coletor)
 
         assert daemon == [True]
 
@@ -315,7 +310,7 @@ class TestPrazo:
         falhas: list[int] = []
 
         def start_que_falha_uma_vez(thread: threading.Thread) -> None:
-            if thread.name == "coletor-da-api" and not falhas:
+            if thread.name == THREAD_DE_LEITURA and not falhas:
                 falhas.append(1)
                 msg = "can't start new thread"
                 raise RuntimeError(msg)
@@ -324,8 +319,8 @@ class TestPrazo:
         monkeypatch.setattr(threading.Thread, "start", start_que_falha_uma_vez)
 
         with capture_logs() as logs:
-            primeira = _raspar(coletor)
-        segunda = _raspar(coletor)
+            primeira = raspar(coletor)
+        segunda = raspar(coletor)
 
         assert primeira == {"pytstop_saga_coletor_disponivel": [0]}
         assert [log["motivo"] for log in logs] == ["RuntimeError"]
@@ -340,7 +335,7 @@ class TestPrazo:
         _trocar_a_leitura(coletor, rapida)
 
         inicio = time.monotonic()
-        _raspar(coletor)
+        raspar(coletor)
 
         # O prazo e um teto: a leitura pronta devolve a raspagem na hora.
         assert time.monotonic() - inicio < 2
@@ -360,7 +355,9 @@ class TestRegistro:
 
         assert primeiro is not None
         assert segundo is None
-        assert set(registro._names_to_collectors) == _NOMES
+        # O primeiro esta no registro: um coletor igual seria serie duplicada.
+        with pytest.raises(ValueError, match="Duplicated timeseries"):
+            registro.register(_coletor())
 
     def test_quem_registrou_tira_e_o_processo_pode_registrar_de_novo(
         self, registro: CollectorRegistry
@@ -370,5 +367,5 @@ class TestRegistro:
 
         desregistrar_coletor(coletor)
 
-        assert registro._names_to_collectors == {}
+        # O registro ficou vazio: registrar de novo nao e serie duplicada.
         assert registrar_coletor(_sem_conexao) is not None
