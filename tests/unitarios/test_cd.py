@@ -20,6 +20,7 @@ WORKFLOWS = RAIZ / ".github" / "workflows"
 CD = WORKFLOWS / "cd.yml"
 SHA_PADRAO = re.compile(r"^[0-9a-f]{40}$")
 DONO = "fiap-postech-sw-architecture"
+BASH = shutil.which("bash") or "/bin/bash"
 
 
 def _carrega(caminho: Path = CD) -> dict[Any, Any]:
@@ -67,6 +68,31 @@ def _passo_que_usa(job: str, acao: str, nome: str | None = None) -> dict[str, An
 
 def _passo_com_id(job: str, id_: str) -> dict[str, Any]:
     return next(passo for passo in _passos(job) if passo.get("id") == id_)
+
+
+def _executa(
+    passo: dict[str, Any],
+    pasta: Path,
+    env: dict[str, str],
+    falsos: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Roda o ``run`` de um passo como o runner o roda (``bash -e``).
+
+    Em ``pasta``, so com o ``env`` dado e com os comandos falsos de ``falsos``
+    na frente do PATH.
+    """
+    script = pasta / "passo.sh"
+    script.write_text(passo["run"])
+    caminho = os.environ["PATH"] if falsos is None else f"{falsos}:{os.environ['PATH']}"
+    return subprocess.run(  # noqa: S603 - bash e o script do proprio workflow
+        [BASH, "-e", str(script)],
+        env={"PATH": caminho} | env,
+        cwd=pasta,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
 
 
 # --- estrutura -------------------------------------------------------------
@@ -159,12 +185,46 @@ def test_runner_fixo_e_prazo_em_todo_job_que_roda_passos() -> None:
 def test_deploy_remote_vem_desligado_e_o_skipped_na_condicao_inversa() -> None:
     jobs = _jobs()
 
-    assert jobs["deploy-remote"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO == 'true'"
+    assert (
+        jobs["deploy-remote"]["if"]
+        == "vars.DEPLOY_REMOTO_HABILITADO == 'true' && github.ref == 'refs/heads/main'"
+    )
     assert jobs["remote-skipped"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO != 'true'"
     passos = jobs["remote-skipped"]["steps"]
     assert len(passos) == 1
     assert passos[0]["run"].startswith('echo "::notice::deploy remoto desligado')
     assert "DEPLOY_REMOTO_HABILITADO" in passos[0]["run"]
+
+
+def test_so_a_main_publica_imagem_e_implanta_no_remoto(tmp_path: Path) -> None:
+    # O workflow_dispatch roda de qualquer ref: a guarda e o primeiro passo do
+    # image, antes do checkout, do login no GHCR e do build, e o deploy-remote
+    # repete a condicao.
+    guarda = _passos("image")[0]
+
+    assert "uses" not in guarda
+    resultado = _executa(guarda, tmp_path, {"GITHUB_REF": "refs/heads/main"})
+    assert resultado.returncode == 0, resultado.stderr
+    assert "github.ref == 'refs/heads/main'" in _jobs()["deploy-remote"]["if"]
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "refs/heads/ci/cd",
+        "refs/heads/main-2",
+        "refs/heads/feature/main",
+        "refs/tags/main",
+        "refs/pull/12/merge",
+        "",
+    ],
+    ids=["branch", "prefixo-de-main", "main-no-fim", "tag", "pull-request", "sem-ref"],
+)
+def test_ref_que_nao_e_a_main_nao_publica_imagem(tmp_path: Path, ref: str) -> None:
+    resultado = _executa(_passos("image")[0], tmp_path, {"GITHUB_REF": ref})
+
+    assert resultado.returncode == 1
+    assert "::error::images are published from main only" in resultado.stdout
 
 
 def test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor() -> None:
@@ -414,7 +474,6 @@ REPOS = {
     "billing-service": f"{DONO}/postech-sw-arch-p4-billing-service",
     "execution-service": f"{DONO}/postech-sw-arch-p4-execution-service",
 }
-BASH = shutil.which("bash") or "/bin/bash"
 PROPRIO = "a" * 40
 VERDE = {
     "platform": "1" * 40,

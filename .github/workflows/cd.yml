@@ -71,6 +71,12 @@ jobs:
       imagem: ${{ steps.meta.outputs.imagem }}
       digest: ${{ steps.build.outputs.digest }}
     steps:
+      # O workflow_dispatch roda de qualquer ref, e este job publica no GHCR a
+      # imagem que o deploy remoto implanta: so a main passa daqui.
+      - name: So a main publica imagem
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] \
+            || { echo "::error::images are published from main only"; exit 1; }
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -318,7 +324,7 @@ jobs:
   # commit usado no kind. Nenhuma credencial de provedor mora neste arquivo.
   deploy-remote:
     needs: [image, deploy-kind]
-    if: vars.DEPLOY_REMOTO_HABILITADO == 'true'
+    if: vars.DEPLOY_REMOTO_HABILITADO == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
