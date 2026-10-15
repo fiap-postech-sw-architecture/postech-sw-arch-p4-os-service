@@ -510,16 +510,32 @@ jq -r "$filtro" "$base.json"
 """
 
 
+def _exige_jq() -> None:
+    if shutil.which("jq") is None:
+        pytest.skip("jq nao esta no PATH")
+
+
+def _gh_falso(pasta: Path) -> tuple[Path, Path]:
+    """O diretorio dos comandos falsos (com o ``gh``) e o das respostas dele."""
+    _exige_jq()
+    fake = pasta / "gh"
+    fake.mkdir()
+    bin_ = pasta / "bin"
+    bin_.mkdir()
+    gh = bin_ / "gh"
+    gh.write_text(GH_FALSO)
+    gh.chmod(0o755)
+    return bin_, fake
+
+
+def _arquivo_do_endpoint(fake: Path, endpoint: str, sufixo: str) -> Path:
+    return fake / (endpoint.replace("/", "_") + sufixo)
+
+
 class _Ambiente:
     def __init__(self, tmp_path: Path) -> None:
         self.dir = tmp_path
-        self.fake = tmp_path / "gh"
-        self.fake.mkdir()
-        self.bin = tmp_path / "bin"
-        self.bin.mkdir()
-        gh = self.bin / "gh"
-        gh.write_text(GH_FALSO)
-        gh.chmod(0o755)
+        self.bin, self.fake = _gh_falso(tmp_path)
         script = tmp_path / "shas.sh"
         script.write_text(_passo_com_id("deploy-kind", "shas")["run"])
         self.script = script
@@ -529,7 +545,7 @@ class _Ambiente:
         self.resumo.touch()
 
     def _arquivo(self, endpoint: str, sufixo: str) -> Path:
-        return self.fake / (endpoint.replace("/", "_") + sufixo)
+        return _arquivo_do_endpoint(self.fake, endpoint, sufixo)
 
     def corridas(self, repo: str, *shas: str) -> None:
         corpo = {
@@ -590,8 +606,6 @@ class _Ambiente:
 
 @pytest.fixture
 def amb(tmp_path: Path) -> _Ambiente:
-    if shutil.which("jq") is None:
-        pytest.skip("jq nao esta no PATH")
     return _Ambiente(tmp_path)
 
 
@@ -764,3 +778,83 @@ def test_resposta_que_nao_e_um_commit_reprova(amb: _Ambiente) -> None:
         in resultado.stdout
     )
     assert amb.saida.read_text() == ""
+
+
+# --- o deploy-remote, executado ---------------------------------------------
+
+SHA_DO_PLATFORM = "9" * 40
+PASSO_DA_COMPARACAO = "Commit do platform esta na main do platform"
+
+
+def test_a_comparacao_com_a_main_do_platform_e_o_primeiro_passo_do_deploy_remote() -> (
+    None
+):
+    # Antes do checkout do platform, do acesso ao cluster e do deploy: o commit
+    # que nao esta na main do platform nem chega a ser baixado.
+    passos = _passos("deploy-remote")
+    comparacao = passos[0]
+
+    assert comparacao["name"] == PASSO_DA_COMPARACAO
+    assert comparacao["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "DONO": "${{ github.repository_owner }}",
+        "SHA_PLATFORM": "${{ needs.deploy-kind.outputs.sha_platform }}",
+    }
+    assert (
+        "postech-sw-arch-p4-platform/compare/main...$SHA_PLATFORM" in comparacao["run"]
+    )
+    assert passos[1]["uses"].startswith("actions/checkout@")
+
+
+def _compara_com_a_main(
+    pasta: Path, status: str | None
+) -> subprocess.CompletedProcess[str]:
+    """Roda o passo com o compare do GitHub respondendo ``status`` (``None``: 404)."""
+    bin_, fake = _gh_falso(pasta)
+    if status is not None:
+        endpoint = f"repos/{REPOS['platform']}/compare/main...{SHA_DO_PLATFORM}"
+        _arquivo_do_endpoint(fake, endpoint, ".json").write_text(
+            json.dumps({"status": status})
+        )
+    env = {
+        "FAKE_GH": str(fake),
+        "GH_TOKEN": "x",
+        "DONO": DONO,
+        "SHA_PLATFORM": SHA_DO_PLATFORM,
+    }
+    return _executa(_passos("deploy-remote")[0], pasta, env, falsos=bin_)
+
+
+@pytest.mark.parametrize("status", ["identical", "behind"])
+def test_commit_que_ja_esta_na_main_do_platform_passa(
+    tmp_path: Path, status: str
+) -> None:
+    resultado = _compara_com_a_main(tmp_path, status)
+
+    assert resultado.returncode == 0, resultado.stderr
+    chamadas = (tmp_path / "gh" / "chamadas").read_text().splitlines()
+    comparacao = f"repos/{REPOS['platform']}/compare/main...{SHA_DO_PLATFORM}"
+    assert chamadas == [f"api {comparacao} --jq .status"]
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["diverged", "ahead", "", "null"],
+    ids=["diverged", "ahead", "vazio", "null"],
+)
+def test_commit_fora_da_main_do_platform_reprova(tmp_path: Path, status: str) -> None:
+    resultado = _compara_com_a_main(tmp_path, status)
+
+    assert resultado.returncode == 1
+    assert (
+        f"::error::the platform commit {SHA_DO_PLATFORM} is not in the history "
+        f"of the platform main (compare status: {status})"
+    ) in resultado.stdout
+
+
+def test_commit_que_o_github_nao_conhece_reprova(tmp_path: Path) -> None:
+    resultado = _compara_com_a_main(tmp_path, None)
+
+    assert resultado.returncode == 1
+    assert "::error::could not compare the platform commit" in resultado.stdout
+    assert "HTTP 404" in resultado.stderr

@@ -331,6 +331,26 @@ jobs:
       contents: read
       packages: read
     steps:
+      # O deploy-remoto.sh roda com a credencial do cluster e e o do platform no
+      # commit usado no kind, que um dispatch pode apontar para qualquer commit
+      # do platform. So passa o que ja esta na main dele (ou e a propria main):
+      # no compare main...<sha>, "behind" e "identical".
+      - name: Commit do platform esta na main do platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DONO: ${{ github.repository_owner }}
+          SHA_PLATFORM: ${{ needs.deploy-kind.outputs.sha_platform }}
+        run: |
+          set -euo pipefail
+          situacao=$(gh api "repos/$DONO/postech-sw-arch-p4-platform/compare/main...$SHA_PLATFORM" --jq .status) \
+            || { echo "::error::could not compare the platform commit $SHA_PLATFORM with the platform main"; exit 1; }
+          case $situacao in
+            identical | behind) ;;
+            *)
+              echo "::error::the platform commit $SHA_PLATFORM is not in the history of the platform main (compare status: $situacao)"
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/postech-sw-arch-p4-platform
