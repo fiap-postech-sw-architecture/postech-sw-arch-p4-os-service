@@ -363,6 +363,8 @@ def test_image_exporta_o_tar_amd64_e_confere_o_digest() -> None:
         passo for passo in _passos("image") if "imagetools" in passo.get("run", "")
     )
     assert "--format '{{ json .SBOM }}'" in sbom["run"]
+    # O buildx devolve {"SPDX": <documento>}: o artefato leva so o documento.
+    assert "jq .SPDX sbom-buildx.json >" in sbom["run"]
     assert "sbom-${SERVICO}.spdx.json" in sbom["run"]
     assert "$GITHUB_STEP_SUMMARY" in sbom["run"]
     # O summary so abre para quem tem login: a mesma linha vai para o log.
@@ -380,6 +382,12 @@ def test_artefatos_e_retencoes() -> None:
     }
 
     assert envios == {"imagem": 1, f"sbom-{SERVICO}": 90, "e2e-kind": 90}
+    # Nenhum outro: a action de build anexaria o registro do build (90 dias).
+    assert _passo_com_id("image", "build")["env"] == {
+        "DOCKER_BUILD_RECORD_UPLOAD": False
+    }
+    sbom = _passo_que_usa("image", "actions/upload-artifact", f"sbom-{SERVICO}")
+    assert _resolve(sbom["with"]["path"]) == f"sbom-{SERVICO}.spdx.json"
     assert _passo_que_usa("deploy-kind", "actions/download-artifact")["with"] == {
         "name": "imagem"
     }
@@ -458,6 +466,10 @@ def test_sbom_com_pacotes_passa_e_conta_no_log_e_no_summary(tmp_path: Path) -> N
     assert resultado.returncode == 0, resultado.stderr
     assert "SBOM with 2 packages" in resultado.stdout
     assert "| SBOM (SPDX) | 2 packages," in (tmp_path / "resumo.md").read_text()
+    # O artefato e o documento SPDX, sem o involucro {"SPDX": ...} do buildx.
+    assert json.loads((tmp_path / f"sbom-{SERVICO}.spdx.json").read_text()) == {
+        "packages": [{"name": "a"}, {"name": "b"}]
+    }
 
 
 @pytest.mark.parametrize(

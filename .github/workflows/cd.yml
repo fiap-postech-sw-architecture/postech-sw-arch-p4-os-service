@@ -107,10 +107,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       # SBOM em SPDX e proveniencia ficam no indice da imagem no registry. O
-      # cache de camadas e o do BuildKit no cache do GitHub, por servico.
+      # cache de camadas e o do BuildKit no cache do GitHub, por servico. O
+      # registro do build (*.dockerbuild) que a action anexaria sozinha, por 90
+      # dias, fica desligado: os artefatos do run sao so os tres listados no README.
       - id: build
         name: Build e push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           push: true
@@ -141,8 +145,9 @@ jobs:
           IMAGEM: ${{ steps.meta.outputs.imagem }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker buildx imagetools inspect "$IMAGEM" --format '{{ json .SBOM }}' > "sbom-${SERVICO}.spdx.json"
-          pacotes=$(jq '[.. | objects | select(has("packages")) | .packages | length] | add // 0' "sbom-${SERVICO}.spdx.json")
+          docker buildx imagetools inspect "$IMAGEM" --format '{{ json .SBOM }}' > sbom-buildx.json
+          jq .SPDX sbom-buildx.json > "sbom-${SERVICO}.spdx.json"
+          pacotes=$(jq '.packages | length' "sbom-${SERVICO}.spdx.json")
           [ "$pacotes" -gt 0 ] || { echo "::error::the SBOM of $IMAGEM lists no package"; exit 1; }
           echo "image $IMAGEM digest $DIGEST, SBOM with $pacotes packages"
           {
