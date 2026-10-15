@@ -16,12 +16,15 @@ from prometheus_client import CollectorRegistry
 from sqlalchemy import text
 
 from src.autenticacao.dominio.papel import Papel
+from src.ordem_servico.aplicacao.use_cases import ObterMetricas
 from src.ordem_servico.dominio.status import StatusOrdem
 from src.ordem_servico.infraestrutura.coletor_da_api import ColetorDaApi
 from src.ordem_servico.infraestrutura.consultas import (
     JANELA_DAS_PERMANENCIAS,
+    ConsultaDeMetricasSQLAlchemy,
     ler_metricas_das_ordens,
 )
+from src.ordem_servico.interfaces import router
 from tests.integracao.seed_helpers import (
     SENHA_PADRAO,
     criar_ordens_com_historicos,
@@ -202,6 +205,22 @@ def admin(api_client: TestClient, admin_user: Usuario) -> dict[str, str]:
     return _cabecalhos(api_client, admin_user.email)
 
 
+@pytest.fixture
+def relogio_da_rota(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rota le o ``AGORA`` fixo, e nao o relogio da maquina.
+
+    A rota monta o caso de uso direto (sem ``Depends``), entao o gancho e a funcao
+    que o monta; ``dependency_overrides`` nao a alcanca.
+    """
+
+    def com_relogio_fixo(session: Session) -> ObterMetricas:
+        return ObterMetricas(
+            ConsultaDeMetricasSQLAlchemy(session), relogio=lambda: AGORA
+        )
+
+    monkeypatch.setattr(router, "obter_obter_metricas", com_relogio_fixo)
+
+
 def _cabecalhos(api: TestClient, email: str) -> dict[str, str]:
     login = api.post(
         "/api/v1/autenticacao/login", json={"email": email, "senha": SENHA_PADRAO}
@@ -211,14 +230,14 @@ def _cabecalhos(api: TestClient, email: str) -> dict[str, str]:
 
 
 class TestRota:
+    @pytest.mark.usefixtures("relogio_da_rota")
     def test_admin_recebe_total_por_status_e_permanencia_media(
         self,
         api_client: TestClient,
         admin: dict[str, str],
         session_factory: sessionmaker[Session],
     ) -> None:
-        agora = datetime.now(UTC)
-        criar_ordens_com_historicos(session_factory, *_fixture_conhecida(agora))
+        criar_ordens_com_historicos(session_factory, *_fixture_conhecida(AGORA))
 
         resposta = api_client.get(_METRICAS, headers=admin)
 
@@ -228,8 +247,7 @@ class TestRota:
         assert corpo["total"] == 3
         assert corpo["por_status"]["cancelada"] == 1
         assert corpo["por_status"]["recebida"] == 0
-        # Os mesmos 150 s, 300 s + 23 h e 600 s da leitura (a janela anda com o
-        # relogio real, e a folga das entradas e de horas).
+        # Os mesmos 150 s, 300 s + 23 h e 600 s da leitura.
         assert corpo["tempo_medio_por_status_segundos"] == pytest.approx(
             {
                 "recebida": 150.0,
@@ -327,16 +345,17 @@ def test_gauge_do_tempo_medio_guarda_a_fracao(
     ) == pytest.approx(150.375, abs=1e-3)
 
 
+@pytest.mark.usefixtures("relogio_da_rota")
 def test_gauges_do_coletor_sao_os_numeros_da_rota(
     api_client: TestClient,
     admin: dict[str, str],
     engine: Engine,
     session_factory: sessionmaker[Session],
 ) -> None:
-    criar_ordens_com_historicos(session_factory, *_fixture_conhecida(datetime.now(UTC)))
+    criar_ordens_com_historicos(session_factory, *_fixture_conhecida(AGORA))
 
     corpo = api_client.get(_METRICAS, headers=admin).json()
-    registro = _registro(engine)
+    registro = _registro(engine, agora=lambda: AGORA)
 
     for status, total in corpo["por_status"].items():
         assert registro.get_sample_value(

@@ -32,6 +32,8 @@ if TYPE_CHECKING:
     from sqlalchemy import Engine
     from sqlalchemy.orm import Session, sessionmaker
 
+# O relogio das ordens do coletor: as fixtures de historico e o coletor leem este.
+_AGORA = datetime(2026, 10, 14, 12, tzinfo=UTC)
 _SO_A_DISPONIBILIDADE = {"pytstop_saga_coletor_disponivel": [0]}
 _DA_SAGA = {
     "pytstop_saga_ativas",
@@ -92,12 +94,11 @@ class TestLeitura:
         metricas: Engine,
         session_factory: sessionmaker[Session],
     ) -> None:
-        agora = datetime.now(UTC)
         criar_ordens_com_historicos(
-            session_factory, [("recebida", agora), ("em_diagnostico", agora)]
+            session_factory, [("recebida", _AGORA), ("em_diagnostico", _AGORA)]
         )
 
-        raspagem = _raspar(ColetorDaApi(metricas.connect))
+        raspagem = _raspar(ColetorDaApi(metricas.connect, agora=lambda: _AGORA))
 
         assert set(raspagem) == _DA_SAGA | _DAS_ORDENS | _DA_OUTBOX | {
             "pytstop_saga_coletor_disponivel"
@@ -128,8 +129,9 @@ class TestLeitura:
         raspagem = _raspar(ColetorDaApi(metricas.connect))
 
         (idade,) = raspagem["pytstop_outbox_mais_antiga_segundos"]
-        # So a pendente mais antiga conta; a entregue e a morta, mais velhas, nao.
-        assert 120 <= idade < 150
+        # So a pendente mais antiga conta (120 s, e nao a de 10 s); a entregue
+        # (5.000 s) e a morta (9.000 s), mais velhas, nao entram.
+        assert 120 <= idade < 5000
 
     def test_sem_pendente_a_idade_vale_zero_e_a_serie_existe(
         self, metricas: Engine
@@ -172,14 +174,13 @@ class TestCache:
         session_factory: sessionmaker[Session],
         leituras_do_historico: list[str],
     ) -> None:
-        agora = datetime.now(UTC)
         relogio = RelogioFixo()
-        coletor = ColetorDaApi(engine.connect, relogio=relogio)
+        coletor = ColetorDaApi(engine.connect, relogio=relogio, agora=lambda: _AGORA)
         por_status = "pytstop_os_por_status"
 
         primeira = _raspar(coletor)
         # Muda o banco: a leitura em cache nao o ve.
-        criar_ordens_com_historicos(session_factory, [("recebida", agora)])
+        criar_ordens_com_historicos(session_factory, [("recebida", _AGORA)])
         relogio.avancar(29)
         dentro_da_validade = _raspar(coletor)
         relogio.avancar(2)
