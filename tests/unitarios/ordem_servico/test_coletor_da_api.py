@@ -273,6 +273,38 @@ class TestPrazo:
 
         assert daemon == [True]
 
+    def test_thread_que_nao_inicia_devolve_a_vez_e_a_raspagem_seguinte_le(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `RuntimeError: can't start new thread` (limite de pids do container). Sem
+        # devolver a vez, esta raspagem levantaria (o /metrics inteiro viraria 500) e
+        # todas as seguintes sairiam sem gauge ate o pod reiniciar.
+        coletor = _coletor()
+
+        def ler(leitura: _Leitura) -> None:
+            leitura.saga = _SAGA
+
+        _trocar_a_leitura(coletor, ler)
+        original = threading.Thread.start
+        falhas: list[int] = []
+
+        def start_que_falha_uma_vez(thread: threading.Thread) -> None:
+            if thread.name == "coletor-da-api" and not falhas:
+                falhas.append(1)
+                msg = "can't start new thread"
+                raise RuntimeError(msg)
+            original(thread)
+
+        monkeypatch.setattr(threading.Thread, "start", start_que_falha_uma_vez)
+
+        with capture_logs() as logs:
+            primeira = _raspar(coletor)
+        segunda = _raspar(coletor)
+
+        assert primeira == {"pytstop_saga_coletor_disponivel": [0]}
+        assert [log["motivo"] for log in logs] == ["RuntimeError"]
+        assert segunda["pytstop_saga_coletor_disponivel"] == [1]
+
     def test_raspagem_nao_espera_alem_do_necessario(self) -> None:
         coletor = _coletor(orcamento_s=30)
 

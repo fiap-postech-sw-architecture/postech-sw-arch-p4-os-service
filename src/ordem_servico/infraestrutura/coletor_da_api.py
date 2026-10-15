@@ -154,10 +154,7 @@ class ColetorDaApi:
     def collect(self) -> Iterator[GaugeMetricFamily]:
         leitura = _Leitura()
         if self._ocupado.acquire(blocking=False):
-            threading.Thread(
-                target=self._ler, args=(leitura,), daemon=True, name="coletor-da-api"
-            ).start()
-            if not leitura.pronta.wait(self._orcamento_s):
+            if self._iniciar(leitura) and not leitura.pronta.wait(self._orcamento_s):
                 _log.warning("api gauges unavailable", motivo="prazo_esgotado")
         else:
             _log.warning("api gauges unavailable", motivo="raspagem_anterior_presa")
@@ -174,6 +171,22 @@ class ColetorDaApi:
             yield _idade_da_outbox(outbox)
         if ordens is not None:
             yield from _familias_das_ordens(ordens)
+
+    def _iniciar(self, leitura: _Leitura) -> bool:
+        """Abre a thread de leitura; sem thread (limite de pids), devolve a vez.
+
+        Sem isto, o ``start()`` que levanta deixaria a trava tomada para sempre: o
+        ``release`` mora no ``finally`` de ``_ler``, que nunca chegaria a rodar.
+        """
+        try:
+            threading.Thread(
+                target=self._ler, args=(leitura,), daemon=True, name="coletor-da-api"
+            ).start()
+        except Exception as exc:  # noqa: BLE001  # RuntimeError "can't start new thread"
+            self._ocupado.release()
+            _log.warning("api gauges unavailable", motivo=type(exc).__name__)
+            return False
+        return True
 
     def _ler(self, leitura: _Leitura) -> None:
         """Corpo da thread de leitura: nunca levanta e sempre devolve a vez."""
