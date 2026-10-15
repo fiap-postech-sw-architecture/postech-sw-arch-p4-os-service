@@ -250,24 +250,21 @@ def test_ref_que_nao_e_a_main_nao_publica_imagem(tmp_path: Path, ref: str) -> No
 
 
 def test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor() -> None:
-    job = yaml.safe_dump(_jobs()["deploy-remote"]).lower()
+    # Ligar o deploy remoto acrescenta o passo de acesso ao cluster (README,
+    # "Deploy remoto") e relaxa estas asserções de proposito.
+    job = _jobs()["deploy-remote"]
     workflow = yaml.safe_dump(_carrega()).lower()
 
     assert "environment" not in job
-    assert "id-token" not in job
-    assert "secrets." not in job
+    assert "id-token" not in job["permissions"]
+    assert "secrets." not in yaml.safe_dump(job).lower()
     # O unico segredo do workflow e o token do GHCR, no login do image.
     assert set(re.findall(r"secrets\.(\w+)", workflow)) == {"github_token"}
-    for provedor in (
-        "azure",
-        "aws",
-        "eks",
-        "gcp",
-        "oidc",
-        "producao",
-        "k3s_habilitado",
-    ):
-        assert provedor not in CD.read_text().lower(), provedor
+    # Nenhuma action de login de provedor: o acesso ao cluster e do dono do repositorio.
+    usos = {
+        passo["uses"].partition("@")[0] for passo in job["steps"] if "uses" in passo
+    }
+    assert usos == {"actions/checkout"}
 
 
 def test_deploy_remote_usa_o_commit_do_platform_do_kind_e_o_digest_da_imagem() -> None:
@@ -584,24 +581,25 @@ def test_inputs_do_dispatch_so_entram_por_env_e_o_passo_valida_o_padrao() -> Non
 
 
 def test_nenhum_run_interpola_expressao() -> None:
-    # Nada de ${{ }} em script: input, saida de passo e contexto do github
-    # entram por env, onde o shell os trata como dado.
+    # Nada de ${{ }} em script, nos tres workflows: input, saida de passo e
+    # contexto do github entram por env, onde o shell os trata como dado. O
+    # ci.yml e o security.yml rodam em PR de fork, onde github.head_ref e o
+    # titulo do PR sao do autor.
+    arquivos = sorted(WORKFLOWS.glob("*.yml"))
     com_expressao = [
-        (job, passo.get("name") or passo.get("id") or passo["run"][:40])
-        for job, passo in _todos_os_passos()
+        (arquivo.name, nome, passo.get("name") or passo.get("id") or passo["run"][:40])
+        for arquivo in arquivos
+        for nome, job in _carrega(arquivo)["jobs"].items()
+        for passo in job.get("steps", [])
         if "run" in passo and "${{" in passo["run"]
     ]
 
+    assert [arquivo.name for arquivo in arquivos] == [
+        "cd.yml",
+        "ci.yml",
+        "security.yml",
+    ]
     assert com_expressao == []
-
-
-def test_nenhum_arquivo_do_workflow_interpola_input_em_run() -> None:
-    for arquivo in WORKFLOWS.glob("*.yml"):
-        for job in _carrega(arquivo)["jobs"].values():
-            for passo in job.get("steps", []):
-                run = passo.get("run", "")
-                assert "github.event.inputs" not in run, arquivo.name
-                assert "${{ inputs." not in run, arquivo.name
 
 
 # --- actions por SHA -------------------------------------------------------
@@ -757,7 +755,11 @@ jq -r "$filtro" "$base.json"
 
 def _exige_jq() -> None:
     if shutil.which("jq") is None:
-        pytest.skip("jq nao esta no PATH")
+        # Sem o jq somem, calados, os testes que executam os passos do workflow.
+        mensagem = "jq nao esta no PATH: os testes dos passos do workflow precisam dele"
+        if os.environ.get("CI"):
+            pytest.fail(mensagem)
+        pytest.skip(mensagem)
 
 
 def _gh_falso(pasta: Path) -> tuple[Path, Path]:
@@ -809,6 +811,10 @@ class _Ambiente:
 
     def falha_da_api(self, repo: str, mensagem: str) -> None:
         endpoint = f"repos/{REPOS[repo]}/actions/workflows/cd.yml/runs"
+        self._arquivo(endpoint, ".erro").write_text(mensagem + "\n")
+
+    def falha_da_main(self, repo: str, mensagem: str) -> None:
+        endpoint = f"repos/{REPOS[repo]}/commits/main"
         self._arquivo(endpoint, ".erro").write_text(mensagem + "\n")
 
     def todos_verdes(self) -> None:
@@ -1012,6 +1018,41 @@ def test_falha_da_api_que_nao_e_404_reprova_em_vez_de_cair_na_main(
     assert "HTTP 403" in resultado.stderr
     assert "::warning::" not in resultado.stdout
     assert amb.saida.read_text() == ""
+
+
+@pytest.mark.parametrize(
+    "mensagem",
+    ["gh: Not Found (HTTP 404)", "gh: Server Error (HTTP 500)"],
+    ids=["404", "500"],
+)
+def test_falha_ao_ler_a_main_head_reprova_sem_gravar_a_saida(
+    amb: _Ambiente, mensagem: str
+) -> None:
+    # Sem run verde o passo le a main HEAD: se essa segunda chamada falha, o
+    # passo reprova, em vez de seguir com um commit que nao resolveu.
+    amb.todos_verdes()
+    amb.corridas(PRIMEIRO_VIZINHO)
+    amb.falha_da_main(PRIMEIRO_VIZINHO, mensagem)
+
+    resultado = amb.roda()
+
+    assert resultado.returncode != 0
+    assert mensagem in resultado.stderr
+    assert "::warning::" not in resultado.stdout
+    assert amb.saida.read_text() == ""
+
+
+def test_sem_jq_a_fixture_falha_na_ci_e_pula_fora_dela(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda nome: None)
+    monkeypatch.setenv("CI", "true")
+    with pytest.raises(pytest.fail.Exception):
+        _exige_jq()
+
+    monkeypatch.delenv("CI")
+    with pytest.raises(pytest.skip.Exception):
+        _exige_jq()
 
 
 def test_resposta_que_nao_e_um_commit_reprova(amb: _Ambiente) -> None:
