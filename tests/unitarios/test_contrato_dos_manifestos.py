@@ -667,6 +667,37 @@ def test_root_path_e_o_prefixo_que_a_borda_roteia_e_producao_nao_cai_em_dev(
     assert configuracao["ENVIRONMENT"] == "production"
 
 
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_metrics_da_api_nao_sai_pela_borda(overlay: str) -> None:
+    # O /metrics da API esta sempre ligado (a flag que o devolvia como 404 saiu): o
+    # que o tira da borda e o Ingress `fora-da-borda`, em que o Kong responde 404
+    # sem chamar o servico. O caminho mais longo vence, entao o bloqueio tem de ser
+    # `/os/metrics` em Prefix, e nenhum outro Ingress pode publicar um /metrics.
+    ingressos = do_render_por_tipo(overlay, "Ingress")
+    bloqueios = [
+        i
+        for i in ingressos
+        if i["metadata"].get("annotations", {}).get("konghq.com/plugins")
+        == "fora-da-borda"
+    ]
+
+    assert [i["metadata"]["name"] for i in bloqueios] == ["os-service-fora-da-borda"]
+    caminhos = {
+        c["path"]: c["pathType"]
+        for r in bloqueios[0]["spec"]["rules"]
+        for c in r["http"]["paths"]
+    }
+    assert caminhos["/os/metrics"] == "Prefix"
+    publicados = [
+        c["path"]
+        for i in ingressos
+        if i not in bloqueios
+        for r in i["spec"]["rules"]
+        for c in r["http"]["paths"]
+    ]
+    assert [p for p in publicados if "metrics" in p] == []
+
+
 @pytest.mark.parametrize(
     ("overlay", "maximo_da_api", "disco_do_banco"),
     [
