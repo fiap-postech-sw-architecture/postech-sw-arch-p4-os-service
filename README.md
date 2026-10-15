@@ -853,7 +853,7 @@ uv run python -m src.notificador
 
 ## Implantação
 
-Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (local), `kind-ci` (o CD, com uma réplica só da API) e `k3s` (a VM na Azure). Tudo vai para o namespace `pytstop-os`, com Pod Security `restricted`. Nenhum Secret está nos manifestos: os do serviço nascem no `make deploy` do platform ([segredos gerados](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)) e entram por `secretKeyRef` ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)).
+Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (local), `kind-ci` (o CD, com uma réplica só da API) e `k3s` (um cluster persistente genérico, o overlay padrão do [deploy remoto](#deploy-remoto-opcional), que vem desligado). Tudo vai para o namespace `pytstop-os`, com Pod Security `restricted`. Nenhum Secret está nos manifestos: os do serviço nascem no `make deploy` do platform ([segredos gerados](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)) e entram por `secretKeyRef` ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)).
 
 | Objeto | O que é |
 |---|---|
@@ -957,19 +957,148 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 
 - `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
 - `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
+- `make lint-workflows`: actionlint, com o shellcheck da imagem nos scripts dos `run:`, em todos os workflows (a imagem é a `rhysd/actionlint:1.7.12`, fixada por digest no Makefile, na mesma versão do `lint-scripts` do platform). Entra no `make check` e no job `lint`.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
 - `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
 make check
+make lint-workflows
 make manifests
 make audit
 make smoke
 ```
 
-`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e precisa de rede: offline, rode com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
+`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e o que confere o SHA das actions contra as tags roda `git ls-remote`: os dois precisam de rede, e offline se roda com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
 No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira. O resultado do pip-audit e o do trivy aparecem no log enquanto rodam e também no summary do job (`scripts/ci/registra-no-summary.sh`, que mantém o código de saída da ferramenta); o resumo da cobertura mostra o número do gate (linhas e ramos), o que o `fail_under` compara.
+
+## CD
+
+O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) implanta o serviço depois do merge. **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: o `deploy-kind` sobe a plataforma e os três serviços num cluster que some com o job e valida o deploy com o E2E (teste ponta a ponta) da saga; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). Ele substitui o `deploy-k3s` do ADR-042, e a emenda do ADR (com a da RFC-004) sai em PR de documentos do platform, a abrir.
+
+A cada push na `main`, depois do merge de cada PR, e no `workflow_dispatch`:
+
+1. `ci` e `security-scan` chamam o `ci.yml` e o `security.yml` como workflows reutilizáveis: o CI e a varredura de segurança não rodam duas vezes, e o PR continua rodando os dois pelo próprio gatilho.
+2. `image` constrói a imagem uma vez e a publica no GHCR (GitHub Container Registry), com o SHA do commit como tag.
+3. `deploy-kind` carrega essa imagem num kind, roda o smoke de cada namespace e o E2E, e guarda os relatórios.
+4. `deploy-remote`, se estiver ligado, implanta no cluster remoto o mesmo digest que passou no kind (o digest é o `sha256:...` que identifica o conteúdo da imagem). Desligado, o `remote-skipped` só registra o aviso.
+
+Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório). O GitHub guarda um único run pendente por grupo: um push ou um dispatch seguinte substitui o pendente, e o commit do run trocado fica sem CD. O run que sobra testa o estado mais novo da `main`.
+
+### Jobs
+
+| Job | O que faz | Depende de | Prazo | Permissões do job |
+|---|---|---|---|---|
+| `ci` | Chama o `ci.yml`: `lint`, `type-check`, `security`, `test`, `sonarqube` e `build` | | | `contents: read` |
+| `security-scan` | Chama o `security.yml`: `pip-audit`, `gitleaks` e `trivy` | | | `contents: read` |
+| `image` | Só roda na `main` (o primeiro passo reprova qualquer outra ref). Constrói a imagem uma vez e a publica em `ghcr.io/<organização>/pytstop-os-service:<sha do commit>`, com SBOM (a lista de pacotes da imagem) em SPDX (formato padrão de SBOM) e proveniência mínima (`provenance: mode=min`). Confere o digest com um `docker pull`, salva o tar `linux/amd64` e o SBOM | `ci`, `security-scan` | 30 min | `contents: read`, `packages: write` |
+| `deploy-kind` | Sobe a plataforma e os três serviços num kind do runner, roda o smoke de cada namespace e o E2E da saga (abaixo) | `image` | 45 min | `contents: read`, `actions: read` |
+| `deploy-remote` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda na `main` e com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
+| `remote-skipped` | O oposto: com a variável desligada, só registra o aviso de que o deploy remoto não rodou | `deploy-kind` | 5 min | nenhuma |
+
+O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`. Nenhum job pede token de identidade, e o arquivo não guarda credencial de provedor nenhum. O `actions: read` do `deploy-kind` serve à consulta dos runs do `cd.yml` dos vizinhos. Como os dois repositórios são públicos, a leitura talvez funcione sem a permissão, mas só um run na `main` prova isso, então ela fica.
+
+O `workflow_dispatch` aceita qualquer ref, e o `image` publica no GHCR a imagem que o deploy remoto implanta. Por isso o primeiro passo do `image` reprova fora de `refs/heads/main` (`images are published from main only`), e o `deploy-remote` repete a condição. O CI e a varredura de segurança rodam antes, então o erro de ref aparece só depois deles.
+
+### O que o `deploy-kind` faz, na ordem
+
+1. Escolhe os commits do platform e dos dois serviços vizinhos ([abaixo](#commits-do-platform-e-dos-vizinhos)) e faz o checkout de cada um, mais o deste repositório, sem guardar a credencial do GitHub.
+2. Baixa o artefato `imagem`, o tar da imagem que o `image` acabou de publicar: o E2E testa a mesma imagem que vai ao GHCR.
+3. `scripts/ci/deploy-kind.sh` do platform: kind e kubectl com versão e sha256 fixados, `make kind-up` e `make deploy` no overlay `kind-ci`, que gera os Secrets no run. Nada de segredo vem do GitHub.
+4. `scripts/ci/implantar-servicos.sh --overlay kind-ci`: este serviço entra pelo tar (`kind load image-archive`); o Billing e a Execução são construídos do código no commit escolhido. Aplica o overlay `kind-ci` de cada serviço e espera o banco, o Job de migração e os Deployments, nessa ordem. O contrato está no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#contrato-com-os-serviços).
+5. `scripts/ci/smoke-servicos.sh`: por namespace, o Job completo, os rollouts, a saúde e o Swagger pela borda, o `/metrics` fora da borda, o `up` de cada pod e o `pg_up` ou `mongodb_up` no Prometheus e a NetworkPolicy do banco. A tabela `Service | Stage | Result` vai para o summary e o passo reprova nomeando o serviço.
+6. `make -C platform e2e`: o BDD (cenários em Gherkin) da saga pela borda, com o resumo e os relatórios.
+7. Sempre, mesmo com falha: o resumo de minutos por etapa e memória (`scripts/medir-kind.sh`) no summary, a varredura de segredos nos relatórios do E2E (`python -m e2e.varredura` do platform, que apaga o arquivo com segredo e reprova o passo) e o upload do artefato `e2e-kind`. Com falha ou cancelamento (inclusive o do `timeout-minutes`): `scripts/ci/diagnostico.sh`, que despeja pods, eventos e logs de todos os namespaces com o cluster ainda de pé.
+
+O job fica verde só se o E2E passar. O resumo e o diagnóstico só rodam se o checkout do platform aconteceu: com um `sha_*` inválido o primeiro passo reprova antes de qualquer checkout, e o único vermelho é o dele.
+
+### Commits do platform e dos vizinhos
+
+O primeiro passo do `deploy-kind` escolhe o commit de cada um dos três repositórios e escreve a tabela no summary, com a origem de cada commit. Este serviço é sempre o commit do run.
+
+1. O commit do input do dispatch, se houver.
+2. Senão, o commit do último run verde do `cd.yml` daquele repositório, na `main` e disparado por push (`gh api repos/<organização>/<repositório>/actions/workflows/cd.yml/runs` com `branch=main`, `event=push` e `status=success`). O platform e os vizinhos entram assim, e não pelo último commit da `main`: uma `main` quebrada de um vizinho não derruba o CD dos outros, e o vermelho fica no CD de quem a quebrou.
+3. Senão, a `main` HEAD do repositório, com um `::warning::` nomeando o repositório. É o caso de um repositório sem nenhum CD verde, o que inclui o repositório sem `cd.yml` (a API responde 404). Qualquer outra falha da API, como o limite de requisições, reprova o passo, em vez de cair na `main` calado.
+
+### Imagem, SBOM e proveniência
+
+- **Tag e digest:** a tag é o SHA do commit. O `image` confere que o digest que o `docker pull` imprime é o do build e usa esse digest no deploy remoto.
+- **SBOM:** o `docker buildx imagetools inspect --format '{{ json .SBOM }}'` devolve o documento SPDX dentro de `{"SPDX": ...}`; o passo extrai o documento, reprova se ele não lista nenhum pacote e sobe o resultado como artefato.
+- **Proveniência:** o atestado de proveniência (como a imagem foi construída) fica no índice da imagem, no registro público. É o mínimo (`mode=min`) e sem o payload do evento do push: o buildx o grava na proveniência em qualquer modo, com nome e e-mail dos autores, e só o `provenance-add-gha=false` do `setup-buildx-action` o tira.
+- **Imagens do build fixadas por digest:** o BuildKit, o gerador do SBOM e a imagem do actionlint do Makefile. As tags delas andam; os comentários do `cd.yml` e do Makefile dizem como subir.
+- **Visibilidade:** o pacote `pytstop-os-service` é público por herança, e nada neste repositório o configura: ele nasce vinculado a este repositório, que é público, pela label `org.opencontainers.image.source` do Dockerfile. Se a visibilidade mudar, o cluster do `deploy-remote` precisa de um segredo de pull do `ghcr.io`.
+- **Gate no commit, não no artefato:** o `ci / build`, o `security-scan / trivy` e o `image` constroem o Dockerfile cada um no seu job, e o Dockerfile faz `apt-get upgrade` sobre `python:3.14-slim`, uma tag que anda. O digest publicado pode ter pacotes do sistema diferentes dos que passaram no smoke do CI e no trivy. O E2E do `deploy-kind` testa o tar do `image`, a mesma imagem que foi ao GHCR.
+- **Registro antes do E2E:** a imagem vai ao GHCR antes do smoke e do E2E, então o registro tem imagens de commits cujo `deploy-kind` ficou vermelho. A tag não é um selo de CD verde; o deploy remoto implanta por digest, e só depois do kind verde.
+
+### Artefatos e summary
+
+| Artefato | Conteúdo | Retenção |
+|---|---|---|
+| `imagem` | `imagem.tar`, a imagem `linux/amd64` sem os manifestos de atestado (com eles, o `kind load` falha por digest ausente no image store do containerd) | 1 dia |
+| `sbom-os-service` | O documento SPDX 2.3 da imagem publicada, com os pacotes dela | 90 dias |
+| `e2e-kind` | `platform/reports/e2e/` depois da varredura de segredos: `resumo.md`, `junit.xml`, `cucumber.json`, `cenarios.json` e o trace do caminho feliz | 90 dias |
+
+São os três artefatos do run. O registro do build (`*.dockerbuild`) que o `docker/build-push-action` anexaria sozinho está desligado (`DOCKER_BUILD_RECORD_UPLOAD`).
+
+O summary do run traz, em ordem: os commits usados, a imagem (referência, digest e número de pacotes do SBOM), as tabelas do smoke e do E2E e os minutos por etapa e a memória do nó do kind.
+
+### Reexecutar e acompanhar
+
+Dispare o `workflow_dispatch` sempre com `--ref main`. Ele aceita `sha_platform`, `sha_billing_service` e `sha_execution_service`, todos opcionais, cada um com 40 caracteres hexadecimais minúsculos (um SHA abreviado, em maiúsculas, um nome de ramo ou qualquer outra coisa reprova o passo antes de qualquer checkout). O `sha_os_service` mantém as mesmas entradas dos CDs dos outros serviços e só aceita vazio ou o commit do run: este serviço é sempre o commit que iniciou o workflow. Os valores entram nos passos só por variável de ambiente, nunca dentro de um script.
+
+```bash
+BILLING=$(gh api repos/fiap-postech-sw-architecture/postech-sw-arch-p4-billing-service/commits/main --jq .sha)
+gh workflow run cd.yml --ref main -f sha_billing_service="$BILLING"
+gh run watch "$(gh run list --workflow cd.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+O `gh run watch` sem id abre um seletor interativo; o comando acima segue o último run. Antes de reexecutar, quatro fatos:
+
+1. O artefato `imagem` vive 1 dia. Depois disso, o "Re-run failed jobs" reprova no download dele: rode `gh workflow run cd.yml --ref main` no lugar do re-run.
+2. O re-run do job `image` publica de novo a mesma tag (o SHA do commit) com outro digest. O digest que vale é o da tentativa mais recente, o do summary dela.
+3. Um dispatch pendente é trocado por um push seguinte, e um push pendente, por um dispatch: o grupo de `concurrency` guarda um pendente só.
+4. Um `sha_*` inválido só reprova no primeiro passo do `deploy-kind`, depois do CI e da imagem (cerca de 10 minutos). A mensagem nomeia a entrada.
+
+### Dois serviços que mudam contrato juntos
+
+O CD de cada serviço usa os vizinhos no último CD verde deles. Se o OS e o Billing mudam o mesmo contrato de forma incompatível, o CD de cada um sobe a versão nova com a antiga do outro e fica vermelho, e o último verde de nenhum dos dois avança. Para sair do impasse:
+
+1. Prove a combinação nova com o `workflow_dispatch`: no OS, `sha_billing_service` com o commit novo do Billing; no Billing, `sha_os_service` com o commit novo do OS. Com o deploy remoto ligado, o mesmo run implanta o digest dela.
+2. Esse run não vira "último CD verde", porque a consulta olha só os runs disparados por push.
+3. Um dos dois precisa então de um push verde com o vizinho antigo, ou seja, de um PR que aceite os dois formatos. Depois o outro muda, e o primeiro retira o formato antigo (expandir e contrair, [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md)).
+
+Entrar em duas etapas desde o começo evita o impasse.
+
+### Deploy remoto (opcional)
+
+O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Ele substitui o `deploy-k3s` do ADR-042, e o `DEPLOY_REMOTO_HABILITADO` ocupa o lugar do `K3S_HABILITADO`: a emenda do ADR-042, da RFC-004 e da análise de lacunas sai em PR de documentos do platform, a abrir. Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente), o `deploy-remote` fica de fora e o `remote-skipped` registra um `::notice::` no run.
+
+O `deploy-remote` só roda na `main`. Antes do checkout ele compara o commit do platform usado no kind com a `main` do platform (`compare main...<sha>`) e só aceita `identical` ou `behind`: o `deploy-remoto.sh` desse commit roda com a credencial do cluster, e um dispatch pode apontar para qualquer commit do platform. O job no repositório não tem segredo nem `environment`. Para ligar:
+
+1. Criar as variáveis do repositório (ou da organização): `DEPLOY_REMOTO_HABILITADO` com o valor `true`, `DEPLOY_REMOTO_CONTEXTO` com o nome do contexto do kubeconfig (sem ela o job reprova nomeando-a) e, se não for o overlay `k3s` dos manifestos, `DEPLOY_REMOTO_OVERLAY`.
+2. Criar um `environment` (por exemplo, `cluster-remoto`) com as branches de deploy restritas à `main` (Settings, Environments, Deployment branches and tags, Selected branches and tags) e guardar nele o kubeconfig do cluster, no segredo `KUBECONFIG_REMOTO`. Um segredo de repositório não serve: qualquer workflow de qualquer branch o lê. O do `environment` só chega ao job que o declara e só a partir da `main`.
+3. No job `deploy-remote`, declarar `environment: cluster-remoto` e trocar o passo "Acesso ao cluster remoto (a configurar)" por este, que grava o kubeconfig só para o dono, fora do workspace, e o exporta para o passo seguinte:
+
+   ```yaml
+   - name: Acesso ao cluster remoto
+     env:
+       KUBECONFIG_REMOTO: ${{ secrets.KUBECONFIG_REMOTO }}
+     run: |
+       umask 077
+       printf '%s' "$KUBECONFIG_REMOTO" > "$RUNNER_TEMP/kubeconfig"
+       echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+   ```
+
+   Com a identidade federada do provedor (OIDC) no lugar do kubeconfig, o passo é a action de login dele, e o job ganha `id-token: write`.
+4. Relaxar de propósito o teste `test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor` (`tests/unitarios/test_cd.py`), que hoje proíbe `secrets.`, `environment`, `id-token` e qualquer action que não seja o checkout no job. A proibição guarda o estado desligado: ligar o deploy remoto é a mudança que a desfaz, no mesmo PR.
+5. Ter o script `platform/scripts/ci/deploy-remoto.sh` no platform. Ele chega num PR próprio do platform, com a interface que o job já chama: `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`, no contexto já ativo, com o overlay deste serviço, as imagens por digest do GHCR, a ordem de implantação e o smoke. Enquanto ele não existir no commit do platform usado no run, o job reprova dizendo isso, em vez de um erro de arquivo no meio do log.
+
+O job pede só `contents: read` e `packages: read`. Se o pacote do GHCR deixar de ser público, o cluster precisa de um segredo de pull do `ghcr.io`.
+
+### Conferir o workflow sem empurrar
+
+O `cd.yml` só roda no GitHub, depois do merge ou no dispatch. Antes disso: `make lint-workflows` (actionlint e shellcheck) e `uv run pytest tests/unitarios/test_cd.py`. O teste lê o YAML (jobs, dependências, permissões mínimas por job, `concurrency`, entradas do dispatch, a guarda de ref, nenhuma expressão dentro de `run:` nos três workflows, actions por SHA de commit, imagens do build por digest, artefatos e retenções, o `if` do resumo e do diagnóstico, nenhum `continue-on-error` nem `|| true` no `image` e no `deploy-kind`) e executa, com `gh`, `docker` e `deploy-remoto.sh` falsos, os passos que escolhem os commits, conferem o SBOM, comparam o commit do platform com a `main` dele e chamam o deploy remoto. Esses testes usam o `jq`; sem ele a suíte falha na CI e pula fora dela. Que o SHA de cada action seja mesmo o commit da tag do comentário só se confere com rede (teste `rede`, `git ls-remote`).
 
 ## Repositórios da fase 4
 

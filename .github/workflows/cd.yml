@@ -1,0 +1,426 @@
+name: CD
+
+# Deploy automatizado do OS Service (ADR-042). A cada push na main: o mesmo CI
+# e a mesma varredura de seguranca do PR (workflows reutilizaveis), a imagem
+# construida uma vez e publicada no GHCR com o SHA do commit como tag, o deploy
+# num kind efemero dentro do runner com a plataforma e os tres servicos,
+# validado pelo smoke de cada namespace e pelo E2E BDD da saga. O kind do
+# runner e o ambiente Kubernetes do deploy automatizado; o deploy remoto, num
+# cluster persistente, e opcional e vem desligado. README, secao "CD".
+on:
+  push:
+    branches: [main]
+  # Reexecuta uma combinacao de commits, sempre a partir da main (o job image
+  # reprova outra ref). O OS Service e sempre o commit do run: sha_os_service so
+  # aceita esse valor e mantem as mesmas entradas dos CDs dos outros servicos.
+  workflow_dispatch:
+    inputs:
+      sha_platform:
+        description: "Commit do platform (40 hexadecimais minusculos); vazio usa o do ultimo CD verde"
+        required: false
+        type: string
+      sha_os_service:
+        description: "Vazio ou o commit deste run"
+        required: false
+        type: string
+      sha_billing_service:
+        description: "Commit do Billing Service (40 hexadecimais minusculos); vazio usa o do ultimo CD verde"
+        required: false
+        type: string
+      sha_execution_service:
+        description: "Commit do Execution Service (40 hexadecimais minusculos); vazio usa o do ultimo CD verde"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Um CD por vez no repositorio, sem cancelar o que esta em curso: dois pushes
+# seguidos nao implantam fora de ordem. O GitHub guarda um unico run pendente
+# por grupo, entao o push seguinte substitui o pendente e aquele commit fica
+# sem CD; o run que sobra testa o estado mais novo da main.
+concurrency:
+  group: cd-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  SERVICO: os-service
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  security-scan:
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+
+  # Constroi a imagem uma vez. O deploy-kind carrega o tar daqui (a imagem que
+  # o E2E testa e a que foi para o GHCR), e o deploy-remote, se ligado, implanta o
+  # mesmo digest.
+  image:
+    needs: [ci, security-scan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      imagem: ${{ steps.meta.outputs.imagem }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      # O workflow_dispatch roda de qualquer ref, e este job publica no GHCR a
+      # imagem que o deploy remoto implanta: so a main passa daqui.
+      - name: So a main publica imagem
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] \
+            || { echo "::error::images are published from main only"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: meta
+        name: Referencia da imagem e data do commit
+        env:
+          DONO: ${{ github.repository_owner }}
+        run: |
+          {
+            echo "imagem=ghcr.io/${DONO,,}/pytstop-${SERVICO}:${GITHUB_SHA}"
+            echo "data=$(git show -s --format=%cI HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      # O BuildKit e o gerador do SBOM entram por digest: as tags (buildx-stable-1
+      # e stable-1) andam, e este e o unico job com packages: write. Para subir:
+      # docker buildx imagetools inspect moby/buildkit:buildx-stable-1 (e
+      # docker/buildkit-syft-scanner:stable-1). O provenance-add-gha=false tira do
+      # atestado, que fica publico no registro, e do log do build o payload do
+      # evento (nome e e-mail de quem fez o push): o buildx o grava na proveniencia
+      # em qualquer mode, min inclusive.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: |
+            image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+            provenance-add-gha=false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # SBOM em SPDX e proveniencia ficam no indice da imagem no registry. O
+      # cache de camadas e o do BuildKit no cache do GitHub, por servico. O
+      # registro do build (*.dockerbuild) que a action anexaria sozinha, por 90
+      # dias, fica desligado: os artefatos do run sao so os tres listados no README.
+      - id: build
+        name: Build e push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          push: true
+          sbom: generator=docker/buildkit-syft-scanner@sha256:ae4f3b554449e7e25548e7d8ccc029d17357348e30c6e3df01b92bc93654d6a9
+          provenance: mode=min
+          tags: ${{ steps.meta.outputs.imagem }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_DATE=${{ steps.meta.outputs.data }}
+          cache-from: type=gha,scope=${{ env.SERVICO }}
+          cache-to: type=gha,mode=max,scope=${{ env.SERVICO }}
+      # So a plataforma linux/amd64, sem os manifestos de atestado do indice:
+      # com eles o kind load falha por digest ausente no image store do
+      # containerd. O docker pull imprime o digest do indice, que tem de ser o
+      # que o build publicou.
+      - name: Confere o digest publicado e salva o tar da imagem
+        env:
+          IMAGEM: ${{ steps.meta.outputs.imagem }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -o pipefail
+          docker pull --platform linux/amd64 "$IMAGEM" | tee pull.log
+          grep -qxF "Digest: $DIGEST" pull.log \
+            || { echo "::error::the digest pulled for $IMAGEM is not the one that was pushed"; exit 1; }
+          docker save --platform linux/amd64 -o imagem.tar "$IMAGEM"
+      - name: SBOM da imagem publicada e resumo
+        env:
+          IMAGEM: ${{ steps.meta.outputs.imagem }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "$IMAGEM" --format '{{ json .SBOM }}' > sbom-buildx.json
+          jq .SPDX sbom-buildx.json > "sbom-${SERVICO}.spdx.json"
+          pacotes=$(jq '.packages | length' "sbom-${SERVICO}.spdx.json")
+          [ "$pacotes" -gt 0 ] || { echo "::error::the SBOM of $IMAGEM lists no package"; exit 1; }
+          echo "image $IMAGEM digest $DIGEST, SBOM with $pacotes packages"
+          {
+            echo "### Image"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Reference | \`$IMAGEM\` |"
+            echo "| Digest | \`$DIGEST\` |"
+            echo "| SBOM (SPDX) | $pacotes packages, artifact \`sbom-${SERVICO}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: imagem
+          path: imagem.tar
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ env.SERVICO }}
+          path: sbom-${{ env.SERVICO }}.spdx.json
+          retention-days: 90
+
+  # O deploy obrigatorio: a plataforma e os tres servicos num kind do runner. O
+  # proprio servico entra pela imagem do job image; o platform e os dois
+  # vizinhos, construidos do codigo, nos commits do ultimo CD verde de cada um.
+  deploy-kind:
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # Para o passo shas consultar os runs do cd.yml dos vizinhos. Os dois
+      # repositorios sao publicos e a leitura talvez funcione sem esta permissao,
+      # mas so um run na main prova isso: fica.
+      actions: read
+    outputs:
+      sha_platform: ${{ steps.shas.outputs.sha_platform }}
+    steps:
+      # Os quatro inputs do dispatch entram so por env e sao validados antes de
+      # qualquer checkout. Sem input, o commit do ultimo run verde do cd.yml do
+      # repositorio na main (push); sem run verde ainda (o cd.yml novo, ou o
+      # repositorio sem ele: 404), a main HEAD, com aviso. Qualquer outra falha
+      # da API reprova o passo, em vez de cair na main calado.
+      - id: shas
+        name: Commits do platform e dos vizinhos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DONO: ${{ github.repository_owner }}
+          SHA_PROPRIO: ${{ github.sha }}
+          SHA_PLATFORM: ${{ inputs.sha_platform }}
+          SHA_OS_SERVICE: ${{ inputs.sha_os_service }}
+          SHA_BILLING_SERVICE: ${{ inputs.sha_billing_service }}
+          SHA_EXECUTION_SERVICE: ${{ inputs.sha_execution_service }}
+        run: |
+          set -euo pipefail
+          padrao='^[0-9a-f]{40}$'
+          for nome in SHA_PLATFORM SHA_OS_SERVICE SHA_BILLING_SERVICE SHA_EXECUTION_SERVICE; do
+            valor=${!nome}
+            if [ -n "$valor" ] && ! [[ "$valor" =~ $padrao ]]; then
+              echo "::error::input $(tr '[:upper:]' '[:lower:]' <<< "$nome") must be 40 lowercase hexadecimal characters"
+              exit 1
+            fi
+          done
+          # Este servico (env SERVICO) e sempre o commit do run: o input dele so
+          # aceita vazio ou esse commit.
+          entrada_propria=SHA_$(tr '[:lower:]-' '[:upper:]_' <<< "$SERVICO")
+          if [ -n "${!entrada_propria}" ] && [ "${!entrada_propria}" != "$SHA_PROPRIO" ]; then
+            echo "::error::input $(tr '[:upper:]' '[:lower:]' <<< "$entrada_propria") must be empty or the commit of this run: the image of this service is built from the commit that started the workflow"
+            exit 1
+          fi
+          erro=$(mktemp)
+          ultimo_verde() {
+            local resposta
+            if ! resposta=$(gh api -X GET "repos/$DONO/$1/actions/workflows/cd.yml/runs" \
+              -f branch=main -f event=push -f status=success -f per_page=1 \
+              --jq '.workflow_runs[0].head_sha // empty' 2> "$erro"); then
+              grep -q 'HTTP 404' "$erro" || { cat "$erro" >&2; return 1; }
+              resposta=""
+            fi
+            echo "$resposta"
+          }
+          # resolver <nome> <input do dispatch>: grava sha_<nome> e origem_<nome>.
+          resolver() {
+            local repo sha origem
+            repo=postech-sw-arch-p4-${1//_/-}
+            if [ -n "$2" ]; then
+              sha=$2
+              origem="dispatch input"
+            else
+              sha=$(ultimo_verde "$repo")
+              origem="last green CD"
+              if [ -z "$sha" ]; then
+                sha=$(gh api "repos/$DONO/$repo/commits/main" --jq .sha)
+                origem="main HEAD, no green CD yet"
+                if [[ "$sha" =~ $padrao ]]; then
+                  echo "::warning::$repo has no green CD run on main yet: using main HEAD $sha"
+                fi
+              fi
+            fi
+            [[ "$sha" =~ $padrao ]] || { echo "::error::could not resolve a commit for $repo"; exit 1; }
+            printf -v "sha_$1" %s "$sha"
+            printf -v "origem_$1" %s "$origem"
+          }
+          for nome in platform os_service billing_service execution_service; do
+            entrada=SHA_$(tr '[:lower:]' '[:upper:]' <<< "$nome")
+            if [ "${nome//_/-}" = "$SERVICO" ]; then
+              printf -v "sha_$nome" %s "$SHA_PROPRIO"
+              printf -v "origem_$nome" %s "this run"
+            else
+              resolver "$nome" "${!entrada}"
+            fi
+          done
+          {
+            echo "sha_platform=$sha_platform"
+            echo "sha_os_service=$sha_os_service"
+            echo "sha_billing_service=$sha_billing_service"
+            echo "sha_execution_service=$sha_execution_service"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Commits used by the kind deploy"
+            echo
+            echo "| Repository | Commit | Origin |"
+            echo "|---|---|---|"
+            echo "| postech-sw-arch-p4-platform | \`$sha_platform\` | $origem_platform |"
+            echo "| postech-sw-arch-p4-os-service | \`$sha_os_service\` | $origem_os_service |"
+            echo "| postech-sw-arch-p4-billing-service | \`$sha_billing_service\` | $origem_billing_service |"
+            echo "| postech-sw-arch-p4-execution-service | \`$sha_execution_service\` | $origem_execution_service |"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/postech-sw-arch-p4-platform
+          ref: ${{ steps.shas.outputs.sha_platform }}
+          path: platform
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/postech-sw-arch-p4-os-service
+          ref: ${{ steps.shas.outputs.sha_os_service }}
+          path: os-service
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/postech-sw-arch-p4-billing-service
+          ref: ${{ steps.shas.outputs.sha_billing_service }}
+          path: billing-service
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/postech-sw-arch-p4-execution-service
+          ref: ${{ steps.shas.outputs.sha_execution_service }}
+          path: execution-service
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          name: imagem
+      # uv no runner para o make e2e do platform: o Python vem do
+      # .python-version dele e as dependencias, do uv.lock.
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          enable-cache: false
+      # kind e kubectl fixados, make kind-up e make deploy no overlay kind-ci,
+      # que tambem gera os Secrets dos servicos. As etapas sao medidas pelo
+      # medir-kind.sh e o resumo sai num passo proprio, mesmo com falha.
+      - name: Plataforma no kind (overlay kind-ci)
+        run: platform/scripts/ci/deploy-kind.sh
+      - name: Servicos no kind (imagem deste job image, vizinhos construidos do codigo)
+        env:
+          IMAGEM: ${{ needs.image.outputs.imagem }}
+        run: |
+          platform/scripts/medir-kind.sh etapa servicos
+          platform/scripts/ci/implantar-servicos.sh --overlay kind-ci \
+            --tar "${SERVICO}=imagem.tar" --imagem "${SERVICO}=$IMAGEM" \
+            os-service=os-service billing-service=billing-service execution-service=execution-service
+      - name: Smoke por namespace
+        run: |
+          platform/scripts/medir-kind.sh etapa smoke
+          platform/scripts/ci/smoke-servicos.sh
+      - name: E2E BDD da saga (make e2e)
+        run: |
+          platform/scripts/medir-kind.sh etapa e2e
+          make -C platform e2e
+      # Os dois passos que rodam script do platform depois de uma falha so
+      # rodam se o checkout dele aconteceu: com um sha_* invalido o passo shas
+      # reprova antes de qualquer checkout e eles dariam mais dois vermelhos.
+      - name: Minutos e memoria no summary
+        if: always() && hashFiles('platform/scripts/medir-kind.sh') != ''
+        run: platform/scripts/medir-kind.sh resumo
+      # O E2E mascara segredo no junit, no cucumber e no trace, mas o artefato
+      # fica 90 dias num repositorio publico: a varredura final do platform
+      # (a que o make mp-sandbox usa) apaga o arquivo que ainda tenha segredo,
+      # e o passo reprova. Sobe so a pasta que ela olha.
+      - name: Varredura de segredos nos relatorios do E2E
+        if: always() && hashFiles('platform/reports/e2e/**') != ''
+        working-directory: platform
+        run: uv run --group e2e python -m e2e.varredura reports/e2e
+      - name: Publica os relatorios do E2E
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-kind
+          path: platform/reports/e2e/
+          retention-days: 90
+      # Tambem no cancelamento, inclusive o do timeout-minutes.
+      - name: Pods, eventos e logs (diagnostico)
+        if: (failure() || cancelled()) && hashFiles('platform/scripts/ci/diagnostico.sh') != ''
+        run: platform/scripts/ci/diagnostico.sh
+
+  # Opcional e desligado: o ambiente do deploy automatizado e o kind do runner.
+  # Com a variavel DEPLOY_REMOTO_HABILITADO igual a true, o mesmo digest que
+  # passou no kind vai para um cluster persistente que o dono do repositorio
+  # configura (README, secao "CD"). O script e o overlay vem do platform, no
+  # commit usado no kind. Nenhuma credencial de provedor mora neste arquivo.
+  deploy-remote:
+    needs: [image, deploy-kind]
+    if: vars.DEPLOY_REMOTO_HABILITADO == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # O deploy-remoto.sh roda com a credencial do cluster e e o do platform no
+      # commit usado no kind, que um dispatch pode apontar para qualquer commit
+      # do platform. So passa o que ja esta na main dele (ou e a propria main):
+      # no compare main...<sha>, "behind" e "identical".
+      - name: Commit do platform esta na main do platform
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DONO: ${{ github.repository_owner }}
+          SHA_PLATFORM: ${{ needs.deploy-kind.outputs.sha_platform }}
+        run: |
+          set -euo pipefail
+          situacao=$(gh api "repos/$DONO/postech-sw-arch-p4-platform/compare/main...$SHA_PLATFORM" --jq .status) \
+            || { echo "::error::could not compare the platform commit $SHA_PLATFORM with the platform main"; exit 1; }
+          case $situacao in
+            identical | behind) ;;
+            *)
+              echo "::error::the platform commit $SHA_PLATFORM is not in the history of the platform main (compare status: $situacao)"
+              exit 1
+              ;;
+          esac
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/postech-sw-arch-p4-platform
+          ref: ${{ needs.deploy-kind.outputs.sha_platform }}
+          path: platform
+          persist-credentials: false
+      # O acesso ao cluster entra aqui, antes do deploy: gravar o kubeconfig do
+      # segredo KUBECONFIG_REMOTO num arquivo e exportar KUBECONFIG, ou usar a
+      # action de login do provedor. Sem isso o script nao enxerga o contexto. O
+      # passo pronto e o environment restrito a main, que guarda o segredo, estao
+      # no README, secao "Deploy remoto (opcional)".
+      - name: Acesso ao cluster remoto (a configurar)
+        run: echo "::notice::remote cluster access is not configured in this step, add the kubeconfig (secret KUBECONFIG_REMOTO) or the provider login before the deploy"
+      - name: Deploy no cluster remoto (mesmo digest do kind)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTEXTO: ${{ vars.DEPLOY_REMOTO_CONTEXTO }}
+          OVERLAY: ${{ vars.DEPLOY_REMOTO_OVERLAY || 'k3s' }}
+          IMAGEM: ${{ needs.image.outputs.imagem }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          [ -n "$CONTEXTO" ] || { echo "::error::DEPLOY_REMOTO_CONTEXTO is not set"; exit 1; }
+          [ -x platform/scripts/ci/deploy-remoto.sh ] \
+            || { echo "::error::platform/scripts/ci/deploy-remoto.sh does not exist in the platform commit used by this run: keep DEPLOY_REMOTO_HABILITADO off until it is merged"; exit 1; }
+          platform/scripts/ci/deploy-remoto.sh --contexto "$CONTEXTO" --overlay "$OVERLAY" \
+            --servico "$SERVICO" --imagem "${IMAGEM}@${DIGEST}"
+
+  remote-skipped:
+    needs: deploy-kind
+    if: vars.DEPLOY_REMOTO_HABILITADO != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - run: echo "::notice::deploy remoto desligado (DEPLOY_REMOTO_HABILITADO); o deploy validado desta execucao e o do kind"

@@ -1,0 +1,14 @@
+# As actions dos workflows entram por SHA de commit (as de terceiro e as do job
+# image), e nada as subiria sozinho. Um PR por semana, com todas juntas.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"
