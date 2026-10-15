@@ -179,6 +179,9 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+      # Para o passo shas consultar os runs do cd.yml dos vizinhos. Os dois
+      # repositorios sao publicos e a leitura talvez funcione sem esta permissao,
+      # mas so um run na main prova isso: fica.
       actions: read
     outputs:
       sha_platform: ${{ steps.shas.outputs.sha_platform }}
