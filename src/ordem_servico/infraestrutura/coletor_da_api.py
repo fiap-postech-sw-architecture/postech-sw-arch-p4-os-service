@@ -3,7 +3,8 @@
 Registrado so na API: relay, consumidor e prazos nao leem estas series, e a API
 segue exportando com os outros processos parados, que e o que mantem de pe o
 alerta de outbox parada. Cada replica repete o valor, e os paineis agregam com
-``max``. As series (RFC-004 secao 9 e catalogo do ADR-043):
+``max``. As series da saga estao na RFC-004 secao 9; as tres ultimas entram no
+catalogo pelo PR de dashboards do platform:
 
 - saga: ``pytstop_saga_ativas``, ``pytstop_saga_etapa_mais_antiga_segundos`` e
   ``pytstop_saga_prazo_vencido_segundos``, mais ``pytstop_saga_coletor_disponivel``

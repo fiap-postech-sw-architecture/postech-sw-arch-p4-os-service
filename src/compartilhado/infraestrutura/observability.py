@@ -352,7 +352,7 @@ def configurar_otel(
         provedor = montado = criar_provedor("api")
     instrumentar_api(app, provedor)
     instrumentar_banco(engine, provedor)
-    # O instrumentador (0.63b) nao adiciona middleware: ele embrulha
+    # O instrumentador nao adiciona middleware: ele embrulha
     # `build_middleware_stack`. Como esta funcao roda no lifespan e o proprio
     # scope `lifespan` ja fez o Starlette construir o stack, o embrulho nunca
     # seria invocado — spans de SQLAlchemy apareceriam e os de FastAPI nao

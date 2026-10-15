@@ -41,9 +41,9 @@ class Rastreador:
 def tudo_que_o_span_leva(span: ReadableSpan) -> str:
     """Tudo o que o span leva ao exportador, em texto: o oraculo das provas de LGPD.
 
-    Nome, atributos, eventos, links, descricao do status, recurso e escopo:
-    procurar so nos atributos deixou passar o texto do erro e a descricao do
-    status.
+    Nome, atributos, eventos, links, descricao do status e recurso: procurar so
+    nos atributos deixou passar o texto do erro e a descricao do status. O escopo
+    da instrumentacao (nome do tracer) nao sai no ``to_json()``.
     """
     return json.dumps(json.loads(span.to_json()), ensure_ascii=False, sort_keys=True)
 

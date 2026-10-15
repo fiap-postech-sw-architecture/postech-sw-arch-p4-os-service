@@ -60,7 +60,7 @@ def tratar_evento_da_saga(
 
     O span ``process <tipo>`` do consumo ganha a etapa antes e depois do evento
     e o desfecho (processada, ignorada, adiantada ou recusada), ADR-043; o
-    motivo da recusa vai no status de erro do span, pelo consumidor.
+    motivo da recusa vai no atributo ``pytstop.falha`` do span, pelo consumidor.
     """
     span = trace.get_current_span()
     orquestrador = OrquestradorDaSaga(
