@@ -111,6 +111,10 @@ def test_jobs_e_dependencias_do_adr_042() -> None:
     ]
     assert jobs["ci"]["uses"] == "./.github/workflows/ci.yml"
     assert jobs["security-scan"]["uses"] == "./.github/workflows/security.yml"
+    # Os workflows reutilizaveis nao recebem segredo: nem `secrets:` explicito
+    # nem `secrets: inherit`, so a chamada e as permissoes.
+    assert set(jobs["ci"]) == {"uses", "permissions"}
+    assert set(jobs["security-scan"]) == {"uses", "permissions"}
     assert jobs["image"]["needs"] == ["ci", "security-scan"]
     assert jobs["deploy-kind"]["needs"] == "image"
     assert jobs["deploy-remote"]["needs"] == ["image", "deploy-kind"]
@@ -331,6 +335,94 @@ def test_artefatos_e_retencoes() -> None:
     e2e = _passo_que_usa("deploy-kind", "actions/upload-artifact", "e2e-kind")
     assert e2e["with"]["path"] == "platform/reports/"
     assert e2e["if"] == "always()"
+
+
+# --- o que reprova o job ----------------------------------------------------
+
+_IGNORA_A_FALHA = re.compile(r"\|\|\s*(?:true\b|:|exit\s+0\b)|set\s+\+e")
+
+
+@pytest.mark.parametrize("job", ["image", "deploy-kind"])
+def test_nenhum_passo_dos_gates_ignora_a_falha(job: str) -> None:
+    # O CD so fica verde com o E2E, o smoke e a conferencia da imagem verdes.
+    assert "continue-on-error" not in _jobs()[job], job
+    for passo in _passos(job):
+        nome = passo.get("name") or passo.get("id") or passo.get("uses")
+        assert "continue-on-error" not in passo, (job, nome)
+        assert _IGNORA_A_FALHA.search(passo.get("run", "")) is None, (job, nome)
+
+
+def test_smoke_e_e2e_sao_exatamente_os_comandos_do_adr() -> None:
+    corridas = {
+        passo["name"]: passo["run"]
+        for passo in _passos("deploy-kind")
+        if "name" in passo and "run" in passo
+    }
+
+    assert corridas["Smoke por namespace"] == (
+        "platform/scripts/medir-kind.sh etapa smoke\n"
+        "platform/scripts/ci/smoke-servicos.sh\n"
+    )
+    assert corridas["E2E BDD da saga (make e2e)"] == (
+        "platform/scripts/medir-kind.sh etapa e2e\nmake -C platform e2e\n"
+    )
+
+
+# O docker falso so responde ao `buildx imagetools inspect`, com o conteudo de
+# $SBOM_FAKE.
+DOCKER_FALSO = """#!/usr/bin/env bash
+if [ "$1" = buildx ] && [ "$2" = imagetools ] && [ "$3" = inspect ]; then
+  cat "$SBOM_FAKE"
+  exit 0
+fi
+exit 64
+"""
+
+
+def _roda_sbom(pasta: Path, conteudo: str) -> subprocess.CompletedProcess[str]:
+    _exige_jq()
+    bin_ = pasta / "bin"
+    bin_.mkdir()
+    docker = bin_ / "docker"
+    docker.write_text(DOCKER_FALSO)
+    docker.chmod(0o755)
+    (pasta / "entrada.json").write_text(conteudo)
+    (pasta / "resumo.md").touch()
+    passo = next(p for p in _passos("image") if "imagetools" in p.get("run", ""))
+    env = {
+        "SBOM_FAKE": str(pasta / "entrada.json"),
+        "IMAGEM": "ghcr.io/org/pytstop-os-service:abc",
+        "DIGEST": "sha256:def",
+        "SERVICO": _carrega()["env"]["SERVICO"],
+        "GITHUB_STEP_SUMMARY": str(pasta / "resumo.md"),
+    }
+    return _executa(passo, pasta, env, falsos=bin_)
+
+
+def test_sbom_com_pacotes_passa_e_conta_no_log_e_no_summary(tmp_path: Path) -> None:
+    resultado = _roda_sbom(
+        tmp_path, '{"SPDX":{"packages":[{"name":"a"},{"name":"b"}]}}'
+    )
+
+    assert resultado.returncode == 0, resultado.stderr
+    assert "SBOM with 2 packages" in resultado.stdout
+    assert "| SBOM (SPDX) | 2 packages," in (tmp_path / "resumo.md").read_text()
+
+
+@pytest.mark.parametrize(
+    "conteudo",
+    [
+        pytest.param("null", id="sem-sbom"),
+        pytest.param('{"SPDX":{"packages":[]}}', id="sem-pacote"),
+        pytest.param("", id="saida-vazia"),
+        pytest.param("nao e json", id="nao-json"),
+    ],
+)
+def test_sbom_vazio_ou_invalido_reprova(tmp_path: Path, conteudo: str) -> None:
+    resultado = _roda_sbom(tmp_path, conteudo)
+
+    assert resultado.returncode != 0
+    assert "SBOM with" not in resultado.stdout
 
 
 # --- deploy-kind -----------------------------------------------------------
