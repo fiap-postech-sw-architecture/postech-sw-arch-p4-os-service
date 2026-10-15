@@ -62,7 +62,7 @@ from opentelemetry.semconv.attributes.exception_attributes import (
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from src.compartilhado.infraestrutura.mensageria.telemetria import PropagadorW3C
-from src.compartilhado.infraestrutura.metrics import ROTA_NAO_ROTEADA
+from src.compartilhado.infraestrutura.rotas_http import ROTA_NAO_ROTEADA
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence

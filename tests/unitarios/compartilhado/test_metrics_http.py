@@ -15,10 +15,10 @@ from starlette.requests import Request
 
 from src.compartilhado.infraestrutura.metrics import (
     LATENCIA_HTTP,
-    ROTA_NAO_ROTEADA,
     MetricasHTTPMiddleware,
     configurar_metricas,
 )
+from src.compartilhado.infraestrutura.rotas_http import ROTA_NAO_ROTEADA
 from tests.conftest import existe_a_serie, valor_da_metrica
 
 _NOME = "http_request_duration_seconds_count"

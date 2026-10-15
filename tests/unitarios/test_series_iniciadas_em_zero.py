@@ -79,6 +79,17 @@ print(generate_latest().decode())
 """
 
 
+# O boot de quem nao serve HTTP: so importa o modulo do processo.
+_BOOT_SEM_HTTP = """
+import sys
+from prometheus_client import generate_latest
+import src.{processo}
+
+print("starlette" in sys.modules)
+print(generate_latest().decode())
+"""
+
+
 def _series(texto: str) -> dict[Serie, float]:
     return {
         (amostra.name, tuple(sorted(amostra.labels.items()))): amostra.value
@@ -207,6 +218,22 @@ class TestPrazos:
         series = _series(prazos)
 
         assert series[("pytstop_prazos_ultimo_ciclo_timestamp_seconds", ())] == 0.0
+
+
+class TestProcessosSemHttp:
+    @pytest.mark.parametrize("processo", ["relay", "consumidor", "prazos"])
+    def test_nao_carrega_o_starlette_nem_expoe_a_metrica_http(
+        self, processo: str
+    ) -> None:
+        # O rotulo da rota que o span usa mora num modulo proprio: importar o
+        # `observability` nao arrasta o middleware nem registra o histograma HTTP
+        # que so a API serve.
+        carregou, _, texto = executar_python(
+            _BOOT_SEM_HTTP.format(processo=processo)
+        ).partition("\n")
+
+        assert carregou == "False"
+        assert "http_request_duration_seconds" not in _familias(texto)
 
 
 class TestApi:

@@ -24,15 +24,13 @@ from prometheus_client import CONTENT_TYPE_LATEST, Histogram, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from src.compartilhado.infraestrutura.rotas_http import ROTA_NAO_ROTEADA
+
 if TYPE_CHECKING:
     from fastapi import FastAPI
     from starlette.middleware.base import RequestResponseEndpoint
     from starlette.requests import Request
 
-# Label de rota para requests que nao casaram rota nenhuma (404 de path
-# desconhecido): agrega tudo num unico valor em vez de explodir a
-# cardinalidade com paths arbitrarios.
-ROTA_NAO_ROTEADA: Final = "nao_roteada"
 # O metodo vem do chamador e pode ser qualquer token: so os conhecidos viram label.
 _METODOS: Final = frozenset(
     {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
