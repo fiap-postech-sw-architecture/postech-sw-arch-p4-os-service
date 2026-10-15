@@ -60,7 +60,13 @@ def boot_falso(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             or (registro["engine"], registro["parametros"])
         ),
     )
-    monkeypatch.setattr(processo_prazos, "criar_tracer", lambda nome: MagicMock())
+    monkeypatch.setattr(
+        processo_prazos,
+        "criar_tracer",
+        lambda nome, engine: (
+            registro.setdefault("tracers", []).append((nome, engine)) or MagicMock()
+        ),
+    )
     monkeypatch.setattr(processo_prazos, "subir_metricas", lambda: 9100)
     monkeypatch.setattr(processo_prazos, "criar_session_factory", lambda e: MagicMock())
     monkeypatch.setattr(
@@ -75,6 +81,7 @@ def test_main_monta_executa_e_fecha_o_banco(boot_falso: dict[str, Any]) -> None:
 
     (processo,) = _Processo.criados
     assert boot_falso["processos"] == ["prazos"]
+    assert boot_falso["tracers"] == [("prazos", boot_falso["engine"])]
     assert processo.executou
     assert processo.kwargs["intervalo_s"] == 30
     vencer = processo.kwargs["vencer"]
@@ -482,3 +489,59 @@ def test_manter_atende_o_broker_e_a_queda_desconecta(
     assert broker.desconexoes == 1
     presenca.fechar()
     assert broker.desconexoes == 2
+
+
+class TestUltimoCiclo:
+    """``pytstop_prazos_ultimo_ciclo_timestamp_seconds``: o fim do ultimo ciclo."""
+
+    def _gauge(self) -> float:
+        return processo_dos_prazos.ULTIMO_CICLO._value.get()  # gauge do cliente
+
+    @pytest.mark.parametrize(
+        "resultado",
+        [
+            pytest.param(ResultadoDoCiclo(), id="ocioso"),
+            pytest.param(ResultadoDoCiclo(reenviadas=2), id="com-trabalho"),
+            pytest.param(ResultadoDoCiclo(pausado=True), id="pausado"),
+        ],
+    )
+    def test_cada_ciclo_que_terminou_marca_o_instante(
+        self, tmp_path: Path, resultado: ResultadoDoCiclo
+    ) -> None:
+        processo_dos_prazos.ULTIMO_CICLO.set(0)
+        parar = threading.Event()
+        processo, _, _ = _processo(tmp_path, _Ciclo(parar, resultado))
+        antes = time.time()
+
+        processo.executar(parar)
+
+        assert antes <= self._gauge() <= time.time()
+
+    def test_ciclo_que_falha_nao_marca_o_instante(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Banco fora: o ciclo nao terminou, e o painel "Ultimo ciclo do prazos"
+        # mostra o tempo parado.
+        monkeypatch.setattr(processo_dos_prazos, "_log", structlog.get_logger())
+        processo_dos_prazos.ULTIMO_CICLO.set(123.0)
+        parar = threading.Event()
+        falha = OperationalError("SELECT 1", {}, Exception("banco fora"))
+        processo, _, _ = _processo(tmp_path, _Ciclo(parar, falha))
+
+        processo.executar(parar)
+
+        assert self._gauge() == 123.0
+
+    def test_a_cada_ciclo_o_instante_avanca(self, tmp_path: Path) -> None:
+        processo_dos_prazos.ULTIMO_CICLO.set(0)
+        parar = threading.Event()
+        instantes: list[float] = []
+        ciclo = _Ciclo(parar, ResultadoDoCiclo(), ResultadoDoCiclo())
+        ciclo.antes_de_tratar = lambda: instantes.append(self._gauge())
+        processo, _, _ = _processo(tmp_path, ciclo, intervalo_s=0.05)
+
+        processo.executar(parar)
+
+        # No segundo ciclo o instante ja era o do primeiro, e nao o zero de antes.
+        assert instantes[0] == 0
+        assert instantes[1] > 0

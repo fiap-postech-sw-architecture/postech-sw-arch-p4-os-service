@@ -154,6 +154,7 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
     tmp_path: Path,
 ) -> None:
     mensagem_id = _publicar(session_factory)
+    publicadas_antes = _publicadas("SolicitarDiagnostico")
     # Sem o binding, o broker devolve a mensagem (mandatory) em vez de
     # confirma-la e descarta-la.
     with broker.canal() as canal:
@@ -184,9 +185,12 @@ def test_mensagem_sem_rota_conta_tentativa_e_nunca_vira_entregue(
     assert final.entregue_em is None
     assert REGISTRY.get_sample_value("outbox_dead") == 1
     assert REGISTRY.get_sample_value("outbox_pendentes") == 0
+    # `publicadas` e a confirmacao do broker: a publicacao devolvida nao conta.
+    assert _publicadas("SolicitarDiagnostico") == publicadas_antes
     (falha, *_) = rastreador.spans("publish SolicitarDiagnostico")
-    assert falha.status.description is not None
-    assert "nenhuma fila" in falha.status.description
+    assert falha.status.description is None
+    assert falha.attributes is not None
+    assert falha.attributes["pytstop.falha"] == "UnroutableError"
     assert broker.contar(_FILA) == 0
 
 
@@ -286,7 +290,7 @@ def _transacoes_paradas(engine: Engine) -> int:
 
 def _reconexoes(processo: str) -> float:
     valor = REGISTRY.get_sample_value(
-        "pytstop_reconexoes_ao_broker_total", {"processo": processo}
+        "pytstop_reconexoes_ao_broker_total", {"componente": processo}
     )
     return valor or 0.0
 

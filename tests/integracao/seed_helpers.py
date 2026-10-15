@@ -23,6 +23,7 @@ from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from datetime import datetime
     from uuid import UUID
 
     from sqlalchemy import Engine
@@ -113,6 +114,60 @@ def criar_ordem_recebida(
     OrdemDeServicoSQLAlchemyRepository(session=sessao).salvar(ordem)
     sessao.flush()
     return ordem
+
+
+type Passos = list[tuple[str, datetime]]
+
+
+def criar_ordem_com_historico(
+    sessao: Session, passos: Passos, *, status_atual: str | None = None
+) -> UUID:
+    """Uma OS com o historico exatamente ``passos`` (status e instante de entrada).
+
+    O status da OS e o do ultimo passo (ou ``status_atual``). O historico que a
+    abertura gravou sai: o que vale e o dos ``passos``.
+    """
+    cliente = criar_cliente_com_veiculo(sessao)
+    ordem = criar_ordem_recebida(
+        sessao, cliente_id=cliente.id, veiculo_id=cliente.veiculos[0].id
+    )
+    sessao.execute(
+        text("DELETE FROM historico_status_ordem WHERE ordem_id = :id"),
+        {"id": ordem.id},
+    )
+    anterior: str | None = None
+    for sequencia, (status, quando) in enumerate(passos, start=1):
+        sessao.execute(
+            text(
+                "INSERT INTO historico_status_ordem "
+                "(id, ordem_id, sequencia, de, para, origem, ocorrido_em) "
+                "VALUES (gen_random_uuid(), :ordem, :sequencia, :de, :para, "
+                "'saga', :quando)"
+            ),
+            {
+                "ordem": ordem.id,
+                "sequencia": sequencia,
+                "de": anterior,
+                "para": status,
+                "quando": quando,
+            },
+        )
+        anterior = status
+    sessao.execute(
+        text("UPDATE ordens_de_servico SET status = :status WHERE id = :id"),
+        {"status": status_atual or passos[-1][0], "id": ordem.id},
+    )
+    return ordem.id
+
+
+def criar_ordens_com_historicos(
+    session_factory: sessionmaker[Session], *ordens: Passos
+) -> list[UUID]:
+    """Uma OS por historico, tudo comitado numa sessao so."""
+    with session_factory() as sessao:
+        ids = [criar_ordem_com_historico(sessao, passos) for passos in ordens]
+        sessao.commit()
+    return ids
 
 
 def criar_usuario(

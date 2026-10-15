@@ -1,5 +1,5 @@
 """Persistencia da OS contra Postgres real: mapping (VOs, enums, historico),
-versao, consultas do repositorio, adapters entre contextos e metricas."""
+versao, consultas do repositorio e adapters entre contextos."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, event, insert, inspect, select, text
+from sqlalchemy import delete, insert, inspect, select, text
 from sqlalchemy.orm import Session
 
 from src.cliente_veiculo.infraestrutura.adapters import (
@@ -18,18 +18,15 @@ from src.cliente_veiculo.infraestrutura.repository import ClienteSQLAlchemyRepos
 from src.compartilhado.dominio.cpf import CPF
 from src.compartilhado.dominio.dinheiro import Dinheiro
 from src.compartilhado.dominio.placa import Placa
-from src.compartilhado.infraestrutura.metrics import metricas_api
 from src.ordem_servico.aplicacao.dtos import AcompanhamentoDTO, RetratoDoVeiculo
 from src.ordem_servico.dominio.events import OrdemAbertaEvent
 from src.ordem_servico.dominio.historico import OrigemMudanca
 from src.ordem_servico.dominio.ordem_de_servico import OrdemDeServico
 from src.ordem_servico.dominio.resumos import StatusPagamento
 from src.ordem_servico.dominio.status import StatusOrdem
-from src.ordem_servico.infraestrutura import metrics as metricas_os
 from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
 from src.ordem_servico.infraestrutura.consultas import ConsultaAcompanhamentoSQLAlchemy
 from src.ordem_servico.infraestrutura.mapping import historico_status_ordem_table
-from src.ordem_servico.infraestrutura.metrics import instrumentar_metricas_de_ordens
 from src.ordem_servico.infraestrutura.repository import (
     OrdemDeServicoSQLAlchemyRepository,
 )
@@ -46,8 +43,6 @@ from tests.fabricas import (
 from tests.integracao.seed_helpers import criar_cliente_com_veiculo
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from src.cliente_veiculo.dominio.cliente import Cliente
 
 S = StatusOrdem
@@ -362,68 +357,3 @@ class TestAdaptersEntreContextos:
 
         adapter = OrdemDeServicoSQLAlchemyAdapter(session)
         assert adapter.existe_os_ativa_para_cliente(ordem.cliente_id) is False
-
-
-class TestMetricasDeNegocio:
-    @pytest.fixture(autouse=True)
-    def _listener_so_neste_teste(self) -> Iterator[None]:
-        # O listener e da classe Session (global): sai no teardown para nao
-        # medir os flushes dos testes seguintes.
-        ja_havia = event.contains(Session, "before_flush", metricas_os._observar_flush)
-        yield
-        if not ja_havia and event.contains(
-            Session, "before_flush", metricas_os._observar_flush
-        ):
-            event.remove(Session, "before_flush", metricas_os._observar_flush)
-            metricas_os._instrumentado = False
-
-    def test_abertura_e_transicao_alimentam_as_metricas(
-        self, session: Session, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        criadas: list[int] = []
-        duracoes: list[tuple[str, float]] = []
-        monkeypatch.setattr(metricas_api, "os_criada", lambda: criadas.append(1))
-        monkeypatch.setattr(
-            metricas_api,
-            "os_duracao_status",
-            lambda status, duracao: duracoes.append((status, duracao)),
-        )
-        instrumentar_metricas_de_ordens()
-        instrumentar_metricas_de_ordens()  # idempotente: um listener so
-
-        ordem = _abrir(session)
-        assert criadas == [1]
-        assert duracoes == []
-
-        ordem.registrar_diagnostico_iniciado(ator="consumidor")
-        OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
-
-        assert criadas == [1]
-        ((status, duracao),) = duracoes
-        assert status == "recebida"
-        esperado = (
-            ordem.historico[1].ocorrido_em - ordem.historico[0].ocorrido_em
-        ).total_seconds()
-        assert duracao == pytest.approx(esperado)
-
-    def test_escrita_sem_troca_de_status_nao_mede(
-        self, session: Session, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        ordem = _aguardando_pagamento_sem_resumo(session)
-        duracoes: list[tuple[str, float]] = []
-        monkeypatch.setattr(
-            metricas_api,
-            "os_duracao_status",
-            lambda status, duracao: duracoes.append((status, duracao)),
-        )
-        instrumentar_metricas_de_ordens()
-
-        # So o resumo do pagamento muda (escrita sem transicao de status).
-        ordem.registrar_estado_do_pagamento(
-            StatusPagamento.SOLICITADO,
-            ator=ATOR_PROCESSO,
-            resumo=resumo_do_pagamento(),
-        )
-        OrdemDeServicoSQLAlchemyRepository(session).salvar(ordem)
-
-        assert duracoes == []

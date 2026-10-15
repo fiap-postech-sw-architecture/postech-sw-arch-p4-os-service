@@ -96,8 +96,12 @@ audit:
 # e le a caixa de entrada pela API do Mailpit. O log dele nao leva o endereco.
 #
 # O /metrics da API tem de trazer `pytstop_saga_coletor_disponivel` em 1: o
-# coletor dos gauges da saga raspa por uma engine propria, ligada no lifespan,
-# e sem ela (ou com o banco fora do alcance dela) a serie sai em 0.
+# coletor dos gauges por consulta (saga, idade da outbox e OS por status) raspa por
+# uma engine propria, ligada no lifespan, e sem ela (ou com o banco fora do alcance
+# dela) a serie sai em 0. Logo depois do boot e sem trafego, o /metrics de cada
+# processo tem de listar as series de rotulo fechado dele em zero (o `increase()`
+# dos paineis perde o primeiro evento de uma serie que nasce depois): a API, o
+# relay, o consumidor e o prazos; e a OS aberta no fim conta no contador da API.
 #
 # O access token do login passa pelo validador independente
 # (scripts/validar_token.py, so PyJWT): JWKS buscado por HTTP, RS256, iss, aud,
@@ -128,6 +132,12 @@ SMOKE_COMPOSE := APP_PORT=$(SMOKE_PORT) APP_IMAGE=$(APP_IMAGE) \
 	$(DOCKER_COMPOSE) -p pytstop-os-smoke
 SMOKE_METRICAS := python -c "import urllib.request; \
 	print(urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=5).read().decode())"
+# Confere o /metrics de um processo, de dentro do container dele: a porta e os
+# padroes (regex, um por argumento) vem como argumentos.
+SMOKE_SERIES := import re, sys, urllib.request as u; porta, *padroes = sys.argv[1:]; \
+	texto = u.urlopen(f'http://127.0.0.1:{porta}/metrics', timeout=5).read().decode(); \
+	faltam = [p for p in padroes if not re.search(p, texto, re.M)]; \
+	sys.exit(f'faltam no /metrics: {faltam}' if faltam else 0)
 
 smoke:
 	@status=0; \
@@ -187,6 +197,33 @@ smoke:
 	&& { curl -fsS --max-time 5 $(SMOKE_URL)/metrics \
 			| grep -Eq '^pytstop_saga_coletor_disponivel 1(\.0)?$$' \
 		|| { echo "smoke: o /metrics da API nao traz o coletor da saga disponivel" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T api python -c "$(SMOKE_SERIES)" 8000 \
+			'^# TYPE http_request_duration_seconds histogram$$' \
+			'^pytstop_os_criadas_total 0\.0$$' \
+			'^pytstop_saga_iniciadas_total 0\.0$$' \
+			'^pytstop_saga_finalizadas_total\{resultado="concluida"\} 0\.0$$' \
+			'^pytstop_saga_compensacoes_total\{motivo="prazo_tecnico"\} 0\.0$$' \
+			'^pytstop_saga_ativas\{etapa="em_execucao"\} 0\.0$$' \
+			'^pytstop_saga_prazo_vencido_segundos 0\.0$$' \
+			'^pytstop_outbox_mais_antiga_segundos 0\.0$$' \
+			'^pytstop_os_por_status\{status="recebida"\} 0\.0$$' \
+			'^# TYPE pytstop_os_tempo_medio_status_segundos gauge$$' \
+		|| { echo "smoke: o /metrics da API nao lista as series dele" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T relay python -c "$(SMOKE_SERIES)" 9100 \
+			'^pytstop_mensagens_publicadas_total\{tipo="SolicitarDiagnostico"\} 0\.0$$' \
+			'^pytstop_reconexoes_ao_broker_total\{componente="relay"\} 0\.0$$' \
+			'^outbox_dead [0-9]' \
+		|| { echo "smoke: o /metrics do relay nao lista as series dele em zero" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T consumidor python -c "$(SMOKE_SERIES)" 9100 \
+			'^pytstop_mensagens_consumidas_total\{resultado="processada",tipo="DiagnosticoConcluido"\} 0\.0$$' \
+			'^pytstop_mensagens_consumidas_total\{resultado="dlq",tipo="desconhecido"\} 0\.0$$' \
+			'^pytstop_reconexoes_ao_broker_total\{componente="consumidor"\} 0\.0$$' \
+			'^pytstop_saga_etapa_duracao_segundos_count\{etapa="aguardando_decisao"\} 0\.0$$' \
+		|| { echo "smoke: o /metrics do consumidor nao lista as series dele em zero" >&2; false; }; } \
+	&& { $(SMOKE_COMPOSE) exec -T prazos python -c "$(SMOKE_SERIES)" 9100 \
+			'^pytstop_saga_prazos_esgotados_total\{comando="CancelarExecucao"\} 0\.0$$' \
+			'^pytstop_prazos_ultimo_ciclo_timestamp_seconds 1\.[0-9]+e\+09$$' \
+		|| { echo "smoke: o /metrics do prazos nao lista as series dele" >&2; false; }; } \
 	&& cliente="$$(jq -n '{nome: "Maria Smoke", documento: "21249722519", tipo_documento: "cpf", contato: "Maria Smoke - maria.smoke@pytstop.dev"}' \
 		| curl -fsS --max-time 10 -X POST $(SMOKE_URL)/api/v1/clientes -H "Authorization: Bearer $$access" \
 			-H 'Content-Type: application/json' -d @- | jq -er '.id')" \
@@ -205,6 +242,9 @@ smoke:
 		[ "$$entregue" = 1 ] || { echo "smoke: o notificador nao entregou o e-mail ao Mailpit" >&2; false; }; } \
 	&& { ! $(SMOKE_COMPOSE) logs --no-color --no-log-prefix notificador | grep -Eq 'maria[.]smoke|Maria Smoke' \
 		|| { echo "smoke: o log do notificador traz endereco ou nome do cliente" >&2; false; }; } \
+	&& { curl -fsS --max-time 5 $(SMOKE_URL)/metrics \
+			| grep -Eq '^pytstop_os_criadas_total 1(\.0)?$$' \
+		|| { echo "smoke: a OS aberta nao entrou no pytstop_os_criadas_total da API" >&2; false; }; } \
 	&& logs="$$($(SMOKE_COMPOSE) logs --no-color --no-log-prefix api)" \
 	&& { printf '%s\n' "$$logs" | grep -q '"event": "Started server process' \
 		|| { echo "smoke: o log de boot do uvicorn nao saiu em JSON" >&2; false; }; } \
@@ -214,7 +254,7 @@ smoke:
 		|| { echo "smoke: o uvicorn escreveu o access log dele" >&2; false; }; } \
 	&& { printf '%s\n' "$$logs" | grep '"event": "http_request"' | grep -q '"request_id": "' \
 		|| { echo "smoke: o access log estruturado (http_request com request_id) nao saiu" >&2; false; }; } \
-	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay, consumidor, prazos e notificador prontos, e-mail entregue ao Mailpit" \
+	&& echo "smoke ok: readiness 200, login validado pelo JWKS (e a assinatura adulterada recusada), log em JSON sem o access log do uvicorn, imagem de producao (usuario 1001), relay, consumidor, prazos e notificador prontos, series dos quatro processos no /metrics, OS aberta no contador, e-mail entregue ao Mailpit" \
 	|| status=$$?; \
 	if [ $$status -ne 0 ]; then $(SMOKE_COMPOSE) logs --no-color --tail=200; fi; \
 	$(SMOKE_COMPOSE) down -v; \

@@ -1,11 +1,11 @@
-"""Registro do coletor da saga e fatos que nao viram metrica (sem banco)."""
+"""Fatos da saga e a regra do commit nas metricas (sem banco)."""
 
 from __future__ import annotations
 
 from uuid import uuid4
 
 import pytest
-from prometheus_client import REGISTRY, CollectorRegistry
+from prometheus_client import REGISTRY
 from sqlalchemy.orm import Session
 
 from src.compartilhado.dominio.events import DomainEvent
@@ -19,25 +19,7 @@ from src.ordem_servico.aplicacao.saga.prazos import (
 )
 from src.ordem_servico.aplicacao.saga.tabela_da_saga import COMANDOS_COM_PRAZO
 from src.ordem_servico.infraestrutura import metricas_da_saga
-
-
-def test_coletor_e_registrado_uma_vez_por_processo(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    registro = CollectorRegistry()
-    monkeypatch.setattr(metricas_da_saga, "REGISTRY", registro)
-    monkeypatch.setattr(metricas_da_saga, "_coletor", None)
-
-    metricas_da_saga.registrar_coletor(lambda: pytest.fail("sem raspagem aqui"))
-    metricas_da_saga.registrar_coletor(lambda: pytest.fail("sem raspagem aqui"))
-
-    # describe, e nao collect, no registro: nenhuma consulta antes do boot.
-    assert sorted(registro._names_to_collectors) == [
-        "pytstop_saga_ativas",
-        "pytstop_saga_coletor_disponivel",
-        "pytstop_saga_etapa_mais_antiga_segundos",
-        "pytstop_saga_prazo_vencido_segundos",
-    ]
+from tests.subprocesso import executar_python
 
 
 def test_fato_sem_metrica_levanta_antes_do_commit() -> None:
@@ -132,3 +114,16 @@ def test_rollback_descarta_o_reenvio_anotado() -> None:
     sessao.rollback()
 
     assert _contador("pytstop_saga_reenvios_total", "ReservarPecas") == antes
+
+
+def test_a_os_criada_conta_depois_do_commit_sem_carregar_as_metricas_da_saga() -> None:
+    # A regra "conta depois do commit" mora em `metricas_apos_commit`: a metrica da
+    # OS criada nao herda as series da saga (nem a proxima metrica de sessao).
+    carregados = executar_python(
+        "import sys\n"
+        "import src.ordem_servico.infraestrutura.metrics\n"
+        "print(sorted(m for m in sys.modules if 'infraestrutura.metricas' in m))"
+    )
+
+    assert "metricas_apos_commit" in carregados
+    assert "metricas_da_saga" not in carregados

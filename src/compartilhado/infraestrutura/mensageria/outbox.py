@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from uuid import UUID
 
-    from sqlalchemy import Engine, TextClause
+    from sqlalchemy import Connection, Engine, TextClause
 
 # Politica do relay do p3: um atraso depois de cada falha da propria mensagem;
 # a falha seguinte a ultima da tabela (a quinta) leva a linha a `dead`.
@@ -74,6 +74,23 @@ _SQL_LIBERAR: Final = text(
     "WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate"
 )
 _SQL_CONTAGEM: Final = text("SELECT count(*) FROM outbox WHERE status = :status")
+# Idade da linha pendente mais antiga (0 sem pendente), pelo relogio do banco, o
+# mesmo que grava `criado_em`. O `min` sobre o indice (status, criado_em) le uma
+# linha so, qualquer que seja o tamanho do backlog.
+_SQL_IDADE_DA_PENDENTE: Final = text(
+    "SELECT COALESCE(EXTRACT(EPOCH FROM clock_timestamp() - min(criado_em)), 0) "
+    "FROM outbox WHERE status = 'pendente'"
+)
+
+
+def idade_da_pendente_mais_antiga(conexao: Connection) -> float:
+    """Segundos desde a gravacao da linha pendente mais antiga; 0 sem pendente.
+
+    Quem a le e o coletor da API (``pytstop_outbox_mais_antiga_segundos``), que
+    segue exportando com o relay parado: e o que mantem de pe o alerta "Outbox
+    parada" (ADR-043).
+    """
+    return float(conexao.execute(_SQL_IDADE_DA_PENDENTE).scalar_one())
 
 
 def atraso_depois_da_falha(

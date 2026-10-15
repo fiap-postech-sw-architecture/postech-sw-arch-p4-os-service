@@ -95,6 +95,9 @@ outbox_table = Table(
 Index("ix_outbox_claim", outbox_table.c.status, outbox_table.c.proxima_tentativa_em)
 # Limpeza das entregues ha mais de 7 dias.
 Index("ix_outbox_entregues", outbox_table.c.status, outbox_table.c.entregue_em)
+# Idade da linha pendente mais antiga, a cada raspagem do coletor da API: o `min`
+# sobre este indice le uma linha so, qualquer que seja o backlog.
+Index("ix_outbox_status_criado_em", outbox_table.c.status, outbox_table.c.criado_em)
 
 # Claim com ordem por OS (head-of-line): `NOT EXISTS (... WHERE
 # p.correlation_id = o.correlation_id AND p.id < o.id AND p.status = 'pendente')`.

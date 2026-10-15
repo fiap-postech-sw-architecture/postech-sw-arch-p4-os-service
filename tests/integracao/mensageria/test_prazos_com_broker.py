@@ -27,7 +27,7 @@ from src.ordem_servico.aplicacao.saga import vencer_prazos
 from src.ordem_servico.aplicacao.saga.contexto_de_envio import ContextoDeEnvio
 from src.ordem_servico.aplicacao.saga.vencer_prazos import VencerPrazos
 from src.ordem_servico.aplicacao.use_cases import RetomarCompensacao
-from src.ordem_servico.infraestrutura.metricas_da_saga import ColetorDaSaga
+from src.ordem_servico.infraestrutura.coletor_da_api import ColetorDaApi
 from src.ordem_servico.infraestrutura.presenca_do_consumidor import (
     PresencaPikaDoConsumidor,
 )
@@ -435,7 +435,7 @@ class TestSemConsumidorEComRelayParado:
                 pausado = [e for e in logs if "paused" in e["event"]]
                 coletor = CollectorRegistry()
                 coletor.register(
-                    ColetorDaSaga(atendimento.engine.connect, lambda: PRAZO)
+                    ColetorDaApi(atendimento.engine.connect, lambda: PRAZO)
                 )
                 gauge = coletor.get_sample_value("pytstop_saga_prazo_vencido_segundos")
 
@@ -489,7 +489,7 @@ class TestSemConsumidorEComRelayParado:
             assert [s for s, _ in ordem.linhas("GerarOrcamento")] == ["pendente"]
             assert ordem.reenvios() == 0
             coletor = CollectorRegistry()
-            coletor.register(ColetorDaSaga(atendimento.engine.connect, lambda: PRAZO))
+            coletor.register(ColetorDaApi(atendimento.engine.connect, lambda: PRAZO))
             assert coletor.get_sample_value("pytstop_saga_prazo_vencido_segundos") == 0
 
             # O relay volta, entrega, e o prazo passa a correr dai.

@@ -458,7 +458,9 @@ def test_falha_permanente_do_handler_vai_para_a_dlq_com_o_motivo_e_volta_no_redr
         (log["event"], log.get("motivo")) for log in logs if "dlq" in log["event"]
     ] == [("message rejected to dlq", "transicao_invalida")]
     recusa, redrive = rastreador.spans("process OrcamentoRecusado")
-    assert recusa.status.description == "transicao_invalida"
+    assert recusa.status.description is None
+    assert recusa.attributes is not None
+    assert recusa.attributes["pytstop.falha"] == "transicao_invalida"
     assert redrive.status.is_ok
 
 
@@ -1068,7 +1070,7 @@ class _CabecalhoIlegivel(pika.BasicProperties):
 
 def _reconexoes() -> float:
     valor = REGISTRY.get_sample_value(
-        "pytstop_reconexoes_ao_broker_total", {"processo": "consumidor"}
+        "pytstop_reconexoes_ao_broker_total", {"componente": "consumidor"}
     )
     return valor or 0.0
 

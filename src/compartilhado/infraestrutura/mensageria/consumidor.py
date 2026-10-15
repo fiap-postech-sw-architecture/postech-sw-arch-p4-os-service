@@ -39,7 +39,7 @@ from uuid import UUID
 
 import pika
 import structlog
-from opentelemetry.trace import SpanKind, StatusCode
+from opentelemetry.trace import SpanKind
 from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter
 from sqlalchemy import event, text
@@ -65,6 +65,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,
     contexto_dos_cabecalhos,
+    marcar_falha,
     span_de_mensagem,
 )
 from src.compartilhado.infraestrutura.outbox_mapping import (
@@ -93,6 +94,10 @@ MENSAGENS_CONSUMIDAS: Final = Counter(
     "(processada, duplicada, ignorada, retry, dlq).",
     ["tipo", "resultado"],
 )
+
+# Os cinco resultados da metrica de consumo (o `Desfecho` do handler mais a
+# repeticao, o retry e a DLQ), todos pre-inicializados para cada tipo.
+RESULTADOS: Final = ("processada", "duplicada", "ignorada", "retry", "dlq")
 
 type Handler = Callable[[MensagemRecebida, TransacaoDaMensagem], Desfecho]
 
@@ -221,6 +226,13 @@ class Consumidor:
         )
         self._catalogo = catalogo()
         self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
+        # Series de rotulo fechado nascem com zero: o `increase()` perderia a
+        # primeira mensagem de cada tipo e resultado. O tipo fora do catalogo e o
+        # rotulo `desconhecido`.
+        for tipo in (*self._catalogo.consumidos, _TIPO_DESCONHECIDO):
+            for resultado in RESULTADOS:
+                MENSAGENS_CONSUMIDAS.labels(tipo=tipo, resultado=resultado)
+        amqp.RECONEXOES.labels(componente="consumidor")
 
     def executar(self, parar: threading.Event) -> None:
         """Laco principal; queda do broker nao derruba o processo.
@@ -291,11 +303,11 @@ class Consumidor:
                 _log.warning(
                     "message rejected to dlq", motivo=exc.motivo, **exc.contexto
                 )
-                span.set_status(StatusCode.ERROR, exc.motivo)
+                marcar_falha(span, exc.motivo)
                 self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
                 resultado = "dlq"
             except _TRANSITORIOS as exc:
-                span.set_status(StatusCode.ERROR, type(exc).__name__)
+                marcar_falha(span, type(exc).__name__)
                 resultado = self._repetir(metodo, propriedades, corpo, tentativa, exc)
             except Exception as exc:  # noqa: BLE001  # mensagem venenosa vai para a DLQ
                 # Repetir nao muda o resultado, e derrubar o processo traria a
@@ -305,7 +317,7 @@ class Consumidor:
                     erro=type(exc).__name__,
                     onde=onde(exc),
                 )
-                span.set_status(StatusCode.ERROR, type(exc).__name__)
+                marcar_falha(span, type(exc).__name__)
                 self._broker.canal.basic_reject(metodo.delivery_tag, requeue=False)
                 resultado = "dlq"
             else:

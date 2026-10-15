@@ -2,12 +2,12 @@
 
 Definidas no contexto consumidor e implementadas na infraestrutura:
 ``ClientePort`` em ``adapters.py`` (Anti-Corruption Layer: consulta o contexto
-Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento`` e
-``ConsultaDaOrdem`` em ``consultas.py`` (query services de leitura, fora do
-repositorio do agregado), ``SagaRepository`` em ``repository.py`` e
-``PresencaDoConsumidor`` em ``presenca_do_consumidor.py`` (a unica que fala com
-o broker, para a camada de aplicacao nao importar o cliente AMQP) e
-``TransacaoDosPrazos`` em ``transacao_dos_prazos.py``.
+Cliente+Veiculo sem importar o agregado vizinho), ``ConsultaAcompanhamento``,
+``ConsultaDaOrdem`` e ``ConsultaDeMetricas`` em ``consultas.py`` (query services
+de leitura, fora do repositorio do agregado), ``SagaRepository`` em
+``repository.py`` e ``PresencaDoConsumidor`` em ``presenca_do_consumidor.py`` (a
+unica que fala com o broker, para a camada de aplicacao nao importar o cliente
+AMQP) e ``TransacaoDosPrazos`` em ``transacao_dos_prazos.py``.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from src.ordem_servico.aplicacao.dtos import (
         AcompanhamentoDTO,
         ContatoDoCliente,
+        MetricasDasOrdensDTO,
         RetratoDoVeiculo,
     )
     from src.ordem_servico.aplicacao.notificacoes import Notificacao
@@ -74,6 +75,14 @@ class ConsultaAcompanhamento(Protocol):
         Recebe os VOs ja validados: quem chama garante que documento e placa
         invalidos nunca chegam ao banco.
         """
+        pass
+
+
+class ConsultaDeMetricas(Protocol):
+    """Query service das metricas das OS: contagem e permanencia por status."""
+
+    def ler(self, agora: datetime) -> MetricasDasOrdensDTO:
+        """Total, OS por status e permanencia media nos 30 dias ate ``agora``."""
         pass
 
 

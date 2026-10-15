@@ -12,6 +12,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from opentelemetry.sdk.environment_variables import (
+    OTEL_BSP_EXPORT_TIMEOUT,
+    OTEL_EXPORTER_OTLP_TIMEOUT,
+)
 
 from tests.manifestos import (
     OVERLAYS,
@@ -628,6 +632,25 @@ def test_confianca_no_x_forwarded_for_e_so_do_cidr_de_pods_do_cluster(
 
 
 @pytest.mark.parametrize("overlay", OVERLAYS)
+def test_configmap_nao_traz_flag_para_o_metrics_da_api(overlay: str) -> None:
+    # O /metrics da API esta sempre ligado (o Prometheus o raspa na porta http):
+    # a flag de antes, desligada, o devolvia como 404 e o alvo virava `up=0`.
+    assert "API_METRICS_ENABLED" not in _configmap_do_servico(overlay)
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_configmap_fixa_os_prazos_do_exportador_de_spans(overlay: str) -> None:
+    # Com o Jaeger fora do ar e a fila cheia, o SDK espera o exportador em cada
+    # lote: o prazo padrao do OTLP (10 s) fez a API levar 30,5 s para sair, mais
+    # que o grace period do pod (30 s); com 2 s, 8,1 s (medido no container).
+    configuracao = _configmap_do_servico(overlay)
+
+    assert configuracao["OTEL_ENABLED"] == "true"
+    assert configuracao["OTEL_BSP_EXPORT_TIMEOUT"] == "2000"
+    assert configuracao["OTEL_EXPORTER_OTLP_TIMEOUT"] == "2"
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
 def test_root_path_e_o_prefixo_que_a_borda_roteia_e_producao_nao_cai_em_dev(
     overlay: str,
 ) -> None:
@@ -642,6 +665,37 @@ def test_root_path_e_o_prefixo_que_a_borda_roteia_e_producao_nao_cai_em_dev(
     assert prefixos == {"/os"}
     assert configuracao["ROOT_PATH"] == "/os"
     assert configuracao["ENVIRONMENT"] == "production"
+
+
+@pytest.mark.parametrize("overlay", OVERLAYS)
+def test_metrics_da_api_nao_sai_pela_borda(overlay: str) -> None:
+    # O /metrics da API esta sempre ligado (a flag que o devolvia como 404 saiu): o
+    # que o tira da borda e o Ingress `fora-da-borda`, em que o Kong responde 404
+    # sem chamar o servico. O caminho mais longo vence, entao o bloqueio tem de ser
+    # `/os/metrics` em Prefix, e nenhum outro Ingress pode publicar um /metrics.
+    ingressos = do_render_por_tipo(overlay, "Ingress")
+    bloqueios = [
+        i
+        for i in ingressos
+        if i["metadata"].get("annotations", {}).get("konghq.com/plugins")
+        == "fora-da-borda"
+    ]
+
+    assert [i["metadata"]["name"] for i in bloqueios] == ["os-service-fora-da-borda"]
+    caminhos = {
+        c["path"]: c["pathType"]
+        for r in bloqueios[0]["spec"]["rules"]
+        for c in r["http"]["paths"]
+    }
+    assert caminhos["/os/metrics"] == "Prefix"
+    publicados = [
+        c["path"]
+        for i in ingressos
+        if i not in bloqueios
+        for r in i["spec"]["rules"]
+        for c in r["http"]["paths"]
+    ]
+    assert [p for p in publicados if "metrics" in p] == []
 
 
 @pytest.mark.parametrize(
@@ -666,6 +720,12 @@ def test_overlay_dimensiona_a_api_e_o_disco_do_banco(
     assert volume["spec"]["resources"]["requests"]["storage"] == disco_do_banco
 
 
+# Lidas pelo SDK do OpenTelemetry, e nao pelo codigo do servico: os nomes saem das
+# constantes do proprio SDK, e um erro de digitacao no ConfigMap deixaria o padrao
+# dele (10 s por lote no OTLP, 30,5 s para encerrar a API) valendo sem aviso.
+LIDAS_PELO_SDK = frozenset({OTEL_BSP_EXPORT_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT})
+
+
 def test_toda_variavel_do_configmap_e_lida_pelo_codigo() -> None:
     # Uma variavel renomeada no codigo passa no make manifests (o kubeconform so
     # confere o schema) e so cairia no deploy.
@@ -684,7 +744,9 @@ def test_toda_variavel_do_configmap_e_lida_pelo_codigo() -> None:
     sem_leitor = [
         variavel
         for variavel in literais
-        if f'"{variavel}"' not in codigo and "${" + variavel not in entrypoint
+        if variavel not in LIDAS_PELO_SDK
+        and f'"{variavel}"' not in codigo
+        and "${" + variavel not in entrypoint
     ]
 
     assert len(literais) > 19

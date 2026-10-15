@@ -106,3 +106,29 @@ def test_mailpit_e_os_processos_rodam_endurecidos() -> None:
         assert servico["security_opt"] == ["no-new-privileges:true"], nome
         assert {"mem_limit", "cpus", "pids_limit"} <= servico.keys(), nome
     assert servicos["mailpit"]["user"] == "65534:65534"
+
+
+def test_api_nao_tem_flag_para_o_metrics() -> None:
+    # O /metrics da API esta sempre ligado: com a flag desligada (o padrao de
+    # antes) o alvo respondia 404 e o alerta de servico fora do ar disparava.
+    ambientes = [servico.get("environment", {}) for servico in _servicos().values()]
+
+    assert not [a for a in ambientes if "API_METRICS_ENABLED" in a]
+
+
+def test_api_e_os_processos_com_span_exportam_com_o_mesmo_prazo() -> None:
+    # Com o Jaeger fora do ar e a fila cheia, o SDK espera o exportador em cada
+    # lote: o prazo padrao do OTLP (10 s) fez a API levar 30,5 s para sair, mais
+    # que o grace period do pod; com 2 s, 8,1 s (medido no container).
+    servicos = _servicos()
+
+    prazos = {
+        (
+            servicos[nome]["environment"]["OTEL_BSP_EXPORT_TIMEOUT"],
+            servicos[nome]["environment"]["OTEL_EXPORTER_OTLP_TIMEOUT"],
+            servicos[nome]["environment"]["OTEL_ENABLED"],
+        )
+        for nome in ("api", "relay", "consumidor", "prazos")
+    }
+
+    assert prazos == {("2000", "2", "${OTEL_ENABLED:-false}")}

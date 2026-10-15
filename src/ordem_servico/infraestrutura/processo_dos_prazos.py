@@ -8,6 +8,11 @@ duas sagas e entre as fatias da espera: o processo termina a saga em curso, que
 comita ou desfaz inteira, e sai. Banco fora nao derruba o
 processo: o ciclo falha, vai para o log, e o seguinte tenta de novo. O laco
 ocioso nao abre span: so a saga tratada abre o dela (ADR-043).
+
+``pytstop_prazos_ultimo_ciclo_timestamp_seconds`` (mesmo nome e semantica do
+Billing) marca o fim de cada ciclo que terminou, com trabalho, ocioso ou
+pausado: o painel "Ultimo ciclo do prazos" mostra o tempo desde ele, e o ciclo que
+falha (banco fora) nao o atualiza.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ import time
 from typing import TYPE_CHECKING, Final
 
 import structlog
+from prometheus_client import Gauge
 from sqlalchemy.exc import SQLAlchemyError
 
 if TYPE_CHECKING:
@@ -31,6 +37,11 @@ if TYPE_CHECKING:
     )
 
 _log = structlog.get_logger(__name__)
+
+ULTIMO_CICLO: Final = Gauge(
+    "pytstop_prazos_ultimo_ciclo_timestamp_seconds",
+    "Instante (epoch) do ultimo ciclo concluido do processo prazos.",
+)
 
 # Fatia da espera entre ciclos: a cada uma o laco toca o heartbeat e atende o
 # heartbeat AMQP (30 s no pika), e o SIGTERM interrompe a espera.
@@ -69,6 +80,7 @@ class ProcessoDosPrazos:
                     # tenta de novo; derrubar o processo so reiniciaria o pod.
                     _log.exception("deadline cycle failed")
                 else:
+                    ULTIMO_CICLO.set_to_current_time()
                     _registrar(ciclo)
                 self._esperar(parar)
         finally:
