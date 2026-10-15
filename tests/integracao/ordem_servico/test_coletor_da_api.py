@@ -21,7 +21,7 @@ from structlog.testing import capture_logs
 from src.compartilhado.infraestrutura.database import criar_engine_de_metricas
 from src.ordem_servico.infraestrutura import coletor_da_api
 from src.ordem_servico.infraestrutura.coletor_da_api import ColetorDaApi
-from tests.coletor import falhas_do_coletor, raspar
+from tests.coletor import esperar_a_thread_de_leitura, falhas_do_coletor, raspar
 from tests.integracao.proxy_tcp import ProxyTcp
 from tests.integracao.seed_helpers import criar_ordens_com_historicos
 from tests.relogio import RelogioFixo
@@ -430,6 +430,30 @@ class TestBancoComProblema:
         assert mudo == _SO_A_DISPONIBILIDADE
         assert 4.5 <= decorrido < 7
         proxy.fechar()
+        via_proxy.dispose()
+
+    def test_leitura_presa_devolve_a_vez_quando_o_socket_preso_cai(
+        self, engine: Engine, metricas: Engine, proxy: ProxyTcp
+    ) -> None:
+        # O banco volta, mas o socket que a leitura presa usa segue aberto e mudo: a
+        # vez so volta quando ele cai (o banco reinicia, a conexao e resetada). A
+        # thread sai com erro, e a raspagem seguinte, numa conexao nova, le tudo.
+        via_proxy = _metricas_via(proxy, engine)
+        alvo = [via_proxy]
+        coletor = ColetorDaApi(lambda: alvo[0].connect(), orcamento_s=1.0)
+        assert "pytstop_saga_ativas" in raspar(coletor)  # aquece a conexao do pool
+        proxy.calar()
+        assert raspar(coletor) == _SO_A_DISPONIBILIDADE  # a leitura fica presa
+
+        alvo[0] = metricas  # o banco volta para quem abre conexao nova
+        assert raspar(coletor) == _SO_A_DISPONIBILIDADE  # o socket preso segura a vez
+
+        proxy.fechar()  # o socket preso cai
+        esperar_a_thread_de_leitura()
+        depois = raspar(coletor)
+
+        assert depois["pytstop_saga_coletor_disponivel"] == [1]
+        assert set(depois) >= (_DA_SAGA | _DA_OUTBOX | _DAS_ORDENS)
         via_proxy.dispose()
 
     def test_banco_lento_em_todas_as_consultas_responde_antes_do_prazo(
