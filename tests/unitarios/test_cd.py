@@ -80,15 +80,15 @@ def test_jobs_e_dependencias_do_adr_042() -> None:
         "security-scan",
         "image",
         "deploy-kind",
-        "deploy-remoto",
-        "remoto-skipped",
+        "deploy-remote",
+        "remote-skipped",
     ]
     assert jobs["ci"]["uses"] == "./.github/workflows/ci.yml"
     assert jobs["security-scan"]["uses"] == "./.github/workflows/security.yml"
     assert jobs["image"]["needs"] == ["ci", "security-scan"]
     assert jobs["deploy-kind"]["needs"] == "image"
-    assert jobs["deploy-remoto"]["needs"] == ["image", "deploy-kind"]
-    assert jobs["remoto-skipped"]["needs"] == "deploy-kind"
+    assert jobs["deploy-remote"]["needs"] == ["image", "deploy-kind"]
+    assert jobs["remote-skipped"]["needs"] == "deploy-kind"
     # O CD so comeca com o CI do commit verde: nada de `if` que deixe o image
     # rodar com o ci ou o security-scan vermelho, e o deploy-kind depende da imagem.
     assert "if" not in jobs["image"]
@@ -132,11 +132,11 @@ def test_permissoes_minimas_por_job() -> None:
         "contents": "read",
         "actions": "read",
     }
-    assert jobs["deploy-remoto"]["permissions"] == {
+    assert jobs["deploy-remote"]["permissions"] == {
         "contents": "read",
         "packages": "read",
     }
-    assert jobs["remoto-skipped"]["permissions"] == {}
+    assert jobs["remote-skipped"]["permissions"] == {}
     # Nenhum job pede token de identidade, e so o image escreve pacote.
     escrevem = {
         nome
@@ -147,7 +147,7 @@ def test_permissoes_minimas_por_job() -> None:
 
 
 def test_runner_fixo_e_prazo_em_todo_job_que_roda_passos() -> None:
-    prazos = {"image": 30, "deploy-kind": 45, "deploy-remoto": 20, "remoto-skipped": 5}
+    prazos = {"image": 30, "deploy-kind": 45, "deploy-remote": 20, "remote-skipped": 5}
 
     for nome, job in _jobs().items():
         if "uses" in job:
@@ -156,19 +156,19 @@ def test_runner_fixo_e_prazo_em_todo_job_que_roda_passos() -> None:
         assert job["timeout-minutes"] == prazos[nome], nome
 
 
-def test_deploy_remoto_vem_desligado_e_o_skipped_na_condicao_inversa() -> None:
+def test_deploy_remote_vem_desligado_e_o_skipped_na_condicao_inversa() -> None:
     jobs = _jobs()
 
-    assert jobs["deploy-remoto"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO == 'true'"
-    assert jobs["remoto-skipped"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO != 'true'"
-    passos = jobs["remoto-skipped"]["steps"]
+    assert jobs["deploy-remote"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO == 'true'"
+    assert jobs["remote-skipped"]["if"] == "vars.DEPLOY_REMOTO_HABILITADO != 'true'"
+    passos = jobs["remote-skipped"]["steps"]
     assert len(passos) == 1
     assert passos[0]["run"].startswith('echo "::notice::deploy remoto desligado')
     assert "DEPLOY_REMOTO_HABILITADO" in passos[0]["run"]
 
 
-def test_deploy_remoto_nao_tem_segredo_nem_credencial_de_provedor() -> None:
-    job = yaml.safe_dump(_jobs()["deploy-remoto"]).lower()
+def test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor() -> None:
+    job = yaml.safe_dump(_jobs()["deploy-remote"]).lower()
     workflow = yaml.safe_dump(_carrega()).lower()
 
     assert "environment" not in job
@@ -188,9 +188,9 @@ def test_deploy_remoto_nao_tem_segredo_nem_credencial_de_provedor() -> None:
         assert provedor not in CD.read_text().lower(), provedor
 
 
-def test_deploy_remoto_usa_o_commit_do_platform_do_kind_e_o_digest_da_imagem() -> None:
-    checkout = _passo_que_usa("deploy-remoto", "actions/checkout")
-    deploy = _passos("deploy-remoto")[-1]
+def test_deploy_remote_usa_o_commit_do_platform_do_kind_e_o_digest_da_imagem() -> None:
+    checkout = _passo_que_usa("deploy-remote", "actions/checkout")
+    deploy = _passos("deploy-remote")[-1]
 
     assert checkout["with"]["ref"] == "${{ needs.deploy-kind.outputs.sha_platform }}"
     assert _jobs()["deploy-kind"]["outputs"] == {

@@ -58,7 +58,7 @@ jobs:
       contents: read
 
   # Constroi a imagem uma vez. O deploy-kind carrega o tar daqui (a imagem que
-  # o E2E testa e a que foi para o GHCR), e o deploy-remoto, se ligado, implanta o
+  # o E2E testa e a que foi para o GHCR), e o deploy-remote, se ligado, implanta o
   # mesmo digest.
   image:
     needs: [ci, security-scan]
@@ -316,7 +316,7 @@ jobs:
   # passou no kind vai para um cluster persistente que o dono do repositorio
   # configura (README, secao "CD"). O script e o overlay vem do platform, no
   # commit usado no kind. Nenhuma credencial de provedor mora neste arquivo.
-  deploy-remoto:
+  deploy-remote:
     needs: [image, deploy-kind]
     if: vars.DEPLOY_REMOTO_HABILITADO == 'true'
     runs-on: ubuntu-24.04
@@ -349,7 +349,7 @@ jobs:
           platform/scripts/ci/deploy-remoto.sh --contexto "$CONTEXTO" --overlay "$OVERLAY" \
             --servico "$SERVICO" --imagem "${IMAGEM}@${DIGEST}"
 
-  remoto-skipped:
+  remote-skipped:
     needs: deploy-kind
     if: vars.DEPLOY_REMOTO_HABILITADO != 'true'
     runs-on: ubuntu-24.04

@@ -985,8 +985,8 @@ O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.
 | `security-scan` | Chama o `security.yml`: `pip-audit`, `gitleaks` e `trivy` | | | `contents: read` |
 | `image` | Constrói a imagem uma vez e a publica em `ghcr.io/<organização>/pytstop-os-service:<sha do commit>`, com SBOM em SPDX e proveniência (`provenance: mode=max`). Confere o digest com um `docker pull`, salva o tar `linux/amd64` e o SBOM | `ci`, `security-scan` | 30 min | `contents: read`, `packages: write` |
 | `deploy-kind` | Sobe a plataforma e os três serviços num kind do runner, roda o smoke de cada namespace e o E2E da saga (abaixo) | `image` | 45 min | `contents: read`, `actions: read` |
-| `deploy-remoto` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
-| `remoto-skipped` | O oposto: com a variável desligada, só registra o aviso de que o deploy remoto não rodou | `deploy-kind` | 5 min | nenhuma |
+| `deploy-remote` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
+| `remote-skipped` | O oposto: com a variável desligada, só registra o aviso de que o deploy remoto não rodou | `deploy-kind` | 5 min | nenhuma |
 
 O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`. Nenhum job pede token de identidade, e o arquivo não guarda credencial de provedor nenhum.
 
@@ -1038,10 +1038,10 @@ O CD de cada serviço usa o outro no último CD verde. Se o OS e o Billing mudam
 
 ### Deploy remoto (opcional)
 
-O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente, que é o estado de hoje), o `deploy-remoto` fica de fora e o `remoto-skipped` registra um `::notice::` no run. Para ligar:
+O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente, que é o estado de hoje), o `deploy-remote` fica de fora e o `remote-skipped` registra um `::notice::` no run. Para ligar:
 
 1. Criar as variáveis do repositório (ou da organização) `DEPLOY_REMOTO_HABILITADO` com o valor `true`, `DEPLOY_REMOTO_CONTEXTO` com o nome do contexto do kubeconfig e, se não for o overlay `k3s` dos manifestos, `DEPLOY_REMOTO_OVERLAY`.
-2. Guardar o kubeconfig do cluster no segredo `KUBECONFIG_REMOTO` e, no passo "Acesso ao cluster remoto" do `deploy-remoto`, gravá-lo num arquivo e exportar o `KUBECONFIG` (ou usar a action de login do provedor). O passo vem só com um aviso porque a credencial depende do provedor, e o `cd.yml` não guarda nenhuma.
+2. Guardar o kubeconfig do cluster no segredo `KUBECONFIG_REMOTO` e, no passo "Acesso ao cluster remoto" do `deploy-remote`, gravá-lo num arquivo e exportar o `KUBECONFIG` (ou usar a action de login do provedor). O passo vem só com um aviso porque a credencial depende do provedor, e o `cd.yml` não guarda nenhuma.
 3. Ter o script `platform/scripts/ci/deploy-remoto.sh` no platform. Ele chega num PR próprio do platform, com a interface que o job já chama: `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`, no contexto já ativo, com o overlay deste serviço, as imagens por digest do GHCR, a ordem de implantação e o smoke. Enquanto ele não existir no commit do platform usado no run, o job reprova dizendo isso, em vez de um erro de arquivo no meio do log.
 
 O job pede só `contents: read` e `packages: read`, e o platform entra no commit usado no kind.
