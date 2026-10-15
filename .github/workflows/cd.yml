@@ -10,9 +10,9 @@ name: CD
 on:
   push:
     branches: [main]
-  # Reexecuta uma combinacao de commits. O OS Service e sempre o commit do run:
-  # sha_os_service so aceita esse valor e existe para os quatro workflows de CD
-  # terem as mesmas entradas.
+  # Reexecuta uma combinacao de commits, sempre a partir da main (o job image
+  # reprova outra ref). O OS Service e sempre o commit do run: sha_os_service so
+  # aceita esse valor e mantem as mesmas entradas dos CDs dos outros servicos.
   workflow_dispatch:
     inputs:
       sha_platform:
