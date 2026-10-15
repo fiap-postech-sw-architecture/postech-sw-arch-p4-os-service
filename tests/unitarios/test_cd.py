@@ -1,6 +1,10 @@
-"""O ``cd.yml`` (ADR-042): a estrutura do workflow lida do YAML, a regra de
-seguranca dos inputs e o passo que escolhe os commits do platform e dos
-vizinhos, executado de verdade com um ``gh`` falso."""
+"""O ``cd.yml`` (ADR-042): a estrutura do workflow lida do YAML (jobs,
+permissoes, gates, actions por SHA, imagens por digest, artefatos) e os passos
+que valem executar de verdade, com ``gh``, ``docker`` e script falsos: a guarda
+de ref, a escolha dos commits do platform e dos vizinhos (a regra de seguranca
+dos inputs), o SBOM, a comparacao do platform com a ``main`` dele e a chamada
+do deploy remoto. O arquivo vale, sem mudar, na copia de qualquer um dos tres
+servicos: o ``SERVICO`` vem do YAML."""
 
 from __future__ import annotations
 
