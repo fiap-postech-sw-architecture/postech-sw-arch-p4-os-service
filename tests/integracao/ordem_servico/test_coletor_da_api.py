@@ -29,7 +29,7 @@ from tests.relogio import RelogioFixo
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from sqlalchemy import Engine
+    from sqlalchemy import Connection, Engine
     from sqlalchemy.orm import Session, sessionmaker
 
 # O relogio das ordens do coletor: as fixtures de historico e o coletor leem este.
@@ -144,11 +144,11 @@ class TestLeitura:
         # O prazo de abrir a conexao conta uma vez, e nao uma por gauge.
         aberturas: list[int] = []
 
-        def abrir() -> object:
+        def abrir() -> Connection:
             aberturas.append(1)
             return engine.connect()
 
-        _raspar(ColetorDaApi(abrir))  # type: ignore[arg-type]  # abre e fecha como a engine
+        _raspar(ColetorDaApi(abrir))
 
         assert aberturas == [1]
 
@@ -261,13 +261,13 @@ class TestConexaoDaEngine:
 
 class TestBancoComProblema:
     def test_antes_do_boot_marca_o_coletor_indisponivel(self) -> None:
-        def sem_engine() -> object:
+        def sem_engine() -> Connection:
             msg = "Engine de metricas nao configurada"
             raise RuntimeError(msg)
 
         falhas = _falhas()
 
-        raspagem = _raspar(ColetorDaApi(sem_engine))  # type: ignore[arg-type]
+        raspagem = _raspar(ColetorDaApi(sem_engine))
 
         assert raspagem == _SO_A_DISPONIBILIDADE
         assert _falhas() == falhas + 1

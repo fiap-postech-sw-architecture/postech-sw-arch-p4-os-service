@@ -262,7 +262,11 @@ def criar_provedor(
     return provedor
 
 
-def redigir_url_da_span(span: Span, scope: Mapping[str, Any]) -> None:
+# O scope do ASGI: chaves de texto e valores de tipos variados (str, bytes, listas).
+type _ScopeAsgi = Mapping[str, Any]
+
+
+def redigir_url_da_span(span: Span, scope: _ScopeAsgi) -> None:
     """``server_request_hook`` do FastAPI: o span guarda o template da rota.
 
     O caminho cru traz o que identifica a requisicao (``/ordens-de-servico/<id>``)

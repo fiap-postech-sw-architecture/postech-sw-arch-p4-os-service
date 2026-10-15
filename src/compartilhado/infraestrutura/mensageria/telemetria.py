@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 _TETOS: Final = {"traceparent": 128, "tracestate": 512}
 
 
-class _LeitorComTeto(Getter[Any]):
+class _LeitorComTeto(Getter[Any]):  # Any: o carrier e o de quem chama (HTTP, AMQP)
     """Esconde o ``tracestate`` acima do teto: o contexto segue so pelo traceparent."""
 
-    def __init__(self, leitor: Getter[Any]) -> None:
+    def __init__(self, leitor: Getter[Any]) -> None:  # mesmo carrier
         self._leitor = leitor
 
     def get(self, carrier: CarrierT, key: str) -> list[str] | None:
