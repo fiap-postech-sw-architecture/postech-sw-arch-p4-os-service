@@ -307,6 +307,28 @@ class AcompanhamentoRequest(BaseModel):
     )
 
 
+class MetricasResponse(BaseModel):
+    """Metricas das OS para a operacao (RF-027 da fase 3, RFC-004 secao 6.1)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    total: int = Field(description="Total de ordens de servico.")
+    por_status: dict[str, int] = Field(
+        description=(
+            "Ordens em cada um dos nove status (chaves em snake_case), com zero "
+            "onde nao ha nenhuma."
+        )
+    )
+    tempo_medio_por_status_segundos: dict[str, float] = Field(
+        description=(
+            "Permanencia media da ordem em cada status, em segundos: da entrada "
+            "no status ate a transicao seguinte da mesma ordem, nas entradas dos "
+            "ultimos 30 dias. So os status com ao menos uma permanencia "
+            "concluida entram; a ordem que ainda esta no status nao conta."
+        )
+    )
+
+
 class AcompanhamentoResponse(_ComSituacao):
     """Projecao publica: status e timestamps, nada do cliente (LGPD)."""
 

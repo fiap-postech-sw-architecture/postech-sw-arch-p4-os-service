@@ -325,7 +325,9 @@ def test_falha_inesperada_fora_do_handler_nao_poe_o_texto_no_log_nem_no_span(
         esperar_ate(lambda: broker.contar(_DLQ) == 1)
 
     (span,) = rastreador.spans("process DiagnosticoConcluido")
-    assert span.status.description == "RuntimeError"
+    assert span.status.description is None
+    assert span.attributes is not None
+    assert span.attributes["pytstop.falha"] == "RuntimeError"
     eventos = [evento["event"] for evento in saidas.eventos]
     assert "message processing crashed; rejected to dlq" in eventos
     assert _PLACA not in saidas.texto(rastreador)

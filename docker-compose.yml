@@ -26,14 +26,23 @@ x-saga: &saga
   SAGA_MAX_REENVIOS: ${SAGA_MAX_REENVIOS:-5}
   PRAZOS_INTERVALO_SEGUNDOS: ${PRAZOS_INTERVALO_SEGUNDOS:-30}
 
+# Exportacao dos spans (a API, o relay, o consumidor e o prazos). Com o Jaeger
+# fora do ar e a fila cheia, o SDK espera o exportador em cada lote de 512 spans:
+# com o prazo padrao do OTLP (10 s) a API levou 30,5 s para sair, e com 2 s, 8,1 s.
+# O SDK 1.45 ainda nao usa o OTEL_BSP_EXPORT_TIMEOUT. Aqui a exportacao fica
+# desligada; o kind a liga.
+x-otel: &otel
+  OTEL_ENABLED: ${OTEL_ENABLED:-false}
+  OTEL_BSP_EXPORT_TIMEOUT: "2000"
+  OTEL_EXPORTER_OTLP_TIMEOUT: "2"
+
 # Relay, consumidor e prazos: banco (montado das POSTGRES_* em development) e o usuario
 # `os` do RabbitMQ, com a mesma senha de demonstracao do platform.
 x-mensageria: &mensageria
-  <<: [*banco-demo, *saga]
+  <<: [*banco-demo, *saga, *otel]
   POSTGRES_HOST: postgres
   ENVIRONMENT: development
   RABBITMQ_URL: amqp://os:pytstop-os-demo-2026@rabbitmq:5672/%2F  # gitleaks:allow (senha de demo)
-  OTEL_ENABLED: ${OTEL_ENABLED:-false}
 
 # Notificador: so o banco e o SMTP. Sem RABBITMQ_URL (nao fala com o broker) e
 # sem ENCRYPTION_KEY (le o contato do cliente em claro, sem decifrar o documento).
@@ -77,7 +86,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      <<: [*banco-demo, *saga]
+      <<: [*banco-demo, *saga, *otel]
       POSTGRES_HOST: postgres
       ENVIRONMENT: development
       # Chave RSA de assinatura do JWT, so de desenvolvimento (escapes \n do YAML).
@@ -87,8 +96,6 @@ services:
       RUN_SEED_ON_STARTUP: "true"
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@pytstop.dev}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin-demo-os-2026}  # gitleaks:allow (senha de demo)
-      API_METRICS_ENABLED: ${API_METRICS_ENABLED:-true}
-      OTEL_ENABLED: ${OTEL_ENABLED:-false}
     # Readiness (banco acessivel): o `up --wait` so libera com a API pronta.
     # O HEALTHCHECK da imagem segue na liveness /api/v1/saude.
     healthcheck:

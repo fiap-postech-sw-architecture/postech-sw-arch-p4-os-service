@@ -27,7 +27,7 @@ def main() -> None:
         relay = Relay(
             engine=engine,
             parametros=parametros,
-            tracer=criar_tracer("relay"),
+            tracer=criar_tracer("relay", engine),
             config=ConfigRelay.do_ambiente(),
         )
         subir_metricas()

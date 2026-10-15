@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pika
 import pytest
+from opentelemetry.propagators.textmap import default_getter
 from opentelemetry.trace import (
     INVALID_SPAN_CONTEXT,
     SpanKind,
@@ -17,6 +18,7 @@ from opentelemetry.trace import (
 
 from src.compartilhado.infraestrutura.mensageria import amqp
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
+    _LeitorComTeto,
     cabecalhos_do_contexto_atual,
     contexto_dos_cabecalhos,
     span_de_mensagem,
@@ -137,6 +139,15 @@ def test_tracestate_acima_de_512_e_ignorado_sem_ir_para_o_log(
     assert "joao@exemplo.com.br" not in caplog.text
 
 
+def test_leitor_com_teto_lista_as_chaves_e_so_esconde_o_tracestate_longo() -> None:
+    leitor = _LeitorComTeto(default_getter)
+    portador = {"traceparent": "00-x", "tracestate": "a=" + "x" * 600, "outro": "y"}
+
+    assert leitor.keys(portador) == ["traceparent", "tracestate", "outro"]
+    assert leitor.get(portador, "tracestate") is None
+    assert leitor.get(portador, "traceparent") == ["00-x"]
+
+
 def test_tracestate_de_ate_512_segue_no_contexto() -> None:
     traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
     # Dois membros: o W3C limita o valor de cada um a 256 caracteres.
@@ -169,5 +180,7 @@ def test_erro_que_escapa_do_span_marca_so_o_tipo() -> None:
 
     (span,) = rastreador.spans()
     assert span.status.status_code is StatusCode.ERROR
-    assert span.status.description == "RuntimeError"
+    assert span.status.description is None
+    assert span.attributes is not None
+    assert span.attributes["pytstop.falha"] == "RuntimeError"
     assert span.events == ()

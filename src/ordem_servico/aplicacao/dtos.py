@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from datetime import datetime
     from decimal import Decimal
     from uuid import UUID
@@ -131,6 +132,22 @@ class AcompanhamentoDTO:
     status: str
     criado_em: datetime
     atualizado_em: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MetricasDasOrdensDTO:
+    """Total, OS por status e permanencia media por status (RF-027 da fase 3).
+
+    Os mesmos numeros do ``GET /api/v1/ordens-de-servico/metricas`` e dos gauges
+    ``pytstop_os_por_status`` e ``pytstop_os_tempo_medio_status_segundos``.
+    ``por_status`` leva os nove status (zero onde nao ha OS);
+    ``tempo_medio_por_status_segundos``, so os status com ao menos uma
+    permanencia concluida na janela (entrada ate a transicao seguinte da mesma OS).
+    """
+
+    total: int
+    por_status: Mapping[str, int]
+    tempo_medio_por_status_segundos: Mapping[str, float]
 
 
 @dataclass(frozen=True, slots=True)

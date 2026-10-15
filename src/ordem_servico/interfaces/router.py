@@ -1,8 +1,9 @@
 """Routers HTTP do contexto Ordem de Servico (RFC-004 secao 6.1, parte OS).
 
 ``router`` (JWT + papel): abertura, fila por prioridade, consulta, historico,
-cancelamento e entrega. ``router_sagas`` (admin): estado da saga e retomada da
-compensacao parada, para a operacao. ``router_publico`` (sem token, rate limit
+cancelamento, entrega e, so para admin, as metricas das ordens (``/metricas``).
+``router_sagas`` (admin): estado da saga e retomada da compensacao parada, para a
+operacao. ``router_publico`` (sem token, rate limit
 por IP): acompanhamento por placa + documento. As transicoes da saga
 (diagnostico, orcamento, pagamento, execucao) chegam por mensageria, nao por
 rota HTTP.
@@ -31,6 +32,7 @@ from src.ordem_servico.interfaces.dependencies import (
     obter_cancelar_ordem,
     obter_consultar_acompanhamento,
     obter_listar_ordens,
+    obter_obter_metricas,
     obter_obter_ordem,
     obter_obter_saga,
     obter_registrar_entrega,
@@ -42,6 +44,7 @@ from src.ordem_servico.interfaces.schemas import (
     AcompanhamentoResponse,
     CancelarOrdemRequest,
     HistoricoResponse,
+    MetricasResponse,
     MudancaDeStatusResponse,
     OrdemDeServicoResponse,
     OrdemListaResponse,
@@ -161,6 +164,23 @@ def listar_ordens(
         offset=offset,
         limit=limit,
     )
+
+
+# Declarada antes de `/{ordem_id}`: do contrario "metricas" cairia no UUID.
+@router.get(
+    "/metricas",
+    summary="Total, ordens por status e tempo medio em cada status",
+    responses={403: {"description": "Papel sem acesso: so admin."}},
+)
+def obter_metricas(usuario: _Admin, session: _Sessao) -> MetricasResponse:
+    """Os numeros que o dashboard de negocio mostra, do banco, na hora (RF-027).
+
+    A permanencia media de cada status e a do historico: da entrada no status ate
+    a transicao seguinte da mesma ordem, nas entradas dos ultimos 30 dias. E a
+    mesma leitura dos gauges `pytstop_os_por_status` e
+    `pytstop_os_tempo_medio_status_segundos`.
+    """
+    return MetricasResponse.model_validate(obter_obter_metricas(session).executar())
 
 
 @router.get("/{ordem_id}", summary="Consulta uma ordem", responses=_RESPOSTA_404)

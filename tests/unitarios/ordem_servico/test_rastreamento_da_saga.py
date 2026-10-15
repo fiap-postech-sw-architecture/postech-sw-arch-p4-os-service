@@ -89,7 +89,9 @@ def test_falha_inesperada_marca_o_span_com_erro_e_o_tipo_sem_a_mensagem() -> Non
 
     (acao,) = rastreador.spans("saga cancelamento")
     assert acao.status.status_code is StatusCode.ERROR
-    assert acao.status.description == "RuntimeError"
+    assert acao.status.description is None
+    assert acao.attributes is not None
+    assert acao.attributes["pytstop.falha"] == "RuntimeError"
     assert acao.events == ()
 
 

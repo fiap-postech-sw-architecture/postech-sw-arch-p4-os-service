@@ -154,6 +154,12 @@ historico_status_ordem_table = Table(
     ),
 )
 
+# Janela de 30 dias da permanencia media por status (metricas das OS): so as
+# entradas recentes, sem varrer o historico inteiro a cada consulta.
+Index(
+    "ix_historico_status_ordem_ocorrido_em", historico_status_ordem_table.c.ocorrido_em
+)
+
 sagas_table = Table(
     "sagas",
     metadata,

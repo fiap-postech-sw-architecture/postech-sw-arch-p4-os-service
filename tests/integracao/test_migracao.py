@@ -187,3 +187,26 @@ def test_migracao_das_notificacoes_desiste_do_lock_em_segundos(
         assert "notificacoes" in inspect(eng).get_table_names()
     finally:
         eng.dispose()
+
+
+@pytest.mark.parametrize("tabela", ["outbox", "historico_status_ordem"])
+def test_migracao_dos_indices_da_observabilidade_desiste_do_lock_em_segundos(
+    banco_vazio: str, tabela: str
+) -> None:
+    # Uma escrita longa na tabela segura o lock que o CREATE INDEX da 005 pede: a
+    # migracao espera o lock_timeout (5 s) e falha (o Job tenta de novo), sem
+    # enfileirar as escritas da app atras dela.
+    eng = create_engine(banco_vazio)
+    try:
+        alembic(banco_vazio, "004")
+        with eng.connect() as escrita, escrita.begin():
+            escrita.execute(text(f"LOCK TABLE {tabela} IN ROW EXCLUSIVE MODE"))
+            erro = _migrar_com_prazo(banco_vazio)
+        assert isinstance(erro, OperationalError)
+        assert "lock" in str(erro)
+        alembic(banco_vazio)
+        assert "ix_outbox_status_criado_em" in {
+            i["name"] for i in inspect(eng).get_indexes("outbox")
+        }
+    finally:
+        eng.dispose()

@@ -3,33 +3,49 @@ logs capturados de um teste (``Saidas``), para as provas de LGPD."""
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
+from src.compartilhado.infraestrutura.observability import criar_provedor
+
 if TYPE_CHECKING:
-    from opentelemetry.sdk.trace import ReadableSpan
+    from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
     from opentelemetry.trace import Tracer
 
 
 class Rastreador:
-    """Um provider por teste: os spans terminados ficam em ``spans()``."""
+    """Um provider por teste, o de producao (amostrador e limpeza do texto de erro).
 
-    def __init__(self) -> None:
+    Os spans terminados ficam em ``spans()``; ``provedor`` e o que o app de teste
+    instrumenta (``criar_app(provedor=...)``).
+    """
+
+    def __init__(self, processo: str = "testes") -> None:
         self._exportador = InMemorySpanExporter()
-        provider = TracerProvider()
-        provider.add_span_processor(SimpleSpanProcessor(self._exportador))
-        self.tracer: Tracer = provider.get_tracer("testes")
+        self.provedor: TracerProvider = criar_provedor(
+            processo, exportador=self._exportador
+        )
+        self.tracer: Tracer = self.provedor.get_tracer("testes")
 
     def spans(self, nome: str | None = None) -> list[ReadableSpan]:
         terminados = list(self._exportador.get_finished_spans())
         return [s for s in terminados if nome is None or s.name == nome]
+
+
+def tudo_que_o_span_leva(span: ReadableSpan) -> str:
+    """Tudo o que o span leva ao exportador, em texto: o oraculo das provas de LGPD.
+
+    Nome, atributos, eventos, links, descricao do status e recurso: procurar so
+    nos atributos deixou passar o texto do erro e a descricao do status. O escopo
+    da instrumentacao (nome do tracer) nao sai no ``to_json()``.
+    """
+    return json.dumps(json.loads(span.to_json()), ensure_ascii=False, sort_keys=True)
 
 
 def traceparent(span: ReadableSpan) -> str:
@@ -66,7 +82,5 @@ class Saidas:
             f"{registro.getMessage()} {registro.exc_text or ''}"
             for registro in self.stdlib.registros
         ]
-        for span in rastreador.spans():
-            partes += [span.name, repr(dict(span.attributes or {}))]
-            partes += [span.status.description or "", repr(span.events)]
+        partes += [tudo_que_o_span_leva(span) for span in rastreador.spans()]
         return "\n".join(partes)

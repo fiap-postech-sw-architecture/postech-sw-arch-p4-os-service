@@ -17,6 +17,7 @@ from src.ordem_servico.aplicacao.use_cases import (
     CancelarOrdem,
     ConsultarAcompanhamento,
     ListarOrdens,
+    ObterMetricas,
     ObterOrdem,
     ObterSaga,
     RegistrarEntrega,
@@ -26,6 +27,7 @@ from src.ordem_servico.infraestrutura.adapters import ClienteSQLAlchemyAdapter
 from src.ordem_servico.infraestrutura.consultas import (
     ConsultaAcompanhamentoSQLAlchemy,
     ConsultaDaOrdemSQLAlchemy,
+    ConsultaDeMetricasSQLAlchemy,
 )
 from src.ordem_servico.infraestrutura.notificacoes_mapping import (
     NotificacoesSQLAlchemy,
@@ -86,6 +88,10 @@ def obter_listar_ordens(session: Session) -> ListarOrdens:
 
 def obter_obter_ordem(session: Session) -> ObterOrdem:
     return ObterOrdem(consulta=ConsultaDaOrdemSQLAlchemy(session=session))
+
+
+def obter_obter_metricas(session: Session) -> ObterMetricas:
+    return ObterMetricas(consulta=ConsultaDeMetricasSQLAlchemy(session=session))
 
 
 def obter_obter_saga(session: Session) -> ObterSaga:

@@ -27,10 +27,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
-from opentelemetry.trace import SpanKind, StatusCode
+from opentelemetry.trace import SpanKind
 from pika.exceptions import ChannelClosedByBroker, NackError, UnroutableError
 from prometheus_client import Counter, Gauge
 from sqlalchemy.exc import SQLAlchemyError
@@ -58,6 +58,7 @@ from src.compartilhado.infraestrutura.mensageria.processo import (
 from src.compartilhado.infraestrutura.mensageria.telemetria import (
     cabecalhos_do_contexto_atual,
     contexto_dos_cabecalhos,
+    marcar_falha,
     span_de_mensagem,
 )
 from src.compartilhado.infraestrutura.outbox_mapping import CANAL_NOTIFY
@@ -94,6 +95,13 @@ _LEASE_PADRAO_S: Final = 60
 # da linha (statement_timeout de 15 s): abaixo disso, outra replica publicaria
 # de novo cada linha presa num alarme.
 _LEASE_MINIMO_S: Final = 45
+
+
+class _Recusa(NamedTuple):
+    """A falha de uma publicacao: o texto vai ao log e a outbox, o tipo ao span."""
+
+    texto: str
+    tipo: str
 
 
 class _BrokerIndisponivelError(Exception):
@@ -170,6 +178,11 @@ class Relay:
             }
         )
         self._limpeza = Agenda(INTERVALO_DE_LIMPEZA_S)
+        # Series de rotulo fechado nascem com zero: o `increase()` perderia a
+        # primeira publicacao de cada tipo.
+        for tipo in self._catalogo.publicados:
+            MENSAGENS_PUBLICADAS.labels(tipo=tipo)
+        amqp.RECONEXOES.labels(componente="relay")
         OUTBOX_PENDENTES.set_function(lambda: self._outbox.contar("pendente"))
         OUTBOX_DEAD.set_function(lambda: self._outbox.contar("dead"))
 
@@ -302,10 +315,10 @@ class Relay:
                 self._broker.sucesso()
                 self._desfecho.entregue(linha)
             else:
-                span.set_status(StatusCode.ERROR, falha)
-                self._desfecho.recusada(linha, falha)
+                marcar_falha(span, falha.tipo)
+                self._desfecho.recusada(linha, falha.texto)
 
-    def _publicar(self, linha: LinhaDaOutbox) -> str | None:
+    def _publicar(self, linha: LinhaDaOutbox) -> _Recusa | None:
         """Publica com confirm; devolve a falha da mensagem, ou None se confirmada.
 
         Raises:
@@ -322,11 +335,16 @@ class Relay:
                 linha.exchange, linha.routing_key, corpo, propriedades, mandatory=True
             )
         except UnroutableError:
-            return "devolvida pelo broker: nenhuma fila para a routing key"
+            return _Recusa(
+                "devolvida pelo broker: nenhuma fila para a routing key",
+                "UnroutableError",
+            )
         except NackError:
-            return "recusada pelo broker (nack)"
+            return _Recusa("recusada pelo broker (nack)", "NackError")
         except ChannelClosedByBroker as exc:
-            return f"canal fechado pelo broker ({exc.reply_code})"
+            return _Recusa(
+                f"canal fechado pelo broker ({exc.reply_code})", "ChannelClosedByBroker"
+            )
         except amqp.ERROS_DE_CONEXAO as exc:
             raise _BrokerIndisponivelError from exc
         return None

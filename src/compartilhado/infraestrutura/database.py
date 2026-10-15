@@ -134,11 +134,13 @@ def criar_engine(
     )
 
 
-# Engine das metricas por consulta (gauges da saga): uma conexao so, fora do
-# pool das requisicoes, com prazo curto para conectar e para esperar a vez. A
-# raspagem do /metrics (10 s no Prometheus) nunca fica presa ao banco lento.
+# Engine das metricas por consulta (gauges da saga, da outbox e das OS por
+# status): uma conexao so, fora do pool das requisicoes, com prazo curto para
+# conectar (1 s) e para esperar a vez. A raspagem abre uma conexao e roda as
+# consultas nela (``ColetorDaApi``): o prazo da conexao conta uma vez, e nao uma por
+# gauge. A raspagem do /metrics (10 s no Prometheus) nunca fica presa ao banco lento.
 _METRICAS_POOL_TIMEOUT_S = 1
-_METRICAS_CONNECT_TIMEOUT_S = 2
+_METRICAS_CONNECT_TIMEOUT_S = 1
 
 
 def criar_engine_de_metricas(url: str) -> Engine:
