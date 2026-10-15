@@ -303,7 +303,7 @@ def test_image_publica_com_sbom_e_proveniencia_e_cache_do_gha() -> None:
     assert build["uses"].startswith("docker/build-push-action@")
     com = build["with"]
     assert com["push"] is True
-    assert com["sbom"] is True
+    assert com["sbom"].startswith("generator=docker/buildkit-syft-scanner@")
     assert com["provenance"] == "mode=max"
     assert com["tags"] == "${{ steps.meta.outputs.imagem }}"
     assert "GIT_SHA=${{ github.sha }}" in com["build-args"]
@@ -316,6 +316,28 @@ def test_image_publica_com_sbom_e_proveniencia_e_cache_do_gha() -> None:
     }
     meta = _passo_com_id("image", "meta")["run"]
     assert "ghcr.io/${DONO,,}/pytstop-${SERVICO}:${GITHUB_SHA}" in meta
+
+
+DIGEST = r"sha256:[0-9a-f]{64}"
+
+
+def test_buildkit_e_gerador_do_sbom_entram_por_digest() -> None:
+    # As tags (buildx-stable-1 e stable-1) andam; este e o job que escreve no GHCR.
+    buildx = _passo_que_usa("image", "docker/setup-buildx-action")
+    sbom = _passo_com_id("image", "build")["with"]["sbom"]
+
+    assert re.fullmatch(f"image=moby/buildkit@{DIGEST}", buildx["with"]["driver-opts"])
+    assert re.fullmatch(f"generator=docker/buildkit-syft-scanner@{DIGEST}", sbom)
+
+
+def test_imagem_do_actionlint_do_makefile_por_digest() -> None:
+    makefile = (RAIZ / "Makefile").read_text()
+
+    assert re.search(
+        rf"^ACTIONLINT_IMAGE := rhysd/actionlint:\d+\.\d+\.\d+@{DIGEST}$",
+        makefile,
+        re.MULTILINE,
+    )
 
 
 def test_image_exporta_o_tar_amd64_e_confere_o_digest() -> None:

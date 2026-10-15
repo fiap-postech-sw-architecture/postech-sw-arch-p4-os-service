@@ -31,8 +31,10 @@ lint-arch:
 	$(PY) lint-imports
 
 # actionlint nos workflows, com o shellcheck que a imagem traz rodando nos
-# scripts dos `run:` (mesma imagem do make lint-scripts do platform).
-ACTIONLINT_IMAGE := rhysd/actionlint:1.7.12
+# scripts dos `run:` (a versao do make lint-scripts do platform). O digest fixa a
+# imagem: a tag anda, e o job lint, que roda isto, e check obrigatorio da main.
+# Para subir: docker buildx imagetools inspect rhysd/actionlint:<versao>.
+ACTIONLINT_IMAGE := rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
 
 lint-workflows:
 	docker run --rm -v "$(CURDIR):/repo:ro" -w /repo $(ACTIONLINT_IMAGE)
