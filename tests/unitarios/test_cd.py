@@ -70,6 +70,24 @@ def _passo_com_id(job: str, id_: str) -> dict[str, Any]:
     return next(passo for passo in _passos(job) if passo.get("id") == id_)
 
 
+SERVICO: str = _carrega()["env"]["SERVICO"]
+SERVICOS = ("os-service", "billing-service", "execution-service")
+# Os outros dois servicos, na ordem de SERVICOS: o arquivo vale, sem mudar, na
+# copia que o Billing e a Execucao fizerem (so o env SERVICO do workflow muda).
+VIZINHOS = tuple(servico for servico in SERVICOS if servico != SERVICO)
+PRIMEIRO_VIZINHO, SEGUNDO_VIZINHO = VIZINHOS
+
+
+def _entrada(servico: str) -> str:
+    """O nome do input do dispatch (SHA_...) como o passo o recebe por env."""
+    return "SHA_" + servico.upper().replace("-", "_")
+
+
+def _saida(servico: str) -> str:
+    """O nome da saida do passo (sha_...) e do input do dispatch."""
+    return "sha_" + servico.replace("-", "_")
+
+
 def _executa(
     passo: dict[str, Any],
     pasta: Path,
@@ -328,7 +346,7 @@ def test_artefatos_e_retencoes() -> None:
         if passo.get("uses", "").startswith("actions/upload-artifact@")
     }
 
-    assert envios == {"imagem": 1, "sbom-os-service": 90, "e2e-kind": 90}
+    assert envios == {"imagem": 1, f"sbom-{SERVICO}": 90, "e2e-kind": 90}
     assert _passo_que_usa("deploy-kind", "actions/download-artifact")["with"] == {
         "name": "imagem"
     }
@@ -391,9 +409,9 @@ def _roda_sbom(pasta: Path, conteudo: str) -> subprocess.CompletedProcess[str]:
     passo = next(p for p in _passos("image") if "imagetools" in p.get("run", ""))
     env = {
         "SBOM_FAKE": str(pasta / "entrada.json"),
-        "IMAGEM": "ghcr.io/org/pytstop-os-service:abc",
+        "IMAGEM": f"ghcr.io/org/pytstop-{SERVICO}:abc",
         "DIGEST": "sha256:def",
-        "SERVICO": _carrega()["env"]["SERVICO"],
+        "SERVICO": SERVICO,
         "GITHUB_STEP_SUMMARY": str(pasta / "resumo.md"),
     }
     return _executa(passo, pasta, env, falsos=bin_)
@@ -451,8 +469,8 @@ def test_deploy_kind_roda_os_scripts_do_platform_na_ordem_do_adr() -> None:
     assert posicoes == sorted(posicoes)
     implantar = next(c for c in corridas if "implantar-servicos.sh" in c)
     # A imagem deste servico vem do tar do job image; os vizinhos, do codigo.
-    assert '--tar "os-service=imagem.tar" --imagem "os-service=$IMAGEM"' in implantar
-    for servico in ("os-service", "billing-service", "execution-service"):
+    assert '--tar "${SERVICO}=imagem.tar" --imagem "${SERVICO}=$IMAGEM"' in implantar
+    for servico in SERVICOS:
         assert f"{servico}={servico}" in implantar
 
 
@@ -499,11 +517,24 @@ def test_checkouts_do_platform_e_dos_vizinhos_nos_shas_e_sem_credencial() -> Non
         if passo.get("uses", "").startswith("actions/checkout@")
     ]
 
-    assert {c["with"]["path"]: c["with"]["ref"] for c in checkouts} == {
-        "platform": "${{ steps.shas.outputs.sha_platform }}",
-        "os-service": "${{ steps.shas.outputs.sha_os_service }}",
-        "billing-service": "${{ steps.shas.outputs.sha_billing_service }}",
-        "execution-service": "${{ steps.shas.outputs.sha_execution_service }}",
+    # Os quatro checkouts sao iguais em qualquer um dos tres repositorios: o
+    # proprio servico tambem entra pelo nome e pelo sha que o passo shas grava.
+    dono = "${{ github.repository_owner }}"
+    assert {
+        c["with"]["path"]: (c["with"]["repository"], c["with"]["ref"])
+        for c in checkouts
+    } == {
+        "platform": (
+            f"{dono}/postech-sw-arch-p4-platform",
+            "${{ steps.shas.outputs.sha_platform }}",
+        ),
+        **{
+            servico: (
+                f"{dono}/postech-sw-arch-p4-{servico}",
+                f"${{{{ steps.shas.outputs.{_saida(servico)} }}}}",
+            )
+            for servico in SERVICOS
+        },
     }
     for _, passo in _todos_os_passos():
         if passo.get("uses", "").startswith("actions/checkout@"):
@@ -584,21 +615,19 @@ def test_action_de_terceiro_por_sha_de_commit_com_a_tag_em_comentario(
 
 # --- o passo dos commits, executado ---------------------------------------
 
-REPOS = {
-    "platform": f"{DONO}/postech-sw-arch-p4-platform",
-    "billing-service": f"{DONO}/postech-sw-arch-p4-billing-service",
-    "execution-service": f"{DONO}/postech-sw-arch-p4-execution-service",
+REPOS = {"platform": f"{DONO}/postech-sw-arch-p4-platform"} | {
+    servico: f"{DONO}/postech-sw-arch-p4-{servico}" for servico in VIZINHOS
 }
 PROPRIO = "a" * 40
 VERDE = {
     "platform": "1" * 40,
-    "billing-service": "2" * 40,
-    "execution-service": "3" * 40,
+    PRIMEIRO_VIZINHO: "2" * 40,
+    SEGUNDO_VIZINHO: "3" * 40,
 }
 MAIN = {
     "platform": "4" * 40,
-    "billing-service": "5" * 40,
-    "execution-service": "6" * 40,
+    PRIMEIRO_VIZINHO: "5" * 40,
+    SEGUNDO_VIZINHO: "6" * 40,
 }
 
 # O gh falso responde com o JSON de um diretorio e aplica o --jq de verdade, de
@@ -694,11 +723,10 @@ class _Ambiente:
             "GITHUB_STEP_SUMMARY": str(self.resumo),
             "GH_TOKEN": "x",
             "DONO": DONO,
+            "SERVICO": SERVICO,
             "SHA_PROPRIO": PROPRIO,
             "SHA_PLATFORM": "",
-            "SHA_OS_SERVICE": "",
-            "SHA_BILLING_SERVICE": "",
-            "SHA_EXECUTION_SERVICE": "",
+            **{_entrada(servico): "" for servico in SERVICOS},
         } | entradas
         return subprocess.run(  # noqa: S603 - bash e o script do proprio workflow
             [BASH, str(self.script)],
@@ -732,9 +760,9 @@ def test_sem_input_usa_o_ultimo_cd_verde_de_cada_repositorio(amb: _Ambiente) -> 
     assert resultado.returncode == 0, resultado.stderr
     assert amb.saidas() == {
         "sha_platform": VERDE["platform"],
-        "sha_os_service": PROPRIO,
-        "sha_billing_service": VERDE["billing-service"],
-        "sha_execution_service": VERDE["execution-service"],
+        _saida(SERVICO): PROPRIO,
+        _saida(PRIMEIRO_VIZINHO): VERDE[PRIMEIRO_VIZINHO],
+        _saida(SEGUNDO_VIZINHO): VERDE[SEGUNDO_VIZINHO],
     }
     assert "::warning::" not in resultado.stdout
     consultas = [c for c in amb.chamadas() if "workflows/cd.yml/runs" in c]
@@ -750,14 +778,14 @@ def test_sem_input_usa_o_ultimo_cd_verde_de_cada_repositorio(amb: _Ambiente) -> 
         ):
             assert filtro in consulta
     tabela = amb.resumo.read_text()
-    billing = f"postech-sw-arch-p4-billing-service | `{VERDE['billing-service']}`"
-    assert f"| {billing} | last green CD |" in tabela
-    assert f"| postech-sw-arch-p4-os-service | `{PROPRIO}` | this run |" in tabela
+    vizinho = f"postech-sw-arch-p4-{PRIMEIRO_VIZINHO} | `{VERDE[PRIMEIRO_VIZINHO]}`"
+    assert f"| {vizinho} | last green CD |" in tabela
+    assert f"| postech-sw-arch-p4-{SERVICO} | `{PROPRIO}` | this run |" in tabela
 
 
 def test_repositorio_sem_cd_yml_cai_na_main_head_com_aviso(amb: _Ambiente) -> None:
     amb.todos_verdes()
-    for repo in ("billing-service", "execution-service"):
+    for repo in VIZINHOS:
         # O endpoint do workflow responde 404 enquanto o cd.yml nao existe.
         (
             amb.fake
@@ -772,8 +800,8 @@ def test_repositorio_sem_cd_yml_cai_na_main_head_com_aviso(amb: _Ambiente) -> No
     assert resultado.returncode == 0, resultado.stderr
     saidas = amb.saidas()
     assert saidas["sha_platform"] == VERDE["platform"]
-    assert saidas["sha_billing_service"] == MAIN["billing-service"]
-    assert saidas["sha_execution_service"] == MAIN["execution-service"]
+    assert saidas[_saida(PRIMEIRO_VIZINHO)] == MAIN[PRIMEIRO_VIZINHO]
+    assert saidas[_saida(SEGUNDO_VIZINHO)] == MAIN[SEGUNDO_VIZINHO]
     avisos = [
         linha
         for linha in resultado.stdout.splitlines()
@@ -782,7 +810,7 @@ def test_repositorio_sem_cd_yml_cai_na_main_head_com_aviso(amb: _Ambiente) -> No
     assert avisos == [
         f"::warning::postech-sw-arch-p4-{repo} has no green CD run on main yet: "
         f"using main HEAD {MAIN[repo]}"
-        for repo in ("billing-service", "execution-service")
+        for repo in VIZINHOS
     ]
     assert "main HEAD, no green CD yet" in amb.resumo.read_text()
 
@@ -802,11 +830,13 @@ def test_input_do_dispatch_vence_e_dispensa_a_consulta(amb: _Ambiente) -> None:
     amb.todos_verdes()
     fixo = "c" * 40
 
-    resultado = amb.roda(SHA_BILLING_SERVICE=fixo, SHA_OS_SERVICE=PROPRIO)
+    resultado = amb.roda(
+        **{_entrada(PRIMEIRO_VIZINHO): fixo, _entrada(SERVICO): PROPRIO}
+    )
 
     assert resultado.returncode == 0, resultado.stderr
-    assert amb.saidas()["sha_billing_service"] == fixo
-    assert not any("billing-service" in c for c in amb.chamadas())
+    assert amb.saidas()[_saida(PRIMEIRO_VIZINHO)] == fixo
+    assert not any(PRIMEIRO_VIZINHO in c for c in amb.chamadas())
     assert f"`{fixo}` | dispatch input" in amb.resumo.read_text()
 
 
@@ -837,7 +867,7 @@ def test_input_do_dispatch_vence_e_dispensa_a_consulta(amb: _Ambiente) -> None:
 )
 @pytest.mark.parametrize(
     "entrada",
-    ["SHA_PLATFORM", "SHA_BILLING_SERVICE", "SHA_EXECUTION_SERVICE", "SHA_OS_SERVICE"],
+    ["SHA_PLATFORM", *(_entrada(servico) for servico in SERVICOS)],
 )
 def test_input_fora_do_padrao_reprova_antes_de_qualquer_consulta_sem_ecoar_o_valor(
     amb: _Ambiente, entrada: str, valor: str
@@ -860,10 +890,12 @@ def test_input_fora_do_padrao_reprova_antes_de_qualquer_consulta_sem_ecoar_o_val
 def test_sha_do_proprio_servico_que_nao_e_o_do_run_reprova(amb: _Ambiente) -> None:
     amb.todos_verdes()
 
-    resultado = amb.roda(SHA_OS_SERVICE="b" * 40)
+    resultado = amb.roda(**{_entrada(SERVICO): "b" * 40})
 
     assert resultado.returncode == 1
-    assert "sha_os_service must be empty or the commit of this run" in resultado.stdout
+    assert (
+        f"{_saida(SERVICO)} must be empty or the commit of this run" in resultado.stdout
+    )
     assert amb.chamadas() == []
 
 
@@ -871,7 +903,7 @@ def test_falha_da_api_que_nao_e_404_reprova_em_vez_de_cair_na_main(
     amb: _Ambiente,
 ) -> None:
     amb.todos_verdes()
-    amb.falha_da_api("billing-service", "gh: API rate limit exceeded (HTTP 403)")
+    amb.falha_da_api(PRIMEIRO_VIZINHO, "gh: API rate limit exceeded (HTTP 403)")
 
     resultado = amb.roda()
 
@@ -883,13 +915,13 @@ def test_falha_da_api_que_nao_e_404_reprova_em_vez_de_cair_na_main(
 
 def test_resposta_que_nao_e_um_commit_reprova(amb: _Ambiente) -> None:
     amb.todos_verdes()
-    amb.corridas("execution-service", "nao-e-um-sha")
+    amb.corridas(SEGUNDO_VIZINHO, "nao-e-um-sha")
 
     resultado = amb.roda()
 
     assert resultado.returncode == 1
     assert (
-        "could not resolve a commit for postech-sw-arch-p4-execution-service"
+        f"could not resolve a commit for postech-sw-arch-p4-{SEGUNDO_VIZINHO}"
         in resultado.stdout
     )
     assert amb.saida.read_text() == ""
@@ -987,9 +1019,9 @@ def _roda_deploy_remote(
     env = {
         "CONTEXTO": contexto,
         "OVERLAY": "k3s",
-        "IMAGEM": "ghcr.io/org/pytstop-os-service:abc",
+        "IMAGEM": f"ghcr.io/org/pytstop-{SERVICO}:abc",
         "DIGEST": "sha256:def",
-        "SERVICO": _carrega()["env"]["SERVICO"],
+        "SERVICO": SERVICO,
     }
     return _executa(_passos("deploy-remote")[-1], pasta, env)
 
@@ -1004,9 +1036,9 @@ def test_deploy_remote_chama_o_script_do_platform_com_o_digest(tmp_path: Path) -
         "--overlay",
         "k3s",
         "--servico",
-        _carrega()["env"]["SERVICO"],
+        SERVICO,
         "--imagem",
-        "ghcr.io/org/pytstop-os-service:abc@sha256:def",
+        f"ghcr.io/org/pytstop-{SERVICO}:abc@sha256:def",
     ]
 
 

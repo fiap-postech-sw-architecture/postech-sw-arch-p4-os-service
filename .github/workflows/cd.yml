@@ -192,8 +192,11 @@ jobs:
               exit 1
             fi
           done
-          if [ -n "$SHA_OS_SERVICE" ] && [ "$SHA_OS_SERVICE" != "$SHA_PROPRIO" ]; then
-            echo "::error::input sha_os_service must be empty or the commit of this run: the image of this service is built from the commit that started the workflow"
+          # Este servico (env SERVICO) e sempre o commit do run: o input dele so
+          # aceita vazio ou esse commit.
+          entrada_propria=SHA_$(tr '[:lower:]-' '[:upper:]_' <<< "$SERVICO")
+          if [ -n "${!entrada_propria}" ] && [ "${!entrada_propria}" != "$SHA_PROPRIO" ]; then
+            echo "::error::input $(tr '[:upper:]' '[:lower:]' <<< "$entrada_propria") must be empty or the commit of this run: the image of this service is built from the commit that started the workflow"
             exit 1
           fi
           erro=$(mktemp)
@@ -229,11 +232,15 @@ jobs:
             printf -v "sha_$1" %s "$sha"
             printf -v "origem_$1" %s "$origem"
           }
-          resolver platform "$SHA_PLATFORM"
-          resolver billing_service "$SHA_BILLING_SERVICE"
-          resolver execution_service "$SHA_EXECUTION_SERVICE"
-          sha_os_service=$SHA_PROPRIO
-          origem_os_service="this run"
+          for nome in platform os_service billing_service execution_service; do
+            entrada=SHA_$(tr '[:lower:]' '[:upper:]' <<< "$nome")
+            if [ "${nome//_/-}" = "$SERVICO" ]; then
+              printf -v "sha_$nome" %s "$SHA_PROPRIO"
+              printf -v "origem_$nome" %s "this run"
+            else
+              resolver "$nome" "${!entrada}"
+            fi
+          done
           {
             echo "sha_platform=$sha_platform"
             echo "sha_os_service=$sha_os_service"
@@ -258,6 +265,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
+          repository: ${{ github.repository_owner }}/postech-sw-arch-p4-os-service
           ref: ${{ steps.shas.outputs.sha_os_service }}
           path: os-service
           persist-credentials: false
@@ -292,7 +300,7 @@ jobs:
         run: |
           platform/scripts/medir-kind.sh etapa servicos
           platform/scripts/ci/implantar-servicos.sh --overlay kind-ci \
-            --tar "os-service=imagem.tar" --imagem "os-service=$IMAGEM" \
+            --tar "${SERVICO}=imagem.tar" --imagem "${SERVICO}=$IMAGEM" \
             os-service=os-service billing-service=billing-service execution-service=execution-service
       - name: Smoke por namespace
         run: |
