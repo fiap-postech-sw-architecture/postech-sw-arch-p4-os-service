@@ -300,12 +300,12 @@ jobs:
           ref: ${{ steps.shas.outputs.sha_execution_service }}
           path: execution-service
           persist-credentials: false
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: imagem
       # uv no runner para o make e2e do platform: o Python vem do
       # .python-version dele e as dependencias, do uv.lock.
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
       # kind e kubectl fixados, make kind-up e make deploy no overlay kind-ci,
