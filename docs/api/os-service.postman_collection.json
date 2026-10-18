@@ -1,0 +1,2024 @@
+{
+  "info": {
+    "name": "PytStop OS Service",
+    "description": "Uma requisicao por rota do OS Service, com corpo e resposta de exemplo. baseUrl aponta para a API do compose (make compose-up) e pode ser trocada pelo Kong do kind (https://localhost/os; o certificado e autoassinado: desligue a verificacao de SSL do Postman). token e o access_token do login (a requisicao de login usa o admin de demonstracao do compose) e refresh_token, o refresh_token dele; cliente_id, veiculo_id e ordem_id saem das respostas do cadastro do cliente, do veiculo e da abertura da OS. Gerada por scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em docs/api/openapi.json.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "refresh_token",
+      "value": ""
+    },
+    {
+      "key": "cliente_id",
+      "value": "facfeed2-183a-4eac-bbea-2f7647625c88"
+    },
+    {
+      "key": "veiculo_id",
+      "value": "12fdbbf4-044c-480b-8c44-6d7988ac4b1a"
+    },
+    {
+      "key": "ordem_id",
+      "value": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40"
+    }
+  ],
+  "item": [
+    {
+      "name": "publico",
+      "item": [
+        {
+          "name": "Liveness probe",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/saude",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "saude"
+              ]
+            },
+            "description": "Liveness: 200 enquanto o processo responde, sem tocar dependencias.\n\nE o HEALTHCHECK da imagem: banco fora nao deve reiniciar o pod (isso e\npapel da readiness, que tira o pod do balanceamento).\n\n``async def`` de proposito: as rotas da API sao sync (``def``) e rodam no\nthreadpool do anyio; sob carga que satura esse pool, uma ``saude`` sync\nficaria na fila e estouraria o timeout das probes -> liveness reiniciaria\no pod exatamente no pico. Como ``async``, responde direto no event loop.\n\nIsenta do rate limit: as probes do kubelet saem todas do IP do no (chave\ndo limiter) e, sob HPA, estourariam o limite global -> 429 no health check\n-> restart storm.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/saude",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "saude"
+                  ]
+                },
+                "description": "Liveness: 200 enquanto o processo responde, sem tocar dependencias.\n\nE o HEALTHCHECK da imagem: banco fora nao deve reiniciar o pod (isso e\npapel da readiness, que tira o pod do balanceamento).\n\n``async def`` de proposito: as rotas da API sao sync (``def``) e rodam no\nthreadpool do anyio; sob carga que satura esse pool, uma ``saude`` sync\nficaria na fila e estouraria o timeout das probes -> liveness reiniciaria\no pod exatamente no pico. Como ``async``, responde direto no event loop.\n\nIsenta do rate limit: as probes do kubelet saem todas do IP do no (chave\ndo limiter) e, sob HPA, estourariam o limite global -> 429 no health check\n-> restart storm.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"ok\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Readiness probe (banco acessivel)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/saude/pronto",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "saude",
+                "pronto"
+              ]
+            },
+            "description": "Readiness: 200 so com o banco respondendo ``SELECT 1`` em ate 2 s.\n\n503 tira o pod do balanceamento (rolling update, banco fora) sem\nreinicia-lo. Isenta do rate limit pelo mesmo motivo da liveness.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/saude/pronto",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "saude",
+                    "pronto"
+                  ]
+                },
+                "description": "Readiness: 200 so com o banco respondendo ``SELECT 1`` em ate 2 s.\n\n503 tira o pod do balanceamento (rolling update, banco fora) sem\nreinicia-lo. Isenta do rate limit pelo mesmo motivo da liveness.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"ok\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Consulta publica do status por placa + documento",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/publico/acompanhamento",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "publico",
+                "acompanhamento"
+              ]
+            },
+            "description": "Status e timestamps da ordem mais recente do par placa + documento.\n\n``POST`` com corpo de proposito, como no p3 (TD-034): placa e documento sao\nPII e nao devem ir para a URL (access log de proxy, historico do browser).\nNao ha variante GET. O 404 (envelope de erro, ``ENTIDADE_NAO_ENCONTRADA``)\ntem o mesmo codigo e a mesma mensagem para placa inexistente, documento\nerrado e documento ou placa invalidos (digito verificador ou formato,\nrecusados antes de qualquer consulta ao banco): anti-enumeracao. O rate\nlimit por IP completa a defesa.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"placa\": \"BRA2E19\",\n  \"documento\": \"529.982.247-25\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/publico/acompanhamento",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "publico",
+                    "acompanhamento"
+                  ]
+                },
+                "description": "Status e timestamps da ordem mais recente do par placa + documento.\n\n``POST`` com corpo de proposito, como no p3 (TD-034): placa e documento sao\nPII e nao devem ir para a URL (access log de proxy, historico do browser).\nNao ha variante GET. O 404 (envelope de erro, ``ENTIDADE_NAO_ENCONTRADA``)\ntem o mesmo codigo e a mesma mensagem para placa inexistente, documento\nerrado e documento ou placa invalidos (digito verificador ou formato,\nrecusados antes de qualquer consulta ao banco): anti-enumeracao. O rate\nlimit por IP completa a defesa.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"placa\": \"BRA2E19\",\n  \"documento\": \"529.982.247-25\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"status\": \"em_diagnostico\",\n  \"situacao\": \"Em diagnóstico\",\n  \"criado_em\": \"2026-10-18T13:00:00Z\",\n  \"atualizado_em\": \"2026-10-18T13:20:00Z\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "autenticacao",
+      "item": [
+        {
+          "name": "Autentica e emite par de tokens",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/autenticacao/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "autenticacao",
+                "login"
+              ]
+            },
+            "description": "Valida e-mail + senha e devolve access + refresh tokens (rate limit 5/min).\n\nE-mail inexistente e senha errada respondem o mesmo 401 (`NAO_AUTENTICADO`,\n\"Credencial ausente, invalida ou expirada\"), para nao revelar quais e-mails\nexistem.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@pytstop.dev\",\n  \"senha\": \"admin-demo-os-2026\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/autenticacao/login",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "autenticacao",
+                    "login"
+                  ]
+                },
+                "description": "Valida e-mail + senha e devolve access + refresh tokens (rate limit 5/min).\n\nE-mail inexistente e senha errada respondem o mesmo 401 (`NAO_AUTENTICADO`,\n\"Credencial ausente, invalida ou expirada\"), para nao revelar quais e-mails\nexistem.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"admin@pytstop.dev\",\n  \"senha\": \"admin-demo-os-2026\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"access_token\": \"<jwt de acesso, 15 min>\",\n  \"refresh_token\": \"<jwt de refresh, 7 dias>\",\n  \"token_type\": \"bearer\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Rotaciona o par de tokens via refresh",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/autenticacao/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "autenticacao",
+                "refresh"
+              ]
+            },
+            "description": "Troca um refresh token valido por um novo par (access + refresh).\n\nSingle-use: o refresh apresentado e revogado atomicamente. Refresh\ninvalido/expirado/ja consumido -> 401.",
+            "auth": {
+              "type": "noauth"
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/autenticacao/refresh",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "autenticacao",
+                    "refresh"
+                  ]
+                },
+                "description": "Troca um refresh token valido por um novo par (access + refresh).\n\nSingle-use: o refresh apresentado e revogado atomicamente. Refresh\ninvalido/expirado/ja consumido -> 401.",
+                "auth": {
+                  "type": "noauth"
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"access_token\": \"<jwt de acesso, 15 min>\",\n  \"refresh_token\": \"<jwt de refresh, 7 dias>\",\n  \"token_type\": \"bearer\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Chaves publicas que validam os tokens (JWKS)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/.well-known/jwks.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                ".well-known",
+                "jwks.json"
+              ]
+            },
+            "description": "JWK Set (RFC 7517) com as chaves publicas que validam os tokens do servico.\n\nPublico, sem token: Billing e Execucao validam os JWT localmente com estas\nchaves (ADR-039). A resposta traz a chave que assina e, durante uma rotacao,\na outra chave publicada.",
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/.well-known/jwks.json",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    ".well-known",
+                    "jwks.json"
+                  ]
+                },
+                "description": "JWK Set (RFC 7517) com as chaves publicas que validam os tokens do servico.\n\nPublico, sem token: Billing e Execucao validam os JWT localmente com estas\nchaves (ADR-039). A resposta traz a chave que assina e, durante uma rotacao,\na outra chave publicada.",
+                "auth": {
+                  "type": "noauth"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"keys\": [\n    {\n      \"kty\": \"RSA\",\n      \"use\": \"sig\",\n      \"alg\": \"RS256\",\n      \"kid\": \"<thumbprint RFC 7638 da chave>\",\n      \"n\": \"<modulo da chave publica, base64url>\",\n      \"e\": \"AQAB\"\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Registra um novo usuario (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/autenticacao/registrar",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "autenticacao",
+                "registrar"
+              ]
+            },
+            "description": "Cria um usuario com o papel informado. Endpoint admin-gated (RBAC).\n\nE-mail ja cadastrado -> 409. O papel e obrigatorio no corpo (nunca um\nadmin silencioso por omissao).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"atendente@pytstop.dev\",\n  \"senha\": \"atendente-demo-2026\",\n  \"papel\": \"atendente\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/autenticacao/registrar",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "autenticacao",
+                    "registrar"
+                  ]
+                },
+                "description": "Cria um usuario com o papel informado. Endpoint admin-gated (RBAC).\n\nE-mail ja cadastrado -> 409. O papel e obrigatorio no corpo (nunca um\nadmin silencioso por omissao).",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"atendente@pytstop.dev\",\n  \"senha\": \"atendente-demo-2026\",\n  \"papel\": \"atendente\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"9809e49f-24a6-4e03-a4bf-c655feb2a0dd\",\n  \"email\": \"atendente@pytstop.dev\",\n  \"papel\": \"atendente\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Revoga o access e, opcionalmente, o refresh",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/autenticacao/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "autenticacao",
+                "logout"
+              ]
+            },
+            "description": "Revoga o access token do header; se o refresh vier no corpo, revoga-o tambem.\n\nSem o refresh, encerra so o access (compat com clientes que so mandam o\nheader). Header ausente -> 401.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/autenticacao/logout",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "autenticacao",
+                    "logout"
+                  ]
+                },
+                "description": "Revoga o access token do header; se o refresh vier no corpo, revoga-o tambem.\n\nSem o refresh, encerra so o access (compat com clientes que so mandam o\nheader). Header ausente -> 401.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"mensagem\": \"Logout realizado com sucesso\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "clientes",
+      "item": [
+        {
+          "name": "Cadastra um cliente (CPF ou CNPJ)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes"
+              ]
+            },
+            "description": "Cria um cliente com documento unico (CPF/CNPJ); 409 se ja cadastrado.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nome\": \"Maria Souza\",\n  \"documento\": \"529.982.247-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes"
+                  ]
+                },
+                "description": "Cria um cliente com documento unico (CPF/CNPJ); 409 se ja cadastrado.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"nome\": \"Maria Souza\",\n  \"documento\": \"529.982.247-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"nome\": \"Maria Souza\",\n  \"documento_formatado\": \"529.982.247-25\",\n  \"documento_mascarado\": \"***.***.***-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\",\n  \"ativo\": true,\n  \"veiculos\": []\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Registra um consentimento LGPD do cliente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/consentimento",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "consentimento"
+              ]
+            },
+            "description": "Registra a base legal de consentimento por tipo; 409 se ja houver ativo.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tipo\": \"tratamento_dados\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/consentimento",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "consentimento"
+                  ]
+                },
+                "description": "Registra a base legal de consentimento por tipo; 409 se ja houver ativo.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"tipo\": \"tratamento_dados\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"f5ebdd3e-154c-42c8-84f7-d7c9f14aa771\",\n  \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"tipo\": \"tratamento_dados\",\n  \"concedido_em\": \"2026-10-18T12:55:00Z\",\n  \"revogado_em\": null,\n  \"ativo\": true\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Adiciona um veiculo a um cliente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/veiculos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "veiculos"
+              ]
+            },
+            "description": "Anexa um veiculo (placa unica global); 409 se placa em uso ou cliente inativo.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"placa\": \"BRA2E19\",\n  \"marca\": \"Fiat\",\n  \"modelo\": \"Argo\",\n  \"ano\": 2022\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/veiculos",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "veiculos"
+                  ]
+                },
+                "description": "Anexa um veiculo (placa unica global); 409 se placa em uso ou cliente inativo.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"placa\": \"BRA2E19\",\n  \"marca\": \"Fiat\",\n  \"modelo\": \"Argo\",\n  \"ano\": 2022\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"placa\": \"BRA2E19\",\n  \"marca\": \"Fiat\",\n  \"modelo\": \"Argo\",\n  \"ano\": 2022\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Lista clientes paginados",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes?offset=0&limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes"
+              ],
+              "query": [
+                {
+                  "key": "offset",
+                  "value": "0"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Retorna os clientes paginados (offset/limit) com o total; documento mascarado."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes?offset=0&limit=20",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes"
+                  ],
+                  "query": [
+                    {
+                      "key": "offset",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    }
+                  ]
+                },
+                "description": "Retorna os clientes paginados (offset/limit) com o total; documento mascarado."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"items\": [\n    {\n      \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n      \"nome\": \"Maria Souza\",\n      \"documento_mascarado\": \"***.***.***-25\",\n      \"tipo_documento\": \"cpf\",\n      \"contato\": \"maria.souza@example.com\",\n      \"ativo\": true\n    }\n  ],\n  \"total\": 1,\n  \"offset\": 0,\n  \"limit\": 20\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Consulta um cliente por id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}"
+              ]
+            },
+            "description": "Busca um cliente pelo id, com seus veiculos; 404 se nao existir."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}"
+                  ]
+                },
+                "description": "Busca um cliente pelo id, com seus veiculos; 404 se nao existir."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"nome\": \"Maria Souza\",\n  \"documento_formatado\": \"529.982.247-25\",\n  \"documento_mascarado\": \"***.***.***-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\",\n  \"ativo\": true,\n  \"veiculos\": [\n    {\n      \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n      \"placa\": \"BRA2E19\",\n      \"marca\": \"Fiat\",\n      \"modelo\": \"Argo\",\n      \"ano\": 2022\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Atualiza nome e contato de um cliente",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}"
+              ]
+            },
+            "description": "Atualiza nome/contato do cliente; 404 se ausente, 409 se inativo/anonimizado.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nome\": \"Maria Souza Lima\",\n  \"contato\": \"maria.lima@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}"
+                  ]
+                },
+                "description": "Atualiza nome/contato do cliente; 404 se ausente, 409 se inativo/anonimizado.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"nome\": \"Maria Souza Lima\",\n  \"contato\": \"maria.lima@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"nome\": \"Maria Souza Lima\",\n  \"documento_formatado\": \"529.982.247-25\",\n  \"documento_mascarado\": \"***.***.***-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.lima@example.com\",\n  \"ativo\": true,\n  \"veiculos\": [\n    {\n      \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n      \"placa\": \"BRA2E19\",\n      \"marca\": \"Fiat\",\n      \"modelo\": \"Argo\",\n      \"ano\": 2022\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Lista os veiculos de um cliente",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/veiculos",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "veiculos"
+              ]
+            },
+            "description": "Retorna todos os veiculos do cliente; 404 se o cliente nao existir."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/veiculos",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "veiculos"
+                  ]
+                },
+                "description": "Retorna todos os veiculos do cliente; 404 se o cliente nao existir."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n    \"placa\": \"BRA2E19\",\n    \"marca\": \"Fiat\",\n    \"modelo\": \"Argo\",\n    \"ano\": 2022\n  }\n]",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Consulta os dados pessoais de um cliente (LGPD acesso)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/dados-pessoais",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "dados-pessoais"
+              ]
+            },
+            "description": "Retorna os dados pessoais do cliente (LGPD acesso), auditando a consulta."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/dados-pessoais",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "dados-pessoais"
+                  ]
+                },
+                "description": "Retorna os dados pessoais do cliente (LGPD acesso), auditando a consulta."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"nome\": \"Maria Souza\",\n  \"documento_formatado\": \"529.982.247-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\",\n  \"veiculos\": [\n    {\n      \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n      \"placa\": \"BRA2E19\",\n      \"marca\": \"Fiat\",\n      \"modelo\": \"Argo\",\n      \"ano\": 2022\n    }\n  ],\n  \"ativo\": true\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Exporta os dados pessoais de um cliente (LGPD portabilidade)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/dados-pessoais/exportar",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "dados-pessoais",
+                "exportar"
+              ]
+            },
+            "description": "Exporta os dados pessoais do cliente (LGPD portabilidade), auditando o acesso."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/dados-pessoais/exportar",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "dados-pessoais",
+                    "exportar"
+                  ]
+                },
+                "description": "Exporta os dados pessoais do cliente (LGPD portabilidade), auditando o acesso."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"nome\": \"Maria Souza\",\n  \"documento_formatado\": \"529.982.247-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\",\n  \"veiculos\": [\n    {\n      \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n      \"placa\": \"BRA2E19\",\n      \"marca\": \"Fiat\",\n      \"modelo\": \"Argo\",\n      \"ano\": 2022\n    }\n  ],\n  \"ativo\": true\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Revoga um consentimento LGPD do cliente",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/consentimento?tipo=tratamento_dados",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "consentimento"
+              ],
+              "query": [
+                {
+                  "key": "tipo",
+                  "value": "tratamento_dados"
+                }
+              ]
+            },
+            "description": "Revoga o consentimento do tipo informado; 404 se nao houver consentimento."
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/consentimento?tipo=tratamento_dados",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "consentimento"
+                  ],
+                  "query": [
+                    {
+                      "key": "tipo",
+                      "value": "tratamento_dados"
+                    }
+                  ]
+                },
+                "description": "Revoga o consentimento do tipo informado; 404 se nao houver consentimento."
+              },
+              "status": "No Content",
+              "code": 204,
+              "header": [],
+              "body": ""
+            }
+          ]
+        },
+        {
+          "name": "Remove um veiculo de um cliente",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/veiculos/{{veiculo_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "veiculos",
+                "{{veiculo_id}}"
+              ]
+            },
+            "description": "Remove um veiculo do cliente; 404 se ausente, 409 se houver OS vinculada."
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/veiculos/{{veiculo_id}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "veiculos",
+                    "{{veiculo_id}}"
+                  ]
+                },
+                "description": "Remove um veiculo do cliente; 404 se ausente, 409 se houver OS vinculada."
+              },
+              "status": "No Content",
+              "code": 204,
+              "header": [],
+              "body": ""
+            }
+          ]
+        },
+        {
+          "name": "Anonimiza os dados de um cliente (LGPD erasure)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/dados-pessoais",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}",
+                "dados-pessoais"
+              ]
+            },
+            "description": "Anonimiza os dados do cliente (LGPD erasure); 409 se houver OS ativa.\n\nNa mesma transacao: cliente, veiculos, texto livre das OS, placa e descricao\ndos comandos ja gravados na outbox e um comando ``AnonimizarVeiculo`` por\nveiculo para a Execucao trocar a placa que guarda."
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}/dados-pessoais",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}",
+                    "dados-pessoais"
+                  ]
+                },
+                "description": "Anonimiza os dados do cliente (LGPD erasure); 409 se houver OS ativa.\n\nNa mesma transacao: cliente, veiculos, texto livre das OS, placa e descricao\ndos comandos ja gravados na outbox e um comando ``AnonimizarVeiculo`` por\nveiculo para a Execucao trocar a placa que guarda."
+              },
+              "status": "No Content",
+              "code": 204,
+              "header": [],
+              "body": ""
+            }
+          ]
+        },
+        {
+          "name": "Desativa (soft-delete) um cliente sem OS ativa",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "clientes",
+                "{{cliente_id}}"
+              ]
+            },
+            "description": "Desativa um cliente (terminal); 404 se ausente, 409 se possuir OS ativa."
+          },
+          "response": [
+            {
+              "name": "204 No Content",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/clientes/{{cliente_id}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "clientes",
+                    "{{cliente_id}}"
+                  ]
+                },
+                "description": "Desativa um cliente (terminal); 404 se ausente, 409 se possuir OS ativa."
+              },
+              "status": "No Content",
+              "code": 204,
+              "header": [],
+              "body": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ordens-de-servico",
+      "item": [
+        {
+          "name": "Abre uma ordem de servico em RECEBIDA e inicia a saga",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico"
+              ]
+            },
+            "description": "Abre a OS para um cliente ativo e um veiculo dele (atendente ou admin).\n\nNo mesmo commit, a saga de atendimento nasce em ``aguardando_diagnostico``\ne o ``SolicitarDiagnostico`` vai para a outbox, rumo a Execucao.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cliente_id\": \"{{cliente_id}}\",\n  \"veiculo_id\": \"{{veiculo_id}}\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico"
+                  ]
+                },
+                "description": "Abre a OS para um cliente ativo e um veiculo dele (atendente ou admin).\n\nNo mesmo commit, a saga de atendimento nasce em ``aguardando_diagnostico``\ne o ``SolicitarDiagnostico`` vai para a outbox, rumo a Execucao.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"cliente_id\": \"{{cliente_id}}\",\n  \"veiculo_id\": \"{{veiculo_id}}\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"veiculo_id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\",\n  \"status\": \"recebida\",\n  \"situacao\": \"Recebida\",\n  \"orcamento\": null,\n  \"pagamento\": null,\n  \"motivo_cancelamento\": null,\n  \"versao\": 1,\n  \"criado_em\": \"2026-10-18T13:00:00Z\",\n  \"atualizado_em\": \"2026-10-18T13:00:00Z\",\n  \"etapa\": \"aguardando_diagnostico\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Fila de ordens por prioridade de status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico?offset=0&limit=20&incluir_encerradas=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico"
+              ],
+              "query": [
+                {
+                  "key": "offset",
+                  "value": "0"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "incluir_encerradas",
+                  "value": "false"
+                }
+              ]
+            },
+            "description": "Pagina por prioridade (EM_EXECUCAO primeiro, RECEBIDA por ultimo).\n\nDentro do mesmo status, a mais antiga primeiro. Por padrao omite as\nencerradas; ``total`` acompanha o filtro."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico?offset=0&limit=20&incluir_encerradas=false",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico"
+                  ],
+                  "query": [
+                    {
+                      "key": "offset",
+                      "value": "0"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "20"
+                    },
+                    {
+                      "key": "incluir_encerradas",
+                      "value": "false"
+                    }
+                  ]
+                },
+                "description": "Pagina por prioridade (EM_EXECUCAO primeiro, RECEBIDA por ultimo).\n\nDentro do mesmo status, a mais antiga primeiro. Por padrao omite as\nencerradas; ``total`` acompanha o filtro."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"items\": [\n    {\n      \"id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n      \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n      \"veiculo_id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n      \"status\": \"recebida\",\n      \"situacao\": \"Recebida\",\n      \"criado_em\": \"2026-10-18T13:00:00Z\",\n      \"atualizado_em\": \"2026-10-18T13:00:00Z\"\n    }\n  ],\n  \"total\": 1,\n  \"offset\": 0,\n  \"limit\": 20\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Consulta uma ordem",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico",
+                "{{ordem_id}}"
+              ]
+            },
+            "description": "Status, etapa da saga, resumo do orcamento e do pagamento e timestamps.\n\nO status e a etapa saem da mesma leitura: nunca divergem."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico",
+                    "{{ordem_id}}"
+                  ]
+                },
+                "description": "Status, etapa da saga, resumo do orcamento e do pagamento e timestamps.\n\nO status e a etapa saem da mesma leitura: nunca divergem."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"veiculo_id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\",\n  \"status\": \"recebida\",\n  \"situacao\": \"Recebida\",\n  \"orcamento\": null,\n  \"pagamento\": null,\n  \"motivo_cancelamento\": null,\n  \"versao\": 1,\n  \"criado_em\": \"2026-10-18T13:00:00Z\",\n  \"atualizado_em\": \"2026-10-18T13:00:00Z\",\n  \"etapa\": \"aguardando_diagnostico\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Linha do tempo de status da ordem",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}/historico",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico",
+                "{{ordem_id}}",
+                "historico"
+              ]
+            },
+            "description": "Mudancas de status (de, para, origem, ator, motivo) e registros da saga.\n\nDuas listas, cada uma na sua ordem: o instante da mudanca da OS e o do\nregistro da saga vem de leituras de relogio diferentes, e intercala-las\npoderia mostrar o efeito antes da causa."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}/historico",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico",
+                    "{{ordem_id}}",
+                    "historico"
+                  ]
+                },
+                "description": "Mudancas de status (de, para, origem, ator, motivo) e registros da saga.\n\nDuas listas, cada uma na sua ordem: o instante da mudanca da OS e o do\nregistro da saga vem de leituras de relogio diferentes, e intercala-las\npoderia mostrar o efeito antes da causa."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"ordem_id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"mudancas\": [\n    {\n      \"sequencia\": 1,\n      \"de\": null,\n      \"para\": \"recebida\",\n      \"origem\": \"atendimento\",\n      \"motivo\": null,\n      \"ator\": \"<sub do atendente>\",\n      \"ocorrido_em\": \"2026-10-18T13:00:00Z\"\n    }\n  ],\n  \"passos\": [\n    {\n      \"seq\": 1,\n      \"em\": \"2026-10-18T13:00:00Z\",\n      \"de\": null,\n      \"para\": \"aguardando_diagnostico\",\n      \"gatilho\": \"abertura\",\n      \"mensagem_id\": null,\n      \"comando\": \"SolicitarDiagnostico\",\n      \"comando_id\": \"be43f983-a6d9-4daf-a720-1a209659559f\",\n      \"motivo\": null,\n      \"ator\": \"<sub do atendente>\"\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Pede o cancelamento: a saga desfaz os passos e cancela a ordem",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}/cancelamento",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico",
+                "{{ordem_id}}",
+                "cancelamento"
+              ]
+            },
+            "description": "Pede o cancelamento antes do inicio da execucao (RFC-004 secao 4.4).\n\n202 com a ordem e a etapa ``compensando``: a OS guarda o motivo e mantem o\nstatus ate a saga desfazer os passos feitos, um por vez; so entao fica\n``cancelada`` (acompanhe pela etapa e pelo historico). Com a compensacao em\ncurso ou parada, o pedido repetido devolve 202 com a etapa atual, sem\nefeito. Depois do inicio da execucao, 409 (\"Cancelamento recusado:\nexecução já iniciada\"); ordem ja cancelada, 409 (\"Ordem já cancelada\").\nToda OS tem saga desde a abertura: sem ela, 404.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"motivo\": \"Cliente vendeu o veiculo\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}/cancelamento",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico",
+                    "{{ordem_id}}",
+                    "cancelamento"
+                  ]
+                },
+                "description": "Pede o cancelamento antes do inicio da execucao (RFC-004 secao 4.4).\n\n202 com a ordem e a etapa ``compensando``: a OS guarda o motivo e mantem o\nstatus ate a saga desfazer os passos feitos, um por vez; so entao fica\n``cancelada`` (acompanhe pela etapa e pelo historico). Com a compensacao em\ncurso ou parada, o pedido repetido devolve 202 com a etapa atual, sem\nefeito. Depois do inicio da execucao, 409 (\"Cancelamento recusado:\nexecução já iniciada\"); ordem ja cancelada, 409 (\"Ordem já cancelada\").\nToda OS tem saga desde a abertura: sem ela, 404.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"motivo\": \"Cliente vendeu o veiculo\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Accepted",
+              "code": 202,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"veiculo_id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\",\n  \"status\": \"recebida\",\n  \"situacao\": \"Recebida\",\n  \"orcamento\": null,\n  \"pagamento\": null,\n  \"motivo_cancelamento\": \"Cliente vendeu o veiculo\",\n  \"versao\": 2,\n  \"criado_em\": \"2026-10-18T13:00:00Z\",\n  \"atualizado_em\": \"2026-10-18T13:05:00Z\",\n  \"etapa\": \"compensando\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Registra a entrega do veiculo (FINALIZADA -> ENTREGUE)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}/entrega",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico",
+                "{{ordem_id}}",
+                "entrega"
+              ]
+            },
+            "description": "Entrega ao cliente; 409 se a ordem nao estiver FINALIZADA."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico/{{ordem_id}}/entrega",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico",
+                    "{{ordem_id}}",
+                    "entrega"
+                  ]
+                },
+                "description": "Entrega ao cliente; 409 se a ordem nao estiver FINALIZADA."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"veiculo_id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\",\n  \"status\": \"entregue\",\n  \"situacao\": \"Entregue\",\n  \"orcamento\": {\n    \"orcamento_id\": \"c2a9e3f4-6b1d-4e8a-9f20-7d3c5b8a1e64\",\n    \"total\": \"350.00\",\n    \"moeda\": \"BRL\",\n    \"link_decisao\": \"https://localhost/billing/api/v1/publico/orcamentos/<token>\",\n    \"valido_ate\": \"2026-10-25T13:20:00Z\"\n  },\n  \"pagamento\": {\n    \"pagamento_id\": \"5e8b1f2a-3c4d-4a6b-8e9f-0a1b2c3d4e5f\",\n    \"status\": \"confirmado\",\n    \"valor\": \"350.00\",\n    \"moeda\": \"BRL\",\n    \"checkout_url\": \"https://www.mercadopago.com.br/checkout/v1/redirect?pref_id=<id>\",\n    \"expira_em\": \"2026-10-19T14:00:00Z\"\n  },\n  \"motivo_cancelamento\": null,\n  \"versao\": 9,\n  \"criado_em\": \"2026-10-18T13:00:00Z\",\n  \"atualizado_em\": \"2026-10-19T17:00:00Z\",\n  \"etapa\": \"concluida\"\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Total, ordens por status e tempo medio em cada status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ordens-de-servico/metricas",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ordens-de-servico",
+                "metricas"
+              ]
+            },
+            "description": "Os numeros que o dashboard de negocio mostra, do banco, na hora (RF-027).\n\nA permanencia media de cada status e a do historico: da entrada no status ate\na transicao seguinte da mesma ordem, nas entradas dos ultimos 30 dias. E a\nmesma leitura dos gauges `pytstop_os_por_status` e\n`pytstop_os_tempo_medio_status_segundos`."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/ordens-de-servico/metricas",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ordens-de-servico",
+                    "metricas"
+                  ]
+                },
+                "description": "Os numeros que o dashboard de negocio mostra, do banco, na hora (RF-027).\n\nA permanencia media de cada status e a do historico: da entrada no status ate\na transicao seguinte da mesma ordem, nas entradas dos ultimos 30 dias. E a\nmesma leitura dos gauges `pytstop_os_por_status` e\n`pytstop_os_tempo_medio_status_segundos`."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"total\": 3,\n  \"por_status\": {\n    \"recebida\": 0,\n    \"em_diagnostico\": 1,\n    \"aguardando_aprovacao\": 1,\n    \"aguardando_pagamento\": 0,\n    \"aguardando_execucao\": 0,\n    \"em_execucao\": 0,\n    \"finalizada\": 0,\n    \"entregue\": 0,\n    \"cancelada\": 1\n  },\n  \"tempo_medio_por_status_segundos\": {\n    \"recebida\": 150.0,\n    \"em_diagnostico\": 41550.0,\n    \"aguardando_aprovacao\": 600.0\n  }\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "sagas",
+      "item": [
+        {
+          "name": "Estado da saga de uma ordem (operacao)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sagas/{{ordem_id}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "sagas",
+                "{{ordem_id}}"
+              ]
+            },
+            "description": "Etapa, motivo, falha, plano restante, comando em voo, reenvios, prazo e passos.\n\nE a primeira consulta do runbook da saga (RFC-004 secao 4.7)."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/sagas/{{ordem_id}}",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "sagas",
+                    "{{ordem_id}}"
+                  ]
+                },
+                "description": "Etapa, motivo, falha, plano restante, comando em voo, reenvios, prazo e passos.\n\nE a primeira consulta do runbook da saga (RFC-004 secao 4.7)."
+              },
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"ordem_id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"etapa\": \"aguardando_diagnostico\",\n  \"motivo\": null,\n  \"falha\": null,\n  \"plano_compensacao\": [],\n  \"comando_em_voo\": null,\n  \"reenvios\": 0,\n  \"prazo_resposta_em\": null,\n  \"passos\": [\n    {\n      \"seq\": 1,\n      \"em\": \"2026-10-18T13:00:00Z\",\n      \"de\": null,\n      \"para\": \"aguardando_diagnostico\",\n      \"gatilho\": \"abertura\",\n      \"mensagem_id\": null,\n      \"comando\": \"SolicitarDiagnostico\",\n      \"comando_id\": \"be43f983-a6d9-4daf-a720-1a209659559f\",\n      \"motivo\": null,\n      \"ator\": \"<sub do atendente>\"\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        },
+        {
+          "name": "Retoma a compensacao parada (falha_na_compensacao)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/sagas/{{ordem_id}}/compensacao",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "sagas",
+                "{{ordem_id}}",
+                "compensacao"
+              ]
+            },
+            "description": "Reenvia a compensacao pendente da saga parada (RFC-004 secao 4.7).\n\nSo em `falha_na_compensacao`, depois de o operador resolver a causa (runbook da\nsaga): o comando sai de novo com `id` novo, a saga volta a `compensando` e\nsegue o plano ate `compensada`. O participante que ja tinha feito a\ncompensacao responde com o desfecho registrado. Fora da falha, 409."
+          },
+          "response": [
+            {
+              "name": "202 Accepted",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/api/v1/sagas/{{ordem_id}}/compensacao",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "sagas",
+                    "{{ordem_id}}",
+                    "compensacao"
+                  ]
+                },
+                "description": "Reenvia a compensacao pendente da saga parada (RFC-004 secao 4.7).\n\nSo em `falha_na_compensacao`, depois de o operador resolver a causa (runbook da\nsaga): o comando sai de novo com `id` novo, a saga volta a `compensando` e\nsegue o plano ate `compensada`. O participante que ja tinha feito a\ncompensacao responde com o desfecho registrado. Fora da falha, 409."
+              },
+              "status": "Accepted",
+              "code": 202,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"ordem_id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"etapa\": \"compensando\",\n  \"motivo\": \"cancelamento\",\n  \"falha\": null,\n  \"plano_compensacao\": [\n    \"DescartarDiagnostico\"\n  ],\n  \"comando_em_voo\": {\n    \"tipo\": \"DescartarDiagnostico\",\n    \"enviado_em\": \"2026-10-18T13:40:00Z\"\n  },\n  \"reenvios\": 0,\n  \"prazo_resposta_em\": \"2026-10-18T13:42:00Z\",\n  \"passos\": [\n    {\n      \"seq\": 1,\n      \"em\": \"2026-10-18T13:00:00Z\",\n      \"de\": null,\n      \"para\": \"aguardando_diagnostico\",\n      \"gatilho\": \"abertura\",\n      \"mensagem_id\": null,\n      \"comando\": \"SolicitarDiagnostico\",\n      \"comando_id\": \"be43f983-a6d9-4daf-a720-1a209659559f\",\n      \"motivo\": null,\n      \"ator\": \"<sub do atendente>\"\n    },\n    {\n      \"seq\": 2,\n      \"em\": \"2026-10-18T13:05:00Z\",\n      \"de\": \"aguardando_diagnostico\",\n      \"para\": \"compensando\",\n      \"gatilho\": \"cancelamento_solicitado\",\n      \"mensagem_id\": null,\n      \"comando\": \"DescartarDiagnostico\",\n      \"comando_id\": \"a66d5f2e-4fe7-44a7-9ead-890342adfc5e\",\n      \"motivo\": \"cancelamento\",\n      \"ator\": \"<sub do atendente>\"\n    },\n    {\n      \"seq\": 3,\n      \"em\": \"2026-10-18T13:30:00Z\",\n      \"de\": \"compensando\",\n      \"para\": \"falha_na_compensacao\",\n      \"gatilho\": \"prazo_esgotado\",\n      \"mensagem_id\": null,\n      \"comando\": null,\n      \"comando_id\": null,\n      \"motivo\": \"cancelamento\",\n      \"ator\": \"prazos\"\n    },\n    {\n      \"seq\": 4,\n      \"em\": \"2026-10-18T13:40:00Z\",\n      \"de\": \"falha_na_compensacao\",\n      \"para\": \"compensando\",\n      \"gatilho\": \"retomada\",\n      \"mensagem_id\": null,\n      \"comando\": \"DescartarDiagnostico\",\n      \"comando_id\": \"0d5c7e9a-2b4f-4c6e-8a1b-3d5f7a9c1e2b\",\n      \"motivo\": \"cancelamento\",\n      \"ator\": \"<sub do admin>\"\n    }\n  ]\n}",
+              "_postman_previewlanguage": "json"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

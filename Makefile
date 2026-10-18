@@ -15,7 +15,7 @@ DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch lint-workflows typecheck security test \
 	diff-cover mutacao check audit smoke compose-up compose-down manifests \
-	print-trivy-version kind-deploy
+	print-trivy-version kind-deploy docs-api
 
 lock-check:
 	uv lock --check
@@ -104,6 +104,13 @@ mutacao:
 
 check: lock-check lint lint-arch lint-workflows typecheck security test diff-cover
 	@echo "All checks passed"
+
+# docs/api: o OpenAPI do app e a colecao Postman (uma requisicao por rota, com
+# corpo e resposta de exemplo), gerados juntos para nao divergirem. So monta o
+# app: nao sobe servidor nem banco. O make test reprova se os arquivos
+# versionados ficarem atras do codigo (tests/unitarios/test_documentacao.py).
+docs-api:
+	$(PY) python scripts/gerar_docs_api.py
 
 # CVE nas dependencias de runtime, com os extras que a imagem instala: o
 # mesmo conjunto do job pip-audit. Aqui o export leva hashes e o pip-audit
