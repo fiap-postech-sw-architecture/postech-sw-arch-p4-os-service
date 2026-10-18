@@ -270,7 +270,7 @@ erDiagram
 | `id` | `uuid` | não | PK | |
 | `placa` | `varchar(64)` | não | UNIQUE | formato antigo ou Mercosul, validada pelo VO `Placa`; `ANONIMIZADO:<id>` depois da eliminação |
 | `marca`, `modelo` | `varchar(100)` | não | | `ANONIMIZADO` depois da eliminação |
-| `ano` | `integer` | não | | do primeiro carro até o ano seguinte ao atual |
+| `ano` | `integer` | não | | de 1887 até o ano seguinte ao atual (`dominio/veiculo.py`) |
 | `cliente_id` | `uuid` | não | FK `clientes.id`, índice `ix_veiculos_cliente_id` | |
 
 ### Agregado ConsentimentoCliente (contexto `cliente_veiculo`)
@@ -845,7 +845,7 @@ A tabela das séries, o que não é exportado e por quê, e como ver localmente 
 | Saga orquestrada, com o orquestrador no serviço que a inicia e persistido como agregado na mesma transação da OS | [ADR-035](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/035-saga-orquestrada.md), `aplicacao/saga/` |
 | RabbitMQ com outbox transacional, consumidor idempotente, retry por atraso e DLQ | [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md), `compartilhado/infraestrutura/mensageria/` |
 | Banco próprio (PostgreSQL 16) com credencial só nos pods do serviço | [ADR-037](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/037-banco-por-servico.md), `k8s/base/papeis.sql` |
-| Borda no Kong, com `/metrics` e `/api/v1/admin` fora dela, e sem chamada HTTP entre serviços na saga | [ADR-038](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/038-borda-e-comunicacao-sincrona.md), `k8s/base/borda.yaml` |
+| Borda no Kong, com `/metrics` e `/api/v1/admin` fora dela; o OS não chama outro serviço por HTTP | [ADR-038](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/038-borda-e-comunicacao-sincrona.md), `k8s/base/borda.yaml` |
 | O OS como único emissor de JWT, com RS256, JWKS e validação local nos outros serviços | [ADR-039](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/039-autenticacao-entre-servicos.md), `autenticacao/` |
 | Mercado Pago só no Billing; o OS guarda o resumo do pagamento e casa o estorno pelo `causation_id` | [ADR-040](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/040-integracao-mercado-pago.md), `aplicacao/saga/linhas_da_compensacao.py` |
 | Testes em pirâmide com testcontainers, BDD de componente da saga, gate de 95% e mutação | [ADR-041](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/041-estrategia-de-testes-e-qualidade.md), [README, Qualidade](../README.md#qualidade) |

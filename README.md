@@ -862,7 +862,7 @@ uv run python -m src.notificador
 
 ## Exemplos da API
 
-Os `curl` das rotas do OpenAPI, um por rota e agrupados por fluxo, contra a API do compose (`make compose-up`, porta 8000). Pela borda do kind, troque `localhost:8000` por `https://localhost/os` e acrescente `-k` (o certificado do Kong é autoassinado). O OpenAPI e a coleção Postman, com os mesmos exemplos, estão em [`docs/api/`](docs/api/), e os fluxos por trás de cada rota, em [`docs/arquitetura.md`](docs/arquitetura.md).
+Os `curl` das rotas do OpenAPI, um por rota e agrupados por fluxo, contra a API do compose (`make compose-up`, porta 8000). Pela borda do kind, troque `localhost:8000` por `https://localhost/os` e acrescente `-k` (o certificado do Kong é autoassinado). O OpenAPI e a coleção Postman, com um exemplo de corpo e de resposta por rota, estão em [`docs/api/`](docs/api/), e os fluxos por trás de cada rota, em [`docs/arquitetura.md`](docs/arquitetura.md).
 
 - **Variáveis.** Cada bloco usa as que os anteriores preenchem: `TOKEN` e `REFRESH` saem do login, e `CLIENTE_ID`, `VEICULO_ID` e `ORDEM_ID`, das respostas do cadastro e da abertura.
 - **O que o compose não tem.** O compose não sobe o Billing nem a Execução, então a OS aberta aqui fica em `recebida`, com a saga esperando o diagnóstico. As rotas que pedem outro estado respondem o erro da regra, que o texto de cada bloco diz.
