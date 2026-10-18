@@ -199,6 +199,7 @@ _GUARDA = re.compile(
 def test_login_e_criacoes_guardam_o_token_e_os_ids_que_as_outras_usam() -> None:
     texto = COLECAO.read_text(encoding="utf-8")
     guardadas: dict[str, list[tuple[str, str]]] = {}
+    pares: set[tuple[str, str]] = set()
     for item in _requisicoes(json.loads(texto)):
         resposta = item["response"][0]
         for evento in item.get("event", []):
@@ -209,8 +210,18 @@ def test_login_e_criacoes_guardam_o_token_e_os_ids_que_as_outras_usam() -> None:
                 assert int(status) == resposta["code"]
                 assert campo in json.loads(resposta["body"])
                 guardadas.setdefault(variavel, []).append(_par(item["request"]))
+                pares.add((variavel, campo))
 
     assert set(guardadas) == set(re.findall(r"\{\{(\w+)\}\}", texto)) - {"baseUrl"}
+    # Cada variavel recebe o campo que as outras requisicoes esperam dela: o token
+    # de acesso no Bearer, o de renovacao so no refresh, o id de cada cadastro.
+    assert pares == {
+        ("token", "access_token"),
+        ("refresh_token", "refresh_token"),
+        ("cliente_id", "id"),
+        ("veiculo_id", "id"),
+        ("ordem_id", "id"),
+    }
     assert guardadas["token"] == [
         ("post", "/api/v1/autenticacao/login"),
         ("post", "/api/v1/autenticacao/refresh"),
@@ -705,15 +716,24 @@ def test_estados_da_os_na_arquitetura_sao_os_da_maquina_de_status() -> None:
 def test_linhas_da_saga_na_arquitetura_sao_as_do_fluxo_normal() -> None:
     texto = ARQUITETURA.read_text(encoding="utf-8")
     linhas: dict[str, tuple[str, str]] = {}
-    for passo in re.findall(r"^\| T\d+ \|.*$", texto, re.M):
-        _, evento, _, etapa, comando = (c.strip() for c in passo.strip("|").split("|"))
+    passos: dict[str, str] = {}
+    for linha in re.findall(r"^\| T\d+ \|.*$", texto, re.M):
+        passo, evento, _, etapa, comando = (
+            c.strip() for c in linha.strip("|").split("|")
+        )
         # As linhas das requisicoes (abertura e entrega) nao sao evento da saga.
         if evento.startswith("`"):
-            linhas[evento.split("`")[1]] = (etapa.strip("`"), comando.strip("`"))
+            nome = evento.split("`")[1]
+            linhas[nome] = (etapa.strip("`"), comando.strip("`"))
+            passos[nome] = passo
 
     assert linhas == {
         evento: (t.seguinte, t.comando or "nenhum")
         for evento, t in FLUXO_NORMAL.items()
+    }
+    # O T de quem conclui um passo (T3, T5, T6 e T7) tambem e o do codigo.
+    assert {nome: passos[nome] for nome, t in FLUXO_NORMAL.items() if t.concluido} == {
+        nome: t.concluido for nome, t in FLUXO_NORMAL.items() if t.concluido
     }
 
 
