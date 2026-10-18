@@ -689,9 +689,14 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
 
     assert set(blocos) == {"uv", "github-actions", "docker"}
     for bloco in blocos.values():
+        assert bloco["directory"] == "/"
         assert bloco["schedule"]["interval"] == "weekly"
         assert bloco["open-pull-requests-limit"] == 3
-    assert blocos["github-actions"]["commit-message"] == {"prefix": "ci"}
+    assert {nome: b["commit-message"]["prefix"] for nome, b in blocos.items()} == {
+        "uv": "chore(deps)",
+        "github-actions": "ci",
+        "docker": "chore(deps)",
+    }
     assert blocos["github-actions"]["groups"] == {
         "actions-patch-e-minor": {"update-types": ["minor", "patch"]}
     }
