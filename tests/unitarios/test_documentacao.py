@@ -1,9 +1,14 @@
 """Documentos do servico: README, docs/arquitetura.md e docs/api.
 
 - Os comandos dos blocos ``bash`` do README rodam colados no terminal.
-- ``docs/api`` (OpenAPI e colecao Postman) acompanha o app (``make docs-api``).
-- Toda rota do OpenAPI tem um ``curl`` no README, com corpo que segue o schema.
-- O README aponta ``docs/arquitetura.md`` e ``docs/api``.
+- ``docs/api`` (OpenAPI e colecao Postman) acompanha o app (``make docs-api``),
+  e a colecao guarda o token e os ids que as outras requisicoes usam.
+- Toda rota do OpenAPI tem um ``curl`` na secao Exemplos da API do README, e
+  cada ``curl`` traz o corpo no schema e os cabecalhos que a operacao pede.
+- ``docs/arquitetura.md`` segue o codigo: o ER e as tabelas, o metadata dos
+  mapeamentos; os estados, a ``MaquinaDeStatus``; a saga, o ``FLUXO_NORMAL``; a
+  mensageria, o catalogo do AsyncAPI e a ``ETAPA_ESPERADA``.
+- Os links relativos do README e da arquitetura caem em arquivo e secao reais.
 - A secao Cobertura do README sai de ``scripts/cobertura_resumo.py``.
 """
 
@@ -725,7 +730,9 @@ def _celulas(trecho: str) -> dict[str, list[str]]:
         for linha in trecho.splitlines()
         if linha.startswith("| `")
     ]
-    return {primeira: resto for primeira, *resto in linhas}
+    tabela = {primeira: resto for primeira, *resto in linhas}
+    assert len(tabela) == len(linhas), "linha repetida na tabela"
+    return tabela
 
 
 def test_comandos_publicados_na_arquitetura_sao_os_do_catalogo() -> None:
