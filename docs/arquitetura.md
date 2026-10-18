@@ -474,7 +474,7 @@ sequenceDiagram
     OS->>OS: VO CPF ou CNPJ valida o dígito verificador
     OS->>DB: documento_hash já existe?
     OS->>DB: INSERT clientes (documento cifrado, HMAC)
-    OS-->>AT: 201 com o documento mascarado
+    OS-->>AT: 201 com o documento formatado e o mascarado
     AT->>OS: POST /api/v1/clientes/{id}/consentimento {tipo}
     OS->>DB: consentimento ativo desse tipo?
     OS->>DB: INSERT consentimentos
@@ -792,7 +792,10 @@ O `mecanico` não tem rota de negócio no OS: trabalha pelas filas da Execução
 
 **Dados pessoais.**
 
-- O documento fica cifrado (Fernet com a `ENCRYPTION_KEY`, que só a API recebe), com um HMAC-SHA256 para busca e unicidade; a resposta da API traz o documento mascarado, e o completo só na exportação do titular.
+- O documento fica cifrado (Fernet com a `ENCRYPTION_KEY`, que só a API recebe), com um HMAC-SHA256 para busca e unicidade. A API o devolve decifrado ao atendente e ao admin conforme a rota:
+  - a listagem (`GET /api/v1/clientes`) traz só o mascarado (`documento_mascarado`, `***.***.***-25`);
+  - o cadastro, a consulta e a atualização (`POST /api/v1/clientes`, `GET` e `PUT /api/v1/clientes/{id}`) trazem o documento inteiro, formatado (`documento_formatado`), e o mascarado;
+  - `GET .../dados-pessoais` e `GET .../dados-pessoais/exportar` trazem o formatado, com a linha de auditoria no log.
 - Texto livre (descrição do problema e motivo do cancelamento) é validado no domínio: recusa caracteres de controle e de formatação que escondem ou reordenam o texto lido na tela (`dominio/texto_livre.py`).
 - A saga, a outbox de e-mail, as métricas e os spans guardam só códigos; a placa e a descrição vão só no `SolicitarDiagnostico`, para a Execução.
 - Os logs passam por um mascaramento de CPF, CNPJ, e-mail, telefone e chaves sensíveis (`compartilhado/infraestrutura/logging.py`), inclusive o traceback e o log das bibliotecas; os spans não levam o texto das exceções nem o caminho cru da URL ([7. Observabilidade](#7-observabilidade)).
