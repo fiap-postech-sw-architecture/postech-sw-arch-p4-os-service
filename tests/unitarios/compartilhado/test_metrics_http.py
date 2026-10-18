@@ -148,8 +148,24 @@ class TestRotaMetrics:
         assert resposta.headers["content-type"] == CONTENT_TYPE_LATEST
         assert "# TYPE http_request_duration_seconds histogram" in resposta.text
 
+    def test_raspagem_conta_no_template_da_propria_rota(self) -> None:
+        # Com o template `/metrics`, a exclusao `rota!~"/metrics|..."` das
+        # consultas de paineis e alertas tira a raspagem da latencia da API.
+        cliente = TestClient(_app())
+        antes = _contagem("GET", "/metrics", 200)
+        antes_sem_rota = _contagem("GET", ROTA_NAO_ROTEADA, 200)
+
+        resposta = cliente.get("/metrics", follow_redirects=False)
+
+        assert resposta.status_code == 200
+        assert _contagem("GET", "/metrics", 200) == antes + 1
+        assert _contagem("GET", ROTA_NAO_ROTEADA, 200) == antes_sem_rota
+
     def test_rota_fica_fora_do_openapi(self) -> None:
-        assert "/metrics" not in _app().openapi()["paths"]
+        paths = TestClient(_app()).get("/openapi.json").json()["paths"]
+
+        assert _TEMPLATE in paths
+        assert "/metrics" not in paths
 
     def test_middleware_fica_instalado_no_app(self) -> None:
         classes = [m.cls for m in _app().user_middleware]
