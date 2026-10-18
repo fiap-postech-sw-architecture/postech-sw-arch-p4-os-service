@@ -727,11 +727,11 @@ No macOS sem o `timeout` do coreutils, troque-o por `perl -e 'alarm shift; exec 
 
 ## Observabilidade
 
-Métricas, traces e logs do OS Service seguem o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md); as métricas novas desta seção entram no catálogo da RFC-004 (seção 9) pelo PR de dashboards do platform, que também traz os painéis e os alertas.
+Métricas, traces e logs do OS Service seguem o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md). O catálogo das métricas dos três serviços (tipo, rótulos, quem emite, quando conta e a unidade), os painéis do Grafana e as regras de alerta ficam no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#catálogo-de-métricas), onde um teste reprova o painel ou o alerta que consulte uma métrica fora do catálogo ou um rótulo que ela não tem. Esta seção diz o que o OS emite e por quê.
 
 ### Métricas
 
-Cada processo serve o `/metrics` que já tinha (a API na 8000, junto do resto da API e fora da borda; o relay, o consumidor, o `prazos` e o notificador na `METRICS_PORT`, 9100). Nenhuma porta é nova, e o `/metrics` da API está sempre ligado.
+Cada processo serve o `/metrics`: a API na 8000, junto do resto da API, e o relay, o consumidor, o `prazos` e o notificador na `METRICS_PORT` (9100). O `/metrics` da API está sempre ligado e fica fora da borda: o Ingress do Kong responde 404 a `/os/metrics` sem chegar ao serviço (`k8s/base/borda.yaml`, conferido pelo smoke do platform), e o Prometheus raspa cada pod direto, pelas anotações `prometheus.io/*` dos Deployments.
 
 | Processo | Série | Tipo e rótulos | Quando |
 |---|---|---|---|
@@ -799,12 +799,21 @@ O pika não tem instrumentador: os spans de publicação e de consumo são abert
 - **Os parâmetros dos comandos SQL**: o instrumentador do SQLAlchemy grava só o texto do comando, com os marcadores, e nunca os parâmetros. O `hide_parameters` do engine cuida da mensagem de erro e do log do engine.
 - **Dinheiro, ids e rótulos abertos nas métricas**: os rótulos são enumerações fechadas (`status`, `etapa`, `motivo`, `comando`, `tipo`, `resultado`, `componente`) ou o template da rota; nunca `ordem_id`, placa ou documento.
 
-O Jaeger do platform guarda os traces em memória, até cerca de 5.000 (ADR-043): reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
+O Jaeger do platform guarda os traces em memória, com retenção por contagem e sem prazo ([Retenção e prazos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#retenção-e-prazos)): o trace mais antigo sai quando entra um novo, reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
+
+### Logs
+
+Cada processo escreve um JSON por linha no stdout, que o Promtail do platform leva ao Loki.
+
+- **Campos.** `event` (a mensagem, em inglês), `level`, `timestamp` (ISO 8601, em UTC), `logger`, `git_sha` e `git_date` (a versão da imagem), `trace_id` e `span_id` com um span aberto, e os campos de cada evento: o `correlation_id` (o id da OS) nos de saga, mensageria e prazos, e o `request_id` e o `http_request` (método, caminho, status e duração) de cada requisição da API.
+- **Sem dado pessoal.** O mascaramento de `compartilhado/infraestrutura/logging.py` roda em todo evento, inclusive no log das bibliotecas e no traceback: CPF, CNPJ, e-mail e telefone viram máscara, e o valor de uma chave sensível (senha, token, contato, telefone) sai trocado inteiro. O texto livre, a placa e o envelope das mensagens não vão para o log, e do cliente AMQP só sai o nível ERROR.
+- **Auditoria.** O pedido de cancelamento e a retomada da compensação deixam uma linha com o `ator` (o `sub` do JWT) e o resultado, e a leitura dos dados pessoais, com o `ator` e a rota (`via`).
+- **Busca.** No Grafana do kind, a consulta `{namespace="pytstop-os"} | json | correlation_id="<id da OS>"` traz a OS nos cinco processos, e o `trace_id` de cada linha abre o trace no Jaeger.
 
 ### Como ver
 
 - **Sem cluster.** `make compose-up` e `curl -s localhost:8000/metrics | grep '^pytstop_'` (a API); o relay, o consumidor, o `prazos` e o notificador servem o deles na 9100 dentro do container (`docker compose exec relay python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9100/metrics').read().decode())"`). O compose deixa `OTEL_ENABLED=false`: a API não abre span, e o relay, o consumidor e o `prazos` abrem os deles e levam o `trace_id` aos logs, mas os spans não saem do processo. Para ver um trace, acrescente um serviço `jaeger` ao compose (por exemplo num `docker-compose.override.yml`: `services: {jaeger: {image: "jaegertracing/all-in-one:1.76.0", ports: ["127.0.0.1:16686:16686"]}}`) e suba com `OTEL_ENABLED=true make compose-up`: o endpoint padrão dos processos é `http://jaeger:4317`, e a tela fica em `http://localhost:16686` (serviço `pytstop-os-service`; o atributo `pytstop.processo` do recurso diz de qual processo veio cada span).
-- **No kind.** O ConfigMap do serviço liga `OTEL_ENABLED=true`, aponta para o Jaeger do platform e fixa `OTEL_SERVICE_NAME=os-service`: no Jaeger do kind o serviço aparece como `os-service` (no compose, sem a variável, é `pytstop-os-service`). Depois de `make -C ../postech-sw-arch-p4-platform kind-up deploy` e do `make kind-deploy` deste serviço (e dos outros), `make -C ../postech-sw-arch-p4-platform port-forward` abre o Jaeger em `http://localhost:16686` (busque pelo atributo `messaging.message.conversation_id`, o id da OS), o Grafana em `http://localhost:3000` e o Prometheus em `http://localhost:9090`. O `make -C ../postech-sw-arch-p4-platform e2e` roda os cenários da saga, o caminho feliz entre eles, e deixa os traces no Jaeger; ele pede o overlay `kind-ci` (`deploy OVERLAY=kind-ci`), que não tem o Grafana. Os dashboards e os alertas desta observabilidade estão no PR de dashboards do platform.
+- **No kind.** O ConfigMap do serviço liga `OTEL_ENABLED=true`, aponta para o Jaeger do platform e fixa `OTEL_SERVICE_NAME=os-service`: no Jaeger do kind o serviço aparece como `os-service` (no compose, sem a variável, é `pytstop-os-service`). Depois de `make -C ../postech-sw-arch-p4-platform kind-up deploy` e do `make kind-deploy` deste serviço (e dos outros), `make -C ../postech-sw-arch-p4-platform port-forward` abre o Jaeger em `http://localhost:16686` (busque pelo atributo `messaging.message.conversation_id`, o id da OS), o Grafana em `http://localhost:3000` e o Prometheus em `http://localhost:9090`. O `make -C ../postech-sw-arch-p4-platform e2e` roda os cenários da saga, o caminho feliz entre eles, e deixa os traces no Jaeger; ele pede o overlay `kind-ci` (`deploy OVERLAY=kind-ci`), que não tem o Grafana. Os painéis e os alertas estão descritos no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md).
 
 ### Encerramento com o exportador fora
 
