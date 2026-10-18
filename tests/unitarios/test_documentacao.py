@@ -339,6 +339,58 @@ def test_readme_aponta_a_arquitetura_e_os_documentos_da_api() -> None:
     assert "](docs/api/)" in texto
 
 
+_CERCA = re.compile(r"^[ \t]*```.*?^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE)
+
+
+def _ancoras(texto: str) -> set[str]:
+    """As ancoras que o GitHub gera para os titulos do Markdown.
+
+    Minusculas, sem pontuacao, espaco vira hifen, e o titulo repetido ganha
+    ``-1``, ``-2``... Os blocos de codigo ficam de fora (``#`` neles nao e titulo).
+    """
+    ancoras: set[str] = set()
+    vistas: dict[str, int] = {}
+    for titulo in re.findall(r"^#{1,6} (.+)$", _CERCA.sub("", texto), re.MULTILINE):
+        base = re.sub(r"[^\w\- ]", "", titulo.strip().lower()).replace(" ", "-")
+        repeticao = vistas.get(base, 0)
+        vistas[base] = repeticao + 1
+        ancoras.add(f"{base}-{repeticao}" if repeticao else base)
+    return ancoras
+
+
+def test_ancora_gerada_como_a_do_github() -> None:
+    texto = "# Ação (LGPD)\n```bash\n# nao e titulo\n```\n## Testes\n### Testes\n"
+
+    assert _ancoras(texto) == {"ação-lgpd", "testes", "testes-1"}
+
+
+def test_links_para_secoes_do_readme_e_da_arquitetura_existem() -> None:
+    readme, arquitetura = README.read_text(), ARQUITETURA.read_text()
+    links = [
+        *(
+            ("README.md", alvo, readme)
+            for alvo in re.findall(r"\]\(#([^)]+)\)", readme)
+        ),
+        *(
+            ("docs/arquitetura.md", alvo, arquitetura)
+            for alvo in re.findall(r"\]\(#([^)]+)\)", arquitetura)
+        ),
+        *(
+            ("docs/arquitetura.md para o README", alvo, readme)
+            for alvo in re.findall(r"\]\(\.\./README\.md#([^)]+)\)", arquitetura)
+        ),
+    ]
+
+    quebrados = [
+        f"{origem}: #{alvo}"
+        for origem, alvo, destino in links
+        if alvo not in _ancoras(destino)
+    ]
+
+    assert len(links) > 30
+    assert quebrados == [], "link para uma secao que nao existe (titulo renomeado?)"
+
+
 # A secao Cobertura do README: gerada pelo script, nunca digitada.
 
 _LINHA_DA_TABELA = re.compile(
