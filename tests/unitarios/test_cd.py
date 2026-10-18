@@ -700,9 +700,11 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
     assert blocos["github-actions"]["groups"] == {
         "actions-patch-e-minor": {"update-types": ["minor", "patch"]}
     }
-    # O primeiro grupo que casa leva a dependencia: o do OpenTelemetry vem antes
-    # do generico, senao o SDK subiria sem as instrumentacoes da mesma versao.
-    assert list(blocos["uv"]["groups"]) == ["opentelemetry", "python-patch-e-minor"]
+    # Os opentelemetry-* sobem juntos no generico: um grupo so deles nunca
+    # recebe pacote, porque o Dependabot o trata como menos especifico.
+    assert blocos["uv"]["groups"] == {
+        "python-patch-e-minor": {"update-types": ["minor", "patch"]}
+    }
     # O Python do Dockerfile sobe a mao, junto do .python-version e dos workflows.
     assert blocos["docker"]["ignore"] == [
         {
