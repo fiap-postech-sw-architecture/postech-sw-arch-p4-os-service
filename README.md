@@ -976,7 +976,7 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 ## Cobertura
 
-**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), com 10.354 testes (unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais). O gate é de 95% (`fail_under` no `.coveragerc`) e o código novo precisa de 90% (`make diff-cover`). Medido em 18/10/2026 com `make test` na árvore do commit `d19c4bc` (o pull request do hardening); o CI publica a mesma tabela no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)). Ficam fora da medição os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
+**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), com 10.356 testes (unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais). O gate é de 95% (`fail_under` no `.coveragerc`) e o código novo precisa de 90% (`make diff-cover`). Medido em 18/10/2026 com `make test` no macOS, no pull request #16. O CI publica a tabela no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)) e mede 99,61% no mesmo código: no runner Linux, um ramo a mais de `encryption.py` fica parcial, e são 916 ramos cobertos. Ficam fora da medição os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
@@ -989,7 +989,7 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 Por camada: `dominio` 942 linhas (99,7%), `aplicacao` 1.788 (100,0%), `infraestrutura` 2.491 (99,8%) e `interfaces` 797 (99,5%). As 16 linhas sem teste são o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista. Para refazer: `make test` e `uv run python scripts/cobertura_resumo.py coverage.xml`, que também abre a tabela por pacote e camada.
 
-O `make diff-cover` lê o `coverage.xml` do `make test` e exige que ele seja mais novo que o código de `src/`: com o XML velho recusa e manda rodar o `make test` antes, em vez de passar sem medir nada. O `make check` já roda os dois na ordem certa.
+O `make diff-cover` lê o `coverage.xml` do `make test` e exige que ele exista e seja mais novo que o código de `src/`: sem o XML, ou com ele velho, recusa e manda rodar o `make test` antes. Com o XML velho, o diff-cover passaria sem medir nada. O `make check` já roda os dois na ordem certa.
 
 ## Mutação
 
@@ -1003,7 +1003,7 @@ AssertionError: Failed trampoline hit. Module name starts with `src.`, which is 
 
 (`mutmut/stats.py`, `record_trampoline_hit`). Renomear o pacote ou remendar a ferramenta mudaria o que se mede, então a alternativa são mutantes escritos à mão: [`scripts/mutantes.toml`](scripts/mutantes.toml) lista 60 defeitos plausíveis nos módulos críticos, e [`scripts/mutacao_manual.py`](scripts/mutacao_manual.py) (o mesmo script do Billing) aplica um por vez numa cópia do código (`mutants/`, fora do git) e roda só os testes que deveriam pegá-lo.
 
-**Resultado** em 18/10/2026: 60 mortos de 60 medidos (100%) em 5,7 min, sem equivalentes. A primeira execução mediu 50 mortos de 51 (98,0%), com 9 em `erro`: o único sobrevivente era uma lacuna real de limite exato e hoje tem teste, e os 9 do JWT e do acesso reprovavam na cópia limpa porque ela não levava `scripts/`, o `docker-compose.yml` e o `.env.example`, que esses testes leem.
+**Resultado** em 18/10/2026: 60 mortos de 60 medidos (100%) em 5,6 a 6,3 min, conforme a carga da máquina, sem equivalentes. A primeira execução mediu 50 mortos de 51 (98,0%), com 9 em `erro`: o único sobrevivente era uma lacuna real de limite exato e hoje tem teste, e os 9 do JWT e do acesso reprovavam na cópia limpa porque ela não levava `scripts/`, o `docker-compose.yml` e o `.env.example`, que esses testes leem.
 
 | Área | Mutantes | Mortos | Equivalentes |
 |---|---:|---:|---:|
