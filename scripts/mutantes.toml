@@ -11,8 +11,9 @@
 # schema pela migracao real (alembic.ini e migrations/), validam as mensagens
 # pelos contratos (contratos/, que tambem leva a topologia do RabbitMQ de
 # teste) e sobem o PostgreSQL e o RabbitMQ por testcontainers (precisam de
-# Docker).
-copiar = ["src", "tests", "contratos", "migrations", "alembic.ini", "pyproject.toml", ".coveragerc"]
+# Docker). Os do JWT importam scripts/validar_token.py e leem a chave de
+# demonstracao do docker-compose.yml e do .env.example.
+copiar = ["src", "tests", "contratos", "migrations", "alembic.ini", "scripts", "docker-compose.yml", ".env.example", "pyproject.toml", ".coveragerc"]
 
 [testes]
 # Os arquivos rodam na ordem da lista e o pytest para no primeiro teste que
