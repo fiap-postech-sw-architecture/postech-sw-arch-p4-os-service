@@ -201,11 +201,11 @@ def test_rota_nova_sem_exemplo_reprova_a_geracao(
 # README: um curl por rota do OpenAPI.
 
 # Opcoes do curl que levam valor; as demais (-s, -k, -f...) sao flags.
-_OPCOES_COM_VALOR = frozenset(
-    {"-X", "--request", "-H", "--header", "-d", "--data", "--data-raw", "--json"}
-    | {"-o", "--output", "-w", "--write-out", "-m", "--max-time", "-u", "--user"}
+_DADOS = frozenset({"-d", "--data", "--data-raw", "--data-binary", "--json"})
+_OPCOES_COM_VALOR = _DADOS | frozenset(
+    {"-X", "--request", "-H", "--header", "-o", "--output", "-w", "--write-out"}
+    | {"-m", "--max-time", "-u", "--user"}
 )
-_DADOS = frozenset({"-d", "--data", "--data-raw", "--json"})
 _VARIAVEL = re.compile(r"\$\{?\w+\}?")
 _UUID_QUALQUER = "00000000-0000-4000-8000-000000000000"
 
@@ -276,6 +276,7 @@ def test_leitura_dos_curl_do_readme() -> None:
         "curl -s -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID; echo\n"
         "curl -sk https://localhost/os/api/v1/saude\n"
         'curl -s localhost:8000/x -d \'{"r": "\'"$REFRESH"\'"}\'\n'
+        "curl -s --data-binary '{\"a\": 1}' localhost:8000/y\n"
         "```\n"
     )
 
@@ -285,6 +286,7 @@ def test_leitura_dos_curl_do_readme() -> None:
         Curl("DELETE", "/api/v1/clientes/$CLIENTE_ID", None),
         Curl("GET", "/os/api/v1/saude", None),
         Curl("POST", "/x", '{"r": "$REFRESH"}'),
+        Curl("POST", "/y", '{"a": 1}'),
     ]
 
 
