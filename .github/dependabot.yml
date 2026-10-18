@@ -8,7 +8,8 @@
 # (habilitados no repositorio) nao entram no limite e seguem abrindo.
 #
 # O que o Dependabot nao cobre e a versao ficou fixada de proposito, a ser
-# subida a mao: postgres e prometheuscommunity/postgres-exporter em k8s/,
+# subida a mao: o uv do Dockerfile (entra por COPY --from, e o Dependabot so
+# le as linhas FROM), postgres e prometheuscommunity/postgres-exporter em k8s/,
 # postgres, rabbitmq e mailpit no compose, o SonarQube do ci.yml, trivy,
 # gitleaks, pip-audit, diff-cover, kubeconform e actionlint (Makefile e
 # workflows).
@@ -55,7 +56,7 @@ updates:
       actions-patch-e-minor:
         update-types: ["minor", "patch"]
 
-  # Imagens base do Dockerfile (uv e python).
+  # Imagens das linhas FROM do Dockerfile (python). O uv fica de fora (acima).
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
