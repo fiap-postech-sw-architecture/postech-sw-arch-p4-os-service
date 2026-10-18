@@ -993,7 +993,7 @@ curl -s -X POST localhost:8000/api/v1/sagas/$ORDEM_ID/compensacao -H "Authorizat
 
 ### Acompanhamento público
 
-Sem token, com a placa e o documento no corpo; dado inválido e OS não encontrada dão o mesmo 404:
+Sem token, com a placa e o documento no corpo. Formato ou dígito verificador inválido e OS não encontrada dão o mesmo 404; placa fora de 7 a 8 caracteres ou documento fora de 11 a 18 dão o 422 da validação de schema:
 
 ```bash
 curl -s -X POST localhost:8000/api/v1/publico/acompanhamento \

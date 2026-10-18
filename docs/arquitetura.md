@@ -716,8 +716,9 @@ O texto de cada modelo e a operação da linha `dead` estão no [README, Notific
 ### 4.10 Acompanhamento público
 
 1. `POST /api/v1/publico/acompanhamento`, sem token, com a placa e o documento no corpo (nunca na URL, que vai para logs de borda e histórico do navegador), limitado a 10 chamadas por minuto por IP.
-2. O VO `Placa` e o VO `CPF` ou `CNPJ` validam a entrada antes de qualquer acesso ao banco. A entrada inválida devolve o mesmo 404 da OS não encontrada, sem consulta: quem tenta não distingue documento inexistente de documento inválido.
-3. Um query service (a porta `ConsultaAcompanhamento`, implementada em `infraestrutura/consultas.py`) projeta só o status e os instantes da OS mais recente do par placa e documento, sem nada do cliente.
+2. O schema da rota confere o tamanho: placa com 7 ou 8 caracteres e documento com 11 a 18. Fora disso (e com campo faltando ou a mais), a resposta é o 422 da validação de schema, sem consulta.
+3. Dentro desses tamanhos, o VO `Placa` e o VO `CPF` ou `CNPJ` validam o formato e o dígito verificador antes de qualquer acesso ao banco. A entrada inválida devolve o mesmo 404 da OS não encontrada, sem consulta: quem tenta não distingue documento inválido de documento inexistente, nem do documento de outro dono.
+4. Um query service (a porta `ConsultaAcompanhamento`, implementada em `infraestrutura/consultas.py`) projeta só o status e os instantes da OS mais recente do par placa e documento, sem nada do cliente. Sem OS para o par (placa ou documento inexistente, ou de donos diferentes), a resposta é o mesmo 404.
 
 ```mermaid
 sequenceDiagram
@@ -726,12 +727,15 @@ sequenceDiagram
     participant OS as os-service
     participant DB as PostgreSQL
     CL->>OS: POST /api/v1/publico/acompanhamento {placa, documento}
-    OS->>OS: VO Placa e VO CPF ou CNPJ
-    alt entrada inválida
-        OS-->>CL: 404 ENTIDADE_NAO_ENCONTRADA, sem consulta
-    else entrada válida
+    alt placa fora de 7 a 8 ou documento fora de 11 a 18 caracteres
+        OS-->>CL: 422 da validação de schema, sem consulta
+    else formato ou dígito verificador inválido, ou par sem OS
+        OS->>OS: VO Placa e VO CPF ou CNPJ
+        OS->>DB: só com os dois válidos: OS mais recente do par
+        OS-->>CL: 404 ENTIDADE_NAO_ENCONTRADA, o mesmo nos dois casos
+    else formato válido e par com OS
         OS->>DB: OS mais recente do par (status, criado_em, atualizado_em)
-        OS-->>CL: 200 com o status e a situação, ou o mesmo 404
+        OS-->>CL: 200 com o status e a situação
     end
 ```
 
