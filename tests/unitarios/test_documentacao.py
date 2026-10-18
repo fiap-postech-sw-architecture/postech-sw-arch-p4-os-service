@@ -4,6 +4,7 @@
 - ``docs/api`` (OpenAPI e colecao Postman) acompanha o app (``make docs-api``).
 - Toda rota do OpenAPI tem um ``curl`` no README, com corpo que segue o schema.
 - O README aponta ``docs/arquitetura.md`` e ``docs/api``.
+- A secao Cobertura do README sai de ``scripts/cobertura_resumo.py``.
 """
 
 from __future__ import annotations
@@ -334,3 +335,53 @@ def test_readme_aponta_a_arquitetura_e_os_documentos_da_api() -> None:
     assert ARQUITETURA.is_file()
     assert "](docs/arquitetura.md)" in texto
     assert "](docs/api/)" in texto
+
+
+# A secao Cobertura do README: gerada pelo script, nunca digitada.
+
+_LINHA_DA_TABELA = re.compile(
+    r"^\| (?P<rotulo>[^|]+?) \| (?P<total>[\d.]+) \| (?P<cobertas>[\d.]+)"
+    r" \| [\d,]+% \|$",
+    re.MULTILINE,
+)
+_RAMOS = re.compile(r"e (?P<total>[\d.]+) ramos, (?P<cobertos>[\d.]+) cobertos")
+_RUN = re.compile(
+    r"\]\((?P<url>https://github\.com/fiap-postech-sw-architecture/"
+    r"postech-sw-arch-p4-os-service/actions/runs/\d+)\)"
+)
+
+
+def _numero(texto: str) -> int:
+    return int(texto.replace(".", ""))
+
+
+def _tabela(texto: str) -> dict[str, tuple[int, int]]:
+    return {
+        linha["rotulo"]: (_numero(linha["total"]), _numero(linha["cobertas"]))
+        for linha in _LINHA_DA_TABELA.finditer(texto)
+        if linha["rotulo"] != "**total**"
+    }
+
+
+def test_secao_de_cobertura_do_readme_e_a_que_o_script_gera() -> None:
+    cobertura = _modulo("cobertura_resumo")
+    texto = README.read_text()
+    assert texto.count(cobertura.MARCADOR_INICIO) == 1
+    assert texto.count(cobertura.MARCADOR_FIM) == 1
+    secao = texto.split(cobertura.MARCADOR_INICIO)[1].split(cobertura.MARCADOR_FIM)[0]
+    contextos, camadas = secao.split("| Camada |")
+    ramos, run = _RAMOS.search(secao), _RUN.search(secao)
+    assert ramos is not None, "secao Cobertura sem a contagem dos ramos"
+    assert run is not None, "secao Cobertura sem o link do run do CI"
+
+    # Ponto fixo: os numeros que a secao mostra, passados de novo pelo script,
+    # devolvem a secao inteira. Uma linha editada a mao (percentual, total,
+    # formato) ou o link de outro repositorio nao passam.
+    medida = cobertura.Medida(
+        contextos=_tabela(contextos),
+        camadas=_tabela("| Camada |" + camadas),
+        ramos=(_numero(ramos["total"]), _numero(ramos["cobertos"])),
+    )
+    assert f"\n{cobertura.secao_do_readme(medida, run['url'])}\n" == secao, (
+        "secao Cobertura editada a mao: rode make cobertura-readme RUN=<id do run>"
+    )

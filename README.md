@@ -1131,6 +1131,8 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make lint-workflows`: actionlint, com o shellcheck da imagem nos scripts dos `run:`, em todos os workflows (a imagem é a `rhysd/actionlint:1.7.12`, fixada por digest no Makefile, na mesma versão do `lint-scripts` do platform). Entra no `make check` e no job `lint`.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
 - `make mutacao`: mutantes escritos à mão nos módulos críticos, aplicados um por vez numa cópia do código (seção [Mutação](#mutação)). Fica fora do `make check` e do CI.
+- `make docs-api`: gera de novo o OpenAPI e a coleção Postman de [`docs/api/`](docs/api/) a partir do app, sem servidor nem banco; o `make test` reprova os arquivos atrás do código.
+- `make cobertura-readme RUN=<id do run>`: reescreve a seção [Cobertura](#cobertura) com o `coverage.xml` de um run do CI (pede o `gh` autenticado).
 - `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
@@ -1147,7 +1149,8 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 ## Cobertura
 
-**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), com 10.356 testes (unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais). O gate é de 95% (`fail_under` no `.coveragerc`) e o código novo precisa de 90% (`make diff-cover`). Medido em 18/10/2026 com `make test`, no pull request #16; o CI publica a tabela no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)). Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917. Ficam fora da medição os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
+<!-- cobertura:inicio -->
+**99,61% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 916 cobertos (98,7%), medidos no [run 39104220173 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39104220173). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
@@ -1158,7 +1161,21 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 | `src/ordem_servico` | 2.699 | 2.699 | 100,0% |
 | **total** | 6.254 | 6.238 | 99,7% |
 
-Por camada: `dominio` 942 linhas (99,7%), `aplicacao` 1.788 (100,0%), `infraestrutura` 2.491 (99,8%) e `interfaces` 797 (99,5%). As 16 linhas sem teste são o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista. Para refazer: `make test` e `uv run python scripts/cobertura_resumo.py coverage.xml`, que também abre a tabela por pacote e camada.
+| Camada | Linhas | Cobertas | Cobertura |
+|---|---:|---:|---:|
+| `dominio` | 942 | 939 | 99,7% |
+| `aplicacao` | 1.788 | 1.788 | 100,0% |
+| `infraestrutura` | 2.491 | 2.487 | 99,8% |
+| `interfaces` | 797 | 793 | 99,5% |
+
+<!-- cobertura:fim -->
+
+As tabelas não são digitadas: `make cobertura-readme RUN=<id do run>` baixa o `coverage.xml` do artefato `relatorios-de-teste` de um run do CI e reescreve, com `scripts/cobertura_resumo.py`, o trecho entre os dois marcadores de comentário desta seção (`cobertura:inicio` e `cobertura:fim`), com o link do run. `tests/unitarios/test_documentacao.py` reprova o trecho editado à mão. O CI publica a mesma medida, por pacote, no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)), e `uv run python scripts/cobertura_resumo.py coverage.xml` a mostra depois de um `make test` local.
+
+- **Gate.** 95% de linhas e ramos somados (`fail_under` no `.coveragerc`), e 90% no código que a branch muda (`make diff-cover`). A suíte tem testes unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais.
+- **Oscilação.** Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917.
+- **Fora da medição.** Os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
+- **Linhas sem teste.** São 16: o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista.
 
 O `make diff-cover` lê o `coverage.xml` do `make test` e exige que ele exista e seja mais novo que o código de `src/`: sem o XML, ou com ele velho, recusa e manda rodar o `make test` antes. Com o XML velho, o diff-cover passaria sem medir nada. O `make check` já roda os dois na ordem certa.
 
