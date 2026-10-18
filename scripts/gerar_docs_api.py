@@ -38,10 +38,12 @@ DESCRICAO = (
     "por scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em "
     "docs/api/openapi.json."
 )
+# Os tokens daqui sao variaveis vazias e marcadores da colecao, nao credenciais:
+# o bandit (B105) os toma por senha pelo nome da chave.
 VARIAVEIS = {
     "baseUrl": "http://localhost:8000",
-    "token": "",
-    "refresh_token": "",
+    "token": "",  # nosec B105
+    "refresh_token": "",  # nosec B105
     "cliente_id": "facfeed2-183a-4eac-bbea-2f7647625c88",
     "veiculo_id": "12fdbbf4-044c-480b-8c44-6d7988ac4b1a",
     "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
@@ -52,10 +54,11 @@ _VEICULO = VARIAVEIS["veiculo_id"]
 _ORDEM = VARIAVEIS["ordem_id"]
 _ATENDENTE = "9809e49f-24a6-4e03-a4bf-c655feb2a0dd"
 _TOKENS = {
-    "access_token": "<jwt de acesso, 15 min>",
-    "refresh_token": "<jwt de refresh, 7 dias>",
-    "token_type": "bearer",
+    "access_token": "<jwt de acesso, 15 min>",  # nosec B105
+    "refresh_token": "<jwt de refresh, 7 dias>",  # nosec B105
+    "token_type": "bearer",  # nosec B105
 }
+_REFRESH = {"refresh_token": "{{refresh_token}}"}  # nosec B105
 _CPF = {"documento": "529.982.247-25", "tipo_documento": "cpf"}
 _VEICULO_NOVO = {"placa": "BRA2E19", "marca": "Fiat", "modelo": "Argo", "ano": 2022}
 _VEICULO_RESPOSTA = {"id": _VEICULO, **_VEICULO_NOVO}
@@ -171,7 +174,7 @@ EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
         "resposta": _TOKENS,
     },
     ("post", "/api/v1/autenticacao/refresh"): {
-        "corpo": {"refresh_token": "{{refresh_token}}"},
+        "corpo": _REFRESH,
         "status": 200,
         "resposta": _TOKENS,
     },
@@ -418,7 +421,7 @@ EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
     ("delete", "/api/v1/clientes/{cliente_id}/dados-pessoais"): {"status": 204},
     ("delete", "/api/v1/clientes/{cliente_id}"): {"status": 204},
     ("post", "/api/v1/autenticacao/logout"): {
-        "corpo": {"refresh_token": "{{refresh_token}}"},
+        "corpo": _REFRESH,
         "status": 200,
         "resposta": {"mensagem": "Logout realizado com sucesso"},
     },
