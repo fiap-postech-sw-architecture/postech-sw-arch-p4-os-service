@@ -2,9 +2,9 @@
 # lint, type-check, security e test: uv.lock em dia, lint, formato, contratos
 # de camada, workflows, tipos, seguranca e testes (unitarios + integracao com
 # testcontainers) com gate de cobertura (.coveragerc) e o diff-cover do codigo
-# novo. `make manifests` e `make smoke` sao o job build e `make audit` e o
-# pip-audit do workflow Security. `make kind-deploy` implanta o servico no kind
-# do platform.
+# novo; `make mutacao` mede a suite por mutantes manuais. `make manifests` e
+# `make smoke` sao o job build e `make audit` e o pip-audit do workflow
+# Security. `make kind-deploy` implanta o servico no kind do platform.
 PY := uv run
 PY_PATHS := src/ scripts/ migrations/
 PY_PATHS_COM_TESTS := $(PY_PATHS) tests/
@@ -14,7 +14,7 @@ GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch lint-workflows typecheck security test \
-	diff-cover check audit smoke compose-up compose-down manifests \
+	diff-cover mutacao check audit smoke compose-up compose-down manifests \
 	print-trivy-version kind-deploy
 
 lock-check:
@@ -83,6 +83,21 @@ diff-cover:
 	uvx diff-cover==$(DIFF_COVER_VERSION) coverage.xml --branch-coverage --include-untracked \
 		--compare-branch=$(COMPARAR_COM) --fail-under=$(DIFF_COVER_MINIMO) \
 		--format markdown:reports/diff-cover.md
+
+# Mutacao nos modulos criticos (maquina de status da OS, transicoes da saga,
+# orquestrador, idempotencia e retry do consumidor, relay, CPF e JWT), sem gate
+# e sem pontuacao minima. O mutmut nao roda aqui (o pacote se chama `src`, e ele
+# exige o pacote fora de `src.`), entao sao mutantes escritos a mao em
+# scripts/mutantes.toml, aplicados um por vez numa copia do codigo (mutants/); o
+# relatorio sai em reports/mutacao.md. Para quando passa de MUTACAO_PRAZO
+# segundos (15 min); os testes de integracao sobem um PostgreSQL (e um
+# RabbitMQ, os do broker) por testcontainers a cada mutante, entao pedem o
+# Docker. MUTANTES="S01 R03" roda so esses.
+MUTACAO_PRAZO ?= 900
+MUTANTES ?=
+
+mutacao:
+	$(PY) python scripts/mutacao_manual.py --prazo $(MUTACAO_PRAZO) $(if $(MUTANTES),--so $(MUTANTES))
 
 check: lock-check lint lint-arch lint-workflows typecheck security test diff-cover
 	@echo "All checks passed"

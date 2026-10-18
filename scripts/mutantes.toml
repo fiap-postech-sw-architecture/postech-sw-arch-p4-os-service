@@ -1,0 +1,530 @@
+# Mutantes manuais dos modulos criticos (scripts/mutacao_manual.py, make mutacao).
+#
+# Cada [[mutante]] troca o trecho `de` (uma ocorrencia exata no arquivo) por
+# `para` e roda so os testes do grupo `testes`; o teste esperado e o que deveria
+# pegar o defeito. `equivalente` marca o mutante que nao muda o comportamento:
+# se sobreviver, nao conta contra a suite.
+
+[config]
+# O que o script copia do repositorio para mutants/ (arquivos e pastas): tudo
+# que os testes dos grupos abaixo importam ou leem. Os de integracao criam o
+# schema pela migracao real (alembic.ini e migrations/), validam as mensagens
+# pelos contratos (contratos/, que tambem leva a topologia do RabbitMQ de
+# teste) e sobem o PostgreSQL e o RabbitMQ por testcontainers (precisam de
+# Docker).
+copiar = ["src", "tests", "contratos", "migrations", "alembic.ini", "pyproject.toml", ".coveragerc"]
+
+[testes]
+# Os arquivos rodam na ordem da lista e o pytest para no primeiro teste que
+# falha: o mais rapido vai primeiro.
+status = ["tests/unitarios/ordem_servico/test_maquina_de_status.py", "tests/unitarios/ordem_servico/test_ordem_de_servico.py"]
+classificacao = ["tests/unitarios/ordem_servico/test_classificacao.py", "tests/unitarios/ordem_servico/test_saga.py"]
+transicoes = ["tests/unitarios/ordem_servico/test_transicoes.py", "tests/unitarios/ordem_servico/test_saga.py"]
+prazos = ["tests/unitarios/ordem_servico/test_prazos_da_saga.py", "tests/unitarios/ordem_servico/test_saga.py", "tests/unitarios/ordem_servico/test_vencer_prazos.py"]
+compensacao = ["tests/unitarios/ordem_servico/test_compensacao.py", "tests/unitarios/ordem_servico/test_orquestrador_compensacoes.py"]
+orquestrador = ["tests/unitarios/ordem_servico/test_orquestrador.py", "tests/unitarios/ordem_servico/test_orquestrador_compensacoes.py"]
+politica_do_consumidor = ["tests/unitarios/compartilhado/mensageria/test_politica_do_consumidor.py"]
+consumidor = ["tests/unitarios/compartilhado/mensageria/test_politica_do_consumidor.py", "tests/integracao/mensageria/test_consumidor.py"]
+politica_do_relay = ["tests/unitarios/compartilhado/mensageria/test_politica_do_relay.py"]
+relay = ["tests/integracao/mensageria/test_marcacao_com_fencing.py", "tests/integracao/mensageria/test_replicas.py", "tests/integracao/mensageria/test_relay.py"]
+jwt = ["tests/unitarios/autenticacao/test_jwt_service.py", "tests/unitarios/autenticacao/test_jwks.py"]
+acesso = ["tests/unitarios/autenticacao/test_middleware.py", "tests/unitarios/autenticacao/test_dependencies_auth.py"]
+cpf = ["tests/unitarios/compartilhado/test_cpf.py", "tests/unitarios/compartilhado/test_cnpj.py"]
+
+
+[[mutante]]
+id = "S01"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/maquina_de_status.py"
+testes = "status"
+de = "StatusOrdem.EM_EXECUCAO: frozenset({StatusOrdem.FINALIZADA}),"
+para = "StatusOrdem.EM_EXECUCAO: frozenset({StatusOrdem.FINALIZADA, StatusOrdem.CANCELADA}),"
+
+[[mutante]]
+id = "S02"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/maquina_de_status.py"
+testes = "status"
+de = "{StatusOrdem.EM_EXECUCAO, StatusOrdem.CANCELADA}"
+para = "{StatusOrdem.EM_EXECUCAO}"
+
+[[mutante]]
+id = "S03"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/maquina_de_status.py"
+testes = "status"
+de = "{StatusOrdem.EM_DIAGNOSTICO, StatusOrdem.CANCELADA}"
+para = "{StatusOrdem.EM_DIAGNOSTICO, StatusOrdem.AGUARDANDO_APROVACAO, StatusOrdem.CANCELADA}"
+
+[[mutante]]
+id = "S04"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/maquina_de_status.py"
+testes = "status"
+de = "StatusOrdem.CANCELADA: frozenset(),"
+para = "StatusOrdem.CANCELADA: frozenset({StatusOrdem.RECEBIDA}),"
+
+[[mutante]]
+id = "S05"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/maquina_de_status.py"
+testes = "status"
+de = "StatusOrdem.FINALIZADA: frozenset({StatusOrdem.ENTREGUE}),"
+para = "StatusOrdem.FINALIZADA: frozenset({StatusOrdem.ENTREGUE, StatusOrdem.CANCELADA}),"
+
+[[mutante]]
+id = "S06"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/maquina_de_status.py"
+testes = "status"
+de = "if para not in validas:"
+para = "if para not in validas and para is not StatusOrdem.CANCELADA:"
+
+[[mutante]]
+id = "S07"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/ordem_de_servico.py"
+testes = "status"
+de = "if self._resumo_orcamento is None:"
+para = "if False:"
+
+[[mutante]]
+id = "S08"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/ordem_de_servico.py"
+testes = "status"
+de = "if self._status is not _S.AGUARDANDO_PAGAMENTO:"
+para = "if False:"
+
+[[mutante]]
+id = "S09"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/ordem_de_servico.py"
+testes = "status"
+de = "if (resumo is None) is (status is StatusPagamento.SOLICITADO):"
+para = "if resumo is None and status is StatusPagamento.SOLICITADO:"
+
+[[mutante]]
+id = "S10"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/ordem_de_servico.py"
+testes = "status"
+de = """
+        self._transicionar(_S.EM_EXECUCAO, origem=_O.EXECUCAO, ator=ator)
+        self._motivo_cancelamento = None"""
+para = """
+        self._transicionar(_S.EM_EXECUCAO, origem=_O.EXECUCAO, ator=ator)"""
+
+[[mutante]]
+id = "S11"
+area = "Status da OS"
+arquivo = "src/ordem_servico/dominio/ordem_de_servico.py"
+testes = "status"
+de = """
+        _maquina.validar_transicao(self._status, _S.CANCELADA)
+        self._motivo_cancelamento = motivo_de_cancelamento(motivo)"""
+para = """
+        self._motivo_cancelamento = motivo_de_cancelamento(motivo)"""
+
+[[mutante]]
+id = "G01"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = "if alvo < atual:"
+para = "if alvo <= atual:"
+
+[[mutante]]
+id = "G02"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = "if alvo > atual:"
+para = "if alvo >= atual:"
+
+[[mutante]]
+id = "G03"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = "if marcos.encerrada:"
+para = "if False:"
+
+[[mutante]]
+id = "G04"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = "return casada or respondida is not Comando.ESTORNAR_PAGAMENTO"
+para = "return True"
+
+[[mutante]]
+id = "G05"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = "if pendente != Comando.CANCELAR_EXECUCAO:"
+para = "if False:"
+
+[[mutante]]
+id = "G06"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = """case "DiagnosticoIniciado" if marcos.diagnostico_iniciado:"""
+para = """case "DiagnosticoIniciado" if False:"""
+
+[[mutante]]
+id = "G07"
+area = "Classificacao do evento na saga"
+arquivo = "src/ordem_servico/aplicacao/saga/classificacao.py"
+testes = "classificacao"
+de = """if tipo == "PagamentoEstornado" and not responde:"""
+para = """if tipo == "PagamentoEstornado" and False:"""
+
+[[mutante]]
+id = "T01"
+area = "Transicoes da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/transicoes.py"
+testes = "transicoes"
+de = "if evento.correlation_id != saga.id:"
+para = "if False:"
+
+[[mutante]]
+id = "T02"
+area = "Transicoes da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/transicoes.py"
+testes = "transicoes"
+de = "return agora.tzinfo is not None and agora >= saga.atualizada_em"
+para = "return agora.tzinfo is not None"
+
+[[mutante]]
+id = "T03"
+area = "Transicoes da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/transicoes.py"
+testes = "transicoes"
+de = "if saga.etapa not in ANTES_DO_PIVOT:"
+para = "if False:"
+
+[[mutante]]
+id = "T04"
+area = "Transicoes da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/transicoes.py"
+testes = "transicoes"
+de = "prazo is not None and (prazo.tzinfo is None or prazo <= agora)"
+para = "prazo is not None and (prazo.tzinfo is None or prazo < agora)"
+
+[[mutante]]
+id = "T05"
+area = "Transicoes da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/transicoes.py"
+testes = "transicoes"
+de = "elif saga.reenvios < 0 or (not em_voo and saga.reenvios):"
+para = "elif saga.reenvios < 0:"
+
+[[mutante]]
+id = "P01"
+area = "Prazos da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/prazos.py"
+testes = "prazos"
+de = "if saga.reenvios >= maximo:"
+para = "if saga.reenvios > maximo:"
+
+[[mutante]]
+id = "P02"
+area = "Prazos da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/prazos.py"
+testes = "prazos"
+de = "if saga.reenvios < maximo:"
+para = "if saga.reenvios < maximo - 1:"
+
+[[mutante]]
+id = "P03"
+area = "Prazos da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/prazos.py"
+testes = "prazos"
+de = """elif str(envio.id) in em_voo["mensagem_ids"]:"""
+para = "elif False:"
+
+[[mutante]]
+id = "P04"
+area = "Prazos da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/prazos.py"
+testes = "prazos"
+de = """
+    if not instante_valido(saga, agora):
+        msg = "prazo esgotado num instante sem fuso ou anterior ao ultimo registro"
+        raise TransicaoDaSagaInvalidaError(msg)"""
+para = ""
+
+[[mutante]]
+id = "C01"
+area = "Compensacao da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/compensacao.py"
+testes = "compensacao"
+de = "if len(plano) == 1:"
+para = "if len(plano) <= 2:"
+
+[[mutante]]
+id = "C02"
+area = "Compensacao da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/compensacao.py"
+testes = "compensacao"
+de = """
+    Comando.CANCELAR_EXECUCAO,
+    Comando.ESTORNAR_PAGAMENTO,
+    Comando.LIBERAR_RESERVA,"""
+para = """
+    Comando.ESTORNAR_PAGAMENTO,
+    Comando.CANCELAR_EXECUCAO,
+    Comando.LIBERAR_RESERVA,"""
+
+[[mutante]]
+id = "C03"
+area = "Compensacao da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/compensacao.py"
+testes = "compensacao"
+de = "if comando is Comando.ESTORNAR_PAGAMENTO and marcos.pagamento_id is not None:"
+para = "if False:"
+
+[[mutante]]
+id = "C04"
+area = "Compensacao da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/compensacao.py"
+testes = "compensacao"
+de = """if tipo == "EstornoDePagamentoFalhou":"""
+para = "if False:"
+
+[[mutante]]
+id = "O01"
+area = "Orquestrador da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/orquestrador.py"
+testes = "orquestrador"
+de = """if UUID(evento.dados["ordem_id"]) != ordem_id:"""
+para = "if False:"
+
+[[mutante]]
+id = "O02"
+area = "Orquestrador da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/orquestrador.py"
+testes = "orquestrador"
+de = "if classificacao is Classificacao.ADIANTADO:"
+para = "if False:"
+
+[[mutante]]
+id = "O03"
+area = "Orquestrador da saga"
+arquivo = "src/ordem_servico/aplicacao/saga/orquestrador.py"
+testes = "orquestrador"
+de = "if resumo is None or resumo.status is StatusPagamento.ESTORNADO:"
+para = "if resumo is None:"
+
+[[mutante]]
+id = "Q01"
+area = "Consumidor"
+arquivo = "src/compartilhado/infraestrutura/mensageria/consumidor.py"
+testes = "politica_do_consumidor"
+de = "copia_de_retry = usuario == consumidor and tentativa > 0"
+para = "copia_de_retry = usuario == consumidor"
+
+[[mutante]]
+id = "Q02"
+area = "Consumidor"
+arquivo = "src/compartilhado/infraestrutura/mensageria/consumidor.py"
+testes = "politica_do_consumidor"
+de = "if tentativa >= len(NIVEIS_DE_RETRY):"
+para = "if tentativa > len(NIVEIS_DE_RETRY):"
+
+[[mutante]]
+id = "Q03"
+area = "Consumidor"
+arquivo = "src/compartilhado/infraestrutura/mensageria/consumidor.py"
+testes = "politica_do_consumidor"
+de = "or not 0 <= tentativa <= len(NIVEIS_DE_RETRY)"
+para = "or not 0 <= tentativa"
+
+[[mutante]]
+id = "Q04"
+area = "Consumidor"
+arquivo = "src/compartilhado/infraestrutura/mensageria/consumidor.py"
+testes = "politica_do_consumidor"
+de = "or isinstance(tentativa, bool)"
+para = "or False"
+
+[[mutante]]
+id = "Q05"
+area = "Consumidor"
+arquivo = "src/compartilhado/infraestrutura/mensageria/consumidor.py"
+testes = "consumidor"
+de = "if len(corpo) > _CORPO_MAXIMO_BYTES:"
+para = "if len(corpo) >= _CORPO_MAXIMO_BYTES:"
+
+[[mutante]]
+id = "I01"
+area = "Idempotencia"
+arquivo = "src/compartilhado/infraestrutura/mensageria/consumidor.py"
+testes = "consumidor"
+de = "if not registrar_processada(sessao, mensagem.id):"
+para = "if False:"
+
+[[mutante]]
+id = "I02"
+area = "Idempotencia"
+arquivo = "src/compartilhado/infraestrutura/outbox_mapping.py"
+testes = "consumidor"
+de = "return inserida is not None"
+para = "return True"
+
+[[mutante]]
+id = "R01"
+area = "Relay"
+arquivo = "src/compartilhado/infraestrutura/mensageria/outbox.py"
+testes = "politica_do_relay"
+de = "if tentativas > len(atrasos):"
+para = "if tentativas >= len(atrasos):"
+
+[[mutante]]
+id = "R02"
+area = "Relay"
+arquivo = "src/compartilhado/infraestrutura/mensageria/relay.py"
+testes = "relay"
+de = "linha.exchange, linha.routing_key, corpo, propriedades, mandatory=True"
+para = "linha.exchange, linha.routing_key, corpo, propriedades, mandatory=False"
+
+[[mutante]]
+id = "R03"
+area = "Relay"
+arquivo = "src/compartilhado/infraestrutura/mensageria/outbox.py"
+testes = "relay"
+de = """"WHERE id = :id AND status = 'pendente' AND proxima_tentativa_em = :lease_ate "
+    "RETURNING proxima_tentativa_em\""""
+para = """"WHERE id = :id AND status = 'pendente' "
+    "RETURNING proxima_tentativa_em\""""
+
+[[mutante]]
+id = "R04"
+area = "Relay"
+arquivo = "src/compartilhado/infraestrutura/mensageria/outbox.py"
+testes = "relay"
+de = """"AND p.id < o.id AND p.status = 'pendente') \""""
+para = """"AND p.id < o.id AND p.status = 'entregue') \""""
+
+[[mutante]]
+id = "R05"
+area = "Relay"
+arquivo = "src/compartilhado/infraestrutura/mensageria/outbox.py"
+testes = "relay"
+de = """"WHERE o.status = 'pendente' AND o.proxima_tentativa_em <= now() \""""
+para = """"WHERE o.status = 'pendente' \""""
+
+[[mutante]]
+id = "R06"
+area = "Relay"
+arquivo = "src/compartilhado/infraestrutura/mensageria/outbox.py"
+testes = "relay"
+de = "return alteradas == 1"
+para = "return alteradas >= 0"
+
+[[mutante]]
+id = "J01"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
+testes = "jwt"
+de = "audience=AUDIENCIA,"
+para = """audience=[AUDIENCIA, "outro-servico"],"""
+
+[[mutante]]
+id = "J02"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
+testes = "jwt"
+de = "issuer=EMISSOR,"
+para = ""
+
+[[mutante]]
+id = "J03"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
+testes = "jwt"
+de = "LEEWAY_SEGUNDOS: Final = 10"
+para = "LEEWAY_SEGUNDOS: Final = 30"
+
+[[mutante]]
+id = "J04"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
+testes = "jwt"
+de = """_CLAIMS_OBRIGATORIAS: Final = ["iss", "aud", "sub", "type", "jti", "iat", "exp"]"""
+para = """_CLAIMS_OBRIGATORIAS: Final = ["iss", "aud", "sub", "type", "iat", "exp"]"""
+
+[[mutante]]
+id = "J05"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
+testes = "jwt"
+de = "if bits < BITS_MINIMOS:"
+para = "if bits < 1024:"
+
+[[mutante]]
+id = "J06"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
+testes = "jwt"
+de = "chave = self._chaves_publicas.get(kid) if isinstance(kid, str) else None"
+para = "chave = next(iter(self._chaves_publicas.values()))"
+
+[[mutante]]
+id = "J07"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/interfaces/middleware.py"
+testes = "acesso"
+de = """if payload.get("type") != "access":"""
+para = """if payload.get("type") not in {"access", "refresh"}:"""
+
+[[mutante]]
+id = "J08"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/interfaces/middleware.py"
+testes = "acesso"
+de = "if obter_token_revogado_repo(session).esta_revogado(str(jti)):"
+para = "if False:"
+
+[[mutante]]
+id = "J09"
+area = "Validacao do JWT"
+arquivo = "src/autenticacao/interfaces/middleware.py"
+testes = "acesso"
+de = "Papel.ATENDENTE: frozenset({Papel.ATENDENTE}),"
+para = "Papel.ATENDENTE: frozenset({Papel.ATENDENTE, Papel.ADMIN}),"
+
+[[mutante]]
+id = "F01"
+area = "CPF"
+arquivo = "src/compartilhado/dominio/documento.py"
+testes = "cpf"
+de = "if not (normalizado.isascii() and validador(normalizado)):"
+para = "if not validador(normalizado):"
+
+[[mutante]]
+id = "F02"
+area = "CPF"
+arquivo = "src/compartilhado/dominio/cpf.py"
+testes = "cpf"
+de = """return f"***.***.***-{n[9:]}\""""
+para = """return f"***.***.{n[6:9]}-{n[9:]}\""""
+
+[[mutante]]
+id = "F03"
+area = "CPF"
+arquivo = "src/compartilhado/dominio/cpf.py"
+testes = "cpf"
+de = """return f"CPF(numero='{self.mascarado()}')\""""
+para = """return f"CPF(numero='{self.numero}')\""""
+
+[[mutante]]
+id = "F04"
+area = "CPF"
+arquivo = "src/compartilhado/dominio/cpf.py"
+testes = "cpf"
+de = """numero = normalizar_e_validar(self.numero, "CPF", normalizar_cpf, is_valid)"""
+para = "numero = normalizar_cpf(self.numero)"

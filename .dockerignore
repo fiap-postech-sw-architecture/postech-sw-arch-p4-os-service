@@ -26,6 +26,7 @@ reports/
 .ruff_cache/
 .import_linter_cache/
 .scannerwork/
+mutants/
 .sonar/
 sonar-project.properties
 # Dos scripts, so os do CI saem. Ficam os que o container roda: o seed_admin.py
@@ -34,6 +35,8 @@ sonar-project.properties
 # "Eliminacao de dados").
 scripts/sonar/
 scripts/cobertura_resumo.py
+scripts/mutacao_manual.py
+scripts/mutantes.toml
 
 # Python
 **/__pycache__
