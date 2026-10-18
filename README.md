@@ -1230,7 +1230,7 @@ Como o alvo se comporta:
 
 Códigos de saída:
 
-- `0`: nenhum mutante saiu `erro`. Sobrevivente e `nao rodado` não reprovam, porque não há gate (ADR-041).
+- `0`: nenhum mutante saiu `erro`. Sobrevivente e `nao rodado` não reprovam, porque não há gate (ADR-041). É o código do script; o `make mutacao` sai com 0 ou com 2 (o `make` troca o 1 do script pelo 2 dele).
 - `1`: algum mutante saiu `erro`, uma medida inválida, como o Docker fora ou um arquivo que os testes leem e que a cópia não levou.
 - `2`: um id de `MUTANTES` não existe (a mensagem lista os válidos) ou o `.toml` não bate com o código.
 
