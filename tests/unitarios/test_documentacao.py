@@ -20,7 +20,13 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import pytest
 from jsonschema import Draft202012Validator
 
+from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
+from src.compartilhado.infraestrutura.database import metadata
 from src.main import app
+from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import FLUXO_NORMAL
+from src.ordem_servico.dominio.maquina_de_status import MaquinaDeStatus
+from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -389,6 +395,113 @@ def test_links_para_secoes_do_readme_e_da_arquitetura_existem() -> None:
 
     assert len(links) > 30
     assert quebrados == [], "link para uma secao que nao existe (titulo renomeado?)"
+
+
+# docs/arquitetura.md: o modelo de dados, os estados da OS e a saga, lidos do codigo.
+
+
+def _secao(texto: str, titulo: str) -> str:
+    """De ``titulo`` (com os ``#``) ate o proximo titulo do mesmo nivel ou acima."""
+    nivel = len(titulo.split(" ", 1)[0])
+    resto = texto.split(f"\n{titulo}\n", 1)[1]
+    return re.split(rf"\n#{{1,{nivel}}} ", resto, maxsplit=1)[0]
+
+
+def _mermaid(texto: str, tipo: str) -> str:
+    (bloco,) = re.findall(rf"```mermaid\n{tipo}\n(.*?)```", texto, re.DOTALL)
+    return str(bloco)
+
+
+def _colunas_do_banco() -> set[tuple[str, str]]:
+    iniciar_todos_mapeamentos()
+    return {
+        (tabela.name, coluna.name)
+        for tabela in metadata.tables.values()
+        for coluna in tabela.columns
+    }
+
+
+def _colunas_do_er(texto: str) -> set[tuple[str, str]]:
+    entidades = re.findall(
+        r"^ {4}(\w+) \{\n(.*?)^ {4}\}", _mermaid(texto, "erDiagram"), re.M | re.S
+    )
+    return {
+        (tabela, linha.split()[1])
+        for tabela, corpo in entidades
+        for linha in corpo.splitlines()
+    }
+
+
+def _colunas_das_tabelas(texto: str, tabelas: set[str]) -> set[tuple[str, str]]:
+    """(tabela, coluna) das tabelas Markdown da secao 3.
+
+    Cada tabela vem depois do paragrafo que comeca com o nome dela entre
+    crases; a primeira celula de cada linha traz uma ou mais colunas.
+    """
+    colunas: set[tuple[str, str]] = set()
+    atual = ""
+    for linha in _CERCA.sub("", _secao(texto, "## 3. Modelo de dados")).splitlines():
+        nome = re.match(r"`(\w+)`", linha)
+        if nome is not None and nome[1] in tabelas:
+            atual = nome[1]
+        elif linha.startswith("| `"):
+            primeira = linha.split("|")[1]
+            colunas |= {(atual, coluna) for coluna in re.findall(r"`(\w+)`", primeira)}
+    return colunas
+
+
+def test_er_da_arquitetura_tem_as_colunas_dos_mapeamentos() -> None:
+    texto = ARQUITETURA.read_text(encoding="utf-8")
+    banco = _colunas_do_banco()
+
+    assert len(banco) > 90
+    assert _colunas_do_er(texto) == banco, "coluna nova: o ER de docs/arquitetura.md"
+
+
+def test_tabelas_da_arquitetura_tem_as_colunas_dos_mapeamentos() -> None:
+    texto = ARQUITETURA.read_text(encoding="utf-8")
+    banco = _colunas_do_banco()
+
+    tabelas = _colunas_das_tabelas(texto, {tabela for tabela, _ in banco})
+
+    assert tabelas == banco, "coluna nova: a tabela dela em docs/arquitetura.md"
+
+
+def test_estados_da_os_na_arquitetura_sao_os_da_maquina_de_status() -> None:
+    diagrama = _mermaid(ARQUITETURA.read_text(encoding="utf-8"), "stateDiagram-v2")
+    setas = set(re.findall(r"^ +(\S+) --> ([^\s:]+)", diagrama, re.M))
+    maquina = MaquinaDeStatus()
+
+    assert {seta for seta in setas if "[*]" not in seta} == {
+        (de.value, para.value)
+        for de in StatusOrdem
+        for para in maquina.transicoes_validas(de)
+    }
+    assert {de for de, para in setas if para == "[*]"} == {
+        status.value for status in ESTADOS_TERMINAIS
+    }
+    assert {para for de, para in setas if de == "[*]"} == {StatusOrdem.RECEBIDA.value}
+
+
+def test_linhas_da_saga_na_arquitetura_sao_as_do_fluxo_normal() -> None:
+    texto = ARQUITETURA.read_text(encoding="utf-8")
+    linhas: dict[str, tuple[str, str]] = {}
+    for passo in re.findall(r"^\| T\d+ \|.*$", texto, re.M):
+        _, evento, _, etapa, comando = (c.strip() for c in passo.strip("|").split("|"))
+        # As linhas das requisicoes (abertura e entrega) nao sao evento da saga.
+        if evento.startswith("`"):
+            linhas[evento.split("`")[1]] = (etapa.strip("`"), comando.strip("`"))
+
+    assert linhas == {
+        evento: (t.seguinte, t.comando or "nenhum")
+        for evento, t in FLUXO_NORMAL.items()
+    }
+
+
+def test_toda_etapa_da_saga_aparece_na_arquitetura() -> None:
+    citadas = set(re.findall(r"`(\w+)`", ARQUITETURA.read_text(encoding="utf-8")))
+
+    assert {etapa.value for etapa in EtapaSaga} - citadas == set()
 
 
 # A secao Cobertura do README: gerada pelo script, nunca digitada.

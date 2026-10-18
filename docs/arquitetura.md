@@ -114,7 +114,7 @@ As regras de dependência são contratos do import-linter (`[tool.importlinter]`
 
 ## 3. Modelo de dados
 
-PostgreSQL 16, banco `os`, só deste serviço ([ADR-037](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/037-banco-por-servico.md)). O schema nasce das migrações Alembic em `migrations/versions/` (`001` a `005`); da `003` em diante elas só acrescentam, e o rollback da imagem não roda `downgrade`. `tests/integracao/test_migracao.py` compara a migração com o metadata do mapeamento. Status, etapa, origem e situação são `varchar` com os valores dos enums validados pela aplicação, sem tipo nativo nem `CHECK`: um valor novo não pede migração de tipo (`001_schema_inicial.py`).
+PostgreSQL 16, banco `os`, só deste serviço ([ADR-037](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/037-banco-por-servico.md)). O schema nasce das migrações Alembic em `migrations/versions/` (`001` a `005`); da `003` em diante elas só acrescentam, e o rollback da imagem não roda `downgrade`. `tests/integracao/test_migracao.py` compara a migração com o metadata do mapeamento, e `tests/unitarios/test_documentacao.py` compara o metadata com o ER e as tabelas abaixo: coluna nova sem linha aqui reprova o `make test`, como os estados da OS e as linhas da saga da seção 4.4 fora do código. Status, etapa, origem e situação são `varchar` com os valores dos enums validados pela aplicação, sem tipo nativo nem `CHECK`: um valor novo não pede migração de tipo (`001_schema_inicial.py`).
 
 ```mermaid
 erDiagram
@@ -287,15 +287,22 @@ erDiagram
 
 ### Agregados Usuario e TokenRevogado (contexto `autenticacao`)
 
-| Tabela | Coluna | Tipo | Nulo | Chave | Descrição |
-|---|---|---|---|---|---|
-| `usuarios` | `id` | `uuid` | não | PK | o `sub` dos tokens |
-| `usuarios` | `email` | `varchar(255)` | não | UNIQUE | |
-| `usuarios` | `senha_hash` | `varchar(255)` | não | | bcrypt (pwdlib) |
-| `usuarios` | `papel` | `varchar(20)` | não | | `admin`, `atendente` ou `mecanico` |
-| `tokens_revogados` | `id` | `uuid` | não | PK | |
-| `tokens_revogados` | `jti` | `varchar(255)` | não | índice único `ix_tokens_revogados_jti` | o access do logout e cada refresh usado ou revogado |
-| `tokens_revogados` | `revogado_em` | `timestamptz` | não | | |
+`usuarios`:
+
+| Coluna | Tipo | Nulo | Chave | Descrição |
+|---|---|---|---|---|
+| `id` | `uuid` | não | PK | o `sub` dos tokens |
+| `email` | `varchar(255)` | não | UNIQUE | |
+| `senha_hash` | `varchar(255)` | não | | bcrypt (pwdlib) |
+| `papel` | `varchar(20)` | não | | `admin`, `atendente` ou `mecanico` |
+
+`tokens_revogados`:
+
+| Coluna | Tipo | Nulo | Chave | Descrição |
+|---|---|---|---|---|
+| `id` | `uuid` | não | PK | |
+| `jti` | `varchar(255)` | não | índice único `ix_tokens_revogados_jti` | o access do logout e cada refresh usado ou revogado |
+| `revogado_em` | `timestamptz` | não | | |
 
 O `TokenRevogado` não tem mapeamento ORM: a revogação é um `INSERT ... ON CONFLICT (jti) DO NOTHING`, o que resolve refresh e logout simultâneos sem erro de unicidade (`token_revogado_repository.py`).
 
@@ -393,7 +400,12 @@ As etapas, o status que cada uma mostra e o comando que cada evento dispara est�
 | `criado_em`, `entregue_em` | `timestamptz` | `entregue_em` sim | | relógio do banco; a limpeza apaga as entregues há 7 dias e as `dead` há 30 |
 | `ultimo_erro` | `text` | sim | | texto fixo (o código do broker ou o nome da exceção), nunca a mensagem dela |
 
-`mensagens_processadas`, a idempotência do consumidor: `mensagem_id uuid` (PK) e `processada_em timestamptz` (índice para a limpeza de 30 dias). O registro entra no mesmo commit do efeito.
+`mensagens_processadas`, a idempotência do consumidor (o registro entra no mesmo commit do efeito):
+
+| Coluna | Tipo | Nulo | Chave | Descrição |
+|---|---|---|---|---|
+| `mensagem_id` | `uuid` | não | PK | o `id` do envelope recebido |
+| `processada_em` | `timestamptz` | não | índice `ix_mensagens_processadas_processada_em` | a limpeza apaga as de mais de 30 dias |
 
 `notificacoes`, os e-mails a enviar (migração `004`):
 
