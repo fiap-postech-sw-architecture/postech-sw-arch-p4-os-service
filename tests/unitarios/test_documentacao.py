@@ -34,6 +34,7 @@ from src.ordem_servico.dominio.maquina_de_status import MaquinaDeStatus
 from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import ModuleType
 
 RAIZ = Path(__file__).resolve().parents[2]
@@ -61,7 +62,7 @@ def _linhas_com_comentario(texto: str) -> list[str]:
 
 
 def test_blocos_de_comando_nao_levam_comentario() -> None:
-    texto = README.read_text()
+    texto = README.read_text(encoding="utf-8")
 
     assert len(_BLOCO.findall(texto)) > 10
     assert _linhas_com_comentario(texto) == []
@@ -81,13 +82,14 @@ def test_bloco_indentado_de_passo_numerado_tambem_e_conferido() -> None:
     assert _linhas_com_comentario(texto) == ["   kubectl get pods  # espera"]
 
 
-def _modulo(nome: str) -> ModuleType:
+def _modulo(nome: str, monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     spec = importlib.util.spec_from_file_location(nome, RAIZ / "scripts" / f"{nome}.py")
     assert spec is not None
     assert spec.loader is not None
     modulo = importlib.util.module_from_spec(spec)
-    # O dataclass do modulo procura o proprio modulo em sys.modules.
-    sys.modules[nome] = modulo
+    # O dataclass do modulo procura o proprio modulo em sys.modules; o
+    # monkeypatch o tira de la no fim, sem deixar estado para os outros testes.
+    monkeypatch.setitem(sys.modules, nome, modulo)
     spec.loader.exec_module(modulo)
     return modulo
 
@@ -100,8 +102,9 @@ def openapi() -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def gerador() -> ModuleType:
-    return _modulo("gerar_docs_api")
+def gerador() -> Iterator[ModuleType]:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        yield _modulo("gerar_docs_api", monkeypatch)
 
 
 def _pares(openapi: dict[str, Any]) -> list[tuple[str, str]]:
@@ -117,7 +120,10 @@ def _fora_do_schema(
     schema = declaracao.get("content", {}).get("application/json", {}).get("schema")
     if schema is None:
         return [f"{onde}: a rota nao declara corpo JSON"]
-    validador = Draft202012Validator({**schema, "components": openapi["components"]})
+    validador = Draft202012Validator(
+        {**schema, "components": openapi["components"]},
+        format_checker=Draft202012Validator.FORMAT_CHECKER,
+    )
     return [f"{onde}: {erro.message}" for erro in validador.iter_errors(valor)]
 
 
@@ -125,7 +131,7 @@ def _fora_do_schema(
 
 
 def test_openapi_versionado_e_o_do_app(openapi: dict[str, Any]) -> None:
-    versionado = json.loads(OPENAPI.read_text())
+    versionado = json.loads(OPENAPI.read_text(encoding="utf-8"))
 
     assert versionado == openapi, (
         "docs/api/openapi.json atras do app: rode make docs-api"
@@ -144,7 +150,7 @@ def _par(pedido: dict[str, Any]) -> tuple[str, str]:
 def test_colecao_postman_tem_uma_requisicao_por_rota_do_openapi(
     openapi: dict[str, Any],
 ) -> None:
-    colecao = json.loads(COLECAO.read_text())
+    colecao = json.loads(COLECAO.read_text(encoding="utf-8"))
 
     pares = sorted(_par(item["request"]) for item in _requisicoes(colecao))
 
@@ -154,7 +160,7 @@ def test_colecao_postman_tem_uma_requisicao_por_rota_do_openapi(
 def test_colecao_postman_e_a_que_o_script_gera(
     openapi: dict[str, Any], gerador: ModuleType
 ) -> None:
-    colecao = json.loads(COLECAO.read_text())
+    colecao = json.loads(COLECAO.read_text(encoding="utf-8"))
 
     assert colecao == gerador.colecao(openapi), "colecao atras do script: make docs-api"
 
@@ -162,7 +168,7 @@ def test_colecao_postman_e_a_que_o_script_gera(
 def test_rota_com_token_na_colecao_e_a_que_o_openapi_protege(
     openapi: dict[str, Any],
 ) -> None:
-    colecao = json.loads(COLECAO.read_text())
+    colecao = json.loads(COLECAO.read_text(encoding="utf-8"))
 
     sem_token = sorted(
         _par(item["request"])
@@ -206,24 +212,76 @@ def test_login_e_criacoes_guardam_o_token_e_os_ids_que_as_outras_usam() -> None:
     ]
 
 
-def test_exemplos_da_colecao_seguem_o_schema_da_rota(openapi: dict[str, Any]) -> None:
+def _erros_do_exemplo(openapi: dict[str, Any], item: dict[str, Any]) -> list[str]:
+    """O corpo e as respostas de exemplo de uma requisicao contra os schemas."""
+    metodo, rota = _par(item["request"])
+    operacao = openapi["paths"][rota][metodo]
+    onde = f"{metodo.upper()} {rota}"
     erros: list[str] = []
-    for item in _requisicoes(json.loads(COLECAO.read_text())):
-        metodo, rota = _par(item["request"])
-        operacao = openapi["paths"][rota][metodo]
-        onde = f"{metodo.upper()} {rota}"
-        if "requestBody" in operacao:
-            corpo = json.loads(item["request"].get("body", {}).get("raw", "null"))
-            erros += _fora_do_schema(openapi, operacao["requestBody"], corpo, onde)
-        elif "body" in item["request"]:
-            erros.append(f"{onde}: corpo numa rota sem requestBody")
-        for resposta in item["response"]:
-            declarada = operacao["responses"][str(resposta["code"])]
-            if resposta["body"]:
-                valor = json.loads(resposta["body"])
-                erros += _fora_do_schema(openapi, declarada, valor, f"{onde} resposta")
+    if "requestBody" in operacao:
+        # A variavel da colecao ({{cliente_id}}) vale um uuid, como a do shell no curl.
+        bruto = item["request"].get("body", {}).get("raw", "null")
+        corpo = json.loads(re.sub(r"\{\{\w+\}\}", _UUID_QUALQUER, bruto))
+        erros += _fora_do_schema(openapi, operacao["requestBody"], corpo, onde)
+    elif "body" in item["request"]:
+        erros.append(f"{onde}: corpo numa rota sem requestBody")
+    for resposta in item["response"]:
+        declarada = operacao["responses"][str(resposta["code"])]
+        if resposta["body"]:
+            valor = json.loads(resposta["body"])
+            erros += _fora_do_schema(openapi, declarada, valor, f"{onde} resposta")
+    return erros
+
+
+def test_exemplos_da_colecao_seguem_o_schema_da_rota(openapi: dict[str, Any]) -> None:
+    colecao = json.loads(COLECAO.read_text(encoding="utf-8"))
+
+    erros = [
+        erro
+        for item in _requisicoes(colecao)
+        for erro in _erros_do_exemplo(openapi, item)
+    ]
 
     assert erros == []
+
+
+def test_exemplo_com_corpo_a_mais_ou_fora_do_formato_reprova(
+    openapi: dict[str, Any],
+) -> None:
+    saude = {
+        "request": {
+            "method": "GET",
+            "url": {"path": ["api", "v1", "saude"]},
+            "body": {},
+        },
+        "response": [{"code": 200, "body": ""}],
+    }
+    abertura = {
+        "request": {
+            "method": "POST",
+            "url": {"path": ["api", "v1", "ordens-de-servico"]},
+            "body": {
+                "raw": json.dumps(
+                    {
+                        "cliente_id": "nao-e-um-uuid",
+                        "veiculo_id": _UUID_QUALQUER,
+                        "descricao_problema": "Freio",
+                    }
+                )
+            },
+        },
+        "response": [{"code": 201, "body": ""}],
+    }
+
+    assert _erros_do_exemplo(openapi, saude) == [
+        "GET /api/v1/saude: corpo numa rota sem requestBody"
+    ]
+    assert _erros_do_exemplo(openapi, abertura) == [
+        "POST /api/v1/ordens-de-servico: 'nao-e-um-uuid' is not a 'uuid'"
+    ]
+    assert _fora_do_schema(openapi, {}, None, "GET /x") == [
+        "GET /x: a rota nao declara corpo JSON"
+    ]
 
 
 def test_rota_nova_sem_exemplo_reprova_a_geracao(
@@ -299,6 +357,8 @@ class Curl(NamedTuple):
     metodo: str
     caminho: str
     corpo: str | None
+    # Os nomes dos cabecalhos, em minusculas.
+    cabecalhos: frozenset[str] = frozenset()
 
 
 def _curl(trecho: str) -> Curl | None:
@@ -306,6 +366,7 @@ def _curl(trecho: str) -> Curl | None:
     lexer = shlex.shlex(trecho, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     metodo, url, corpo = "", "", None
+    cabecalhos: set[str] = set()
     palavras = iter(lexer)
     for palavra in palavras:
         if palavra[:1] in {"|", ")", ";", "&", "<", ">"}:
@@ -314,12 +375,17 @@ def _curl(trecho: str) -> Curl | None:
             valor = next(palavras)
             metodo = valor.upper() if palavra in {"-X", "--request"} else metodo
             corpo = valor if palavra in _DADOS else corpo
+            if palavra in {"-H", "--header"}:
+                cabecalhos.add(valor.partition(":")[0].strip().lower())
+            elif palavra == "--json":  # o curl ja manda o Content-Type
+                cabecalhos.add("content-type")
         elif not palavra.startswith("-") and not url:
             url = palavra
     caminho = re.match(r"(?:https?://)?[^/]+(/[^?#]*)", url)
     if caminho is None:
         return None
-    return Curl(metodo or ("POST" if corpo else "GET"), caminho[1], corpo)
+    metodo = metodo or ("POST" if corpo else "GET")
+    return Curl(metodo, caminho[1], corpo, frozenset(cabecalhos))
 
 
 def _curls(texto: str) -> list[Curl]:
@@ -362,16 +428,24 @@ def test_leitura_dos_curl_do_readme() -> None:
         "curl -sk https://localhost/os/api/v1/saude\n"
         'curl -s localhost:8000/x -d \'{"r": "\'"$REFRESH"\'"}\'\n'
         "curl -s --data-binary '{\"a\": 1}' localhost:8000/y\n"
+        "curl -s --json '{\"b\": 2}' localhost:8000/z\n"
+        "curl --version\n"
         "```\n"
     )
 
     assert _curls(texto) == [
-        Curl("POST", "/api/v1/autenticacao/login", '{"email": "a@b.dev"}'),
-        Curl("GET", "/api/v1/clientes", None),
+        Curl(
+            "POST",
+            "/api/v1/autenticacao/login",
+            '{"email": "a@b.dev"}',
+            frozenset({"content-type"}),
+        ),
+        Curl("GET", "/api/v1/clientes", None, frozenset({"authorization"})),
         Curl("DELETE", "/api/v1/clientes/$CLIENTE_ID", None),
         Curl("GET", "/os/api/v1/saude", None),
         Curl("POST", "/x", '{"r": "$REFRESH"}'),
         Curl("POST", "/y", '{"a": 1}'),
+        Curl("POST", "/z", '{"b": 2}', frozenset({"content-type"})),
     ]
 
 
@@ -384,40 +458,77 @@ def test_parametro_da_rota_so_casa_com_variavel_do_shell() -> None:
     assert not _casa("/api/v1/sagas/$ORDEM_ID/compensacao", "/api/v1/sagas/{ordem_id}")
 
 
-def test_toda_rota_do_openapi_tem_um_curl_no_readme(openapi: dict[str, Any]) -> None:
-    cobertas = {_rota(openapi, curl) for curl in _curls(README.read_text())}
+def test_toda_rota_do_openapi_tem_um_curl_na_secao_exemplos_da_api(
+    openapi: dict[str, Any],
+) -> None:
+    exemplos = _secao(README.read_text(encoding="utf-8"), "## Exemplos da API")
+    cobertas = {_rota(openapi, curl) for curl in _curls(exemplos)}
 
     faltam = [par for par in _pares(openapi) if par not in cobertas]
 
     assert faltam == [], "rota do OpenAPI sem curl no README (secao Exemplos da API)"
 
 
-def test_corpo_dos_curl_do_readme_segue_o_schema_da_rota(
+def _erros_do_curl(openapi: dict[str, Any], curl: Curl) -> list[str]:
+    """O que a operacao pede e o curl nao traz: token, corpo e Content-Type."""
+    par = _rota(openapi, curl)
+    if par is None:
+        return []
+    operacao = openapi["paths"][par[1]][par[0]]
+    onde = f"{curl.metodo} {curl.caminho}"
+    erros: list[str] = []
+    if "security" in operacao and "authorization" not in curl.cabecalhos:
+        erros.append(f"{onde}: rota protegida sem Authorization")
+    if "requestBody" not in operacao:
+        erros += [f"{onde}: corpo numa rota sem requestBody"] if curl.corpo else []
+    elif curl.corpo is None:
+        erros.append(f"{onde}: rota com requestBody e curl sem corpo")
+    else:
+        if "content-type" not in curl.cabecalhos:
+            erros.append(f"{onde}: corpo sem Content-Type (a API responderia 422)")
+        corpo = json.loads(_VARIAVEL.sub(_UUID_QUALQUER, curl.corpo))
+        erros += _fora_do_schema(openapi, operacao["requestBody"], corpo, onde)
+    return erros
+
+
+def test_curl_do_readme_tem_o_token_o_corpo_e_o_content_type_que_a_rota_pede(
     openapi: dict[str, Any],
 ) -> None:
-    erros: list[str] = []
-    for curl in _curls(README.read_text()):
-        par = _rota(openapi, curl)
-        if par is None:
-            continue
-        operacao = openapi["paths"][par[1]][par[0]]
-        onde = f"{curl.metodo} {curl.caminho}"
-        if "requestBody" not in operacao:
-            erros += [f"{onde}: corpo numa rota sem requestBody"] if curl.corpo else []
-        elif curl.corpo is None:
-            erros.append(f"{onde}: rota com requestBody e curl sem corpo")
-        else:
-            corpo = json.loads(_VARIAVEL.sub(_UUID_QUALQUER, curl.corpo))
-            erros += _fora_do_schema(openapi, operacao["requestBody"], corpo, onde)
+    curls = _curls(README.read_text(encoding="utf-8"))
 
+    erros = [erro for curl in curls for erro in _erros_do_curl(openapi, curl)]
+
+    assert len(curls) > 30
     assert erros == []
+
+
+def test_curl_sem_token_sem_content_type_ou_com_corpo_errado_reprova(
+    openapi: dict[str, Any],
+) -> None:
+    abertura = "/api/v1/ordens-de-servico"
+    corpo = (
+        '{"cliente_id": "nao-e-um-uuid", "veiculo_id": "$V", "descricao_problema": "x"}'
+    )
+    com_token = frozenset({"authorization"})
+
+    assert _erros_do_curl(openapi, Curl("POST", abertura, None)) == [
+        f"POST {abertura}: rota protegida sem Authorization",
+        f"POST {abertura}: rota com requestBody e curl sem corpo",
+    ]
+    assert _erros_do_curl(openapi, Curl("POST", abertura, corpo, com_token)) == [
+        f"POST {abertura}: corpo sem Content-Type (a API responderia 422)",
+        f"POST {abertura}: 'nao-e-um-uuid' is not a 'uuid'",
+    ]
+    assert _erros_do_curl(openapi, Curl("GET", "/api/v1/saude", "{}")) == [
+        "GET /api/v1/saude: corpo numa rota sem requestBody"
+    ]
 
 
 # docs/arquitetura.md e as referencias do README.
 
 
 def test_readme_aponta_a_arquitetura_e_os_documentos_da_api() -> None:
-    texto = README.read_text()
+    texto = README.read_text(encoding="utf-8")
 
     assert ARQUITETURA.is_file()
     assert "](docs/arquitetura.md)" in texto
@@ -449,31 +560,55 @@ def test_ancora_gerada_como_a_do_github() -> None:
     assert _ancoras(texto) == {"ação-lgpd", "testes", "testes-1"}
 
 
-def test_links_para_secoes_do_readme_e_da_arquitetura_existem() -> None:
-    readme, arquitetura = README.read_text(), ARQUITETURA.read_text()
-    links = [
-        *(
-            ("README.md", alvo, readme)
-            for alvo in re.findall(r"\]\(#([^)]+)\)", readme)
-        ),
-        *(
-            ("docs/arquitetura.md", alvo, arquitetura)
-            for alvo in re.findall(r"\]\(#([^)]+)\)", arquitetura)
-        ),
-        *(
-            ("docs/arquitetura.md para o README", alvo, readme)
-            for alvo in re.findall(r"\]\(\.\./README\.md#([^)]+)\)", arquitetura)
-        ),
+def _links_relativos(origem: Path) -> list[tuple[str, Path, str]]:
+    """(alvo, arquivo de destino, ancora) dos links de ``origem`` para o repositorio."""
+    links = []
+    for alvo in re.findall(
+        r"\]\(([^)\s]+)\)", _CERCA.sub("", origem.read_text(encoding="utf-8"))
+    ):
+        caminho, _, ancora = alvo.partition("#")
+        # http:, https:, mailto: saem do repositorio.
+        if re.match(r"[a-z]+:", caminho) is None:
+            links.append((alvo, origem.parent / caminho if caminho else origem, ancora))
+    return links
+
+
+def _quebrados(links: list[tuple[str, Path, str]]) -> list[str]:
+    return [
+        alvo
+        for alvo, destino, ancora in links
+        if not destino.exists()
+        or (
+            ancora != ""
+            and destino.suffix == ".md"
+            and ancora not in _ancoras(destino.read_text(encoding="utf-8"))
+        )
     ]
 
-    quebrados = [
-        f"{origem}: #{alvo}"
-        for origem, alvo, destino in links
-        if alvo not in _ancoras(destino)
-    ]
 
-    assert len(links) > 30
-    assert quebrados == [], "link para uma secao que nao existe (titulo renomeado?)"
+def test_links_relativos_do_readme_e_da_arquitetura_existem() -> None:
+    links = [*_links_relativos(README), *_links_relativos(ARQUITETURA)]
+
+    assert len(links) > 60
+    assert _quebrados(links) == [], "link para arquivo ou secao que nao existe"
+
+
+def test_link_para_arquivo_ou_secao_que_nao_existe_reprova(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("# Seção A\n", encoding="utf-8")
+    origem = tmp_path / "README.md"
+    origem.write_text(
+        "# Topo\n[a](docs/a.md#seção-a) [b](#topo) [c](docs/) [d](https://x.dev/#y)\n"
+        "[e](docs/b.md) [f](docs/a.md#outra) [g](#fim) [h](docs/a.md)\n"
+        "```bash\n[nao e link](nada.md)\n```\n",
+        encoding="utf-8",
+    )
+
+    assert _quebrados(_links_relativos(origem)) == [
+        "docs/b.md",
+        "docs/a.md#outra",
+        "#fim",
+    ]
 
 
 # docs/arquitetura.md: o modelo de dados, os estados da OS e a saga, lidos do codigo.
@@ -636,9 +771,11 @@ def _tabela(texto: str) -> dict[str, tuple[int, int]]:
     }
 
 
-def test_secao_de_cobertura_do_readme_e_a_que_o_script_gera() -> None:
-    cobertura = _modulo("cobertura_resumo")
-    texto = README.read_text()
+def test_secao_de_cobertura_do_readme_e_a_que_o_script_gera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cobertura = _modulo("cobertura_resumo", monkeypatch)
+    texto = README.read_text(encoding="utf-8")
     assert texto.count(cobertura.MARCADOR_INICIO) == 1
     assert texto.count(cobertura.MARCADOR_FIM) == 1
     secao = texto.split(cobertura.MARCADOR_INICIO)[1].split(cobertura.MARCADOR_FIM)[0]

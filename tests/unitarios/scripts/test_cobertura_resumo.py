@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-from scripts.cobertura_resumo import (  # noqa: E402
+from scripts.cobertura_resumo import (
     MARCADOR_FIM,
     MARCADOR_INICIO,
     Medida,
@@ -44,7 +39,7 @@ _COVERAGE_XML = """<?xml version="1.0" ?>
 @pytest.fixture
 def coverage_xml(tmp_path: Path) -> Path:
     caminho = tmp_path / "coverage.xml"
-    caminho.write_text(_COVERAGE_XML)
+    caminho.write_text(_COVERAGE_XML, encoding="utf-8")
     return caminho
 
 
@@ -90,7 +85,9 @@ _PROCESSO = """    <class filename="main.py"><lines>
 
 def test_medir_separa_contexto_camada_e_os_processos_da_raiz(tmp_path: Path) -> None:
     caminho = tmp_path / "coverage.xml"
-    caminho.write_text(_COVERAGE_XML.replace("  </classes>", _PROCESSO))
+    caminho.write_text(
+        _COVERAGE_XML.replace("  </classes>", _PROCESSO), encoding="utf-8"
+    )
 
     medida = medir(caminho)
 
@@ -107,7 +104,9 @@ def test_medir_separa_contexto_camada_e_os_processos_da_raiz(tmp_path: Path) -> 
 
 def test_secao_do_readme_em_portugues_com_o_link_do_run(tmp_path: Path) -> None:
     caminho = tmp_path / "coverage.xml"
-    caminho.write_text(_COVERAGE_XML.replace("  </classes>", _PROCESSO))
+    caminho.write_text(
+        _COVERAGE_XML.replace("  </classes>", _PROCESSO), encoding="utf-8"
+    )
 
     secao = secao_do_readme(medir(caminho), _RUN)
 
@@ -153,6 +152,7 @@ def test_milhar_com_ponto_na_secao_do_readme() -> None:
         "https://github.com/o/r/actions/runs/123/job/456",
         "http://exemplo.com/actions/runs/123",
     ],
+    ids=["run-sem-numero", "job-dentro-do-run", "fora-do-github"],
 )
 def test_secao_do_readme_so_aceita_o_endereco_de_um_run(url: str) -> None:
     with pytest.raises(ValueError, match="endereco de um run do CI"):
@@ -165,7 +165,9 @@ def _argv(xml: Path, readme: Path) -> list[str]:
 
 def _readme(tmp_path: Path, meio: str) -> Path:
     readme = tmp_path / "README.md"
-    readme.write_text(f"# Servico\n\n## Cobertura\n\n{meio}\nPara refazer.\n")
+    readme.write_text(
+        f"# Servico\n\n## Cobertura\n\n{meio}\nPara refazer.\n", encoding="utf-8"
+    )
     return readme
 
 
@@ -177,7 +179,7 @@ def test_main_reescreve_so_o_trecho_entre_os_marcadores(
     codigo = main(_argv(coverage_xml, readme))
 
     assert codigo == 0
-    assert readme.read_text() == (
+    assert readme.read_text(encoding="utf-8") == (
         "# Servico\n\n## Cobertura\n\n"
         f"{MARCADOR_INICIO}\n{secao_do_readme(medir(coverage_xml), _RUN)}\n"
         f"{MARCADOR_FIM}\nPara refazer.\n"
@@ -191,17 +193,18 @@ def test_main_reescreve_so_o_trecho_entre_os_marcadores(
         f"{MARCADOR_FIM}\n{MARCADOR_INICIO}",
         f"{MARCADOR_INICIO}\n{MARCADOR_FIM}\n{MARCADOR_INICIO}\n{MARCADOR_FIM}",
     ],
+    ids=["ausente", "invertido", "repetido"],
 )
 def test_marcador_ausente_repetido_ou_invertido_reprova_sem_tocar_no_readme(
     coverage_xml: Path, tmp_path: Path, meio: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     readme = _readme(tmp_path, meio)
-    antes = readme.read_text()
+    antes = readme.read_text(encoding="utf-8")
 
     codigo = main(_argv(coverage_xml, readme))
 
     assert codigo == 1
-    assert readme.read_text() == antes
+    assert readme.read_text(encoding="utf-8") == antes
     assert "cobertura:" in capsys.readouterr().err
     with pytest.raises(ValueError, match="cobertura:"):
         atualizar_readme(antes, "x\n")

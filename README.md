@@ -867,7 +867,7 @@ Os `curl` das rotas do OpenAPI, um por rota e agrupados por fluxo, contra a API 
 
 - **Variáveis.** Cada bloco usa as que os anteriores preenchem: `TOKEN` e `REFRESH` saem do login, e `CLIENTE_ID`, `VEICULO_ID` e `ORDEM_ID`, das respostas do cadastro e da abertura.
 - **O que o compose não tem.** O compose não sobe o Billing nem a Execução, então a OS aberta aqui fica em `recebida`, com a saga esperando o diagnóstico. As rotas que pedem outro estado respondem o erro da regra, que o texto de cada bloco diz.
-- **Teste.** `tests/unitarios/test_documentacao.py` reprova o README quando uma rota do OpenAPI fica sem `curl` ou quando um corpo sai do schema da rota.
+- **Teste.** `tests/unitarios/test_documentacao.py` reprova o README quando uma rota do OpenAPI fica sem `curl` nesta seção, quando um corpo sai do schema da rota (inclusive o formato, como o de um uuid) e quando falta o `Authorization` de uma rota protegida ou o `Content-Type` de um corpo.
 
 ### Saúde
 

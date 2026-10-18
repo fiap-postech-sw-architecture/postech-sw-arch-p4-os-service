@@ -200,7 +200,8 @@ def _reescrever_readme(xml: Path, readme: Path, url_do_run: str) -> int:
         return 1
     try:
         secao = secao_do_readme(medir(xml), url_do_run)
-        readme.write_text(atualizar_readme(readme.read_text(), secao))
+        texto = atualizar_readme(readme.read_text(encoding="utf-8"), secao)
+        readme.write_text(texto, encoding="utf-8")
     except ValueError as erro:
         print(erro, file=sys.stderr)
         return 1
@@ -227,5 +228,5 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main(sys.argv))
