@@ -3,7 +3,8 @@
 - ``docs/api/openapi.json``: o ``app.openapi()`` do servico, o mesmo do ``/docs``.
 - ``docs/api/os-service.postman_collection.json``: colecao Postman v2.1 com uma
   requisicao por metodo e rota do OpenAPI, cada uma com corpo e resposta de
-  exemplo (``EXEMPLOS``) e as variaveis ``{{baseUrl}}`` e ``{{token}}``.
+  exemplo (``EXEMPLOS``) e as variaveis ``{{baseUrl}}`` e ``{{token}}``; o
+  login, o refresh e as criacoes guardam o token e os ids num script de teste.
 
 Os dois saem juntos, do mesmo OpenAPI, para nao divergirem. O script so monta o
 app e le o OpenAPI dele: nao sobe servidor nem banco. ``tests/unitarios/
@@ -31,11 +32,15 @@ DESCRICAO = (
     "Uma requisicao por rota do OS Service, com corpo e resposta de exemplo. "
     "baseUrl aponta para a API do compose (make compose-up) e pode ser trocada "
     "pelo Kong do kind (https://localhost/os; o certificado e autoassinado: "
-    "desligue a verificacao de SSL do Postman). token e o access_token do login "
-    "(a requisicao de login usa o admin de demonstracao do compose) e "
-    "refresh_token, o refresh_token dele; cliente_id, veiculo_id e ordem_id saem "
-    "das respostas do cadastro do cliente, do veiculo e da abertura da OS. Gerada "
-    "por scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em "
+    "desligue a verificacao de SSL do Postman). O script de teste do login (o "
+    "admin de demonstracao do compose) e o do refresh guardam token, o "
+    "access_token que as rotas protegidas mandam como Bearer, e refresh_token; os "
+    "do cadastro do cliente, do veiculo e da abertura da OS guardam cliente_id, "
+    "veiculo_id e ordem_id (antes deles, valem os ids dos exemplos). As pastas "
+    "seguem as tags do OpenAPI, e nao um roteiro: para rodar em sequencia, siga a "
+    "ordem da secao Exemplos da API do README, com as remocoes do cliente depois "
+    "da abertura da OS e o logout, que revoga o token, por ultimo. Gerada por "
+    "scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em "
     "docs/api/openapi.json."
 )
 # Os tokens daqui sao variaveis vazias e marcadores da colecao, nao credenciais:
@@ -164,7 +169,12 @@ def _pagina(item: dict[str, Any]) -> dict[str, Any]:
     return {"items": [item], "total": 1, "offset": 0, "limit": 20}
 
 
-# Ordem dos fluxos do README; as chaves sao as do OpenAPI (metodo, rota).
+# Variavel da colecao -> campo da resposta que o script de teste guarda nela (os
+# nomes de campo, e nao credenciais, que o B105 toma por senha).
+_GUARDA_TOKENS = {"token": "access_token", "refresh_token": "refresh_token"}  # nosec B105
+
+# Ordem dos fluxos do README; as chaves sao as do OpenAPI (metodo, rota). O
+# "guarda" de uma requisicao vira o script de teste dela (_script_de_teste).
 EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
     ("get", "/api/v1/saude"): {"status": 200, "resposta": {"status": "ok"}},
     ("get", "/api/v1/saude/pronto"): {"status": 200, "resposta": {"status": "ok"}},
@@ -172,11 +182,13 @@ EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
         "corpo": {"email": "admin@pytstop.dev", "senha": "admin-demo-os-2026"},
         "status": 200,
         "resposta": _TOKENS,
+        "guarda": _GUARDA_TOKENS,
     },
     ("post", "/api/v1/autenticacao/refresh"): {
         "corpo": _REFRESH,
         "status": 200,
         "resposta": _TOKENS,
+        "guarda": _GUARDA_TOKENS,
     },
     ("get", "/.well-known/jwks.json"): {
         "status": 200,
@@ -210,6 +222,7 @@ EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
         "corpo": _CLIENTE_NOVO,
         "status": 201,
         "resposta": {**_CLIENTE_RESPOSTA, "veiculos": []},
+        "guarda": {"cliente_id": "id"},
     },
     ("post", "/api/v1/clientes/{cliente_id}/consentimento"): {
         "corpo": {"tipo": "tratamento_dados"},
@@ -227,6 +240,7 @@ EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
         "corpo": _VEICULO_NOVO,
         "status": 201,
         "resposta": _VEICULO_RESPOSTA,
+        "guarda": {"veiculo_id": "id"},
     },
     ("get", "/api/v1/clientes"): {
         "query": {"offset": 0, "limit": 20},
@@ -278,6 +292,7 @@ EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
         },
         "status": 201,
         "resposta": _ORDEM_RESPOSTA,
+        "guarda": {"ordem_id": "id"},
     },
     ("get", "/api/v1/ordens-de-servico"): {
         "query": {"offset": 0, "limit": 20, "incluir_encerradas": "false"},
@@ -476,7 +491,29 @@ def _requisicao(
         resposta["header"] = [{"key": "Content-Type", "value": "application/json"}]
         resposta["body"] = _json(exemplo["resposta"]).rstrip("\n")
         resposta["_postman_previewlanguage"] = "json"
-    return {"name": operacao["summary"], "request": pedido, "response": [resposta]}
+    item: dict[str, Any] = {
+        "name": operacao["summary"],
+        "request": pedido,
+        "response": [resposta],
+    }
+    if "guarda" in exemplo:
+        item["event"] = [_script_de_teste(status.value, exemplo["guarda"])]
+    return item
+
+
+def _script_de_teste(status: int, guarda: dict[str, str]) -> dict[str, Any]:
+    """Guarda campos da resposta em variaveis da colecao, uma linha por variavel."""
+    return {
+        "listen": "test",
+        "script": {
+            "type": "text/javascript",
+            "exec": [
+                f"if (pm.response.code === {status}) pm.collectionVariables.set("
+                f'"{variavel}", pm.response.json().{campo});'
+                for variavel, campo in guarda.items()
+            ],
+        },
+    }
 
 
 def colecao(openapi: dict[str, Any]) -> dict[str, Any]:

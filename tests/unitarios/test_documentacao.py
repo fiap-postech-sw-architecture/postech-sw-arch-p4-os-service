@@ -179,6 +179,33 @@ def test_rota_com_token_na_colecao_e_a_que_o_openapi_protege(
     )
 
 
+_GUARDA = re.compile(
+    r"if \(pm\.response\.code === (\d+)\) "
+    r'pm\.collectionVariables\.set\("(\w+)", pm\.response\.json\(\)\.(\w+)\);'
+)
+
+
+def test_login_e_criacoes_guardam_o_token_e_os_ids_que_as_outras_usam() -> None:
+    texto = COLECAO.read_text(encoding="utf-8")
+    guardadas: dict[str, list[tuple[str, str]]] = {}
+    for item in _requisicoes(json.loads(texto)):
+        resposta = item["response"][0]
+        for evento in item.get("event", []):
+            assert evento["listen"] == "test"
+            for linha in evento["script"]["exec"]:
+                # Uma linha por variavel, com o status e um campo da resposta.
+                ((status, variavel, campo),) = _GUARDA.findall(linha)
+                assert int(status) == resposta["code"]
+                assert campo in json.loads(resposta["body"])
+                guardadas.setdefault(variavel, []).append(_par(item["request"]))
+
+    assert set(guardadas) == set(re.findall(r"\{\{(\w+)\}\}", texto)) - {"baseUrl"}
+    assert guardadas["token"] == [
+        ("post", "/api/v1/autenticacao/login"),
+        ("post", "/api/v1/autenticacao/refresh"),
+    ]
+
+
 def test_exemplos_da_colecao_seguem_o_schema_da_rota(openapi: dict[str, Any]) -> None:
     erros: list[str] = []
     for item in _requisicoes(json.loads(COLECAO.read_text())):

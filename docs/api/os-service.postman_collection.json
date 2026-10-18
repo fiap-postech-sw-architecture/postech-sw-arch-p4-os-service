@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "PytStop OS Service",
-    "description": "Uma requisicao por rota do OS Service, com corpo e resposta de exemplo. baseUrl aponta para a API do compose (make compose-up) e pode ser trocada pelo Kong do kind (https://localhost/os; o certificado e autoassinado: desligue a verificacao de SSL do Postman). token e o access_token do login (a requisicao de login usa o admin de demonstracao do compose) e refresh_token, o refresh_token dele; cliente_id, veiculo_id e ordem_id saem das respostas do cadastro do cliente, do veiculo e da abertura da OS. Gerada por scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em docs/api/openapi.json.",
+    "description": "Uma requisicao por rota do OS Service, com corpo e resposta de exemplo. baseUrl aponta para a API do compose (make compose-up) e pode ser trocada pelo Kong do kind (https://localhost/os; o certificado e autoassinado: desligue a verificacao de SSL do Postman). O script de teste do login (o admin de demonstracao do compose) e o do refresh guardam token, o access_token que as rotas protegidas mandam como Bearer, e refresh_token; os do cadastro do cliente, do veiculo e da abertura da OS guardam cliente_id, veiculo_id e ordem_id (antes deles, valem os ids dos exemplos). As pastas seguem as tags do OpenAPI, e nao um roteiro: para rodar em sequencia, siga a ordem da secao Exemplos da API do README, com as remocoes do cliente depois da abertura da OS e o logout, que revoga o token, por ultimo. Gerada por scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em docs/api/openapi.json.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -333,6 +333,18 @@
               "body": "{\n  \"access_token\": \"<jwt de acesso, 15 min>\",\n  \"refresh_token\": \"<jwt de refresh, 7 dias>\",\n  \"token_type\": \"bearer\"\n}",
               "_postman_previewlanguage": "json"
             }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) pm.collectionVariables.set(\"token\", pm.response.json().access_token);",
+                  "if (pm.response.code === 200) pm.collectionVariables.set(\"refresh_token\", pm.response.json().refresh_token);"
+                ]
+              }
+            }
           ]
         },
         {
@@ -418,6 +430,18 @@
               ],
               "body": "{\n  \"access_token\": \"<jwt de acesso, 15 min>\",\n  \"refresh_token\": \"<jwt de refresh, 7 dias>\",\n  \"token_type\": \"bearer\"\n}",
               "_postman_previewlanguage": "json"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) pm.collectionVariables.set(\"token\", pm.response.json().access_token);",
+                  "if (pm.response.code === 200) pm.collectionVariables.set(\"refresh_token\", pm.response.json().refresh_token);"
+                ]
+              }
             }
           ]
         },
@@ -716,6 +740,17 @@
               "body": "{\n  \"id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"nome\": \"Maria Souza\",\n  \"documento_formatado\": \"529.982.247-25\",\n  \"documento_mascarado\": \"***.***.***-25\",\n  \"tipo_documento\": \"cpf\",\n  \"contato\": \"maria.souza@example.com\",\n  \"ativo\": true,\n  \"veiculos\": []\n}",
               "_postman_previewlanguage": "json"
             }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set(\"cliente_id\", pm.response.json().id);"
+                ]
+              }
+            }
           ]
         },
         {
@@ -879,6 +914,17 @@
               ],
               "body": "{\n  \"id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"placa\": \"BRA2E19\",\n  \"marca\": \"Fiat\",\n  \"modelo\": \"Argo\",\n  \"ano\": 2022\n}",
               "_postman_previewlanguage": "json"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set(\"veiculo_id\", pm.response.json().id);"
+                ]
+              }
             }
           ]
         },
@@ -1532,6 +1578,17 @@
               ],
               "body": "{\n  \"id\": \"3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40\",\n  \"cliente_id\": \"facfeed2-183a-4eac-bbea-2f7647625c88\",\n  \"veiculo_id\": \"12fdbbf4-044c-480b-8c44-6d7988ac4b1a\",\n  \"descricao_problema\": \"Barulho no freio dianteiro ao frear em descida\",\n  \"status\": \"recebida\",\n  \"situacao\": \"Recebida\",\n  \"orcamento\": null,\n  \"pagamento\": null,\n  \"motivo_cancelamento\": null,\n  \"versao\": 1,\n  \"criado_em\": \"2026-10-18T13:00:00Z\",\n  \"atualizado_em\": \"2026-10-18T13:00:00Z\",\n  \"etapa\": \"aguardando_diagnostico\"\n}",
               "_postman_previewlanguage": "json"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) pm.collectionVariables.set(\"ordem_id\", pm.response.json().id);"
+                ]
+              }
             }
           ]
         },
