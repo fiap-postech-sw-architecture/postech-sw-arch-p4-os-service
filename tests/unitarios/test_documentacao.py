@@ -2,6 +2,7 @@
 
 - Os comandos dos blocos ``bash`` do README rodam colados no terminal.
 - ``docs/api`` (OpenAPI e colecao Postman) acompanha o app (``make docs-api``).
+- Toda rota do OpenAPI tem um ``curl`` no README, com corpo que segue o schema.
 - O README aponta ``docs/arquitetura.md`` e ``docs/api``.
 """
 
@@ -10,9 +11,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -193,6 +195,134 @@ def test_rota_nova_sem_exemplo_reprova_a_geracao(
 
     with pytest.raises(ValueError, match="faltam \\[\\('get', '/api/v1/nova'\\)\\]"):
         gerador.colecao(com_rota_nova)
+
+
+# README: um curl por rota do OpenAPI.
+
+# Opcoes do curl que levam valor; as demais (-s, -k, -f...) sao flags.
+_OPCOES_COM_VALOR = frozenset(
+    {"-X", "--request", "-H", "--header", "-d", "--data", "--data-raw", "--json"}
+    | {"-o", "--output", "-w", "--write-out", "-m", "--max-time", "-u", "--user"}
+)
+_DADOS = frozenset({"-d", "--data", "--data-raw", "--json"})
+_VARIAVEL = re.compile(r"\$\{?\w+\}?")
+_UUID_QUALQUER = "00000000-0000-4000-8000-000000000000"
+
+
+class Curl(NamedTuple):
+    metodo: str
+    caminho: str
+    corpo: str | None
+
+
+def _curl(trecho: str) -> Curl | None:
+    """O ``curl`` do comeco de ``trecho``, ate o pipe, o ``)`` ou o ``;``."""
+    lexer = shlex.shlex(trecho, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    metodo, url, corpo = "", "", None
+    palavras = iter(lexer)
+    for palavra in palavras:
+        if palavra[:1] in {"|", ")", ";", "&", "<", ">"}:
+            break
+        if palavra in _OPCOES_COM_VALOR:
+            valor = next(palavras)
+            metodo = valor.upper() if palavra in {"-X", "--request"} else metodo
+            corpo = valor if palavra in _DADOS else corpo
+        elif not palavra.startswith("-") and not url:
+            url = palavra
+    caminho = re.match(r"(?:https?://)?[^/]+(/[^?#]*)", url)
+    if caminho is None:
+        return None
+    return Curl(metodo or ("POST" if corpo else "GET"), caminho[1], corpo)
+
+
+def _curls(texto: str) -> list[Curl]:
+    chamadas = []
+    for bloco in _BLOCO.findall(texto):
+        for linha in bloco.replace("\\\n", " ").splitlines():
+            for trecho in re.split(r"(?<![\w-])curl\s", linha)[1:]:
+                chamada = _curl(trecho)
+                if chamada is not None:
+                    chamadas.append(chamada)
+    return chamadas
+
+
+def _casa(caminho: str, rota: str) -> bool:
+    # O parametro da rota casa com uma variavel do shell ($ORDEM_ID), nunca com
+    # um texto fixo: `/ordens-de-servico/metricas` nao vale por `/{ordem_id}`.
+    partes, modelo = caminho.split("/"), rota.split("/")
+    return len(partes) == len(modelo) and all(
+        parte == trecho
+        or (trecho.startswith("{") and _VARIAVEL.fullmatch(parte) is not None)
+        for parte, trecho in zip(partes, modelo, strict=True)
+    )
+
+
+def _rota(openapi: dict[str, Any], curl: Curl) -> tuple[str, str] | None:
+    for metodo, rota in _pares(openapi):
+        if metodo.upper() == curl.metodo and _casa(curl.caminho, rota):
+            return metodo, rota
+    return None
+
+
+def test_leitura_dos_curl_do_readme() -> None:
+    texto = (
+        "```bash\n"
+        "TOKEN=$(curl -s -X POST localhost:8000/api/v1/autenticacao/login \\\n"
+        "  -H 'Content-Type: application/json' \\\n"
+        '  -d \'{"email": "a@b.dev"}\' | jq -r .access_token)\n'
+        'curl -s "localhost:8000/api/v1/clientes?limit=5" -H "Authorization: x"\n'
+        "curl -s -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID; echo\n"
+        "curl -sk https://localhost/os/api/v1/saude\n"
+        'curl -s localhost:8000/x -d \'{"r": "\'"$REFRESH"\'"}\'\n'
+        "```\n"
+    )
+
+    assert _curls(texto) == [
+        Curl("POST", "/api/v1/autenticacao/login", '{"email": "a@b.dev"}'),
+        Curl("GET", "/api/v1/clientes", None),
+        Curl("DELETE", "/api/v1/clientes/$CLIENTE_ID", None),
+        Curl("GET", "/os/api/v1/saude", None),
+        Curl("POST", "/x", '{"r": "$REFRESH"}'),
+    ]
+
+
+def test_parametro_da_rota_so_casa_com_variavel_do_shell() -> None:
+    assert _casa("/api/v1/sagas/$ORDEM_ID", "/api/v1/sagas/{ordem_id}")
+    assert _casa("/api/v1/sagas/${ORDEM_ID}", "/api/v1/sagas/{ordem_id}")
+    assert not _casa(
+        "/api/v1/ordens-de-servico/metricas", "/api/v1/ordens-de-servico/{ordem_id}"
+    )
+    assert not _casa("/api/v1/sagas/$ORDEM_ID/compensacao", "/api/v1/sagas/{ordem_id}")
+
+
+def test_toda_rota_do_openapi_tem_um_curl_no_readme(openapi: dict[str, Any]) -> None:
+    cobertas = {_rota(openapi, curl) for curl in _curls(README.read_text())}
+
+    faltam = [par for par in _pares(openapi) if par not in cobertas]
+
+    assert faltam == [], "rota do OpenAPI sem curl no README (secao Exemplos da API)"
+
+
+def test_corpo_dos_curl_do_readme_segue_o_schema_da_rota(
+    openapi: dict[str, Any],
+) -> None:
+    erros: list[str] = []
+    for curl in _curls(README.read_text()):
+        par = _rota(openapi, curl)
+        if par is None:
+            continue
+        operacao = openapi["paths"][par[1]][par[0]]
+        onde = f"{curl.metodo} {curl.caminho}"
+        if "requestBody" not in operacao:
+            erros += [f"{onde}: corpo numa rota sem requestBody"] if curl.corpo else []
+        elif curl.corpo is None:
+            erros.append(f"{onde}: rota com requestBody e curl sem corpo")
+        else:
+            corpo = json.loads(_VARIAVEL.sub(_UUID_QUALQUER, curl.corpo))
+            erros += _fora_do_schema(openapi, operacao["requestBody"], corpo, onde)
+
+    assert erros == []
 
 
 # docs/arquitetura.md e as referencias do README.
