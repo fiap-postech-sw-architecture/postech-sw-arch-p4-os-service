@@ -525,11 +525,11 @@ def main() -> int:
         print(erro, file=sys.stderr)
         return 1
     DOCS_API.mkdir(parents=True, exist_ok=True)
-    OPENAPI.write_text(_json(documento))
-    COLECAO.write_text(_json(postman))
+    OPENAPI.write_text(_json(documento), encoding="utf-8")
+    COLECAO.write_text(_json(postman), encoding="utf-8")
     print(f"atualizados: {OPENAPI.relative_to(RAIZ)} e {COLECAO.relative_to(RAIZ)}")
     return 0
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

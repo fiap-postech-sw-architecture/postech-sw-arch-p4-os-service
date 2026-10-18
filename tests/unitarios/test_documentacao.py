@@ -204,6 +204,53 @@ def test_rota_nova_sem_exemplo_reprova_a_geracao(
         gerador.colecao(com_rota_nova)
 
 
+@pytest.fixture
+def docs_api_temporario(
+    gerador: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    """O ``main()`` do gerador escrevendo num ``docs/api`` de ``tmp_path``."""
+    destino = tmp_path / "docs" / "api"
+    monkeypatch.setattr(gerador, "RAIZ", tmp_path)
+    monkeypatch.setattr(gerador, "DOCS_API", destino)
+    monkeypatch.setattr(gerador, "OPENAPI", destino / OPENAPI.name)
+    monkeypatch.setattr(gerador, "COLECAO", destino / COLECAO.name)
+    return destino
+
+
+def test_main_grava_os_arquivos_versionados_byte_a_byte_e_de_novo_igual(
+    gerador: ModuleType,
+    docs_api_temporario: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    versionados = {
+        OPENAPI.name: OPENAPI.read_bytes(),
+        COLECAO.name: COLECAO.read_bytes(),
+    }
+
+    assert gerador.main() == 0
+    primeira = {p.name: p.read_bytes() for p in docs_api_temporario.iterdir()}
+    assert gerador.main() == 0
+
+    assert primeira == versionados, "docs/api atras do codigo: rode make docs-api"
+    assert {p.name: p.read_bytes() for p in docs_api_temporario.iterdir()} == primeira
+    assert capsys.readouterr().out.splitlines()[0] == (
+        f"atualizados: docs/api/{OPENAPI.name} e docs/api/{COLECAO.name}"
+    )
+
+
+def test_main_com_rota_sem_exemplo_reprova_sem_gravar(
+    gerador: ModuleType,
+    docs_api_temporario: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delitem(gerador.EXEMPLOS, ("get", "/api/v1/saude"))
+
+    assert gerador.main() == 1
+    assert not docs_api_temporario.exists()
+    assert "faltam [('get', '/api/v1/saude')]" in capsys.readouterr().err
+
+
 # README: um curl por rota do OpenAPI.
 
 # Opcoes do curl que levam valor; as demais (-s, -k, -f...) sao flags.
