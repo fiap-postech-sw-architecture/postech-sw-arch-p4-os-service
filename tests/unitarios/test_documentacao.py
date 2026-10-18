@@ -1,7 +1,8 @@
-"""Documentos do servico: README e docs/api.
+"""Documentos do servico: README, docs/arquitetura.md e docs/api.
 
 - Os comandos dos blocos ``bash`` do README rodam colados no terminal.
 - ``docs/api`` (OpenAPI e colecao Postman) acompanha o app (``make docs-api``).
+- O README aponta ``docs/arquitetura.md`` e ``docs/api``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 RAIZ = Path(__file__).resolve().parents[2]
 README = RAIZ / "README.md"
+ARQUITETURA = RAIZ / "docs" / "arquitetura.md"
 OPENAPI = RAIZ / "docs" / "api" / "openapi.json"
 COLECAO = RAIZ / "docs" / "api" / "os-service.postman_collection.json"
 # A cerca pode vir indentada: os passos numerados do README levam o bloco recuado.
@@ -191,3 +193,14 @@ def test_rota_nova_sem_exemplo_reprova_a_geracao(
 
     with pytest.raises(ValueError, match="faltam \\[\\('get', '/api/v1/nova'\\)\\]"):
         gerador.colecao(com_rota_nova)
+
+
+# docs/arquitetura.md e as referencias do README.
+
+
+def test_readme_aponta_a_arquitetura_e_os_documentos_da_api() -> None:
+    texto = README.read_text()
+
+    assert ARQUITETURA.is_file()
+    assert "](docs/arquitetura.md)" in texto
+    assert "](docs/api/)" in texto
