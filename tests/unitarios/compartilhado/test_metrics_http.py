@@ -7,8 +7,11 @@ Billing e na Execucao. O app e um FastAPI pequeno com as rotas incluidas por
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 from fastapi import APIRouter, FastAPI
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from prometheus_client import CONTENT_TYPE_LATEST
 from starlette.requests import Request
@@ -166,6 +169,17 @@ class TestRotaMetrics:
 
         assert _TEMPLATE in paths
         assert "/metrics" not in paths
+
+    def test_endpoint_e_sincrono_para_rodar_no_threadpool(self) -> None:
+        # A coleta pode esperar o banco por ate 5 s: com `async def` ela
+        # prenderia o event loop da API durante a raspagem.
+        rotas = [
+            rota
+            for rota in _app().routes
+            if isinstance(rota, APIRoute) and rota.path == "/metrics"
+        ]
+
+        assert [inspect.iscoroutinefunction(rota.endpoint) for rota in rotas] == [False]
 
     def test_middleware_fica_instalado_no_app(self) -> None:
         classes = [m.cls for m in _app().user_middleware]
