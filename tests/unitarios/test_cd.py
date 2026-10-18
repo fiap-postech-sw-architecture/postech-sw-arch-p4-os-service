@@ -690,21 +690,29 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
     assert set(blocos) == {"uv", "github-actions", "docker"}
     for bloco in blocos.values():
         assert bloco["directory"] == "/"
-        assert bloco["schedule"]["interval"] == "weekly"
+        assert bloco["schedule"] == {
+            "interval": "weekly",
+            "day": "monday",
+            "time": "06:00",
+            "timezone": "America/Sao_Paulo",
+        }
         assert bloco["open-pull-requests-limit"] == 3
-    assert {nome: b["commit-message"]["prefix"] for nome, b in blocos.items()} == {
-        "uv": "chore(deps)",
-        "github-actions": "ci",
-        "docker": "chore(deps)",
+    # Os opentelemetry-* sobem juntos no generico do uv: um grupo so deles
+    # nunca recebe pacote, porque o Dependabot o trata como menos especifico.
+    patch_e_minor = {"update-types": ["minor", "patch"]}
+    esperado = {
+        "uv": ("chore(deps)", "python", {"python-patch-e-minor": patch_e_minor}),
+        "github-actions": (
+            "ci",
+            "github_actions",
+            {"actions-patch-e-minor": patch_e_minor},
+        ),
+        "docker": ("chore(deps)", "docker", {"docker-patch-e-minor": patch_e_minor}),
     }
-    assert blocos["github-actions"]["groups"] == {
-        "actions-patch-e-minor": {"update-types": ["minor", "patch"]}
-    }
-    # Os opentelemetry-* sobem juntos no generico: um grupo so deles nunca
-    # recebe pacote, porque o Dependabot o trata como menos especifico.
-    assert blocos["uv"]["groups"] == {
-        "python-patch-e-minor": {"update-types": ["minor", "patch"]}
-    }
+    for nome, (prefixo, rotulo, grupos) in esperado.items():
+        assert blocos[nome]["commit-message"]["prefix"] == prefixo, nome
+        assert blocos[nome]["labels"] == ["dependencies", rotulo], nome
+        assert blocos[nome]["groups"] == grupos, nome
     # O Python do Dockerfile sobe a mao, junto do .python-version e dos workflows.
     assert blocos["docker"]["ignore"] == [
         {
