@@ -681,23 +681,33 @@ def test_action_de_terceiro_por_sha_de_commit_com_a_tag_em_comentario(
             assert re.fullmatch(r"v\d+(\.\d+)*", versao), ref
 
 
-def test_dependabot_sobe_as_actions_toda_semana_num_grupo_so() -> None:
+def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> None:
     # As actions entram por SHA: sem isto nada as atualiza, e o SHA e a tag do
     # comentario sobem juntos no PR dele (o teste `rede` confere o par).
     config = yaml.safe_load((RAIZ / ".github" / "dependabot.yml").read_text())
+    blocos = {b["package-ecosystem"]: b for b in config["updates"]}
 
-    assert config == {
-        "version": 2,
-        "updates": [
-            {
-                "package-ecosystem": "github-actions",
-                "directory": "/",
-                "schedule": {"interval": "weekly"},
-                "commit-message": {"prefix": "ci"},
-                "groups": {"github-actions": {"patterns": ["*"]}},
-            }
-        ],
+    assert set(blocos) == {"uv", "github-actions", "docker"}
+    for bloco in blocos.values():
+        assert bloco["schedule"]["interval"] == "weekly"
+        assert bloco["open-pull-requests-limit"] == 3
+    assert blocos["github-actions"]["commit-message"] == {"prefix": "ci"}
+    assert blocos["github-actions"]["groups"] == {
+        "actions-patch-e-minor": {"update-types": ["minor", "patch"]}
     }
+    # O primeiro grupo que casa leva a dependencia: o do OpenTelemetry vem antes
+    # do generico, senao o SDK subiria sem as instrumentacoes da mesma versao.
+    assert list(blocos["uv"]["groups"]) == ["opentelemetry", "python-patch-e-minor"]
+    # O Python do Dockerfile sobe a mao, junto do .python-version e dos workflows.
+    assert blocos["docker"]["ignore"] == [
+        {
+            "dependency-name": "python",
+            "update-types": [
+                "version-update:semver-major",
+                "version-update:semver-minor",
+            ],
+        }
+    ]
 
 
 def test_job_que_escreve_pacote_so_usa_actions_por_sha() -> None:
