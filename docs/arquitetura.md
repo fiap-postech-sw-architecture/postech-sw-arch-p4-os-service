@@ -786,10 +786,60 @@ O comportamento com o broker fora, com alarme de memória e o encerramento estã
 
 ## 5. Mensageria
 
-A topologia, o envelope, o catálogo de comandos e eventos e as garantias de entrega são da RFC-004, seções [4](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md#4-saga-de-atendimento) e [5](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md#5-mensageria), e do [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md); as filas, os exchanges, os argumentos e as permissões estão no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#filas-exchanges-e-argumentos). O que é deste serviço:
+A topologia, o envelope, o catálogo de comandos e eventos e as garantias de entrega são da RFC-004, seções [4](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md#4-saga-de-atendimento) e [5](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md#5-mensageria), e do [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md). As filas, os exchanges, os argumentos e as permissões estão no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#filas-exchanges-e-argumentos).
 
-- **Publica 11 comandos** (enum `Comando`) no exchange `pytstop.comandos`, com a routing key `comando.<serviço>.<tipo>` e o usuário AMQP `os`: os dez da saga (`SolicitarDiagnostico`, `GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento`, `AgendarExecucao` e as compensações `CancelarExecucao`, `EstornarPagamento`, `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico`) e o `AnonimizarVeiculo` da eliminação LGPD, fora da saga.
-- **Consome 23 eventos** da fila `os.eventos`: 13 do Billing e 10 da Execução, todos entregues ao orquestrador pelo despachante de `src/consumidor.py`. Os eventos internos da OS (abertura e mudança de status) ficam no histórico e não vão para o broker.
+As duas tabelas abaixo são o que este serviço publica e consome. Elas repetem o catálogo que o serviço lê de `contratos/asyncapi.yaml` e a etapa esperada de cada evento (`ETAPA_ESPERADA`, em `aplicacao/saga/tabela_da_saga.py`): `tests/unitarios/test_documentacao.py` as compara com o código, e uma mensagem nova sem linha aqui reprova o `make test`.
+
+### Comandos publicados
+
+Onze comandos (enum `Comando`), no exchange `pytstop.comandos` e com o usuário AMQP `os`: os dez da saga e o `AnonimizarVeiculo` da eliminação LGPD, fora dela. As compensações saem na ordem da tabela, menos as dos passos que não chegaram a acontecer (seção 4.5).
+
+| Comando | Routing key | Quando sai |
+|---|---|---|
+| `SolicitarDiagnostico` | `comando.execucao.solicitar_diagnostico` | na abertura da OS (T1), sem prazo técnico |
+| `GerarOrcamento` | `comando.billing.gerar_orcamento` | com o `DiagnosticoConcluido` |
+| `ReservarPecas` | `comando.execucao.reservar_pecas` | com o `OrcamentoAprovado` |
+| `SolicitarPagamento` | `comando.billing.solicitar_pagamento` | com o `PecasReservadas` |
+| `AgendarExecucao` | `comando.execucao.agendar_execucao` | com o `PagamentoConfirmado`, prioridade `normal` |
+| `CancelarExecucao` | `comando.execucao.cancelar_execucao` | compensação do agendamento (T7) |
+| `EstornarPagamento` | `comando.billing.estornar_pagamento` | compensação do pagamento (T6) |
+| `LiberarReserva` | `comando.execucao.liberar_reserva` | compensação da reserva (T5) |
+| `CancelarOrcamento` | `comando.billing.cancelar_orcamento` | compensação do orçamento (T3) |
+| `DescartarDiagnostico` | `comando.execucao.descartar_diagnostico` | compensação do diagnóstico (T2), sempre a última do plano |
+| `AnonimizarVeiculo` | `comando.execucao.anonimizar_veiculo` | na eliminação LGPD, um por veículo que ainda guarda a placa, com o `veiculo_id` no `correlation_id` |
+
+### Eventos consumidos
+
+Vinte e três eventos da fila `os.eventos`, 13 do Billing e 10 da Execução, todos entregues ao orquestrador pelo despachante de `src/consumidor.py`. O consumidor confere quem publicou pelo `user_id` que o broker garante (a coluna "Publica"). A saga confere a etapa: o evento fora da etapa esperada é classificado como na seção 4.4 (ignorado, de volta pela fila de retry ou para a DLQ). As respostas de compensação casam com o comando em voo pelo `causation_id` e mandam a próxima compensação do plano, ou, depois da última, levam a OS a `cancelada`. Os eventos internos da OS (abertura e mudança de status) ficam no histórico e não vão para o broker.
+
+| Evento | Publica | Etapa esperada | Efeito |
+|---|---|---|---|
+| `DiagnosticoIniciado` | `execucao` | `aguardando_diagnostico` | a OS vai a `em_diagnostico` |
+| `DiagnosticoConcluido` | `execucao` | `aguardando_diagnostico` | a saga guarda os itens e manda o `GerarOrcamento` |
+| `OrcamentoGerado` | `billing` | `aguardando_orcamento` | resumo do orçamento, a OS em `aguardando_aprovacao` e o e-mail com o link de decisão |
+| `GeracaoDeOrcamentoFalhou` | `billing` | `aguardando_orcamento` | falha de negócio: compensa com o motivo `geracao_falhou` |
+| `OrcamentoAprovado` | `billing` | `aguardando_decisao` | manda o `ReservarPecas` |
+| `OrcamentoRecusado` | `billing` | `aguardando_decisao` | falha de negócio: `orcamento_recusado` |
+| `OrcamentoExpirado` | `billing` | `aguardando_decisao` | falha de negócio: `orcamento_expirado` |
+| `PecasReservadas` | `execucao` | `aguardando_reserva` | a OS em `aguardando_pagamento` e o `SolicitarPagamento` |
+| `ReservaDePecasFalhou` | `execucao` | `aguardando_reserva` | falha de negócio: `reserva_falhou` |
+| `PagamentoSolicitado` | `billing` | `aguardando_pagamento` | resumo do pagamento e o e-mail com o checkout |
+| `PagamentoConfirmado` | `billing` | `aguardando_pagamento` | a OS em `aguardando_execucao` e o `AgendarExecucao` |
+| `PagamentoRecusado` | `billing` | `aguardando_pagamento` | falha de negócio: `pagamento_recusado` |
+| `PagamentoExpirado` | `billing` | `aguardando_pagamento` | falha de negócio: `pagamento_expirado` |
+| `ExecucaoAgendada` | `execucao` | `aguardando_agendamento` | a posição na fila fica no registro da saga |
+| `ExecucaoIniciada` | `execucao` | `aguardando_inicio` | o pivot: a OS em `em_execucao`, e o cancelamento passa a responder 409 |
+| `ExecucaoFinalizada` | `execucao` | `em_execucao` | a OS `finalizada` e a saga `concluida` |
+| `ExecucaoCancelada` | `execucao` | `compensando` | resposta ao `CancelarExecucao` |
+| `PagamentoCancelado` | `billing` | `compensando` | resposta ao `EstornarPagamento` com o pagamento só solicitado: o Billing cancela a cobrança |
+| `PagamentoEstornado` | `billing` | `compensando` | resposta ao `EstornarPagamento` com o pagamento confirmado; o estorno automático (`pagamento_apos_encerramento`) chega em qualquer etapa e só muda o resumo do pagamento |
+| `EstornoDePagamentoFalhou` | `billing` | `compensando` | resposta ao `EstornarPagamento` recusada pelo provedor: a saga para em `falha_na_compensacao` (seção 4.8) |
+| `ReservaLiberada` | `execucao` | `compensando` | resposta ao `LiberarReserva` |
+| `OrcamentoCancelado` | `billing` | `compensando` | resposta ao `CancelarOrcamento` |
+| `DiagnosticoDescartado` | `execucao` | `compensando` | resposta ao `DescartarDiagnostico` |
+
+### Contratos e garantias
+
 - **Contratos.** `contratos/` é cópia do platform no commit de `contratos/ORIGEM` (AsyncAPI, um JSON Schema por mensagem, exemplos e a topologia do broker). O catálogo e a validação saem do `asyncapi.yaml` em tempo de execução, e o erro de validação aponta o caminho e a regra, nunca o valor.
 - **Garantias.** Entrega pelo menos uma vez, com o consumidor idempotente pela chave primária de `mensagens_processadas`; outbox na transação do efeito; retry por atraso com uma fila por nível (o TTL é da fila, porque a mensagem só expira na cabeça dela) e DLQ com 7 dias de retenção. O redrive da DLQ é `make redrive` do platform, depois de implantar a versão que trata a mensagem em todas as réplicas.
 

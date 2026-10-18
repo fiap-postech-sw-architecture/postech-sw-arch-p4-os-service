@@ -20,11 +20,16 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import pytest
 from jsonschema import Draft202012Validator
 
+from src.compartilhado.aplicacao.mensageria import Comando
 from src.compartilhado.infraestrutura.bootstrap import iniciar_todos_mapeamentos
 from src.compartilhado.infraestrutura.database import metadata
+from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 from src.main import app
 from src.ordem_servico.aplicacao.saga.modelo import EtapaSaga
-from src.ordem_servico.aplicacao.saga.tabela_da_saga import FLUXO_NORMAL
+from src.ordem_servico.aplicacao.saga.tabela_da_saga import (
+    ETAPA_ESPERADA,
+    FLUXO_NORMAL,
+)
 from src.ordem_servico.dominio.maquina_de_status import MaquinaDeStatus
 from src.ordem_servico.dominio.status import ESTADOS_TERMINAIS, StatusOrdem
 
@@ -549,6 +554,33 @@ def test_toda_etapa_da_saga_aparece_na_arquitetura() -> None:
     citadas = set(re.findall(r"`(\w+)`", ARQUITETURA.read_text(encoding="utf-8")))
 
     assert {etapa.value for etapa in EtapaSaga} - citadas == set()
+
+
+def _celulas(trecho: str) -> dict[str, list[str]]:
+    """Primeira celula de cada linha de dados das tabelas -> as demais, sem crase."""
+    linhas = [
+        [celula.strip().strip("`") for celula in linha.strip("|").split("|")]
+        for linha in trecho.splitlines()
+        if linha.startswith("| `")
+    ]
+    return {primeira: resto for primeira, *resto in linhas}
+
+
+def test_comandos_publicados_na_arquitetura_sao_os_do_catalogo() -> None:
+    secao = _secao(ARQUITETURA.read_text(encoding="utf-8"), "### Comandos publicados")
+
+    assert {comando: celulas[0] for comando, celulas in _celulas(secao).items()} == {
+        comando.value: catalogo().destino(comando).routing_key for comando in Comando
+    }
+
+
+def test_eventos_consumidos_na_arquitetura_sao_os_do_catalogo() -> None:
+    secao = _secao(ARQUITETURA.read_text(encoding="utf-8"), "### Eventos consumidos")
+
+    assert {evento: celulas[:2] for evento, celulas in _celulas(secao).items()} == {
+        evento: [catalogo().produtor(evento), ETAPA_ESPERADA[evento].value]
+        for evento in catalogo().consumidos
+    }
 
 
 # A secao Cobertura do README: gerada pelo script, nunca digitada.
