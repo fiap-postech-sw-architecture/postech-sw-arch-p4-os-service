@@ -1003,7 +1003,7 @@ AssertionError: Failed trampoline hit. Module name starts with `src.`, which is 
 
 (`mutmut/stats.py`, `record_trampoline_hit`). Renomear o pacote ou remendar a ferramenta mudaria o que se mede, então a alternativa são mutantes escritos à mão: [`scripts/mutantes.toml`](scripts/mutantes.toml) lista 60 defeitos plausíveis nos módulos críticos, e [`scripts/mutacao_manual.py`](scripts/mutacao_manual.py) (o mesmo script do Billing) aplica um por vez numa cópia do código (`mutants/`, fora do git) e roda só os testes que deveriam pegá-lo.
 
-**Resultado** em 18/10/2026: 60 mortos de 60 medidos (100%) em 5,6 a 6,3 min, conforme a carga da máquina, sem equivalentes.
+**Resultado** em 18/10/2026: 60 mortos de 60 medidos (100%), sem equivalentes, em cerca de 6 min: de 5,5 a 6,3 min em seis medições, conforme a carga da máquina.
 
 | Área | Mutantes | Mortos | Equivalentes |
 |---|---:|---:|---:|
