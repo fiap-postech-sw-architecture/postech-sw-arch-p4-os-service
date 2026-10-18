@@ -1,8 +1,10 @@
 # Arquitetura do OS Service
 
-O OS Service é um dos três serviços do PytStop na fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture): o sistema de gestão de oficina das fases anteriores, refatorado em microsserviços com saga orquestrada e mensageria assíncrona. A arquitetura global (divisão dos serviços, catálogo de mensagens, borda, observabilidade e implantação) está na [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) e nos [ADR-034 a ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura) do platform. Este documento fica com o que é deste serviço: responsabilidades, camadas e módulos, o modelo completo do banco (a RFC-004, seção 7, o delega para cá) e os fluxos passo a passo.
+O OS Service é um dos três serviços do PytStop na fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture): o sistema de gestão de oficina das fases anteriores, refatorado em microsserviços com saga orquestrada e mensageria assíncrona.
 
-O [README](../README.md) traz a operação (configuração, implantação, testes, CD) e um `curl` por rota; o OpenAPI exportado e a coleção Postman estão em [`docs/api/`](api/).
+- **Arquitetura global.** A divisão dos serviços, o catálogo de mensagens, a borda, a observabilidade e a implantação estão na [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) e nos [ADR-034 a ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura) do platform.
+- **Este documento.** O que é deste serviço: responsabilidades, camadas e módulos, o modelo completo do banco (a RFC-004, seção 7, o delega para cá), os comandos e eventos e os fluxos passo a passo. É a documentação da arquitetura do serviço que a [gap analysis](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/requisitos/fase4/gap-analysis-fase-4.md) da fase pede no RNF-051.
+- **API e operação.** O [README](../README.md) traz a operação (configuração, implantação, testes, CD), um `curl` por rota e a evidência de cobertura (RNF-050). O OpenAPI exportado e a coleção Postman com exemplos (RNF-052) estão em [`docs/api/`](api/); a coleção do fluxo completo, que roda com newman, é do platform.
 
 Sumário:
 
@@ -22,7 +24,7 @@ O OS Service é o dono da ordem de serviço e o orquestrador da saga de atendime
 - **Ordem de serviço.** Abertura, os nove status e o histórico de mudanças, cancelamento, entrega, acompanhamento público por placa e documento e os números da operação (`GET /api/v1/ordens-de-servico/metricas`).
 - **Clientes e veículos.** Cadastro com o documento cifrado, consentimentos, exportação e eliminação dos dados pessoais (LGPD).
 - **Usuários internos e tokens.** Login, refresh e logout dos papéis `admin`, `atendente` e `mecanico`. É o único emissor de JWT da fase: Billing e Execução validam o token localmente com o JWKS que este serviço publica.
-- **Saga de atendimento.** Uma instância por OS, persistida como agregado próprio: decide o próximo comando a cada evento, controla o prazo técnico das respostas automáticas e conduz as compensações até a OS cancelada.
+- **Saga de atendimento.** Uma instância por OS, persistida como agregado próprio: decide o próximo comando a cada evento, controla o prazo técnico das respostas automáticas e conduz as compensações até a OS cancelada. Os passos são as transações locais T1 a T10 da [RFC-004, seção 4.3](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md#43-passos-compensações-e-tipos): T1 (a abertura) a T9 (a finalização da execução) nos três serviços, e T10, a entrega, local e fora da saga (seção 4.4 deste documento). O *pivot* é o T8, o início da execução física: o ponto sem retorno, depois do qual não há compensação e o cancelamento responde 409 (RN-029).
 - **E-mail ao cliente** a cada mudança de situação da OS, com os links de decisão do orçamento e de pagamento que o Billing gera.
 
 Não são dele o orçamento, o preço, o pagamento e a integração com o Mercado Pago (Billing), nem o diagnóstico, o estoque, a reserva de peças, a fila e a execução (Execução). A OS guarda só um resumo do orçamento e do pagamento, copiado dos eventos do Billing, para responder sem chamar outro serviço: o OS não faz chamada HTTP a nenhum serviço da fase, e tudo o que troca com eles passa pelo RabbitMQ.
@@ -572,7 +574,13 @@ sequenceDiagram
     Note over OS: OS finalizada, saga concluida
 ```
 
-Antes de tocar no domínio, o orquestrador classifica o evento pela etapa (RFC-004, seção 4.5): o de etapa já passada, o repetido e o de saga encerrada são ignorados com log; o adiantado (`ExecucaoIniciada` antes do `ExecucaoAgendada`) volta pela fila de retry até a saga alcançá-lo; e o que não tem como ser aplicado (OS sem saga, `ordem_id` divergente, OS encerrada com a saga viva, transição recusada) vai para a DLQ com o motivo em código. A tabela completa está no [README, Evento fora de ordem](../README.md#evento-fora-de-ordem), e o diagrama com os atores humanos e o Mercado Pago no [README, Caminho feliz](../README.md#caminho-feliz).
+Antes de tocar no domínio, o orquestrador classifica o evento pela etapa (RFC-004, seção 4.5):
+
+- o de etapa já passada, o repetido e o de saga encerrada são ignorados com log;
+- o adiantado (`ExecucaoIniciada` antes do `ExecucaoAgendada`) volta pela fila de retry até a saga alcançá-lo;
+- o que não tem como ser aplicado (OS sem saga, `ordem_id` divergente, OS encerrada com a saga viva, transição recusada) vai para a DLQ com o motivo em código.
+
+A tabela completa está no [README, Evento fora de ordem](../README.md#evento-fora-de-ordem), e o diagrama com os atores humanos e o Mercado Pago no [README, Caminho feliz](../README.md#caminho-feliz).
 
 O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado`, `AgendarExecucao` e as cinco compensações) fica na saga como comando em voo, com o prazo técnico e o id de cada envio; a resposta casa com ele pelo `causation_id`.
 
@@ -792,7 +800,7 @@ As duas tabelas abaixo são o que este serviço publica e consome. Elas repetem 
 
 ### Comandos publicados
 
-Onze comandos (enum `Comando`), no exchange `pytstop.comandos` e com o usuário AMQP `os`: os dez da saga e o `AnonimizarVeiculo` da eliminação LGPD, fora dela. As compensações saem na ordem da tabela, menos as dos passos que não chegaram a acontecer (seção 4.5).
+Onze comandos (enum `Comando`), no exchange `pytstop.comandos` e com o usuário AMQP `os`: os dez da saga e o `AnonimizarVeiculo` da eliminação LGPD, fora dela. As compensações saem na ordem da tabela, só as dos passos concluídos ou em voo (seção 4.5).
 
 | Comando | Routing key | Quando sai |
 |---|---|---|
@@ -894,7 +902,12 @@ sequenceDiagram
 
 Depois de uma eliminação não se faz redrive de DLQ de comando, que recriaria a placa na Execução; o reenvio de um `AnonimizarVeiculo` que caiu na DLQ é `scripts/reenviar_anonimizacao.py` ([README, Eliminação de dados](../README.md#eliminação-de-dados-lgpd)).
 
-**Infraestrutura.** Pods sem root, raiz somente leitura, sem token de ServiceAccount e com seccomp `RuntimeDefault`; NetworkPolicy que nega toda entrada no namespace e libera só o necessário, e restringe a saída do notificador ao DNS, ao PostgreSQL e ao Mailpit; papéis do banco separados para a migração (`os`, dono do schema) e para os processos (`os_app`, só DML, que lê a `alembic_version` sem escrevê-la); nenhum segredo nos manifestos ([README, Implantação](../README.md#implantação)).
+**Infraestrutura** ([README, Implantação](../README.md#implantação)):
+
+- pods sem root, raiz somente leitura, sem token de ServiceAccount e com seccomp `RuntimeDefault`;
+- NetworkPolicy que nega toda entrada no namespace e libera só o necessário, e restringe a saída do notificador ao DNS, ao PostgreSQL e ao Mailpit;
+- papéis do banco separados para a migração (`os`, dono do schema) e para os processos (`os_app`, só DML, que lê a `alembic_version` sem escrevê-la);
+- nenhum segredo nos manifestos.
 
 ## 7. Observabilidade
 
