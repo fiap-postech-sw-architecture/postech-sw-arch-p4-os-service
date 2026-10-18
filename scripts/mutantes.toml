@@ -428,7 +428,7 @@ para = "return alteradas >= 0"
 
 [[mutante]]
 id = "J01"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
 testes = "jwt"
 de = "audience=AUDIENCIA,"
@@ -436,7 +436,7 @@ para = """audience=[AUDIENCIA, "outro-servico"],"""
 
 [[mutante]]
 id = "J02"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
 testes = "jwt"
 de = "issuer=EMISSOR,"
@@ -444,7 +444,7 @@ para = ""
 
 [[mutante]]
 id = "J03"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
 testes = "jwt"
 de = "LEEWAY_SEGUNDOS: Final = 10"
@@ -452,7 +452,7 @@ para = "LEEWAY_SEGUNDOS: Final = 30"
 
 [[mutante]]
 id = "J04"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
 testes = "jwt"
 de = """_CLAIMS_OBRIGATORIAS: Final = ["iss", "aud", "sub", "type", "jti", "iat", "exp"]"""
@@ -460,7 +460,7 @@ para = """_CLAIMS_OBRIGATORIAS: Final = ["iss", "aud", "sub", "type", "iat", "ex
 
 [[mutante]]
 id = "J05"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
 testes = "jwt"
 de = "if bits < BITS_MINIMOS:"
@@ -468,7 +468,7 @@ para = "if bits < 1024:"
 
 [[mutante]]
 id = "J06"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/infraestrutura/jwt_service.py"
 testes = "jwt"
 de = "chave = self._chaves_publicas.get(kid) if isinstance(kid, str) else None"
@@ -476,7 +476,7 @@ para = "chave = next(iter(self._chaves_publicas.values()))"
 
 [[mutante]]
 id = "J07"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/interfaces/middleware.py"
 testes = "acesso"
 de = """if payload.get("type") != "access":"""
@@ -484,7 +484,7 @@ para = """if payload.get("type") not in {"access", "refresh"}:"""
 
 [[mutante]]
 id = "J08"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/interfaces/middleware.py"
 testes = "acesso"
 de = "if obter_token_revogado_repo(session).esta_revogado(str(jti)):"
@@ -492,7 +492,7 @@ para = "if False:"
 
 [[mutante]]
 id = "J09"
-area = "Validacao do JWT"
+area = "JWT e acesso"
 arquivo = "src/autenticacao/interfaces/middleware.py"
 testes = "acesso"
 de = "Papel.ATENDENTE: frozenset({Papel.ATENDENTE}),"
