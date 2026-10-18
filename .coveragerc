@@ -1,6 +1,7 @@
-# Gate de cobertura do OS Service (minimo do enunciado: 80%; meta do grupo: 90%).
-# `uv run pytest` ja liga --cov=src (addopts no pyproject) e falha abaixo de
-# fail_under. branch=True mede ramos, nao so linhas.
+# Gate de cobertura do OS Service (ADR-041 e RFC-004, secao 10.2: fail_under =
+# 95; o enunciado pede 80). `uv run pytest` ja liga --cov=src (addopts no
+# pyproject) e falha abaixo de fail_under. branch=True mede ramos, nao so linhas.
+# O diff-cover (make diff-cover) exige 90% no codigo novo.
 
 [run]
 relative_files = True
@@ -16,6 +17,6 @@ omit =
     src/compartilhado/aplicacao/unit_of_work.py
 
 [report]
-fail_under = 90
+fail_under = 95
 show_missing = True
 skip_covered = True
