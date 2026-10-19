@@ -729,6 +729,8 @@ No macOS sem o `timeout` do coreutils, troque-o por `perl -e 'alarm shift; exec 
 
 Métricas, traces e logs do OS Service seguem o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md). O catálogo das métricas dos três serviços (tipo, rótulos, quem emite, quando conta e a unidade), os painéis do Grafana e as regras de alerta ficam no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#catálogo-de-métricas), onde um teste reprova o painel ou o alerta que consulte uma métrica fora do catálogo ou um rótulo que ela não tem. Esta seção diz o que o OS emite e por quê.
 
+Dashboards relacionados no Grafana: [Atendimento](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-negocio-atendimento.json), [Saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-saga.json), [Mensageria](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-mensageria.json), [Serviços](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-servicos.json), [Bancos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-bancos.json). Consulte a documentação dos [painéis de negócio](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/negocio.md) e dos [técnicos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md).
+
 ### Métricas
 
 Cada processo serve o `/metrics`: a API na 8000, junto do resto da API, e o relay, o consumidor, o `prazos` e o notificador na `METRICS_PORT` (9100). O `/metrics` da API está sempre ligado e fica fora da borda: o Ingress do Kong responde 404 a `/os/metrics` sem chegar ao serviço (`k8s/base/borda.yaml`, conferido pelo smoke do platform), e o Prometheus raspa cada pod direto, pelas anotações `prometheus.io/*` dos Deployments.
@@ -799,7 +801,7 @@ O pika não tem instrumentador: os spans de publicação e de consumo são abert
 - **Os parâmetros dos comandos SQL**: o instrumentador do SQLAlchemy grava só o texto do comando, com os marcadores, e nunca os parâmetros. O `hide_parameters` do engine cuida da mensagem de erro e do log do engine.
 - **Dinheiro, ids e rótulos abertos nas métricas**: os rótulos são enumerações fechadas (`status`, `etapa`, `motivo`, `comando`, `tipo`, `resultado`, `componente`) ou o template da rota; nunca `ordem_id`, placa ou documento.
 
-O Jaeger do platform guarda os traces em memória, com retenção por contagem e sem prazo ([Retenção e prazos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#retenção-e-prazos)): o trace mais antigo sai quando entra um novo, reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
+O Jaeger do platform guarda até 250 traces em memória (`MEMORY_MAX_TRACES=250`), com retenção por contagem e sem prazo ([Retenção e prazos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#retenção-e-prazos)): o trace mais antigo sai quando entra o 251º, reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
 
 ### Logs
 
@@ -1151,7 +1153,7 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 ## Cobertura
 
 <!-- cobertura:inicio -->
-**99,61% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 916 cobertos (98,7%), medidos no [run 39104220173 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39104220173). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
+**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), medidos no [run 39190965464 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39190965464). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
@@ -1366,7 +1368,7 @@ O `deploy-remote` só roda na `main`. Antes do checkout ele compara o commit do 
 
    Com a identidade federada do provedor (OIDC) no lugar do kubeconfig, o passo é a action de login dele, e o job ganha `id-token: write`.
 4. Relaxar de propósito o teste `test_deploy_remote_nao_tem_segredo_nem_credencial_de_provedor` (`tests/unitarios/test_cd.py`), que hoje proíbe `secrets.`, `environment`, `id-token` e qualquer action que não seja o checkout no job. A proibição guarda o estado desligado: ligar o deploy remoto é a mudança que a desfaz, no mesmo PR.
-5. Ter o script `platform/scripts/ci/deploy-remoto.sh` no platform. Ele chega num PR próprio do platform, com a interface que o job já chama: `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`, no contexto já ativo, com o overlay deste serviço, as imagens por digest do GHCR, a ordem de implantação e o smoke. Enquanto ele não existir no commit do platform usado no run, o job reprova dizendo isso, em vez de um erro de arquivo no meio do log.
+5. Usar um commit do platform que contenha o script executável `scripts/ci/deploy-remoto.sh`. O job já chama a interface `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`. O script implanta no contexto informado, com o overlay deste serviço, a imagem por digest do GHCR e a ordem de banco, Job e Deployments. A plataforma precisa estar implantada antes. O `deploy-kind` executa o smoke no runner; o script remoto não o executa. Se o commit do platform usado no run ainda não tiver o script, o job reprova com uma mensagem específica.
 
 O job pede só `contents: read` e `packages: read`. Se o pacote do GHCR deixar de ser público, o cluster precisa de um segredo de pull do `ghcr.io`.
 
