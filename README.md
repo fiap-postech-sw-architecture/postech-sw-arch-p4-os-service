@@ -1153,7 +1153,7 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 ## Cobertura
 
 <!-- cobertura:inicio -->
-**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), medidos no [run 39190965464 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39190965464). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
+**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), medidos no [run 39233375064 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39233375064). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
@@ -1251,7 +1251,9 @@ Depois do congelamento do código em 06/11/2026, o `open-pull-requests-limit` de
 
 ## CD
 
-O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) implanta o serviço depois do merge. **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: o `deploy-kind` sobe a plataforma e os três serviços num cluster que some com o job e valida o deploy com o E2E (teste ponta a ponta) da saga; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). O caller conserva os gatilhos, a concorrência e os gates locais; o job `cd` chama o [workflow reutilizável do Platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/3f7cca2eb555a038b0d2780058ef0e692f93ee8a/.github/workflows/cd-servico.yml), fixado no commit `3f7cca2eb555a038b0d2780058ef0e692f93ee8a` (S). Esse pin escolhe a definição do workflow; o input `sha_platform` escolhe separadamente os scripts e manifests usados no deploy (P). O primeiro CD deste caller na `main` ainda está pendente; as validações locais não substituem a prova real de imagem, SBOM, digest, kind, smoke, E2E, varredura e `remote-skipped` nesse run.
+O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) implanta o serviço depois do merge. **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: o `deploy-kind` sobe a plataforma e os três serviços num cluster que some com o job e valida o deploy com o E2E (teste ponta a ponta) da saga; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). O caller conserva os gatilhos, a concorrência e os gates locais; o job `cd` chama o [workflow reutilizável do Platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/3f7cca2eb555a038b0d2780058ef0e692f93ee8a/.github/workflows/cd-servico.yml), fixado no commit `3f7cca2eb555a038b0d2780058ef0e692f93ee8a` (S). Esse pin escolhe a definição do workflow; o input `sha_platform` escolhe separadamente os scripts e manifests usados no deploy (P).
+
+O primeiro CD deste caller na `main` foi aprovado no [run 39233375064](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39233375064), sobre `5e4ed2a1c2d74bdc65cc207c3f5a208b4ea672ca`: CI, segurança, imagem com SBOM e digest conferido, implantação no kind, smoke, E2E, varredura e `remote-skipped` passaram.
 
 A cada push na `main`, depois do merge de cada PR, e no `workflow_dispatch`:
 
