@@ -4,7 +4,7 @@ Serviço de ordens de serviço: abertura, status e histórico da OS, cadastro de
 
 Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT): o PytStop, sistema de gestão de oficina mecânica das fases anteriores, refatorado em microsserviços com Saga Pattern, mensageria assíncrona, CI/CD por serviço e deploy automatizado em Kubernetes.
 
-**Status:** em construção. Este README será substituído pela documentação completa do serviço (arquitetura, fluxos, exemplos de API, testes e cobertura, pipelines).
+**Documentação:** a arquitetura do serviço (responsabilidades, camadas e módulos, o modelo completo do banco, os fluxos passo a passo com diagramas de sequência, mensageria, segurança e LGPD) está em [`docs/arquitetura.md`](docs/arquitetura.md); o OpenAPI exportado e a coleção Postman com exemplos, em [`docs/api/`](docs/api/) (`make docs-api` os gera de novo a partir do app), e os `curl` de cada rota, agrupados por fluxo, em [Exemplos da API](#exemplos-da-api). O Swagger fica em `/docs`. São os entregáveis RNF-051 (arquitetura) e RNF-052 (OpenAPI, coleção e `curl`) da [gap analysis da fase](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/requisitos/fase4/gap-analysis-fase-4.md); a evidência de cobertura (RNF-050) está em [Cobertura](#cobertura), e a coleção do fluxo completo, que roda com newman, é do platform.
 
 **Proveniência:** recorte da `main` do PytStop fase 3 (`postech-sw-arch-p3` @ [`08dcffe`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/08dcffe6365ece594f438cdbc4c5eef1d88ebfb1) + [`fc06263`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/fc06263d1f99747145e5a354b817905c59637ebd), a normalização ASCII de CPF/CNPJ do p3 #32), só com os contextos deste serviço (`compartilhado`, `cliente_veiculo`, `autenticacao`, `ordem_servico`). Referências `p3 #N` no código apontam para issues e PRs daquele repositório; IDs como `RF-018`, `ADR-020` e `TD-017` são da numeração contínua das fases anteriores ([requisitos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/requisitos), [ADRs](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/arquitetura/adr) e [dívida técnica](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/tech-debt) do p3); a fase 4 começa em RF-028 e ADR-034.
 
@@ -727,11 +727,11 @@ No macOS sem o `timeout` do coreutils, troque-o por `perl -e 'alarm shift; exec 
 
 ## Observabilidade
 
-Métricas, traces e logs do OS Service seguem o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md); as métricas novas desta seção entram no catálogo da RFC-004 (seção 9) pelo PR de dashboards do platform, que também traz os painéis e os alertas.
+Métricas, traces e logs do OS Service seguem o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md). O catálogo das métricas dos três serviços (tipo, rótulos, quem emite, quando conta e a unidade), os painéis do Grafana e as regras de alerta ficam no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#catálogo-de-métricas), onde um teste reprova o painel ou o alerta que consulte uma métrica fora do catálogo ou um rótulo que ela não tem. Esta seção diz o que o OS emite e por quê.
 
 ### Métricas
 
-Cada processo serve o `/metrics` que já tinha (a API na 8000, junto do resto da API e fora da borda; o relay, o consumidor, o `prazos` e o notificador na `METRICS_PORT`, 9100). Nenhuma porta é nova, e o `/metrics` da API está sempre ligado.
+Cada processo serve o `/metrics`: a API na 8000, junto do resto da API, e o relay, o consumidor, o `prazos` e o notificador na `METRICS_PORT` (9100). O `/metrics` da API está sempre ligado e fica fora da borda: o Ingress do Kong responde 404 a `/os/metrics` sem chegar ao serviço (`k8s/base/borda.yaml`, conferido pelo smoke do platform), e o Prometheus raspa cada pod direto, pelas anotações `prometheus.io/*` dos Deployments.
 
 | Processo | Série | Tipo e rótulos | Quando |
 |---|---|---|---|
@@ -799,12 +799,22 @@ O pika não tem instrumentador: os spans de publicação e de consumo são abert
 - **Os parâmetros dos comandos SQL**: o instrumentador do SQLAlchemy grava só o texto do comando, com os marcadores, e nunca os parâmetros. O `hide_parameters` do engine cuida da mensagem de erro e do log do engine.
 - **Dinheiro, ids e rótulos abertos nas métricas**: os rótulos são enumerações fechadas (`status`, `etapa`, `motivo`, `comando`, `tipo`, `resultado`, `componente`) ou o template da rota; nunca `ordem_id`, placa ou documento.
 
-O Jaeger do platform guarda os traces em memória, até cerca de 5.000 (ADR-043): reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
+O Jaeger do platform guarda os traces em memória, com retenção por contagem e sem prazo ([Retenção e prazos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#retenção-e-prazos)): o trace mais antigo sai quando entra um novo, reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
+
+### Logs
+
+Cada processo escreve um JSON por linha no stdout, que o Promtail do platform leva ao Loki.
+
+- **Campos.** `event` (o nome do evento), `level`, `timestamp` (ISO 8601, em UTC), `logger`, `git_sha` e `git_date` (a versão da imagem), `trace_id` e `span_id` com um span aberto, e os campos de cada evento: o `correlation_id` (o id da OS) nos de saga, mensageria e prazos. Cada requisição da API deixa o evento `http_request`, com `method`, `path`, `status`, `duration_ms` e o `request_id`.
+- **Idioma.** O `event` vem em inglês, menos os nomes herdados da fase 3: as auditorias LGPD (`dados_pessoais_exportados_via_admin`, `dados_pessoais_excluidos_via_admin`, `consentimento_registrado_via_admin` e `consentimento_revogado_via_admin`) e os do tratamento de erros (`erro_interno`, `dominio_excecao_tratada`, `validacao_schema_tratada_422` e `value_error_tratado_422`). As duas mensagens de `compartilhado/infraestrutura/encryption.py` (chave de criptografia não configurada e falha ao decifrar um token Fernet) usam o `logging` da stdlib e também saem em português.
+- **Sem dado pessoal.** O mascaramento de `compartilhado/infraestrutura/logging.py` roda em todo evento, inclusive no log das bibliotecas e no traceback: CPF, CNPJ, e-mail e telefone viram máscara, e o valor de uma chave sensível (senha, token, contato, telefone) sai trocado inteiro. O texto livre, a placa e o envelope das mensagens não vão para o log, e do cliente AMQP só sai o nível ERROR.
+- **Auditoria.** O pedido de cancelamento e a retomada da compensação deixam uma linha com o `ator` (o `sub` do JWT) e o resultado, e a leitura dos dados pessoais, com o `ator` e a rota (`via`).
+- **Busca.** No Grafana do kind, a consulta `{namespace="pytstop-os"} | json | correlation_id="<id da OS>"` traz a OS nos cinco processos, e o `trace_id` de cada linha abre o trace no Jaeger.
 
 ### Como ver
 
 - **Sem cluster.** `make compose-up` e `curl -s localhost:8000/metrics | grep '^pytstop_'` (a API); o relay, o consumidor, o `prazos` e o notificador servem o deles na 9100 dentro do container (`docker compose exec relay python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9100/metrics').read().decode())"`). O compose deixa `OTEL_ENABLED=false`: a API não abre span, e o relay, o consumidor e o `prazos` abrem os deles e levam o `trace_id` aos logs, mas os spans não saem do processo. Para ver um trace, acrescente um serviço `jaeger` ao compose (por exemplo num `docker-compose.override.yml`: `services: {jaeger: {image: "jaegertracing/all-in-one:1.76.0", ports: ["127.0.0.1:16686:16686"]}}`) e suba com `OTEL_ENABLED=true make compose-up`: o endpoint padrão dos processos é `http://jaeger:4317`, e a tela fica em `http://localhost:16686` (serviço `pytstop-os-service`; o atributo `pytstop.processo` do recurso diz de qual processo veio cada span).
-- **No kind.** O ConfigMap do serviço liga `OTEL_ENABLED=true`, aponta para o Jaeger do platform e fixa `OTEL_SERVICE_NAME=os-service`: no Jaeger do kind o serviço aparece como `os-service` (no compose, sem a variável, é `pytstop-os-service`). Depois de `make -C ../postech-sw-arch-p4-platform kind-up deploy` e do `make kind-deploy` deste serviço (e dos outros), `make -C ../postech-sw-arch-p4-platform port-forward` abre o Jaeger em `http://localhost:16686` (busque pelo atributo `messaging.message.conversation_id`, o id da OS), o Grafana em `http://localhost:3000` e o Prometheus em `http://localhost:9090`. O `make -C ../postech-sw-arch-p4-platform e2e` roda os cenários da saga, o caminho feliz entre eles, e deixa os traces no Jaeger; ele pede o overlay `kind-ci` (`deploy OVERLAY=kind-ci`), que não tem o Grafana. Os dashboards e os alertas desta observabilidade estão no PR de dashboards do platform.
+- **No kind.** O ConfigMap do serviço liga `OTEL_ENABLED=true`, aponta para o Jaeger do platform e fixa `OTEL_SERVICE_NAME=os-service`: no Jaeger do kind o serviço aparece como `os-service` (no compose, sem a variável, é `pytstop-os-service`). Depois de `make -C ../postech-sw-arch-p4-platform kind-up deploy` e do `make kind-deploy` deste serviço (e dos outros), `make -C ../postech-sw-arch-p4-platform port-forward` abre o Jaeger em `http://localhost:16686` (busque pelo atributo `messaging.message.conversation_id`, o id da OS), o Grafana em `http://localhost:3000` e o Prometheus em `http://localhost:9090`. O `make -C ../postech-sw-arch-p4-platform e2e` roda os cenários da saga, o caminho feliz entre eles, e deixa os traces no Jaeger; ele pede o overlay `kind-ci` (`deploy OVERLAY=kind-ci`), que não tem o Grafana. Os painéis e os alertas estão descritos no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md).
 
 ### Encerramento com o exportador fora
 
@@ -849,6 +859,168 @@ uv run python -m src.relay
 uv run python -m src.consumidor
 uv run python -m src.prazos
 uv run python -m src.notificador
+```
+
+## Exemplos da API
+
+Os `curl` das rotas do OpenAPI, um por rota e agrupados por fluxo, contra a API do compose (`make compose-up`, porta 8000). Pela borda do kind, troque `localhost:8000` por `https://localhost/os` e acrescente `-k` (o certificado do Kong é autoassinado). O OpenAPI e a coleção Postman, com um exemplo de corpo e de resposta por rota, estão em [`docs/api/`](docs/api/) (na coleção, o login e o refresh guardam o token, e o cadastro do cliente, o do veículo e a abertura da OS guardam os ids nas variáveis), e os fluxos por trás de cada rota, em [`docs/arquitetura.md`](docs/arquitetura.md).
+
+- **Variáveis.** Cada bloco usa as que os anteriores preenchem: `TOKEN` e `REFRESH` saem do login, e `CLIENTE_ID`, `VEICULO_ID` e `ORDEM_ID`, das respostas do cadastro e da abertura.
+- **O que o compose não tem.** O compose não sobe o Billing nem a Execução, então a OS aberta aqui fica em `recebida`, com a saga esperando o diagnóstico. As rotas que pedem outro estado respondem o erro da regra, que o texto de cada bloco diz.
+- **Teste.** `tests/unitarios/test_documentacao.py` reprova o README quando uma rota do OpenAPI fica sem `curl` nesta seção, quando um corpo sai do schema da rota (inclusive o formato, como o de um uuid) e quando falta o `Authorization` de uma rota protegida ou o `Content-Type` de um corpo.
+
+### Saúde
+
+Liveness e readiness (503 com o banco fora), sem token:
+
+```bash
+curl -s localhost:8000/api/v1/saude
+curl -s localhost:8000/api/v1/saude/pronto
+```
+
+### Autenticação
+
+Login do admin de demonstração do compose. A resposta traz o access token, de 15 min, e o refresh, de 7 dias:
+
+```bash
+RESPOSTA=$(curl -s -X POST localhost:8000/api/v1/autenticacao/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email": "admin@pytstop.dev", "senha": "admin-demo-os-2026"}')
+TOKEN=$(echo "$RESPOSTA" | jq -r .access_token)
+REFRESH=$(echo "$RESPOSTA" | jq -r .refresh_token)
+```
+
+A troca do refresh por um par novo; o refresh usado deixa de valer:
+
+```bash
+RESPOSTA=$(curl -s -X POST localhost:8000/api/v1/autenticacao/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"refresh_token": "'"$REFRESH"'"}')
+TOKEN=$(echo "$RESPOSTA" | jq -r .access_token)
+REFRESH=$(echo "$RESPOSTA" | jq -r .refresh_token)
+```
+
+As chaves públicas com que Billing e Execução validam o token, sem token e com cache de 10 min:
+
+```bash
+curl -s localhost:8000/.well-known/jwks.json | jq '.keys[].kid'
+```
+
+O cadastro de um usuário interno (admin). O `papel` é `admin`, `atendente` ou `mecanico`, e a senha tem de 12 a 128 caracteres:
+
+```bash
+curl -s -X POST localhost:8000/api/v1/autenticacao/registrar \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"email": "atendente@pytstop.dev", "senha": "atendente-demo-2026", "papel": "atendente"}' | jq
+```
+
+O logout fica no fim desta seção, porque revoga o `TOKEN`.
+
+### Cadastro do cliente com consentimento (LGPD)
+
+O cliente com CPF (o dígito verificador é conferido, e o documento repetido responde 409), o consentimento de tratamento dos dados e um veículo:
+
+```bash
+CLIENTE_ID=$(curl -s -X POST localhost:8000/api/v1/clientes \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"nome": "Maria Souza", "documento": "529.982.247-25", "tipo_documento": "cpf", "contato": "maria.souza@example.com"}' | jq -r .id)
+curl -s -X POST localhost:8000/api/v1/clientes/$CLIENTE_ID/consentimento \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"tipo": "tratamento_dados"}' | jq
+VEICULO_ID=$(curl -s -X POST localhost:8000/api/v1/clientes/$CLIENTE_ID/veiculos \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"placa": "BRA2E19", "marca": "Fiat", "modelo": "Argo", "ano": 2022}' | jq -r .id)
+```
+
+A listagem paginada, a consulta, a atualização do nome e do contato e os veículos do cliente:
+
+```bash
+curl -s "localhost:8000/api/v1/clientes?offset=0&limit=20" -H "Authorization: Bearer $TOKEN" | jq
+curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X PUT localhost:8000/api/v1/clientes/$CLIENTE_ID \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"nome": "Maria Souza Lima", "contato": "maria.lima@example.com"}' | jq
+curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID/veiculos -H "Authorization: Bearer $TOKEN" | jq
+```
+
+Os dados pessoais do titular, decifrados (acesso e portabilidade). Cada leitura deixa uma linha de auditoria no log, sem o dado:
+
+```bash
+curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID/dados-pessoais -H "Authorization: Bearer $TOKEN" | jq
+curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID/dados-pessoais/exportar -H "Authorization: Bearer $TOKEN" | jq
+```
+
+### Ordem de serviço
+
+A abertura da OS, que inicia a saga e manda o `SolicitarDiagnostico` à Execução, a consulta com a etapa da saga, o histórico e a fila por prioridade de status:
+
+```bash
+ORDEM_ID=$(curl -s -X POST localhost:8000/api/v1/ordens-de-servico \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"cliente_id": "'"$CLIENTE_ID"'", "veiculo_id": "'"$VEICULO_ID"'", "descricao_problema": "Barulho no freio dianteiro ao frear em descida"}' | jq -r .id)
+curl -s localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq '{status, situacao, etapa}'
+curl -s localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/historico -H "Authorization: Bearer $TOKEN" | jq
+curl -s "localhost:8000/api/v1/ordens-de-servico?offset=0&limit=20&incluir_encerradas=false" -H "Authorization: Bearer $TOKEN" | jq
+```
+
+O total, as OS por status e a permanência média em cada status (admin):
+
+```bash
+curl -s localhost:8000/api/v1/ordens-de-servico/metricas -H "Authorization: Bearer $TOKEN" | jq
+```
+
+A entrega ao cliente (T10) só sai de `finalizada`; a OS do compose, sem a Execução, responde 409 `TRANSICAO_STATUS_INVALIDA`:
+
+```bash
+curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/entrega -H "Authorization: Bearer $TOKEN" | jq
+```
+
+O pedido de cancelamento responde 202 com a etapa `compensando` antes do pivot (as respostas de cada etapa estão em [Compensações e cancelamento](#compensações-e-cancelamento)):
+
+```bash
+curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/cancelamento \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"motivo": "Cliente vendeu o veículo"}' | jq '{status, etapa, motivo_cancelamento}'
+```
+
+### Saga (operação, admin)
+
+O estado da saga e a retomada da compensação parada; fora de `falha_na_compensacao`, a retomada responde 409:
+
+```bash
+curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq
+curl -s -X POST localhost:8000/api/v1/sagas/$ORDEM_ID/compensacao -H "Authorization: Bearer $TOKEN" | jq
+```
+
+### Acompanhamento público
+
+Sem token, com a placa e o documento no corpo. Formato ou dígito verificador inválido e OS não encontrada dão o mesmo 404; placa fora de 7 a 8 caracteres ou documento fora de 11 a 18 dão o 422 da validação de schema:
+
+```bash
+curl -s -X POST localhost:8000/api/v1/publico/acompanhamento \
+  -H 'Content-Type: application/json' \
+  -d '{"placa": "BRA2E19", "documento": "529.982.247-25"}' | jq
+```
+
+### Revogação e eliminação (LGPD)
+
+A revogação do consentimento, a remoção do veículo, a desativação do cliente e a eliminação dos dados pessoais (admin) respondem 204, sem corpo. A remoção do veículo responde 409 se ele tem OS, e a desativação e a eliminação, enquanto o cliente tem OS ativa: no roteiro acima, só a revogação passa, porque a OS segue `recebida` com a compensação esperando a Execução.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "localhost:8000/api/v1/clientes/$CLIENTE_ID/consentimento?tipo=tratamento_dados" -H "Authorization: Bearer $TOKEN"
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID/veiculos/$VEICULO_ID -H "Authorization: Bearer $TOKEN"
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID -H "Authorization: Bearer $TOKEN"
+curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID/dados-pessoais -H "Authorization: Bearer $TOKEN"
+```
+
+### Logout
+
+Revoga o access do cabeçalho e o refresh do corpo:
+
+```bash
+curl -s -X POST localhost:8000/api/v1/autenticacao/logout \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"refresh_token": "'"$REFRESH"'"}' | jq
 ```
 
 ## Implantação
@@ -960,6 +1132,8 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make lint-workflows`: actionlint, com o shellcheck da imagem nos scripts dos `run:`, em todos os workflows (a imagem é a `rhysd/actionlint:1.7.12`, fixada por digest no Makefile, na mesma versão do `lint-scripts` do platform). Entra no `make check` e no job `lint`.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
 - `make mutacao`: mutantes escritos à mão nos módulos críticos, aplicados um por vez numa cópia do código (seção [Mutação](#mutação)). Fica fora do `make check` e do CI.
+- `make docs-api`: gera de novo o OpenAPI e a coleção Postman de [`docs/api/`](docs/api/) a partir do app, sem servidor nem banco; o `make test` reprova os arquivos atrás do código.
+- `make cobertura-readme RUN=<id do run>`: reescreve a seção [Cobertura](#cobertura) com o `coverage.xml` de um run do CI (pede o `gh` autenticado).
 - `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
@@ -976,7 +1150,8 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 ## Cobertura
 
-**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), com 10.356 testes (unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais). O gate é de 95% (`fail_under` no `.coveragerc`) e o código novo precisa de 90% (`make diff-cover`). Medido em 18/10/2026 com `make test`, no pull request #16; o CI publica a tabela no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)). Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917. Ficam fora da medição os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
+<!-- cobertura:inicio -->
+**99,61% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 916 cobertos (98,7%), medidos no [run 39104220173 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39104220173). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
@@ -987,7 +1162,21 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 | `src/ordem_servico` | 2.699 | 2.699 | 100,0% |
 | **total** | 6.254 | 6.238 | 99,7% |
 
-Por camada: `dominio` 942 linhas (99,7%), `aplicacao` 1.788 (100,0%), `infraestrutura` 2.491 (99,8%) e `interfaces` 797 (99,5%). As 16 linhas sem teste são o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista. Para refazer: `make test` e `uv run python scripts/cobertura_resumo.py coverage.xml`, que também abre a tabela por pacote e camada.
+| Camada | Linhas | Cobertas | Cobertura |
+|---|---:|---:|---:|
+| `dominio` | 942 | 939 | 99,7% |
+| `aplicacao` | 1.788 | 1.788 | 100,0% |
+| `infraestrutura` | 2.491 | 2.487 | 99,8% |
+| `interfaces` | 797 | 793 | 99,5% |
+
+<!-- cobertura:fim -->
+
+As tabelas não são digitadas: `make cobertura-readme RUN=<id do run>` baixa o `coverage.xml` do artefato `relatorios-de-teste` de um run do CI e reescreve, com `scripts/cobertura_resumo.py`, o trecho entre os dois marcadores de comentário desta seção (`cobertura:inicio` e `cobertura:fim`), com o link do run. `tests/unitarios/test_documentacao.py` reprova o trecho editado à mão. O CI publica a mesma medida, por pacote, no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)), e `uv run python scripts/cobertura_resumo.py coverage.xml` a mostra depois de um `make test` local.
+
+- **Gate.** 95% de linhas e ramos somados (`fail_under` no `.coveragerc`), e 90% no código que a branch muda (`make diff-cover`). A suíte tem testes unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais.
+- **Oscilação.** Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917.
+- **Fora da medição.** Os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
+- **Linhas sem teste.** São 16: o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista.
 
 O `make diff-cover` lê o `coverage.xml` do `make test` e exige que ele exista e seja mais novo que o código de `src/`: sem o XML, ou com ele velho, recusa e manda rodar o `make test` antes. Com o XML velho, o diff-cover passaria sem medir nada. O `make check` já roda os dois na ordem certa.
 
@@ -1041,7 +1230,7 @@ Como o alvo se comporta:
 
 Códigos de saída:
 
-- `0`: nenhum mutante saiu `erro`. Sobrevivente e `nao rodado` não reprovam, porque não há gate (ADR-041).
+- `0`: nenhum mutante saiu `erro`. Sobrevivente e `nao rodado` não reprovam, porque não há gate (ADR-041). É o código do script; o `make mutacao` sai com 0 ou com 2 (o `make` troca o 1 do script pelo 2 dele).
 - `1`: algum mutante saiu `erro`, uma medida inválida, como o Docker fora ou um arquivo que os testes leem e que a cópia não levou.
 - `2`: um id de `MUTANTES` não existe (a mensagem lista os válidos) ou o `.toml` não bate com o código.
 
@@ -1051,12 +1240,12 @@ O Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml)) abre pull requ
 
 - **Agenda:** uma vez por semana, às segundas às 06:00 (São Paulo), com no máximo 3 PRs abertos por ecossistema.
 - **Grupos:** patch e minor de cada ecossistema chegam juntos num PR. Major abre PR próprio, para ser lido com o changelog.
-- **OpenTelemetry:** as bibliotecas `opentelemetry-*` sobem juntas no grupo de patch e minor do uv. O SDK fixa `opentelemetry-api` e `opentelemetry-semantic-conventions` na mesma versão e cada instrumentação fixa a sua, então subir só uma parte não resolve. Um grupo só delas ficaria vazio, porque o Dependabot o trata como menos específico que o de patch e minor. A major da família fica fora, atrás do teto do `pyproject.toml`: `<1.46` no SDK e no exportador, `<0.67` nas instrumentações.
-- **Commit e rótulos:** prefixo `chore(deps)`, ou `ci` nas actions, e os rótulos `dependencies` e o do ecossistema: `python`, `github_actions` ou `docker`.
+- **OpenTelemetry:** as bibliotecas `opentelemetry-*` sobem juntas no grupo de patch e minor do uv. O SDK fixa `opentelemetry-api` e `opentelemetry-semantic-conventions` na mesma versão e cada instrumentação fixa a sua, então subir só uma parte não resolve. Um grupo só delas ficaria vazio, porque o Dependabot o trata como menos específico que o de patch e minor. A major da família fica fora, atrás do teto do `pyproject.toml`: `<1.46` no SDK e no exportador, `<0.67` nas instrumentações. O teto barra também a próxima minor, porque o `observability.py` troca `_status` e `_events` de um span, atributos privados do SDK que uma minor nova pode mudar.
+- **Commit e rótulos:** prefixo `chore(deps)`, ou `ci` nas actions. O arquivo não declara `labels`: os PRs levam os rótulos padrão do Dependabot (`dependencies` e o do ecossistema), que ele cria se faltarem. Declarar rótulo que não existe no repositório só faz o Dependabot comentar isso em cada PR.
 - **Checks:** cada PR passa pelos mesmos checks do CI e da varredura de segurança, inclusive o pip-audit, o trivy e o gate de cobertura.
-- **Python:** no bloco do Docker, major e minor do Python ficam de fora, e o patch segue. A versão sobe à mão, de uma vez, em `.python-version`, `UV_PYTHON` e `python-version` dos workflows, `requires-python` e nas duas imagens do `Dockerfile`. Sem isso, o 3.14 → 3.15 chegaria como "minor" e trocaria só a imagem do runtime.
+- **Python:** no bloco do Docker, major e minor do Python ficam de fora. A versão sobe à mão, de uma vez, em `.python-version`, `UV_PYTHON` e `python-version` dos workflows, `requires-python` e `python_version` (mypy) do `pyproject.toml`, `sonar.python.version` do `sonar-project.properties` e nas duas imagens do `Dockerfile`. Sem isso, o 3.14 → 3.15 chegaria como "minor" e trocaria só a imagem do runtime. O patch vem do rebuild da tag móvel `python:3.14-slim`, sem PR; hoje o bloco do Docker não abre PR, porque as duas linhas `FROM` são `python:3.14-slim` e a única atualização possível está no `ignore`.
 
-Depois do congelamento do código em 06/11/2026, o `open-pull-requests-limit` de cada bloco passa de 3 para 0. O 0 desliga só as atualizações de versão: os PRs de segurança do Dependabot, habilitados no repositório, não entram no limite e seguem abrindo. Sobem à mão, porque o Dependabot não os enxerga ou a versão está fixada de propósito: o uv do `Dockerfile` (entra por `COPY --from`, e o Dependabot só lê as linhas `FROM`), o PostgreSQL e o `postgres-exporter` de `k8s/`, o PostgreSQL, o RabbitMQ e o Mailpit do compose, a imagem do SonarQube do `ci.yml`, o trivy, o gitleaks, o pip-audit, o diff-cover, o kubeconform e o actionlint.
+Depois do congelamento do código em 06/11/2026, o `open-pull-requests-limit` de cada bloco passa de 3 para 0 (e o valor esperado em `tests/unitarios/test_cd.py` com ele). O 0 desliga só as atualizações de versão: os PRs de segurança do Dependabot, habilitados no repositório, não entram no limite e seguem abrindo. Sobem à mão, porque o Dependabot não os enxerga ou a versão está fixada de propósito: o uv do `Dockerfile` (entra por `COPY --from`, e o Dependabot só lê as linhas `FROM`), o PostgreSQL e o `postgres-exporter` de `k8s/`, o PostgreSQL, o RabbitMQ e o Mailpit do compose, o PostgreSQL e o RabbitMQ dos testes de integração (`tests/conftest.py` e `tests/integracao/broker.py`), a imagem do SonarQube do `ci.yml` e o scanner (`scripts/sonar/analisar.sh`), o trivy, o gitleaks, o pip-audit, o diff-cover, o kubeconform e o actionlint.
 
 ## CD
 

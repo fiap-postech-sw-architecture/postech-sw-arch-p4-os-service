@@ -5,14 +5,21 @@
 # O limite de 3 PRs abertos vale ate o congelamento do codigo em 06/11/2026.
 # Depois dele, trocar `open-pull-requests-limit` por 0 nos tres blocos: o 0
 # desliga so as atualizacoes de versao; os PRs de seguranca do Dependabot
-# (habilitados no repositorio) nao entram no limite e seguem abrindo.
+# (habilitados no repositorio) nao entram no limite e seguem abrindo. O valor
+# esperado do limite esta em tests/unitarios/test_cd.py.
+#
+# Sem `labels`: os PRs levam os rotulos padrao do Dependabot (`dependencies` e o
+# do ecossistema), que ele cria no repositorio se faltarem. Com `labels`
+# explicito, rotulo que nao existe no repositorio e ignorado, e o Dependabot
+# comenta isso em cada PR.
 #
 # O que o Dependabot nao cobre e a versao ficou fixada de proposito, a ser
 # subida a mao: o uv do Dockerfile (entra por COPY --from, e o Dependabot so
 # le as linhas FROM), postgres e prometheuscommunity/postgres-exporter em k8s/,
-# postgres, rabbitmq e mailpit no compose, o SonarQube do ci.yml, trivy,
-# gitleaks, pip-audit, diff-cover, kubeconform e actionlint (Makefile e
-# workflows).
+# postgres, rabbitmq e mailpit no compose, o PostgreSQL e o RabbitMQ dos testes
+# de integracao (tests/conftest.py e tests/integracao/broker.py), o SonarQube do
+# ci.yml e o scanner (scripts/sonar/analisar.sh), trivy, gitleaks, pip-audit,
+# diff-cover, kubeconform e actionlint (Makefile e workflows).
 version: 2
 
 updates:
@@ -25,7 +32,6 @@ updates:
       time: "06:00"
       timezone: "America/Sao_Paulo"
     open-pull-requests-limit: 3
-    labels: ["dependencies", "python"]
     commit-message:
       prefix: "chore(deps)"
     groups:
@@ -34,7 +40,9 @@ updates:
       # mesma versao, e subir so uma parte nao resolve. Um grupo so deles
       # ficaria vazio, mesmo antes deste no arquivo: o Dependabot o trata como
       # menos especifico que este. A major fica fora do grupo e atras do teto
-      # do pyproject.toml (<1.46 e <0.67).
+      # do pyproject.toml (<1.46 e <0.67), que barra tambem a proxima minor:
+      # observability.py troca _status e _events de um span, atributos privados
+      # do SDK que uma minor nova pode mudar.
       python-patch-e-minor:
         update-types: ["minor", "patch"]
 
@@ -49,7 +57,6 @@ updates:
       time: "06:00"
       timezone: "America/Sao_Paulo"
     open-pull-requests-limit: 3
-    labels: ["dependencies", "github_actions"]
     commit-message:
       prefix: "ci"
     groups:
@@ -57,6 +64,9 @@ updates:
         update-types: ["minor", "patch"]
 
   # Imagens das linhas FROM do Dockerfile (python). O uv fica de fora (acima).
+  # Hoje o bloco nao abre PR: as duas FROM sao python:3.14-slim e a unica
+  # atualizacao possivel (3.15-slim) esta no `ignore` abaixo; ele cobre uma
+  # imagem nova que entre no Dockerfile.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -65,17 +75,18 @@ updates:
       time: "06:00"
       timezone: "America/Sao_Paulo"
     open-pull-requests-limit: 3
-    labels: ["dependencies", "docker"]
     commit-message:
       prefix: "chore(deps)"
     groups:
       docker-patch-e-minor:
         update-types: ["minor", "patch"]
     # O Python sobe a mao, de uma vez em .python-version, UV_PYTHON e
-    # python-version dos workflows, requires-python do pyproject e nas duas
+    # python-version dos workflows, requires-python e python_version (mypy) do
+    # pyproject, sonar.python.version do sonar-project.properties e nas duas
     # imagens do Dockerfile: o venv do builder tem de rodar no Python do runtime.
     # Sem isto o 3.14 -> 3.15 chegaria como "minor", dentro do grupo acima, e
-    # trocaria so a imagem do runtime. O patch do Python segue automatico.
+    # trocaria so a imagem do runtime. O patch vem do rebuild da tag movel
+    # (python:3.14-slim), sem PR.
     ignore:
       - dependency-name: "python"
         update-types:

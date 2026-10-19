@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -130,17 +131,20 @@ def test_rodar_um_traduz_a_saida_do_pytest_em_resultado(
     assert (copia / "calculadora.py").read_text(encoding="utf-8") == _CALCULADORA
 
 
-def test_rodar_um_conta_o_tempo_esgotado_como_morto(
-    copia: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@pytest.fixture
+def teste_lento(copia: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, ...]:
+    """Grupo com um teste que dorme 30 s na copia, e o limite de um mutante em 1 s."""
     (copia / "tests" / "test_lento.py").write_text(
         "import time\n\n\ndef test_lento():\n    time.sleep(30)\n", encoding="utf-8"
     )
     monkeypatch.setattr(mutacao_manual, "LIMITE_DE_UM_MUTANTE_SEGUNDOS", 1)
+    return ("tests/test_lento.py",)
 
-    resultado = mutacao_manual._rodar_um(
-        _mutante("return x * 3", testes=("tests/test_lento.py",))
-    )
+
+def test_rodar_um_conta_o_tempo_esgotado_como_morto(
+    copia: Path, teste_lento: tuple[str, ...]
+) -> None:
+    resultado = mutacao_manual._rodar_um(_mutante("return x * 3", testes=teste_lento))
 
     assert resultado == ("morto", "(tempo esgotado)")
     assert (copia / "calculadora.py").read_text(encoding="utf-8") == _CALCULADORA
@@ -185,15 +189,10 @@ def test_grupo_que_ja_falha_na_copia_limpa_nao_mata_ninguem(
 
 
 def test_grupo_que_estoura_o_tempo_na_copia_limpa_sai_como_erro(
-    copia: Path, monkeypatch: pytest.MonkeyPatch
+    teste_lento: tuple[str, ...],
 ) -> None:
-    (copia / "tests" / "test_lento.py").write_text(
-        "import time\n\n\ndef test_lento():\n    time.sleep(30)\n", encoding="utf-8"
-    )
-    monkeypatch.setattr(mutacao_manual, "LIMITE_DE_UM_MUTANTE_SEGUNDOS", 1)
-
     (linha,) = mutacao_manual.executar(
-        (_mutante("return x * 3", testes=("tests/test_lento.py",)),), 600
+        (_mutante("return x * 3", testes=teste_lento),), 600
     )
 
     assert (linha["resultado"], linha["teste"]) == (
@@ -287,3 +286,39 @@ def test_main_so_sai_com_erro_quando_a_medida_e_invalida(
     assert mutacao_manual.main(["--so", "S01"]) == saida
     texto = (tmp_path / "reports" / "r.md").read_text(encoding="utf-8")
     assert texto.startswith("Mutantes manuais:")
+
+
+@pytest.fixture
+def execucao_falsa(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+    """Troca a preparacao da copia e a execucao: o main so escolhe e relata."""
+    recebido: dict[str, Any] = {"resultados": ("morto",)}
+
+    def executar(mutantes: tuple[Any, ...], prazo: float) -> list[dict[str, str]]:
+        recebido["ids"] = [m.id for m in mutantes]
+        recebido["prazo"] = prazo
+        return _linhas(*recebido["resultados"])
+
+    monkeypatch.setattr(mutacao_manual, "RELATORIO", tmp_path / "reports" / "r.md")
+    monkeypatch.setattr(mutacao_manual, "preparar_copia", lambda copiar: None)
+    monkeypatch.setattr(mutacao_manual, "executar", executar)
+    return recebido
+
+
+def test_main_so_roda_so_os_ids_pedidos_e_sem_so_roda_todos(
+    execucao_falsa: dict[str, Any],
+) -> None:
+    todos = [m.id for m in mutacao_manual.carregar().mutantes]
+
+    assert mutacao_manual.main(["--so", todos[1], todos[0]]) == 0
+    assert execucao_falsa["ids"] == [todos[0], todos[1]]
+    assert execucao_falsa["prazo"] == 900
+
+    assert mutacao_manual.main([]) == 0
+    assert execucao_falsa["ids"] == todos
+
+
+def test_main_prazo_do_argumento_chega_ao_executar(
+    execucao_falsa: dict[str, Any],
+) -> None:
+    assert mutacao_manual.main(["--prazo", "12.5"]) == 0
+    assert execucao_falsa["prazo"] == 12.5

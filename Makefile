@@ -15,7 +15,7 @@ DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch lint-workflows typecheck security test \
 	diff-cover mutacao check audit smoke compose-up compose-down manifests \
-	print-trivy-version kind-deploy
+	print-trivy-version kind-deploy docs-api cobertura-readme
 
 lock-check:
 	uv lock --check
@@ -47,7 +47,8 @@ TESTES_TIPADOS := tests/manifestos.py tests/migracoes.py \
 	tests/unitarios/test_entrypoint.py tests/unitarios/test_scripts_ci.py \
 	tests/integracao/banco_do_manifesto.py tests/integracao/test_banco.py \
 	tests/integracao/test_banco_do_manifesto.py tests/integracao/test_log_do_init_do_banco.py \
-	tests/unitarios/test_documentacao.py tests/unitarios/test_cd.py
+	tests/unitarios/test_documentacao.py tests/unitarios/test_cd.py \
+	tests/unitarios/test_mutacao_manual.py
 
 typecheck:
 	$(PY) mypy src scripts $(TESTES_TIPADOS)
@@ -104,6 +105,26 @@ mutacao:
 
 check: lock-check lint lint-arch lint-workflows typecheck security test diff-cover
 	@echo "All checks passed"
+
+# docs/api: o OpenAPI do app e a colecao Postman (uma requisicao por rota, com
+# corpo e resposta de exemplo), gerados juntos para nao divergirem. So monta o
+# app: nao sobe servidor nem banco. O make test reprova se os arquivos
+# versionados ficarem atras do codigo (tests/unitarios/test_documentacao.py).
+docs-api:
+	$(PY) python scripts/gerar_docs_api.py
+
+# A secao Cobertura do README sai do coverage.xml de um run do CI (o artefato
+# relatorios-de-teste do job test), com o link dele, e nunca e digitada: o make
+# test reprova a tabela editada a mao. RUN=<id do run> (gh run list --workflow
+# ci.yml); o gh baixa o artefato em reports/ci-<id>.
+CI_RUNS := https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs
+
+cobertura-readme:
+	@test -n "$(RUN)" || { echo "cobertura-readme: RUN=<CI run id> is required" >&2; exit 2; }
+	rm -rf reports/ci-$(RUN)
+	gh run download $(RUN) -n relatorios-de-teste -D reports/ci-$(RUN)
+	$(PY) python scripts/cobertura_resumo.py reports/ci-$(RUN)/coverage.xml \
+		--readme README.md --run $(CI_RUNS)/$(RUN)
 
 # CVE nas dependencias de runtime, com os extras que a imagem instala: o
 # mesmo conjunto do job pip-audit. Aqui o export leva hashes e o pip-audit

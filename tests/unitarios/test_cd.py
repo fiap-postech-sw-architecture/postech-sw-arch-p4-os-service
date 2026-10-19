@@ -685,36 +685,15 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
     # As actions entram por SHA: sem isto nada as atualiza, e o SHA e a tag do
     # comentario sobem juntos no PR dele (o teste `rede` confere o par).
     config = yaml.safe_load((RAIZ / ".github" / "dependabot.yml").read_text())
-    blocos = {b["package-ecosystem"]: b for b in config["updates"]}
-
-    assert set(blocos) == {"uv", "github-actions", "docker"}
-    for bloco in blocos.values():
-        assert bloco["directory"] == "/"
-        assert bloco["schedule"] == {
-            "interval": "weekly",
-            "day": "monday",
-            "time": "06:00",
-            "timezone": "America/Sao_Paulo",
-        }
-        assert bloco["open-pull-requests-limit"] == 3
-    # Os opentelemetry-* sobem juntos no generico do uv: um grupo so deles
-    # nunca recebe pacote, porque o Dependabot o trata como menos especifico.
-    patch_e_minor = {"update-types": ["minor", "patch"]}
-    esperado = {
-        "uv": ("chore(deps)", "python", {"python-patch-e-minor": patch_e_minor}),
-        "github-actions": (
-            "ci",
-            "github_actions",
-            {"actions-patch-e-minor": patch_e_minor},
-        ),
-        "docker": ("chore(deps)", "docker", {"docker-patch-e-minor": patch_e_minor}),
+    agenda = {
+        "interval": "weekly",
+        "day": "monday",
+        "time": "06:00",
+        "timezone": "America/Sao_Paulo",
     }
-    for nome, (prefixo, rotulo, grupos) in esperado.items():
-        assert blocos[nome]["commit-message"]["prefix"] == prefixo, nome
-        assert blocos[nome]["labels"] == ["dependencies", rotulo], nome
-        assert blocos[nome]["groups"] == grupos, nome
+    patch_e_minor = {"update-types": ["minor", "patch"]}
     # O Python do Dockerfile sobe a mao, junto do .python-version e dos workflows.
-    assert blocos["docker"]["ignore"] == [
+    so_patch_do_python = [
         {
             "dependency-name": "python",
             "update-types": [
@@ -723,6 +702,35 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
             ],
         }
     ]
+    # Os opentelemetry-* sobem juntos no generico do uv: um grupo so deles
+    # nunca recebe pacote, porque o Dependabot o trata como menos especifico.
+    esperado = {
+        "uv": ("chore(deps)", {"python-patch-e-minor": patch_e_minor}, []),
+        "github-actions": ("ci", {"actions-patch-e-minor": patch_e_minor}, []),
+        "docker": (
+            "chore(deps)",
+            {"docker-patch-e-minor": patch_e_minor},
+            so_patch_do_python,
+        ),
+    }
+    blocos = {b["package-ecosystem"]: b for b in config["updates"]}
+
+    assert config["version"] == 2
+    assert set(config) == {"version", "updates"}
+    assert set(blocos) == set(esperado)
+    for nome, (prefixo, grupos, ignore) in esperado.items():
+        # O bloco inteiro: chave a mais (allow, cooldown, target-branch...) reprova.
+        # Sem `labels`: rotulo declarado e inexistente no repositorio vira
+        # comentario em cada PR do Dependabot, que cria os padrao se faltarem.
+        assert blocos[nome] == {
+            "package-ecosystem": nome,
+            "directory": "/",
+            "schedule": agenda,
+            "open-pull-requests-limit": 3,
+            "commit-message": {"prefix": prefixo},
+            "groups": grupos,
+            **({"ignore": ignore} if ignore else {}),
+        }, nome
 
 
 def test_job_que_escreve_pacote_so_usa_actions_por_sha() -> None:
