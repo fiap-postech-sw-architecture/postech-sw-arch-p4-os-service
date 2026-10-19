@@ -7,12 +7,15 @@ from decimal import Decimal
 import pytest
 
 from src.compartilhado.infraestrutura.mensageria.consumidor import (
+    _CORPO_MAXIMO_BYTES,
+    _ler_mensagem,
     _MensagemRejeitadaError,
     _uuid_ou_nada,
     conferir_origem,
     fila_de_retry_da_copia,
     ler_tentativa,
 )
+from src.compartilhado.infraestrutura.mensageria.contratos import catalogo
 
 
 def test_cada_tentativa_tem_a_sua_fila_de_retry_e_depois_da_quinta_e_dlq() -> None:
@@ -108,3 +111,20 @@ def test_so_o_id_convertido_em_uuid_vai_para_o_log(
     valor: object, no_log: str | None
 ) -> None:
     assert _uuid_ou_nada(valor) == no_log
+
+
+@pytest.mark.parametrize(
+    ("tamanho", "motivo"),
+    [
+        # No teto exato o corpo passa do tamanho e cai no parse (espacos nao
+        # sao JSON); um byte acima nem chega ao parse.
+        pytest.param(64 * 1024, "json_invalido", id="no-teto-exato"),
+        pytest.param(64 * 1024 + 1, "corpo_grande_demais", id="um-byte-acima"),
+    ],
+)
+def test_corpo_ate_64_kib_passa_do_limite_de_tamanho(tamanho: int, motivo: str) -> None:
+    with pytest.raises(_MensagemRejeitadaError) as recusa:
+        _ler_mensagem(catalogo(), None, b" " * tamanho, "DiagnosticoConcluido")
+
+    assert recusa.value.motivo == motivo
+    assert _CORPO_MAXIMO_BYTES == 64 * 1024

@@ -955,10 +955,11 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 
 ## Qualidade
 
-- `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit e pytest.
+- `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit, pytest com o gate de 95% e o `diff-cover` (90% no código que a branch muda em relação à `origin/main`).
 - `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
 - `make lint-workflows`: actionlint, com o shellcheck da imagem nos scripts dos `run:`, em todos os workflows (a imagem é a `rhysd/actionlint:1.7.12`, fixada por digest no Makefile, na mesma versão do `lint-scripts` do platform). Entra no `make check` e no job `lint`.
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
+- `make mutacao`: mutantes escritos à mão nos módulos críticos, aplicados um por vez numa cópia do código (seção [Mutação](#mutação)). Fica fora do `make check` e do CI.
 - `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
 ```bash
@@ -969,9 +970,93 @@ make audit
 make smoke
 ```
 
-`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 90% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e o que confere o SHA das actions contra as tags roda `git ls-remote`: os dois precisam de rede, e offline se roda com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
+`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 95% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e o que confere o SHA das actions contra as tags roda `git ls-remote`: os dois precisam de rede, e offline se roda com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
 
-No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira. O resultado do pip-audit e o do trivy aparecem no log enquanto rodam e também no summary do job (`scripts/ci/registra-no-summary.sh`, que mantém o código de saída da ferramenta); o resumo da cobertura mostra o número do gate (linhas e ramos), o que o `fail_under` compara.
+No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, roda o `make diff-cover` no PR (com o relatório dele no summary, logo abaixo), passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira. O resultado do pip-audit e o do trivy aparecem no log enquanto rodam e também no summary do job (`scripts/ci/registra-no-summary.sh`, que mantém o código de saída da ferramenta); o resumo da cobertura mostra o número do gate (linhas e ramos), o que o `fail_under` compara.
+
+## Cobertura
+
+**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), com 10.356 testes (unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais). O gate é de 95% (`fail_under` no `.coveragerc`) e o código novo precisa de 90% (`make diff-cover`). Medido em 18/10/2026 com `make test`, no pull request #16; o CI publica a tabela no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)). Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917. Ficam fora da medição os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
+
+| Contexto | Linhas | Cobertas | Cobertura |
+|---|---:|---:|---:|
+| `src` (processos) | 236 | 231 | 97,9% |
+| `src/autenticacao` | 562 | 562 | 100,0% |
+| `src/cliente_veiculo` | 903 | 902 | 99,9% |
+| `src/compartilhado` | 1.854 | 1.844 | 99,5% |
+| `src/ordem_servico` | 2.699 | 2.699 | 100,0% |
+| **total** | 6.254 | 6.238 | 99,7% |
+
+Por camada: `dominio` 942 linhas (99,7%), `aplicacao` 1.788 (100,0%), `infraestrutura` 2.491 (99,8%) e `interfaces` 797 (99,5%). As 16 linhas sem teste são o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista. Para refazer: `make test` e `uv run python scripts/cobertura_resumo.py coverage.xml`, que também abre a tabela por pacote e camada.
+
+O `make diff-cover` lê o `coverage.xml` do `make test` e exige que ele exista e seja mais novo que o código de `src/`: sem o XML, ou com ele velho, recusa e manda rodar o `make test` antes. Com o XML velho, o diff-cover passaria sem medir nada. O `make check` já roda os dois na ordem certa.
+
+## Mutação
+
+Cobertura diz que a linha rodou; mutação diz se a suíte percebe quando ela está errada (ADR-041). Não é gate de CI e não tem pontuação mínima.
+
+O `mutmut` não roda num pacote chamado `src`, que é o caso deste serviço (e do Billing, onde se mediu): a versão 3.8.0 espera o pacote em `src/<pacote>` e tira o prefixo `src.` do nome do módulo, e a primeira função mutada que os testes chamam reprova com
+
+```text
+AssertionError: Failed trampoline hit. Module name starts with `src.`, which is invalid
+```
+
+(`mutmut/stats.py`, `record_trampoline_hit`). Renomear o pacote ou remendar a ferramenta mudaria o que se mede, então a alternativa são mutantes escritos à mão: [`scripts/mutantes.toml`](scripts/mutantes.toml) lista 60 defeitos plausíveis nos módulos críticos, e [`scripts/mutacao_manual.py`](scripts/mutacao_manual.py) (o mesmo script do Billing) aplica um por vez numa cópia do código (`mutants/`, fora do git) e roda só os testes que deveriam pegá-lo.
+
+**Resultado** em 18/10/2026: 60 mortos de 60 medidos (100%), sem equivalentes, em cerca de 6 min: de 5,5 a 6,3 min em seis medições, conforme a carga da máquina.
+
+| Área | Mutantes | Mortos | Equivalentes |
+|---|---:|---:|---:|
+| Status da OS (máquina e agregado) | 11 | 11 | 0 |
+| Classificação do evento na saga | 7 | 7 | 0 |
+| Transições da saga | 5 | 5 | 0 |
+| Prazos da saga | 4 | 4 | 0 |
+| Compensação da saga | 4 | 4 | 0 |
+| Orquestrador da saga | 3 | 3 | 0 |
+| Consumidor | 5 | 5 | 0 |
+| Idempotência | 2 | 2 | 0 |
+| Relay | 6 | 6 | 0 |
+| JWT e acesso | 9 | 9 | 0 |
+| CPF | 4 | 4 | 0 |
+| **total** | **60** | **60** | **0** |
+
+- **Sobrevivente que virou teste:** o corpo no teto exato de 64 KiB tratado como grande demais (Q05). O único caso era um corpo de cerca de 70 KB, longe do limite; `test_corpo_ate_64_kib_passa_do_limite_de_tamanho` prende a constante e os dois lados dela, sem broker.
+- **O que o percentual não é:** a lista é curada, então ele diz que a suíte pega esses 60 defeitos, e não é comparável ao de uma ferramenta que gera os mutantes sozinha.
+
+Para refazer:
+
+```bash
+make mutacao
+make mutacao MUTANTES="Q05 R03"
+```
+
+Como o alvo se comporta:
+
+- Para de iniciar mutantes depois de `MUTACAO_PRAZO` segundos (900); os que sobram saem `nao rodado`.
+- Antes do primeiro mutante de cada grupo de testes, roda o grupo na cópia sem mutante. Se o grupo já reprova ou estoura o tempo, os mutantes dele saem `erro`: um teste que já falha mataria qualquer um.
+- Com `erro` ou `nao rodado`, o percentual vira `n/d`. A tabela vai para `reports/mutacao.md`.
+- Os testes de integração sobem um PostgreSQL por testcontainers a cada grupo e a cada mutante, e os do consumidor e do relay também um RabbitMQ: o Docker precisa estar no ar.
+- O script lê o arquivo original de `src/` a cada mutante: não edite `src/` com a bateria rodando.
+- Um mutante novo entra com o trecho exato (`de`, uma ocorrência no arquivo), e `tests/unitarios/test_mutacao_manual.py` reprova se a lista envelhecer.
+
+Códigos de saída:
+
+- `0`: nenhum mutante saiu `erro`. Sobrevivente e `nao rodado` não reprovam, porque não há gate (ADR-041).
+- `1`: algum mutante saiu `erro`, uma medida inválida, como o Docker fora ou um arquivo que os testes leem e que a cópia não levou.
+- `2`: um id de `MUTANTES` não existe (a mensagem lista os válidos) ou o `.toml` não bate com o código.
+
+## Dependências automatizadas
+
+O Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml)) abre pull requests para três ecossistemas: `pyproject.toml` e `uv.lock` (uv), as actions dos workflows e as imagens base do `Dockerfile`.
+
+- **Agenda:** uma vez por semana, às segundas às 06:00 (São Paulo), com no máximo 3 PRs abertos por ecossistema.
+- **Grupos:** patch e minor de cada ecossistema chegam juntos num PR. Major abre PR próprio, para ser lido com o changelog.
+- **OpenTelemetry:** as bibliotecas `opentelemetry-*` sobem juntas no grupo de patch e minor do uv. O SDK fixa `opentelemetry-api` e `opentelemetry-semantic-conventions` na mesma versão e cada instrumentação fixa a sua, então subir só uma parte não resolve. Um grupo só delas ficaria vazio, porque o Dependabot o trata como menos específico que o de patch e minor. A major da família fica fora, atrás do teto do `pyproject.toml`: `<1.46` no SDK e no exportador, `<0.67` nas instrumentações.
+- **Commit e rótulos:** prefixo `chore(deps)`, ou `ci` nas actions, e os rótulos `dependencies` e o do ecossistema: `python`, `github_actions` ou `docker`.
+- **Checks:** cada PR passa pelos mesmos checks do CI e da varredura de segurança, inclusive o pip-audit, o trivy e o gate de cobertura.
+- **Python:** no bloco do Docker, major e minor do Python ficam de fora, e o patch segue. A versão sobe à mão, de uma vez, em `.python-version`, `UV_PYTHON` e `python-version` dos workflows, `requires-python` e nas duas imagens do `Dockerfile`. Sem isso, o 3.14 → 3.15 chegaria como "minor" e trocaria só a imagem do runtime.
+
+Depois do congelamento do código em 06/11/2026, o `open-pull-requests-limit` de cada bloco passa de 3 para 0. O 0 desliga só as atualizações de versão: os PRs de segurança do Dependabot, habilitados no repositório, não entram no limite e seguem abrindo. Sobem à mão, porque o Dependabot não os enxerga ou a versão está fixada de propósito: o uv do `Dockerfile` (entra por `COPY --from`, e o Dependabot só lê as linhas `FROM`), o PostgreSQL e o `postgres-exporter` de `k8s/`, o PostgreSQL, o RabbitMQ e o Mailpit do compose, a imagem do SonarQube do `ci.yml`, o trivy, o gitleaks, o pip-audit, o diff-cover, o kubeconform e o actionlint.
 
 ## CD
 

@@ -681,23 +681,48 @@ def test_action_de_terceiro_por_sha_de_commit_com_a_tag_em_comentario(
             assert re.fullmatch(r"v\d+(\.\d+)*", versao), ref
 
 
-def test_dependabot_sobe_as_actions_toda_semana_num_grupo_so() -> None:
+def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> None:
     # As actions entram por SHA: sem isto nada as atualiza, e o SHA e a tag do
     # comentario sobem juntos no PR dele (o teste `rede` confere o par).
     config = yaml.safe_load((RAIZ / ".github" / "dependabot.yml").read_text())
+    blocos = {b["package-ecosystem"]: b for b in config["updates"]}
 
-    assert config == {
-        "version": 2,
-        "updates": [
-            {
-                "package-ecosystem": "github-actions",
-                "directory": "/",
-                "schedule": {"interval": "weekly"},
-                "commit-message": {"prefix": "ci"},
-                "groups": {"github-actions": {"patterns": ["*"]}},
-            }
-        ],
+    assert set(blocos) == {"uv", "github-actions", "docker"}
+    for bloco in blocos.values():
+        assert bloco["directory"] == "/"
+        assert bloco["schedule"] == {
+            "interval": "weekly",
+            "day": "monday",
+            "time": "06:00",
+            "timezone": "America/Sao_Paulo",
+        }
+        assert bloco["open-pull-requests-limit"] == 3
+    # Os opentelemetry-* sobem juntos no generico do uv: um grupo so deles
+    # nunca recebe pacote, porque o Dependabot o trata como menos especifico.
+    patch_e_minor = {"update-types": ["minor", "patch"]}
+    esperado = {
+        "uv": ("chore(deps)", "python", {"python-patch-e-minor": patch_e_minor}),
+        "github-actions": (
+            "ci",
+            "github_actions",
+            {"actions-patch-e-minor": patch_e_minor},
+        ),
+        "docker": ("chore(deps)", "docker", {"docker-patch-e-minor": patch_e_minor}),
     }
+    for nome, (prefixo, rotulo, grupos) in esperado.items():
+        assert blocos[nome]["commit-message"]["prefix"] == prefixo, nome
+        assert blocos[nome]["labels"] == ["dependencies", rotulo], nome
+        assert blocos[nome]["groups"] == grupos, nome
+    # O Python do Dockerfile sobe a mao, junto do .python-version e dos workflows.
+    assert blocos["docker"]["ignore"] == [
+        {
+            "dependency-name": "python",
+            "update-types": [
+                "version-update:semver-major",
+                "version-update:semver-minor",
+            ],
+        }
+    ]
 
 
 def test_job_que_escreve_pacote_so_usa_actions_por_sha() -> None:

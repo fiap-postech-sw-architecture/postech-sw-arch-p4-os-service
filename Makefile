@@ -1,7 +1,8 @@
 # Gates do OS Service, os mesmos comandos do CI. `make check` espelha os jobs
 # lint, type-check, security e test: uv.lock em dia, lint, formato, contratos
 # de camada, workflows, tipos, seguranca e testes (unitarios + integracao com
-# testcontainers) com gate de cobertura (.coveragerc). `make manifests` e
+# testcontainers) com gate de cobertura (.coveragerc) e o diff-cover do codigo
+# novo; `make mutacao` mede a suite por mutantes manuais. `make manifests` e
 # `make smoke` sao o job build e `make audit` e o pip-audit do workflow
 # Security. `make kind-deploy` implanta o servico no kind do platform.
 PY := uv run
@@ -13,8 +14,8 @@ GIT_DATE := $(shell git show -s --format=%cI HEAD 2>/dev/null || echo unknown)
 DOCKER_COMPOSE := GIT_SHA=$(GIT_SHA) GIT_DATE=$(GIT_DATE) docker compose
 
 .PHONY: lock-check lint format lint-arch lint-workflows typecheck security test \
-	check audit smoke compose-up compose-down manifests print-trivy-version \
-	kind-deploy
+	diff-cover mutacao check audit smoke compose-up compose-down manifests \
+	print-trivy-version kind-deploy
 
 lock-check:
 	uv lock --check
@@ -62,7 +63,46 @@ test:
 	$(PY) pytest --cov-report=xml:coverage.xml --cov-report=html:htmlcov \
 		--junitxml=reports/junit.xml
 
-check: lock-check lint lint-arch lint-workflows typecheck security test
+# Cobertura do codigo novo (ADR-041): as linhas e os ramos que a branch muda
+# em relacao a origin/main, medidos no coverage.xml do `make test`, nao podem
+# ficar abaixo de 90%. O gate de 95% do .coveragerc mede o total; este impede
+# que uma mudanca sem teste passe so porque o total absorveu o codigo novo.
+# Roda depois do `make test` e deixa o relatorio em reports/diff-cover.md (o
+# CI o copia para o summary do job test). COMPARAR_COM troca a base. Com o
+# coverage.xml mais velho que o codigo o diff-cover so veria "No lines with
+# coverage information" e passaria em branco, entao o alvo recusa esse caso, e
+# o do XML ausente, que viraria traceback do diff-cover.
+# --include-untracked mede tambem o modulo novo que ainda nao foi para o git.
+DIFF_COVER_VERSION := 10.6.0
+DIFF_COVER_MINIMO ?= 90
+COMPARAR_COM ?= origin/main
+
+diff-cover:
+	@mkdir -p reports
+	@test -f coverage.xml \
+		|| { echo "diff-cover: coverage.xml missing, run make test first" >&2; exit 1; }
+	@test -z "$$(find src -name '*.py' -newer coverage.xml 2>/dev/null)" \
+		|| { echo "diff-cover: coverage.xml is older than src/, run make test first" >&2; exit 1; }
+	uvx diff-cover==$(DIFF_COVER_VERSION) coverage.xml --branch-coverage --include-untracked \
+		--compare-branch=$(COMPARAR_COM) --fail-under=$(DIFF_COVER_MINIMO) \
+		--format markdown:reports/diff-cover.md
+
+# Mutacao nos modulos criticos (maquina de status da OS, transicoes da saga,
+# orquestrador, idempotencia e retry do consumidor, relay, CPF e JWT), sem gate
+# e sem pontuacao minima. O mutmut nao roda aqui (o pacote se chama `src`, e ele
+# exige o pacote fora de `src.`), entao sao mutantes escritos a mao em
+# scripts/mutantes.toml, aplicados um por vez numa copia do codigo (mutants/); o
+# relatorio sai em reports/mutacao.md. Para quando passa de MUTACAO_PRAZO
+# segundos (15 min); os testes de integracao sobem um PostgreSQL (e um
+# RabbitMQ, os do broker) por testcontainers a cada mutante, entao pedem o
+# Docker. MUTANTES="S01 R03" roda so esses.
+MUTACAO_PRAZO ?= 900
+MUTANTES ?=
+
+mutacao:
+	$(PY) python scripts/mutacao_manual.py --prazo $(MUTACAO_PRAZO) $(if $(MUTANTES),--so $(MUTANTES))
+
+check: lock-check lint lint-arch lint-workflows typecheck security test diff-cover
 	@echo "All checks passed"
 
 # CVE nas dependencias de runtime, com os extras que a imagem instala: o

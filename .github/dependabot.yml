@@ -1,14 +1,83 @@
-# As actions dos workflows entram por SHA de commit (as de terceiro e as do job
-# image), e nada as subiria sozinho. Um PR por semana, com todas juntas.
+# Atualizacao automatica de dependencias: uma vez por semana (segunda, 06:00 em
+# Sao Paulo), com patch e minor de cada ecossistema agrupados num PR so. Major
+# abre PR proprio, para ser lido com o changelog.
+#
+# O limite de 3 PRs abertos vale ate o congelamento do codigo em 06/11/2026.
+# Depois dele, trocar `open-pull-requests-limit` por 0 nos tres blocos: o 0
+# desliga so as atualizacoes de versao; os PRs de seguranca do Dependabot
+# (habilitados no repositorio) nao entram no limite e seguem abrindo.
+#
+# O que o Dependabot nao cobre e a versao ficou fixada de proposito, a ser
+# subida a mao: o uv do Dockerfile (entra por COPY --from, e o Dependabot so
+# le as linhas FROM), postgres e prometheuscommunity/postgres-exporter em k8s/,
+# postgres, rabbitmq e mailpit no compose, o SonarQube do ci.yml, trivy,
+# gitleaks, pip-audit, diff-cover, kubeconform e actionlint (Makefile e
+# workflows).
 version: 2
+
 updates:
-  - package-ecosystem: github-actions
-    directory: /
+  # pyproject.toml e uv.lock (o CI exige `uv lock --check` e `--frozen`).
+  - package-ecosystem: "uv"
+    directory: "/"
     schedule:
-      interval: weekly
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "python"]
     commit-message:
-      prefix: ci
+      prefix: "chore(deps)"
     groups:
-      github-actions:
-        patterns:
-          - "*"
+      # Leva tambem os opentelemetry-*, e os patches e minors da familia sobem
+      # juntos aqui: o SDK fixa opentelemetry-api e semantic-conventions na
+      # mesma versao, e subir so uma parte nao resolve. Um grupo so deles
+      # ficaria vazio, mesmo antes deste no arquivo: o Dependabot o trata como
+      # menos especifico que este. A major fica fora do grupo e atras do teto
+      # do pyproject.toml (<1.46 e <0.67).
+      python-patch-e-minor:
+        update-types: ["minor", "patch"]
+
+  # Actions dos workflows: as de terceiro e as do job image entram por SHA de
+  # commit (a tag fica no comentario) e nada as subiria sozinho; o SHA e a tag
+  # sobem juntos no mesmo PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "github_actions"]
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-patch-e-minor:
+        update-types: ["minor", "patch"]
+
+  # Imagens das linhas FROM do Dockerfile (python). O uv fica de fora (acima).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Sao_Paulo"
+    open-pull-requests-limit: 3
+    labels: ["dependencies", "docker"]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      docker-patch-e-minor:
+        update-types: ["minor", "patch"]
+    # O Python sobe a mao, de uma vez em .python-version, UV_PYTHON e
+    # python-version dos workflows, requires-python do pyproject e nas duas
+    # imagens do Dockerfile: o venv do builder tem de rodar no Python do runtime.
+    # Sem isto o 3.14 -> 3.15 chegaria como "minor", dentro do grupo acima, e
+    # trocaria so a imagem do runtime. O patch do Python segue automatico.
+    ignore:
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"

@@ -1,13 +1,14 @@
 """Scripts do CI (``scripts/ci/``): a conferencia que estreita a excecao do
 trivy (KSV-0109) ao ``PASSWORD`` lido do ambiente, o relatorio das imagens de
 terceiros dos manifestos, que nunca reprova o job, o registro da saida do
-pip-audit e do trivy no summary e os nomes das variaveis do ``make
-kind-deploy``."""
+pip-audit e do trivy no summary, os nomes das variaveis do ``make
+kind-deploy`` e a guarda de frescor do ``make diff-cover``."""
 
 from __future__ import annotations
 
 import os
 import select
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -385,3 +386,78 @@ def test_kind_deploy_aceita_platform_dir_e_kind_overlay(
     comando = " ".join(resultado.stdout.replace("\\\n", " ").split())
     assert comando.startswith(f"{platform}/scripts/ci/implantar-servicos.sh")
     assert f" --overlay {overlay} os-service=" in comando
+
+
+def _diff_cover(
+    tmp_path: Path, xml_mais_novo: bool, *, sem_xml: bool = False
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """``make diff-cover`` numa arvore minuscula, com um ``uvx`` falso no PATH que
+    so registra os argumentos."""
+    shutil.copy(RAIZ / "Makefile", tmp_path / "Makefile")
+    (tmp_path / "src").mkdir()
+    codigo, xml = tmp_path / "src" / "modulo.py", tmp_path / "coverage.xml"
+    codigo.write_text("X = 1\n", encoding="utf-8")
+    xml.write_text("<coverage/>", encoding="utf-8")
+    os.utime(codigo, (2_000_000_000, 2_000_000_000))
+    do_xml = 2_000_000_100 if xml_mais_novo else 1_999_999_900
+    os.utime(xml, (do_xml, do_xml))
+    if sem_xml:
+        xml.unlink()
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    argumentos = tmp_path / "argumentos-do-uvx"
+    falso = bin_ / "uvx"
+    falso.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" > {argumentos}\n', encoding="utf-8"
+    )
+    falso.chmod(0o755)
+    ambiente = {
+        chave: valor for chave, valor in os.environ.items() if chave != "MAKEFLAGS"
+    }
+    resultado = subprocess.run(
+        ["make", "--no-print-directory", "diff-cover"],  # noqa: S607
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+        env={**ambiente, "PATH": f"{bin_}:{ambiente['PATH']}", "MAKELEVEL": "1"},
+    )
+    return resultado, argumentos
+
+
+def test_diff_cover_recusa_coverage_xml_mais_velho_que_o_codigo(
+    tmp_path: Path,
+) -> None:
+    resultado, argumentos = _diff_cover(tmp_path, xml_mais_novo=False)
+
+    assert resultado.returncode != 0
+    assert "coverage.xml is older than src/, run make test first" in resultado.stderr
+    assert not argumentos.exists()
+
+
+def test_diff_cover_sem_coverage_xml_manda_rodar_o_make_test(tmp_path: Path) -> None:
+    # Sem o XML o `find -newer` nao imprime nada e so a primeira guarda o pega.
+    resultado, argumentos = _diff_cover(tmp_path, xml_mais_novo=True, sem_xml=True)
+
+    assert resultado.returncode != 0
+    assert "coverage.xml missing, run make test first" in resultado.stderr
+    assert not argumentos.exists()
+
+
+def test_diff_cover_com_xml_fresco_mede_tambem_o_arquivo_novo(
+    tmp_path: Path,
+) -> None:
+    resultado, argumentos = _diff_cover(tmp_path, xml_mais_novo=True)
+
+    assert resultado.returncode == 0, resultado.stderr
+    assert argumentos.read_text(encoding="utf-8").split() == [
+        "diff-cover==10.6.0",
+        "coverage.xml",
+        "--branch-coverage",
+        "--include-untracked",
+        "--compare-branch=origin/main",
+        "--fail-under=90",
+        "--format",
+        "markdown:reports/diff-cover.md",
+    ]
