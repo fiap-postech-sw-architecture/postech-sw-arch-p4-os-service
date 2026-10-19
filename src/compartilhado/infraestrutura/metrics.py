@@ -85,10 +85,6 @@ def _rota_template(request: Request) -> str:
     return template if isinstance(template, str) else ROTA_NAO_ROTEADA
 
 
-def _expor_metricas(_request: Request) -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-
 def configurar_metricas(app: FastAPI) -> None:
     """Expoe ``GET /metrics`` e instala o ``MetricasHTTPMiddleware``.
 
@@ -96,7 +92,14 @@ def configurar_metricas(app: FastAPI) -> None:
     adicionado com o app ja servindo, e o adicionado por ultimo fica o mais externo
     e mede a latencia completa.
     """
+
     # Rota (nao mount): um mount so casa `/metrics/` e, sem redirect de barra,
-    # o scrape em `/metrics` daria 404.
-    app.add_route("/metrics", _expor_metricas, include_in_schema=False)
+    # o scrape em `/metrics` daria 404. Rota do FastAPI, e nao `add_route`: so
+    # ela grava `scope["route"]`, e a raspagem conta no template `/metrics` em
+    # vez de `nao_roteada`. Funcao sincrona: roda no threadpool, e a coleta, que
+    # pode esperar o banco por ate 5 s, nao prende o event loop.
+    @app.get("/metrics", include_in_schema=False)
+    def expor_metricas() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     app.add_middleware(MetricasHTTPMiddleware)
