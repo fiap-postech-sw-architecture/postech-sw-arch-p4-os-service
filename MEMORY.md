@@ -141,6 +141,7 @@ Consolidado em 2026-10-06: as 92 entradas anteriores estao em `MEMORY.archive.md
 
 ## Gotchas
 
+- 2026-10-19 - O Dependabot do uv alarga o teto do `pyproject.toml` em vez de respeita-lo: o grupo `python-patch-e-minor` trocou `sqlalchemy<2.1` por `<2.2` e trouxe a 2.1.4, que muda o driver padrao de `postgresql://` para o psycopg 3 (`ModuleNotFoundError: No module named 'psycopg'` no build e no smoke). O que nao pode subir de minor vai no `ignore` do bloco `uv` (sqlalchemy e opentelemetry-*), e o teste do `dependabot.yml` o confere - .github/dependabot.yml
 - 2026-10-18 - O `FORMAT_CHECKER` do jsonschema reprova a variavel do Postman no corpo de exemplo (`{{cliente_id}}` nao e uuid): o teste troca cada `{{...}}` por um uuid antes de validar, como ja trocava as variaveis do shell nos curl - PR #17
 - 2026-10-18 - O aviso "nosec encountered (B105), but no failed test" do bandit aparece tambem quando o `# nosec B105` e necessario: sem ele, o `_GUARDA_TOKENS` (nomes de campo `access_token` e `refresh_token`) reprova o `make security`. Tire o nosec e rode o bandit antes de concluir que ele sobra - PR #17
 - 2026-10-18 - O `ci.yml` e o `security.yml` so disparam em `pull_request` para a `main` (`branches: [main]`): o PR empilhado sobre outra branch nao roda check nenhum. O CI dele sai por `gh workflow run ci.yml --ref <branch>` (e `security.yml`), sem o passo do diff-cover, que so roda em `pull_request` - PR #17
