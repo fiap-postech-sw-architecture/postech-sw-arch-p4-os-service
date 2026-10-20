@@ -18,12 +18,17 @@ class TestMain:
         application = criar_app()
         assert isinstance(application, FastAPI)
 
-    def test_fastapi_nao_monta_o_export_otlp_automatico(self) -> None:
+    def test_fastapi_nao_monta_o_export_otlp_automatico(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """O FastAPI 0.142+ soma exportadores OTLP na partida quando o endpoint
         esta no ambiente e avisa que a configuracao falhou (falta o extra
-        ``fastapi[opentelemetry]``). A API exporta por ``configurar_otel``; no
-        0.141.1 o argumento so fica em ``extra``, e vale quando o lock subir."""
-        assert criar_app().extra["telemetry"] == {"auto_configure": False}
+        ``fastapi[opentelemetry]``). A API exporta por ``configurar_otel``, e o
+        argumento ``telemetry`` desliga a configuracao automatica mesmo com
+        ``FASTAPI_OTEL_AUTO_CONFIGURE=true`` no ambiente (o argumento ganha)."""
+        monkeypatch.setenv("FASTAPI_OTEL_AUTO_CONFIGURE", "true")
+        # O FastAPI 0.143 guarda a configuracao efetiva em ``_telemetry``.
+        assert criar_app()._telemetry["auto_configure"] is False
 
     def test_titulo(self) -> None:
         application = criar_app()

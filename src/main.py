@@ -151,9 +151,8 @@ def criar_app(provedor: TracerProvider | None = None) -> FastAPI:
         # ambiente (o ConfigMap do cluster o leva) ele soma exportadores
         # http/protobuf na partida, que pedem o extra fastapi[opentelemetry], e
         # escreve "automatic telemetry configuration failed" no log de boot. A
-        # API exporta por `configurar_otel` (gRPC). No 0.141.1 do lock o
-        # argumento so fica em `app.extra`, sem efeito, e passa a valer quando o
-        # lock subir.
+        # API exporta por `configurar_otel` (gRPC). O argumento ganha do
+        # FASTAPI_OTEL_AUTO_CONFIGURE do ambiente.
         telemetry={"auto_configure": False},
     )
     application.state.provedor = provedor
