@@ -1,25 +1,63 @@
 # PytStop fase 4: OS Service
 
-Serviço de ordens de serviço: abertura, status e histórico da OS, cadastro de clientes e veículos (com LGPD), usuários internos (emissão de JWT) e orquestração da saga de atendimento. Banco próprio: PostgreSQL 16.
+[![CD](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/cd.yml/badge.svg?branch=main)](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/cd.yml)
 
-Parte da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT): o PytStop, sistema de gestão de oficina mecânica das fases anteriores, refatorado em microsserviços com Saga Pattern, mensageria assíncrona, CI/CD por serviço e deploy automatizado em Kubernetes.
+Serviço de ordens de serviço (OS) do PytStop, o sistema de gestão da oficina mecânica. Abre e acompanha a OS, cadastra clientes e veículos (com LGPD), emite o JWT dos usuários internos e orquestra a saga de atendimento. Banco próprio: PostgreSQL 16.
 
-**Documentação:** a arquitetura do serviço (responsabilidades, camadas e módulos, o modelo completo do banco, os fluxos passo a passo com diagramas de sequência, mensageria, segurança e LGPD) está em [`docs/arquitetura.md`](docs/arquitetura.md); o OpenAPI exportado e a coleção Postman com exemplos, em [`docs/api/`](docs/api/) (`make docs-api` os gera de novo a partir do app), e os `curl` de cada rota, agrupados por fluxo, em [Exemplos da API](#exemplos-da-api). O Swagger fica em `/docs`. São os entregáveis RNF-051 (arquitetura) e RNF-052 (OpenAPI, coleção e `curl`) da [gap analysis da fase](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/requisitos/fase4/gap-analysis-fase-4.md); a evidência de cobertura (RNF-050) está em [Cobertura](#cobertura), e a coleção do fluxo completo, que roda com newman, é do platform.
+Este repositório é um dos quatro da entrega da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT). Nessa fase o PytStop virou microsserviços com Saga Pattern, mensageria assíncrona, CI/CD por serviço e deploy automatizado em Kubernetes. O [índice da entrega](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/INDICE-DA-ENTREGA.md) liga os quatro repositórios, os requisitos e as evidências.
 
-**Proveniência:** recorte da `main` do PytStop fase 3 (`postech-sw-arch-p3` @ [`08dcffe`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/08dcffe6365ece594f438cdbc4c5eef1d88ebfb1) + [`fc06263`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/fc06263d1f99747145e5a354b817905c59637ebd), a normalização ASCII de CPF/CNPJ do p3 #32), só com os contextos deste serviço (`compartilhado`, `cliente_veiculo`, `autenticacao`, `ordem_servico`). Referências `p3 #N` no código apontam para issues e PRs daquele repositório; IDs como `RF-018`, `ADR-020` e `TD-017` são da numeração contínua das fases anteriores ([requisitos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/requisitos), [ADRs](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/arquitetura/adr) e [dívida técnica](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/tech-debt) do p3); a fase 4 começa em RF-028 e ADR-034.
+## Em poucas linhas
 
-**Arquitetura da fase 4:** a RFC-004 e os ADR-034 a ADR-043, citados nos comentários do código como `RFC-004 secao N` e `ADR-0NN`, ficam em [`docs/arquitetura` do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura).
+- **Na saga:** é o orquestrador. A abertura da OS inicia a saga, o consumidor da fila `os.eventos` conduz o caminho feliz até `FINALIZADA`, e as compensações levam a OS a `CANCELADA` quando um passo falha ([Saga](#saga)).
+- **Como rodar:** `make compose-up` sobe a API em http://localhost:8000 (Swagger em `/docs`), o PostgreSQL, o RabbitMQ e os processos da saga, e `make compose-down` derruba tudo ([Como rodar local](#como-rodar-local)).
+- **Como testar:** `make check` roda lint, tipos, segurança e os testes com gate de cobertura de 95%, e `make smoke` prova a imagem pelo entrypoint real. Os dois pedem Docker, e o `make check` pede também o `kubectl` no PATH ([Qualidade](#qualidade)).
+- **Arquitetura (RNF-051):** responsabilidades, camadas e módulos, modelo completo do banco, fluxos com diagramas de sequência, mensageria, segurança e LGPD em [`docs/arquitetura.md`](docs/arquitetura.md).
+- **API (RNF-052):** OpenAPI e coleção Postman em [`docs/api/`](docs/api/) (o `make docs-api` os gera de novo a partir do app), um `curl` por rota em [Exemplos da API](#exemplos-da-api) e Swagger em `/docs`. A coleção do fluxo completo, que roda com newman, é do platform.
+- **Cobertura (RNF-050):** tabela gerada do `coverage.xml` de um run do CI, em [Cobertura](#cobertura).
+- **CD:** o [`cd.yml`](.github/workflows/cd.yml) chama o workflow reutilizável do platform, que publica a imagem no GHCR e implanta num kind efêmero (Kubernetes dentro de contêineres do runner), com smoke e E2E da saga ([CD](#cd)).
 
-## O que já existe
+## Sumário
 
-- OS da fase 4: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
-- Saga de atendimento orquestrada pelo OS Service: a abertura da OS inicia a saga, o consumidor conduz o caminho feliz até `FINALIZADA`, e as falhas de negócio e o cancelamento levam as compensações, uma por vez, até a OS `CANCELADA` ou até a falha da compensação, com a etapa visível na OS e na rota de operação. O processo `prazos` reenvia o comando sem resposta, compensa o passo que esgota os reenvios e para a compensação sem resposta em `falha_na_compensacao`, de onde o admin a retoma ([seção abaixo](#saga)).
-- API: `POST/GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409), `POST /{id}/entrega`, `GET /api/v1/sagas/{ordem_id}` e `POST /api/v1/sagas/{ordem_id}/compensacao` (admin), clientes e veículos com rotas LGPD, autenticação (`/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`), acompanhamento público (`POST /api/v1/publico/acompanhamento`, placa e documento no corpo), `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s), `GET /api/v1/ordens-de-servico/metricas` (admin: total, OS por status e permanência média em cada status) e `GET /metrics` (sempre ligado). Swagger em `/docs`.
-- Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker, consumidor idempotente da fila `os.eventos` com retry por atraso e DLQ ([seção abaixo](#mensageria)).
+- [Origem do código](#origem-do-código)
+- [Escopo do serviço](#escopo-do-serviço)
+- [Autenticação](#autenticação) e a [rotação da chave](#rotação-da-chave)
+- [Mensageria](#mensageria): [contratos](#contratos), [publicar um comando](#publicar-um-comando) e [configuração](#configuração)
+- [Saga](#saga): [por que orquestração](#por-que-orquestração), [caminho feliz](#caminho-feliz), [compensações e cancelamento](#compensações-e-cancelamento), [prazos e retomada](#prazos-falha-na-compensação-e-retomada), [implantação e DLQ](#implantação-e-dlq) e [consulta e operação](#consulta-e-operação)
+- [Notificações por e-mail e LGPD](#notificações-por-e-mail-e-lgpd)
+- [Observabilidade](#observabilidade): [métricas](#métricas), [spans](#spans) e [logs](#logs)
+- [Como rodar local](#como-rodar-local)
+- [Exemplos da API](#exemplos-da-api)
+- [Implantação](#implantação): [no kind](#implantar-no-kind) e [troca de senha e de chave](#troca-de-senha-e-de-chave)
+- [Qualidade](#qualidade), [Cobertura](#cobertura), [Mutação](#mutação) e [Dependências automatizadas](#dependências-automatizadas)
+- [CD](#cd): [jobs](#jobs), [reexecutar e acompanhar](#reexecutar-e-acompanhar) e [deploy remoto](#deploy-remoto-opcional)
+- [Repositórios da fase 4](#repositórios-da-fase-4)
+
+## Origem do código
+
+O código parte de um recorte da `main` do PytStop da fase 3 (`postech-sw-arch-p3`): o commit [`08dcffe`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/08dcffe6365ece594f438cdbc4c5eef1d88ebfb1) mais o [`fc06263`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/fc06263d1f99747145e5a354b817905c59637ebd), a normalização ASCII de CPF e CNPJ (p3 #32). Entraram só os contextos deste serviço: `compartilhado`, `cliente_veiculo`, `autenticacao` e `ordem_servico`.
+
+As referências `p3 #N` no código apontam para issues e PRs daquele repositório. Os identificadores `RF-018`, `ADR-020` e `TD-017` seguem a numeração contínua das fases anteriores ([requisitos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/requisitos), [ADRs](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/arquitetura/adr) e [dívida técnica](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/tech-debt) do p3). A fase 4 começa em RF-028 e ADR-034.
+
+A RFC-004 e os ADRs 034 a 043 ficam em [`docs/arquitetura` do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura). O código os cita nos comentários como `RFC-004 secao N` e `ADR-0NN`. Os entregáveis RNF-050 a RNF-052 vêm da [gap analysis da fase](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/requisitos/fase4/gap-analysis-fase-4.md).
+
+## Escopo do serviço
+
+- Ciclo de vida da OS: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
+- Saga de atendimento orquestrada pelo OS Service. A abertura da OS inicia a saga, e o consumidor conduz o caminho feliz até `FINALIZADA`. As falhas de negócio e o cancelamento disparam as compensações, uma por vez, até a OS `CANCELADA` ou até a falha da compensação. A etapa fica visível na OS e na rota de operação.
+- Prazos da saga: o processo `prazos` reenvia o comando sem resposta e compensa o passo que esgota os reenvios. Quando a compensação esgota os reenvios sem resposta, ele leva a saga ao estado `falha_na_compensacao`, de onde o admin a retoma ([Saga](#saga)).
+- API (o OpenAPI completo está em [`docs/api/`](docs/api/)):
+  - OS: `POST` e `GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409) e `POST /{id}/entrega`.
+  - Saga (admin): `GET /api/v1/sagas/{ordem_id}` e `POST /api/v1/sagas/{ordem_id}/compensacao`.
+  - Clientes e veículos, com as rotas da LGPD.
+  - Autenticação: `/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`.
+  - Acompanhamento público: `POST /api/v1/publico/acompanhamento`, com placa e documento no corpo.
+  - Operação: `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s), `GET /api/v1/ordens-de-servico/metricas` (admin: total, OS por status e permanência média em cada status) e `GET /metrics` (sempre ligado).
+  - Swagger em `/docs`.
+- Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker e consumidor idempotente da fila `os.eventos`, com retry por atraso e DLQ ([Mensageria](#mensageria)).
 - Manifestos Kubernetes em `k8s/`, com o PostgreSQL do serviço, o Job de migração e a borda no Kong ([Implantação](#implantação)).
-- E-mail ao cliente a cada mudança de situação da OS, pelo processo `notificador` e o Mailpit, e a eliminação de dados da LGPD que também anonimiza a placa na Execução e nos comandos da outbox ([seção abaixo](#notificações-por-e-mail-e-lgpd)).
-- A compensação só vai para o cluster junto com o processo `prazos`, que já está nos manifestos ([Implantação e DLQ](#implantação-e-dlq)).
-- Observabilidade: o `/metrics` de cada processo, spans do OpenTelemetry (exportados para o Jaeger com `OTEL_ENABLED=true`) e `trace_id` nos logs. Os gauges por consulta (saga, outbox e OS por status) saem do coletor da API, e `GET /api/v1/ordens-de-servico/metricas` (admin) devolve os mesmos números das OS ([seção abaixo](#observabilidade)).
+- E-mail ao cliente a cada mudança de situação da OS, pelo processo `notificador` e o Mailpit. A eliminação de dados da LGPD também anonimiza a placa na Execução e nos comandos da outbox ([Notificações por e-mail e LGPD](#notificações-por-e-mail-e-lgpd)).
+- A compensação vai para o cluster junto com o processo `prazos`. Sem ele, um participante que nunca responde deixa a saga em `compensando` sem reenvio nem alerta de prazo. Os manifestos têm os dois ([Implantação e DLQ](#implantação-e-dlq)).
+- Observabilidade: o `/metrics` de cada processo, spans do OpenTelemetry (exportados para o Jaeger com `OTEL_ENABLED=true`) e `trace_id` nos logs. Os gauges por consulta (saga, outbox e OS por status) saem do coletor da API. `GET /api/v1/ordens-de-servico/metricas` (admin) devolve os mesmos números das OS ([Observabilidade](#observabilidade)).
 
 ## Autenticação
 
