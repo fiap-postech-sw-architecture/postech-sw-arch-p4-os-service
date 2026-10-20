@@ -197,10 +197,22 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
             ],
         }
     ]
+    # O teto do pyproject.toml nao segura o Dependabot (ele o alarga): a minor do
+    # sqlalchemy (troca o driver do PostgreSQL) e a dos opentelemetry-* (o
+    # observability.py mexe em atributos privados do SDK) so entram a mao.
+    sem_minor = ["version-update:semver-major", "version-update:semver-minor"]
+    sem_minor_de_sqlalchemy_e_opentelemetry = [
+        {"dependency-name": "sqlalchemy", "update-types": sem_minor},
+        {"dependency-name": "opentelemetry-*", "update-types": sem_minor},
+    ]
     # Os opentelemetry-* sobem juntos no generico do uv: um grupo so deles
     # nunca recebe pacote, porque o Dependabot o trata como menos especifico.
     esperado = {
-        "uv": ("chore(deps)", {"python-patch-e-minor": patch_e_minor}, []),
+        "uv": (
+            "chore(deps)",
+            {"python-patch-e-minor": patch_e_minor},
+            sem_minor_de_sqlalchemy_e_opentelemetry,
+        ),
         "github-actions": ("ci", {"actions-patch-e-minor": patch_e_minor}, []),
         "docker": (
             "chore(deps)",
