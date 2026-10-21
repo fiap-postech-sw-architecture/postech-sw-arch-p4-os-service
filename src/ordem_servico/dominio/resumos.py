@@ -10,7 +10,8 @@ funcoes do fim do modulo.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import copy
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -116,7 +117,7 @@ class ResumoPagamento(ValueObject):
 
     def confirmado(self) -> ResumoPagamento:
         """O mesmo pagamento, confirmado pelo Billing."""
-        return replace(self, status=StatusPagamento.CONFIRMADO)
+        return copy.replace(self, status=StatusPagamento.CONFIRMADO)
 
     def recusado(self) -> ResumoPagamento:
         """O mesmo pagamento, recusado: so o solicitado passa a recusado.
@@ -147,12 +148,12 @@ class ResumoPagamento(ValueObject):
         que o Billing faz sozinho com a aprovacao que chega depois do
         encerramento (ADR-040).
         """
-        return replace(self, status=StatusPagamento.ESTORNADO)
+        return copy.replace(self, status=StatusPagamento.ESTORNADO)
 
     def _se_solicitado(self, novo: StatusPagamento) -> ResumoPagamento:
         if self.status is not StatusPagamento.SOLICITADO:
             return self
-        return replace(self, status=novo)
+        return copy.replace(self, status=novo)
 
 
 def pagamento_solicitado(

@@ -29,7 +29,7 @@ relay se perderia ate o poll de seguranca.
 
 from __future__ import annotations
 
-import dataclasses
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
@@ -288,7 +288,7 @@ class Outbox:
             ).scalar_one_or_none()
         if renovada is None:
             return None
-        return dataclasses.replace(linha, lease_ate=renovada)
+        return copy.replace(linha, lease_ate=renovada)
 
     def marcar_entregue(self, linha: LinhaDaOutbox) -> bool:
         return self._marcacao.entregue(linha)
