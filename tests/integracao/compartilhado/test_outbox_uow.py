@@ -143,17 +143,15 @@ def test_publicar_comando_grava_o_contexto_do_span_corrente(
 
 def test_rollback_descarta_o_comando(session: Session) -> None:
     ordem_id = uuid4()
+    dados = _dados_de_solicitar_diagnostico(ordem_id)
+    falha = RuntimeError("falhou depois de publicar")
 
     with (
         pytest.raises(RuntimeError, match="falhou depois de publicar"),
         SQLAlchemyUnitOfWork(session_factory=lambda: session) as uow,
     ):
-        uow.publicar_comando(
-            "SolicitarDiagnostico",
-            _dados_de_solicitar_diagnostico(ordem_id),
-            correlation_id=ordem_id,
-        )
-        raise RuntimeError("falhou depois de publicar")
+        uow.publicar_comando("SolicitarDiagnostico", dados, correlation_id=ordem_id)
+        raise falha
 
     assert _linhas(session) == []
 

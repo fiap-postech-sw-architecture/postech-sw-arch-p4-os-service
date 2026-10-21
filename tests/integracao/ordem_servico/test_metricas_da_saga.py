@@ -147,8 +147,9 @@ def test_rollback_e_conflito_descartam_os_fatos(
         _concluir_diagnostico(saga_b, timedelta(minutes=2))
         SagaSQLAlchemyRepository(sessao_a).salvar(saga_a)
         sessao_a.commit()
+        repositorio = SagaSQLAlchemyRepository(sessao_b)
         with pytest.raises(ConflitoDeConcorrenciaException):
-            SagaSQLAlchemyRepository(sessao_b).salvar(saga_b)
+            repositorio.salvar(saga_b)
         # Fechada sem commit: o fato de B nao vira metrica.
 
     contagem, soma = duracoes

@@ -240,8 +240,9 @@ class TestSemConsumidor:
         with capture_logs() as logs:
             resultado = prazos.caso_de_uso.executar()
 
+        depois = (prazos.saga.etapa, prazos.saga.reenvios, prazos.saga.passos)
         assert resultado == ResultadoDoCiclo(pausado=True)
-        assert (prazos.saga.etapa, prazos.saga.reenvios, prazos.saga.passos) == antes
+        assert depois == antes
         assert (prazos.comandos, prazos.transacao.commits) == ([], 0)
         assert [e["event"] for e in logs] == ["saga deadlines paused"]
         assert (logs[0]["log_level"], logs[0]["motivo"]) == (

@@ -107,10 +107,9 @@ class TestErrosSemDadosDaLinha:
 
     def test_mensagem_de_erro_do_statement_sem_os_valores(self) -> None:
         engine = criar_engine("sqlite:///:memory:")
+        consulta = text("SELECT * FROM inexistente WHERE placa = :p")
         with engine.connect() as conn, pytest.raises(DBAPIError) as erro:
-            conn.execute(
-                text("SELECT * FROM inexistente WHERE placa = :p"), {"p": "ABC1D23"}
-            )
+            conn.execute(consulta, {"p": "ABC1D23"})
         engine.dispose()
         assert "ABC1D23" not in str(erro.value)
 

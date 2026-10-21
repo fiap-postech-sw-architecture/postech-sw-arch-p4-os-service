@@ -237,9 +237,10 @@ class TestReenviar:
         saga = _saga_linear("aguardando_orcamento")
         antes = foto_da_saga(saga)
 
+        reenvio = _reenvio_de(saga, **campos)
         with pytest.raises(TransicaoDaSagaInvalidaError):
             saga.reenviar(
-                _reenvio_de(saga, **campos),
+                reenvio,
                 agora=VENCIDO,
                 ator=ATOR_PRAZOS,
                 maximo=MAXIMO,
@@ -252,9 +253,10 @@ class TestReenviar:
         antes = foto_da_saga(saga)
         usado = _id_do_envio(saga, 0)
 
+        reenvio = _reenvio_de(saga, id=usado)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="repete o id"):
             saga.reenviar(
-                _reenvio_de(saga, id=usado),
+                reenvio,
                 agora=VENCIDO,
                 ator=ATOR_PRAZOS,
                 maximo=MAXIMO,
@@ -273,10 +275,9 @@ class TestReenviar:
         saga = _saga_linear("aguardando_pagamento")
         antes = foto_da_saga(saga)
 
+        reenvio = _reenvio_de(saga)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="instante"):
-            saga.reenviar(
-                _reenvio_de(saga), agora=instante, ator=ATOR_PRAZOS, maximo=MAXIMO
-            )
+            saga.reenviar(reenvio, agora=instante, ator=ATOR_PRAZOS, maximo=MAXIMO)
 
         assert foto_da_saga(saga) == antes
 
@@ -300,10 +301,9 @@ class TestReenviar:
         saga = _saga_parada(("EstornarPagamento",), falha="estorno_recusado")
         antes = foto_da_saga(saga)
 
+        reenvio = _reenvio_de(saga)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="sem prazo"):
-            saga.reenviar(
-                _reenvio_de(saga), agora=VENCIDO, ator=ATOR_PRAZOS, maximo=MAXIMO
-            )
+            saga.reenviar(reenvio, agora=VENCIDO, ator=ATOR_PRAZOS, maximo=MAXIMO)
 
         assert foto_da_saga(saga) == antes
 
@@ -486,12 +486,13 @@ class TestEsgotarEmCompensacao:
         saga = _saga_compensando(("LiberarReserva",), reenvios=5)
         antes = foto_da_saga(saga)
 
+        envio = _reenvio_de(saga)
         with pytest.raises(TransicaoDaSagaInvalidaError):
             saga.esgotar_prazo(
                 agora=VENCIDO,
                 ator=ATOR_PRAZOS,
                 maximo=MAXIMO,
-                envio=_reenvio_de(saga),
+                envio=envio,
             )
 
         assert foto_da_saga(saga) == antes
@@ -522,10 +523,9 @@ class TestMaximoDeReenvios:
         )
         antes = foto_da_saga(saga)
 
+        reenvio = _reenvio_de(saga)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="alem do maximo"):
-            saga.reenviar(
-                _reenvio_de(saga), agora=VENCIDO, ator=ATOR_PRAZOS, maximo=maximo
-            )
+            saga.reenviar(reenvio, agora=VENCIDO, ator=ATOR_PRAZOS, maximo=maximo)
 
         assert foto_da_saga(saga) == antes
 
@@ -631,14 +631,14 @@ class TestEsgotarSemPrazo:
     def test_instante_que_volta_e_recusado(self) -> None:
         saga = _saga_compensando(("LiberarReserva",), reenvios=5)
 
+        agora = AGORA - timedelta(seconds=1)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="instante"):
-            saga.esgotar_prazo(
-                agora=AGORA - timedelta(seconds=1), ator="x", maximo=MAXIMO
-            )
+            saga.esgotar_prazo(agora=agora, ator="x", maximo=MAXIMO)
 
     def test_sem_comando_em_voo_nao_ha_o_que_reenviar(self) -> None:
+        saga = saga_em("aguardando_decisao")
         with pytest.raises(TransicaoDaSagaInvalidaError, match="sem comando em voo"):
-            comando_a_reenviar(saga_em("aguardando_decisao"))
+            comando_a_reenviar(saga)
 
 
 class TestRetomar:
@@ -735,8 +735,9 @@ class TestRetomar:
     def test_compensando_nao_e_retomada(self) -> None:
         saga = _saga_compensando(("LiberarReserva",))
 
+        reenvio = _reenvio_de(saga)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="retomada"):
-            saga.retomar(_reenvio_de(saga), agora=VENCIDO, ator=ATOR_ATENDENTE)
+            saga.retomar(reenvio, agora=VENCIDO, ator=ATOR_ATENDENTE)
 
     @pytest.mark.parametrize(
         "campos",
@@ -755,20 +756,19 @@ class TestRetomar:
         )
         antes = foto_da_saga(saga)
 
+        reenvio = _reenvio_de(saga, **campos)
         with pytest.raises(TransicaoDaSagaInvalidaError):
-            saga.retomar(
-                _reenvio_de(saga, **campos), agora=VENCIDO, ator=ATOR_ATENDENTE
-            )
+            saga.retomar(reenvio, agora=VENCIDO, ator=ATOR_ATENDENTE)
 
         assert foto_da_saga(saga) == antes
 
     def test_instante_que_volta_e_recusado(self) -> None:
         saga = _saga_parada(("EstornarPagamento",), falha="estorno_recusado")
 
+        reenvio = _reenvio_de(saga)
+        agora = AGORA - timedelta(seconds=1)
         with pytest.raises(TransicaoDaSagaInvalidaError, match="instante"):
-            saga.retomar(
-                _reenvio_de(saga), agora=AGORA - timedelta(seconds=1), ator="x"
-            )
+            saga.retomar(reenvio, agora=agora, ator="x")
 
     def test_a_saga_retomada_pode_esgotar_e_ser_retomada_de_novo(self) -> None:
         saga = _saga_parada(("EstornarPagamento",), falha="estorno_recusado")

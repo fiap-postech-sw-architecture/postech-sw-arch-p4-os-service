@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from opentelemetry import trace
 
@@ -49,6 +49,12 @@ if TYPE_CHECKING:
     from src.compartilhado.aplicacao.mensageria import Desfecho, MensagemRecebida
     from src.compartilhado.infraestrutura.unit_of_work import TransacaoDaMensagem
 
+# Atributos do span ``process <tipo>`` que o tratamento da saga preenche (ADR-043).
+_SPAN_ETAPA: Final = "pytstop.saga.etapa"
+_SPAN_ETAPA_NOVA: Final = "pytstop.saga.etapa_nova"
+_SPAN_DESFECHO: Final = "pytstop.saga.desfecho"
+_SPAN_FALHA: Final = "pytstop.saga.falha"
+
 
 def tratar_evento_da_saga(
     mensagem: MensagemRecebida,
@@ -75,25 +81,25 @@ def tratar_evento_da_saga(
     except EventoAdiantadoError as exc:
         span.set_attributes(
             {
-                "pytstop.saga.etapa": exc.etapa.value,
-                "pytstop.saga.desfecho": "adiantada",
+                _SPAN_ETAPA: exc.etapa.value,
+                _SPAN_DESFECHO: "adiantada",
             }
         )
         raise
     except EventoRecusadoError as exc:
-        span.set_attribute("pytstop.saga.desfecho", "recusada")
+        span.set_attribute(_SPAN_DESFECHO, "recusada")
         if exc.etapa is not None:
-            span.set_attribute("pytstop.saga.etapa", exc.etapa.value)
+            span.set_attribute(_SPAN_ETAPA, exc.etapa.value)
         raise
     span.set_attributes(
         {
-            "pytstop.saga.etapa": tratamento.etapa.value,
-            "pytstop.saga.etapa_nova": tratamento.etapa_nova.value,
-            "pytstop.saga.desfecho": tratamento.desfecho.value,
+            _SPAN_ETAPA: tratamento.etapa.value,
+            _SPAN_ETAPA_NOVA: tratamento.etapa_nova.value,
+            _SPAN_DESFECHO: tratamento.desfecho.value,
         }
     )
     if tratamento.falha is not None:
-        span.set_attribute("pytstop.saga.falha", tratamento.falha)
+        span.set_attribute(_SPAN_FALHA, tratamento.falha)
     return tratamento.desfecho
 
 

@@ -375,12 +375,10 @@ def test_entrega_com_commit_recusado_deixa_a_os_finalizada_e_sem_pedido_de_email
 
     # O trigger deferido recusa o pedido de e-mail no COMMIT, depois de a OS ter
     # mudado para `entregue`: so a transacao unica desfaz as duas escritas.
-    with (
-        notificacoes_recusando_no_commit(engine),
-        session_factory() as sess,
-        pytest.raises(DBAPIError, match="notificacoes indisponivel"),
-    ):
-        obter_registrar_entrega(sess).executar(ordem_id, ator=ATENDENTE)
+    with notificacoes_recusando_no_commit(engine), session_factory() as sess:
+        registrar = obter_registrar_entrega(sess)
+        with pytest.raises(DBAPIError, match="notificacoes indisponivel"):
+            registrar.executar(ordem_id, ator=ATENDENTE)
 
     assert _estado(engine, ordem_id) == antes
     with engine.connect() as conexao:

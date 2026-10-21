@@ -204,12 +204,10 @@ class TestEventosMapeamento:
             _documento=_DocumentoEstrangeiro(numero="X123"),
             _contato=Contato(valor="11999990000"),
         )
-        with (
-            Session(engine_sqlite) as sessao,  # type: ignore[arg-type]
-            pytest.raises(TypeError, match="nao suportado"),
-        ):
+        with Session(engine_sqlite) as sessao:  # type: ignore[arg-type]
             sessao.add(cliente)
-            sessao.flush()
+            with pytest.raises(TypeError, match="nao suportado"):
+                sessao.flush()
 
     def test_insert_de_cliente_com_cnpj(self, engine_sqlite: object) -> None:
         cliente_id = uuid4()

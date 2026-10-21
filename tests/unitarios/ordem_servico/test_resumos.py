@@ -159,8 +159,9 @@ class TestCicloDoPagamento:
         assert pagamento_solicitado(None, novo) is novo
 
     def test_segundo_pedido_levanta(self) -> None:
+        primeiro, segundo = _pagamento(), _pagamento()
         with pytest.raises(ViolacaoRegraDeNegocioException, match="ja solicitado"):
-            pagamento_solicitado(_pagamento(), _pagamento())
+            pagamento_solicitado(primeiro, segundo)
 
     @pytest.mark.parametrize(
         "status", [s for s in StatusPagamento if s is not StatusPagamento.SOLICITADO]
@@ -168,8 +169,9 @@ class TestCicloDoPagamento:
     def test_primeiro_resumo_em_outro_estado_levanta(
         self, status: StatusPagamento
     ) -> None:
+        pagamento = _pagamento(status=status)
         with pytest.raises(ViolacaoRegraDeNegocioException, match=status.value):
-            pagamento_solicitado(None, _pagamento(status=status))
+            pagamento_solicitado(None, pagamento)
 
     def test_confirmado_parte_do_solicitado(self) -> None:
         solicitado = _pagamento()
@@ -182,8 +184,9 @@ class TestCicloDoPagamento:
     def test_estado_com_transicao_propria_nao_passa_por_pagamento_no_estado(
         self, status: StatusPagamento
     ) -> None:
+        pagamento = _pagamento()
         with pytest.raises(ViolacaoRegraDeNegocioException, match=status.value):
-            pagamento_no_estado(_pagamento(), status)
+            pagamento_no_estado(pagamento, status)
 
     def test_estado_depois_do_checkout_sem_resumo_levanta(self) -> None:
         with pytest.raises(ViolacaoRegraDeNegocioException, match="sem pagamento"):

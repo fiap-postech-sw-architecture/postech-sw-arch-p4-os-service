@@ -169,12 +169,11 @@ class TestRegistrar:
         )
         assert result.email == "user@test.com"
         assert repo.obter_por_email("user@test.com") is not None
+        dto = RegistrarDTO(
+            email="uSeR@tEsT.com", senha="senhaforte1234", papel=Papel.ADMIN
+        )
         with pytest.raises(EmailDuplicadoException):
-            uc.executar(
-                RegistrarDTO(
-                    email="uSeR@tEsT.com", senha="senhaforte1234", papel=Papel.ADMIN
-                )
-            )
+            uc.executar(dto)
 
     def test_integrity_error_no_commit_vira_email_duplicado(self) -> None:
         # Corrida check-then-insert (p3 #167): email_existe passa nos dois
@@ -192,12 +191,11 @@ class TestRegistrar:
         uc = Registrar(
             repo=RepoQueEstouraUnique(), uow=uow, password_hasher=PasswordHasher()
         )
+        dto = RegistrarDTO(
+            email="race@test.com", senha="senhaforte1234", papel=Papel.ADMIN
+        )
         with pytest.raises(EmailDuplicadoException):
-            uc.executar(
-                RegistrarDTO(
-                    email="race@test.com", senha="senhaforte1234", papel=Papel.ADMIN
-                )
-            )
+            uc.executar(dto)
 
     def test_usa_o_password_hasher_injetado(self) -> None:
         # Prova a inversao de dependencia (TD-019): o use case delega ao port
@@ -253,8 +251,9 @@ class TestLogin:
         repo = FakeUsuarioRepository()
         jwt_svc = _jwt_service()
         uc = Login(repo=repo, jwt_service=jwt_svc, password_hasher=PasswordHasher())
+        dto = LoginDTO(email="x@x.com", senha="senhaerrada12")
         with pytest.raises(CredenciaisInvalidasException):
-            uc.executar(LoginDTO(email="x@x.com", senha="senhaerrada12"))
+            uc.executar(dto)
 
     def test_senha_incorreta(self) -> None:
         repo = FakeUsuarioRepository()
@@ -266,8 +265,9 @@ class TestLogin:
         repo.salvar(usuario)
         jwt_svc = _jwt_service()
         uc = Login(repo=repo, jwt_service=jwt_svc, password_hasher=PasswordHasher())
+        dto = LoginDTO(email="test@test.com", senha="erradaerrada1")
         with pytest.raises(CredenciaisInvalidasException):
-            uc.executar(LoginDTO(email="test@test.com", senha="erradaerrada1"))
+            uc.executar(dto)
 
     def test_login_com_email_em_caixa_mista(self) -> None:
         # O login normaliza o e-mail para lowercase antes da busca (p3 #167):
@@ -292,8 +292,9 @@ class TestLogin:
         repo = FakeUsuarioRepository()
         hasher = FakePasswordHasher()
         uc = Login(repo=repo, jwt_service=FakeJWTService(), password_hasher=hasher)
+        dto = LoginDTO(email="naoexiste@x.com", senha="qualquercoisa12")
         with pytest.raises(CredenciaisInvalidasException):
-            uc.executar(LoginDTO(email="naoexiste@x.com", senha="qualquercoisa12"))
+            uc.executar(dto)
         assert hasher.verificados == [_HASH_DUMMY_TIMING]
 
     def test_usa_os_ports_injetados(self) -> None:

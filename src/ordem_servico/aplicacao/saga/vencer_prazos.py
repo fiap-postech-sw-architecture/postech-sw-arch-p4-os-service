@@ -231,11 +231,10 @@ class VencerPrazos:
             # Repetir no mesmo ciclo nao muda nada, e a saga de prazo mais antigo
             # seria sempre a primeira: ela fica de fora dele, o erro vai ao log e o
             # gauge de prazo vencido mantem o alerta de saga parada.
-            detalhe = (
-                {"motivo": str(exc)}
-                if isinstance(exc, _RECUSAS_DO_DOMINIO)
-                else {"onde": onde(exc)}
-            )
+            if isinstance(exc, _RECUSAS_DO_DOMINIO):
+                detalhe = {"motivo": str(exc)}
+            else:
+                detalhe = {"onde": onde(exc)}
             _log.error(
                 "saga deadline refused",
                 correlation_id=str(ordem_id),

@@ -146,10 +146,9 @@ def test_falha_de_transporte_vira_a_excecao_da_porta_sem_a_mensagem_de_origem(
 
     monkeypatch.setattr(smtplib, "SMTP", smtp_que_falha)
 
+    adapter = SmtpEmailAdapter("mailpit", 1025, "oficina@pytstop.local")
     with pytest.raises(FalhaEnvioEmailError) as capturada:
-        SmtpEmailAdapter("mailpit", 1025, "oficina@pytstop.local").enviar(
-            "maria@cliente.com", "assunto", "corpo"
-        )
+        adapter.enviar("maria@cliente.com", "assunto", "corpo")
 
     # O endereco do destinatario nao sai na excecao nem na cadeia dela.
     assert str(capturada.value) == type(erro).__name__

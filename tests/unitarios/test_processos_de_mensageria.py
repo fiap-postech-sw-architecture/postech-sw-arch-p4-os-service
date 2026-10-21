@@ -160,14 +160,17 @@ def test_handler_marca_o_adiantado_no_span_e_relanca(
     falso = _OrquestradorFalso(EventoAdiantadoError(EtapaSaga.AGUARDANDO_AGENDAMENTO))
     monkeypatch.setattr(processo_consumidor, "OrquestradorDaSaga", falso)
 
+    mensagem = _mensagem()
+    transacao = TransacaoDaMensagem(MagicMock())
+    prazo_resposta = timedelta(seconds=9)
     with (
         rastreador.tracer.start_as_current_span("process ExecucaoIniciada"),
         pytest.raises(EventoAdiantadoError),
     ):
         processo_consumidor.tratar_evento_da_saga(
-            _mensagem(),
-            TransacaoDaMensagem(MagicMock()),
-            prazo_resposta=timedelta(seconds=9),
+            mensagem,
+            transacao,
+            prazo_resposta=prazo_resposta,
         )
 
     (span,) = rastreador.spans()
@@ -205,14 +208,17 @@ def test_handler_marca_a_recusa_no_span_e_relanca(
         processo_consumidor, "OrquestradorDaSaga", _OrquestradorFalso(recusa)
     )
 
+    mensagem = _mensagem()
+    transacao = TransacaoDaMensagem(MagicMock())
+    prazo_resposta = timedelta(seconds=9)
     with (
         rastreador.tracer.start_as_current_span("process OrcamentoRecusado"),
         pytest.raises(EventoRecusadoError) as exc,
     ):
         processo_consumidor.tratar_evento_da_saga(
-            _mensagem(),
-            TransacaoDaMensagem(MagicMock()),
-            prazo_resposta=timedelta(seconds=9),
+            mensagem,
+            transacao,
+            prazo_resposta=prazo_resposta,
         )
 
     assert exc.value is recusa
@@ -323,7 +329,7 @@ def test_main_do_notificador_sobe_so_com_o_banco_e_o_smtp_e_fecha_o_banco(
 ) -> None:
     engine = MagicMock()
     registro: list[str] = []
-    _Processo.criados = []
+    monkeypatch.setattr(_Processo, "criados", [])
     monkeypatch.setattr(processo_notificador, "instalar_sinais", lambda parar: None)
     monkeypatch.setattr(
         processo_notificador,

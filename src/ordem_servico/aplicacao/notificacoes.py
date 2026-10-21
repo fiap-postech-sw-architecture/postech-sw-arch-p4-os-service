@@ -59,7 +59,7 @@ _M = ModeloDeNotificacao
 EVENTO_DO_CHECKOUT: Final = "PagamentoSolicitado"
 
 # O modelo do e-mail de cada status em que a OS entra; ``None`` = sem e-mail.
-# Todo status esta aqui (o teste confere): um status novo pede a decisao.
+# Cada status esta aqui (o teste confere): um status novo pede a decisao.
 MODELO_DO_STATUS: Final[Mapping[StatusOrdem, ModeloDeNotificacao | None]] = (
     MappingProxyType(
         {

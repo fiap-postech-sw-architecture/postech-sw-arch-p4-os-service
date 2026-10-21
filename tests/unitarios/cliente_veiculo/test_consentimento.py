@@ -33,11 +33,13 @@ class TestConsentimentoCliente:
         assert c.tipo == "marketing"
 
     def test_tipo_so_espacos_falha(self) -> None:
+        cliente_id = uuid4()
+        concedido_em = datetime.now(tz=UTC)
         with pytest.raises(ValueError, match="tipo"):
             ConsentimentoCliente(
-                _cliente_id=uuid4(),
+                _cliente_id=cliente_id,
                 _tipo="   ",
-                _concedido_em=datetime.now(tz=UTC),
+                _concedido_em=concedido_em,
             )
 
     def test_factory_criar_normaliza_tipo(self) -> None:
@@ -77,17 +79,20 @@ class TestConsentimentoCliente:
             c.revogar(agora)
 
     def test_consentimento_sem_cliente_id_falha(self) -> None:
+        concedido_em = datetime.now(tz=UTC)
         with pytest.raises(ValueError, match="cliente_id"):
             ConsentimentoCliente(
                 _tipo="tratamento_dados",
-                _concedido_em=datetime.now(tz=UTC),
+                _concedido_em=concedido_em,
             )
 
     def test_consentimento_sem_tipo_falha(self) -> None:
+        cliente_id = uuid4()
+        concedido_em = datetime.now(tz=UTC)
         with pytest.raises(ValueError, match="tipo"):
             ConsentimentoCliente(
-                _cliente_id=uuid4(),
-                _concedido_em=datetime.now(tz=UTC),
+                _cliente_id=cliente_id,
+                _concedido_em=concedido_em,
             )
 
     def test_consentimento_sem_concedido_em_falha(self) -> None:

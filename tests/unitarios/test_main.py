@@ -458,8 +458,9 @@ class TestMain:
                     clear=False,
                 ),
             ):
+                ciclo_de_vida = lifespan(app)
                 with pytest.raises(RuntimeError, match="exportador"):
-                    async with lifespan(app):
+                    async with ciclo_de_vida:
                         pytest.fail("o app nao pode subir")
                 mock_desregistrar.assert_called_once_with(coletor)
                 mock_engine.return_value.dispose.assert_called_once_with()
@@ -560,8 +561,9 @@ class TestMain:
                 async with lifespan(app):
                     pass
 
+        subida = _run()
         with pytest.raises(RuntimeError, match="POSTGRES_PASSWORD"):
-            asyncio.run(_run())
+            asyncio.run(subida)
 
     def test_lifespan_sem_database_url_em_producao_falha(self) -> None:
         app = FastAPI()
@@ -585,8 +587,9 @@ class TestMain:
                 async with lifespan(app):
                     pass
 
+        subida = _run()
         with pytest.raises(RuntimeError, match="DATABASE_URL obrigatoria"):
-            asyncio.run(_run())
+            asyncio.run(subida)
 
     def test_lifespan_chama_validar_segredos(self) -> None:
         """O lifespan exerce a guarda de segredos no startup.
@@ -693,8 +696,9 @@ class TestMain:
                 async with lifespan(app):
                     pass
 
+        subida = _run()
         with pytest.raises(RuntimeError, match="SAGA_PRAZO_RESPOSTA_SEGUNDOS"):
-            asyncio.run(_run())
+            asyncio.run(subida)
 
     def test_lifespan_aborta_com_a_chave_rsa_de_demo_em_producao(self) -> None:
         """Boot em producao falha com a chave RSA de demonstracao do compose.
@@ -731,5 +735,6 @@ class TestMain:
                 async with lifespan(app):
                     pass
 
+        subida = _run()
         with pytest.raises(RuntimeError, match="chave RSA de demonstracao"):
-            asyncio.run(_run())
+            asyncio.run(subida)

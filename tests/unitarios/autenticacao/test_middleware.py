@@ -403,8 +403,9 @@ class TestGateSemChaveConfigurada:
         # Config ruim derruba a requisicao (500): o gate nao a engole como se o
         # token fosse invalido.
         monkeypatch.delenv("JWT_PRIVATE_KEY", raising=False)
+        credentials = credenciais("qualquer")
         with pytest.raises(RuntimeError, match="JWT_PRIVATE_KEY nao configurada"):
             obter_usuario_atual(
-                credentials=credenciais("qualquer"),
+                credentials=credentials,
                 session=_MOCK_SESSION,
             )

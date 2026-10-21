@@ -634,8 +634,9 @@ class TestCicloNoBanco:
                 agora=T0 + timedelta(seconds=1),
                 ator="consumidor",
             )
+            repositorio = SagaSQLAlchemyRepository(consumidor)
             with pytest.raises(ConflitoDeConcorrenciaException):
-                SagaSQLAlchemyRepository(consumidor).salvar(lida)
+                repositorio.salvar(lida)
             consumidor.rollback()
 
             # Volta pela retry, rele a saga ja reenviada e a resposta ao comando

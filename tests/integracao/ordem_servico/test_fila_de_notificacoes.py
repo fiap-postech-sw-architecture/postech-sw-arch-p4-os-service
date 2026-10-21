@@ -152,11 +152,13 @@ def test_pedido_de_uma_transacao_desfeita_nao_existe(
 def test_pedido_de_uma_os_inexistente_e_recusado_pelo_banco(
     engine: Engine, session_factory: sessionmaker[Session]
 ) -> None:
-    with pytest.raises(IntegrityError), session_factory() as sessao:
-        NotificacoesSQLAlchemy(sessao).registrar(
-            Notificacao(uuid4(), ModeloDeNotificacao.SITUACAO, StatusOrdem.ENTREGUE)
-        )
-        sessao.commit()
+    pedido = Notificacao(uuid4(), ModeloDeNotificacao.SITUACAO, StatusOrdem.ENTREGUE)
+
+    with session_factory() as sessao:
+        fila = NotificacoesSQLAlchemy(sessao)
+        # A FK nao e adiada: o INSERT ja e recusado no registrar, antes do commit.
+        with pytest.raises(IntegrityError):
+            fila.registrar(pedido)
 
     assert _linhas(engine) == []
 

@@ -167,14 +167,13 @@ def test_erro_do_banco_nao_leva_o_detail_do_driver_ao_span(
     with engine_rastreado.begin() as conexao:
         conexao.execute(text("CREATE TABLE tmp_placas (placa text UNIQUE)"))
     try:
+        insercao = text("INSERT INTO tmp_placas VALUES (:p), (:p)")
         with (
             pytest.raises(IntegrityError) as erro,
             rastreador.tracer.start_as_current_span("POST /x", kind=SpanKind.SERVER),
             engine_rastreado.begin() as conexao,
         ):
-            conexao.execute(
-                text("INSERT INTO tmp_placas VALUES (:p), (:p)"), {"p": _PLACA}
-            )
+            conexao.execute(insercao, {"p": _PLACA})
     finally:
         with engine_rastreado.begin() as conexao:
             conexao.execute(text("DROP TABLE tmp_placas"))

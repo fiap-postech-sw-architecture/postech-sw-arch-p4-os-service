@@ -32,8 +32,9 @@ class TestCliente:
         assert cliente.veiculos == ()
 
     def test_criacao_sem_cpf(self) -> None:
+        contato = Contato(valor="11999999999")
         with pytest.raises(ValueError, match="Documento do cliente e obrigatorio"):
-            Cliente(_nome="Joao", _contato=Contato(valor="11999999999"))
+            Cliente(_nome="Joao", _contato=contato)
 
     def test_documento_nao_pode_ser_nulo(self) -> None:
         cliente = Cliente.__new__(Cliente)
@@ -43,8 +44,9 @@ class TestCliente:
             _ = cliente.documento
 
     def test_criacao_sem_contato(self) -> None:
+        documento = CPF(numero=CPF_VALIDO)
         with pytest.raises(ValueError, match="Contato do cliente e obrigatorio"):
-            Cliente(_nome="Joao", _documento=CPF(numero=CPF_VALIDO))
+            Cliente(_nome="Joao", _documento=documento)
 
     def test_contato_nao_pode_ser_nulo(self) -> None:
         cliente = Cliente.__new__(Cliente)
@@ -139,13 +141,15 @@ class TestCliente:
         # O invariante "inativo rejeita mutacao" vive no agregado: e a ultima
         # linha mesmo que a aplicacao pre-cheque para a mensagem 409.
         cliente = self._cliente_inativo()
+        contato = Contato(valor="11888888888")
         with pytest.raises(ViolacaoRegraDeNegocioException, match="cliente inativo"):
-            cliente.atualizar(nome="Novo", contato=Contato(valor="11888888888"))
+            cliente.atualizar(nome="Novo", contato=contato)
 
     def test_adicionar_veiculo_cliente_inativo_rejeitado(self) -> None:
         cliente = self._cliente_inativo()
+        placa = Placa(valor="ABC1234")
         with pytest.raises(ViolacaoRegraDeNegocioException, match="cliente inativo"):
-            cliente.adicionar_veiculo(Placa(valor="ABC1234"), "Fiat", "Uno", 2020)
+            cliente.adicionar_veiculo(placa, "Fiat", "Uno", 2020)
 
     def test_remover_veiculo_cliente_inativo_rejeitado(self) -> None:
         # Brecha antiga: RemoverVeiculo nao tinha pre-check na aplicacao, entao
@@ -192,14 +196,16 @@ class TestCliente:
 
     def test_criacao_nome_vazio_invalido(self) -> None:
         cpf = CPF(numero=CPF_VALIDO)
+        contato = Contato(valor="11999999999")
         with pytest.raises(ValueError, match="Nome do cliente nao pode ser vazio"):
-            Cliente(_nome="", _documento=cpf, _contato=Contato(valor="11999999999"))
+            Cliente(_nome="", _documento=cpf, _contato=contato)
 
     def test_criacao_nome_whitespace_invalido(self) -> None:
         # Whitespace-only passava antes do strip() em __post_init__ (p3 #168).
         cpf = CPF(numero=CPF_VALIDO)
+        contato = Contato(valor="11999999999")
         with pytest.raises(ValueError, match="Nome do cliente nao pode ser vazio"):
-            Cliente(_nome="   ", _documento=cpf, _contato=Contato(valor="11999999999"))
+            Cliente(_nome="   ", _documento=cpf, _contato=contato)
 
     def test_criacao_nome_e_aparado(self) -> None:
         cpf = CPF(numero=CPF_VALIDO)
@@ -209,26 +215,27 @@ class TestCliente:
         assert cliente.nome == "Joao"
 
     def test_criacao_documento_none_invalido(self) -> None:
+        contato = Contato(valor="11999999999")
         with pytest.raises(ValueError, match="Documento do cliente e obrigatorio"):
-            Cliente(
-                _nome="Joao", _documento=None, _contato=Contato(valor="11999999999")
-            )
+            Cliente(_nome="Joao", _documento=None, _contato=contato)
 
     def test_atualizar_nome_vazio_invalido(self) -> None:
         cpf = CPF(numero=CPF_VALIDO)
         cliente = Cliente(
             _nome="Joao", _documento=cpf, _contato=Contato(valor="11999999999")
         )
+        contato = Contato(valor="11888888888")
         with pytest.raises(ValueError, match="Nome do cliente nao pode ser vazio"):
-            cliente.atualizar(nome="", contato=Contato(valor="11888888888"))
+            cliente.atualizar(nome="", contato=contato)
 
     def test_atualizar_nome_whitespace_invalido(self) -> None:
         cpf = CPF(numero=CPF_VALIDO)
         cliente = Cliente(
             _nome="Joao", _documento=cpf, _contato=Contato(valor="11999999999")
         )
+        contato = Contato(valor="11888888888")
         with pytest.raises(ValueError, match="Nome do cliente nao pode ser vazio"):
-            cliente.atualizar(nome=" \t ", contato=Contato(valor="11888888888"))
+            cliente.atualizar(nome=" \t ", contato=contato)
 
     def test_atualizar_nome_e_aparado(self) -> None:
         cpf = CPF(numero=CPF_VALIDO)

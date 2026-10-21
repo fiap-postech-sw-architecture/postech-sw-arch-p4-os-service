@@ -389,11 +389,12 @@ class TestFatosDaSaga:
         ordem = _aguardando_pagamento_sem_resumo()
         antes = _fotografia(ordem)
 
+        resumo = resumo_do_pagamento(StatusPagamento.CONFIRMADO)
         with pytest.raises(ViolacaoRegraDeNegocioException, match="confirmado"):
             ordem.registrar_estado_do_pagamento(
                 StatusPagamento.SOLICITADO,
                 ator=ATOR_PROCESSO,
-                resumo=resumo_do_pagamento(StatusPagamento.CONFIRMADO),
+                resumo=resumo,
             )
 
         assert _fotografia(ordem) == antes
@@ -505,9 +506,10 @@ class TestFatosDaSaga:
         ordem = ordem_em(S.AGUARDANDO_PAGAMENTO)
         antes = _fotografia(ordem)
 
+        resumo = resumo_do_pagamento()
         with pytest.raises(ViolacaoRegraDeNegocioException, match="so ele"):
             ordem.registrar_estado_do_pagamento(
-                estado, ator=ATOR_PROCESSO, resumo=resumo_do_pagamento()
+                estado, ator=ATOR_PROCESSO, resumo=resumo
             )
 
         assert _fotografia(ordem) == antes

@@ -100,8 +100,9 @@ class TestDescribe:
         registro = CollectorRegistry()
         registro.register(_coletor())
 
+        coletor = _coletor()
         with pytest.raises(ValueError, match="Duplicated timeseries"):
-            registro.register(_coletor())
+            registro.register(coletor)
 
 
 class TestRaspagem:
@@ -356,8 +357,9 @@ class TestRegistro:
         assert primeiro is not None
         assert segundo is None
         # O primeiro esta no registro: um coletor igual seria serie duplicada.
+        coletor = _coletor()
         with pytest.raises(ValueError, match="Duplicated timeseries"):
-            registro.register(_coletor())
+            registro.register(coletor)
 
     def test_quem_registrou_tira_e_o_processo_pode_registrar_de_novo(
         self, registro: CollectorRegistry
