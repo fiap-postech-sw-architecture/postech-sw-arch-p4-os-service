@@ -184,11 +184,10 @@ def _validar_formatos_de_configuracao() -> None:
     try:
         Fernet(os.environ["ENCRYPTION_KEY"])
     except ValueError as exc:
-        msg = (
+        raise RuntimeError(
             "ENCRYPTION_KEY invalida: precisa ser uma chave Fernet (32 bytes em "
             "base64 url-safe, gere com Fernet.generate_key())."
-        )
-        raise RuntimeError(msg) from exc
+        ) from exc
 
 
 def configurar_cors(app: FastAPI) -> None:
