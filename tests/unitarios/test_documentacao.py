@@ -819,6 +819,6 @@ def test_secao_de_cobertura_do_readme_e_a_que_o_script_gera(
         camadas=_tabela("| Camada |" + camadas),
         ramos=(_numero(ramos["total"]), _numero(ramos["cobertos"])),
     )
-    assert f"\n{cobertura.secao_do_readme(medida, run['url'])}\n" == secao, (
+    assert secao == f"\n{cobertura.secao_do_readme(medida, run['url'])}\n", (
         "secao Cobertura editada a mao: rode make cobertura-readme RUN=<id do run>"
     )
