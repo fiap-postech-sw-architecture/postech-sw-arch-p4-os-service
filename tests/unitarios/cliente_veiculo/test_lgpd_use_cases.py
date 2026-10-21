@@ -271,10 +271,11 @@ class TestExcluirDadosPessoais:
                 raise ContratoInvalidoError("recusado")
 
         uow = UowQueRecusa()
+        excluir = ExcluirDadosPessoais(
+            repo=repo, uow=uow, os_port=StubOrdemDeServicoPort()
+        )
         with pytest.raises(ContratoInvalidoError):
-            ExcluirDadosPessoais(
-                repo=repo, uow=uow, os_port=StubOrdemDeServicoPort()
-            ).executar(cliente.id)
+            excluir.executar(cliente.id)
 
         # Sem commit: a transacao (cliente, textos, outbox, comandos) cai inteira.
         assert not uow.committed

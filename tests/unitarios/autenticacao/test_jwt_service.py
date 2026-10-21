@@ -106,8 +106,9 @@ class TestValidacao:
         # O leeway e de 10 s exatos: com exp 10 s atras o token ja expirou.
         token = assinar(claims(iat=instante(-3600), exp=instante(-atraso_s)))
 
+        svc = jwt_service()
         with pytest.raises(TokenExpiradoException) as exc:
-            jwt_service().validar_token(token)
+            svc.validar_token(token)
         assert exc.value.motivo == "expired_token"
 
     @pytest.mark.parametrize(
@@ -137,8 +138,9 @@ class TestValidacao:
         # Relogio de um pod mais de 10 s adiantado: o token ainda nao "nasceu".
         token = assinar(claims(iat=instante(adianto_s), exp=instante(3600)))
 
+        svc = jwt_service()
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(token)
+            svc.validar_token(token)
         assert exc.value.motivo == "iat_in_future"
 
     @pytest.mark.parametrize(
@@ -210,8 +212,9 @@ class TestValidacao:
     def test_token_forjado_ou_de_outro_emissor_e_recusado(
         self, token: str, motivo: str
     ) -> None:
+        svc = jwt_service()
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(token)
+            svc.validar_token(token)
         assert exc.value.motivo == motivo
         assert exc.value.mensagem == "Credencial ausente, invalida ou expirada"
 
@@ -225,14 +228,18 @@ class TestValidacao:
     def test_claim_obrigatoria_ausente(self, ausente: str) -> None:
         corpo = claims()
         del corpo[ausente]
+        svc = jwt_service()
+        token = assinar(corpo)
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(assinar(corpo))
+            svc.validar_token(token)
         assert exc.value.motivo == "missing_claim"
 
     def test_corpo_adulterado_com_a_assinatura_original(self) -> None:
         token = jwt_service().gerar_access_token(uuid4(), "atendente")
+        svc = jwt_service()
+        adulterado = adulterar(token, papel="admin")
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(adulterar(token, papel="admin"))
+            svc.validar_token(adulterado)
         assert exc.value.motivo == "invalid_signature"
 
 
@@ -246,8 +253,9 @@ class TestRotacao:
         novo = com_anterior.gerar_access_token(uuid4(), "admin")
         assert jwt.get_unverified_header(novo)["kid"] == KID
 
+        svc = jwt_service()
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(antigo)
+            svc.validar_token(antigo)
         assert exc.value.motivo == "unknown_kid"
 
     def test_jwks_publica_a_atual_e_depois_a_anterior(self) -> None:
@@ -289,8 +297,9 @@ class TestRotacaoEmDuasEtapas:
         pod_antigo = jwt_service(chave=CHAVE)
         pod_novo = jwt_service(chave=OUTRA_CHAVE, anterior=CHAVE)
 
+        token_do_pod_novo = pod_novo.gerar_access_token(uuid4(), "admin")
         with pytest.raises(TokenInvalidoException) as exc:
-            pod_antigo.validar_token(pod_novo.gerar_access_token(uuid4(), "admin"))
+            pod_antigo.validar_token(token_do_pod_novo)
 
         assert exc.value.motivo == "unknown_kid"
 

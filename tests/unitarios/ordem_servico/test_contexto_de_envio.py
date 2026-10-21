@@ -157,7 +157,8 @@ class TestInstanteDoPasso:
         saga = saga_em(EtapaSaga.AGUARDANDO_DIAGNOSTICO)
         atras = timedelta(seconds=60, milliseconds=1)
 
+        contexto = _contexto_com_relogio_em(AGORA - atras)
         with capture_logs() as logs, pytest.raises(RelogioDefasadoError, match="60"):
-            _contexto_com_relogio_em(AGORA - atras).instante_do_passo(saga, tipo="x")
+            contexto.instante_do_passo(saga, tipo="x")
 
         assert [log["defasagem_segundos"] for log in logs] == [60.001]

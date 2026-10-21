@@ -170,8 +170,9 @@ class TestTravaEntreErasureEAberturaDeOS:
         with session_factory() as erasure, session_factory() as abertura:
             assert ClienteSQLAlchemyRepository(erasure).bloquear_cliente(cliente_id)
             abertura.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            adapter = ClienteSQLAlchemyAdapter(abertura)
             with pytest.raises(OperationalError, match="lock timeout"):
-                ClienteSQLAlchemyAdapter(abertura).cliente_existe(cliente_id)
+                adapter.cliente_existe(cliente_id)
 
     def test_erasure_espera_a_abertura_que_leu_o_cliente(
         self, session_factory: sessionmaker[Session], cliente_id: UUID
@@ -179,8 +180,9 @@ class TestTravaEntreErasureEAberturaDeOS:
         with session_factory() as abertura, session_factory() as erasure:
             assert ClienteSQLAlchemyAdapter(abertura).cliente_existe(cliente_id)
             erasure.execute(text("SET LOCAL lock_timeout = '200ms'"))
+            repositorio = ClienteSQLAlchemyRepository(erasure)
             with pytest.raises(OperationalError, match="lock timeout"):
-                ClienteSQLAlchemyRepository(erasure).bloquear_cliente(cliente_id)
+                repositorio.bloquear_cliente(cliente_id)
 
     def test_cliente_inexistente_nao_trava_nada(
         self, session_factory: sessionmaker[Session]

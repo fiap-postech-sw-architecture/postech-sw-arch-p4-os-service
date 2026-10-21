@@ -236,8 +236,9 @@ class TestValidadorIndependente:
         corpo = claims()
         del corpo[ausente]
 
+        token = assinar(corpo)
         with pytest.raises(jwt.MissingRequiredClaimError):
-            validar_access_token(url_base, assinar(corpo))
+            validar_access_token(url_base, token)
 
     @pytest.mark.parametrize(
         "adianto_s",
@@ -309,8 +310,9 @@ class TestValidadorIndependente:
     def test_recusa_token_forjado_ou_de_outro_tipo(
         self, url_base: str, token: Callable[[], str]
     ) -> None:
+        forjado = token()
         with pytest.raises(jwt.PyJWTError):
-            validar_access_token(url_base, token())
+            validar_access_token(url_base, forjado)
 
     @pytest.mark.parametrize(
         ("assina", "anterior"),

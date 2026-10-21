@@ -84,11 +84,12 @@ def _negado(url: str, comando: str) -> None:
     """O ``comando``, com o papel da ``url``, e recusado por falta de privilegio."""
     engine = create_engine(url)
     try:
+        instrucao = text(comando)
         with (
             engine.connect() as conexao,
             pytest.raises(ProgrammingError, match=_NEGADO),
         ):
-            conexao.execute(text(comando))
+            conexao.execute(instrucao)
     finally:
         engine.dispose()
 
@@ -382,8 +383,9 @@ def _da_aplicacao(banco: Banco) -> dict[str, str]:
 def _ainda_esperando(ambiente: dict[str, str]) -> bytes:
     """O log da espera, que nao termina enquanto a condicao nao vale."""
     # Duas voltas de 2 s mais a partida do Python.
+    espera = _espera_do_pod()
     with pytest.raises(subprocess.TimeoutExpired) as em_espera:
-        no_host(_espera_do_pod(), ambiente, prazo_s=6)
+        no_host(espera, ambiente, prazo_s=6)
     return em_espera.value.stderr or b""
 
 

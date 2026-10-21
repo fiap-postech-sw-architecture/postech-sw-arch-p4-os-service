@@ -123,8 +123,9 @@ def test_so_o_id_convertido_em_uuid_vai_para_o_log(
     ],
 )
 def test_corpo_ate_64_kib_passa_do_limite_de_tamanho(tamanho: int, motivo: str) -> None:
+    contratos = catalogo()
     with pytest.raises(_MensagemRejeitadaError) as recusa:
-        _ler_mensagem(catalogo(), None, b" " * tamanho, "DiagnosticoConcluido")
+        _ler_mensagem(contratos, None, b" " * tamanho, "DiagnosticoConcluido")
 
     assert recusa.value.motivo == motivo
     assert _CORPO_MAXIMO_BYTES == 64 * 1024

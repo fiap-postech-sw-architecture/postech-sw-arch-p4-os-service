@@ -106,8 +106,9 @@ class TestLatenciaHttp:
         template = "/api/v1/ordens-de-servico/{ordem_id}/estoura"
         antes = _contagem("GET", template, 500)
 
+        cliente = TestClient(_app())
         with pytest.raises(RuntimeError, match="erro da ordem"):
-            TestClient(_app()).get("/api/v1/ordens-de-servico/abc/estoura")
+            cliente.get("/api/v1/ordens-de-servico/abc/estoura")
 
         assert _contagem("GET", template, 500) == antes + 1
 

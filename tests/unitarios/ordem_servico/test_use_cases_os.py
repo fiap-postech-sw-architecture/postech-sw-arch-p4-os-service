@@ -149,8 +149,9 @@ class TestAbrirOrdem:
         repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
         uc = AbrirOrdem(repo, uow, ClientePortFake(cliente_ok=False), sagas)
 
+        dto = _dto()
         with pytest.raises(ClienteNaoEncontradoException):
-            uc.executar(_dto())
+            uc.executar(dto)
 
         assert (repo.salvas, sagas.salvas, uow.comandos) == ([], [], [])
         assert not uow.committed
@@ -159,8 +160,9 @@ class TestAbrirOrdem:
         repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
         uc = AbrirOrdem(repo, uow, ClientePortFake(veiculo_ok=False), sagas)
 
+        dto = _dto()
         with pytest.raises(VeiculoNaoEncontradoException):
-            uc.executar(_dto())
+            uc.executar(dto)
 
         assert (repo.salvas, sagas.salvas, uow.comandos) == ([], [], [])
         assert not uow.committed
@@ -173,16 +175,19 @@ class TestAbrirOrdem:
             ator=ATOR_ATENDENTE,
         )
         uow, sagas = FakeUnitOfWork(), SagasEmMemoria()
+        abrir = AbrirOrdem(RepoEmMemoria(), uow, ClientePortFake(), sagas)
         with pytest.raises(ValorInvalidoException, match="descricao do problema"):
-            AbrirOrdem(RepoEmMemoria(), uow, ClientePortFake(), sagas).executar(dto)
+            abrir.executar(dto)
         assert (sagas.salvas, uow.comandos) == ([], [])
 
     def test_conflito_na_saga_desfaz_tudo(self) -> None:
         repo, uow, sagas = RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
         sagas.provocar_conflito()
 
+        abrir = AbrirOrdem(repo, uow, ClientePortFake(), sagas)
+        dto = _dto()
         with pytest.raises(ConflitoDeConcorrenciaException):
-            AbrirOrdem(repo, uow, ClientePortFake(), sagas).executar(_dto())
+            abrir.executar(dto)
 
         assert not uow.committed
         assert uow.rolled_back
@@ -221,10 +226,10 @@ class TestObterOrdem:
         ]
 
     def test_inexistente_levanta_404(self) -> None:
+        obter = ObterOrdem(ConsultaDaOrdemEmMemoria(RepoEmMemoria(), SagasEmMemoria()))
+        ordem_id = uuid4()
         with pytest.raises(OrdemNaoEncontradaException):
-            ObterOrdem(
-                ConsultaDaOrdemEmMemoria(RepoEmMemoria(), SagasEmMemoria())
-            ).executar(uuid4())
+            obter.executar(ordem_id)
 
     def test_projeta_a_etapa_e_os_passos_da_saga(self) -> None:
         cenario = CenarioDaSaga()
@@ -286,8 +291,10 @@ class TestObterSaga:
         )
 
     def test_inexistente_levanta_404(self) -> None:
+        obter = ObterSaga(SagasEmMemoria())
+        ordem_id = uuid4()
         with pytest.raises(SagaNaoEncontradaException):
-            ObterSaga(SagasEmMemoria()).executar(uuid4())
+            obter.executar(ordem_id)
 
 
 def _cancelar_ordem(
@@ -339,10 +346,9 @@ class TestCancelarOrdem:
         ordem = ordem_em(status)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
+        cancelar = _cancelar_ordem(repo, uow, SagasEmMemoria())
         with pytest.raises(SagaNaoEncontradaException):
-            _cancelar_ordem(repo, uow, SagasEmMemoria()).executar(
-                ordem.id, "x", ator=ATOR_ATENDENTE
-            )
+            cancelar.executar(ordem.id, "x", ator=ATOR_ATENDENTE)
 
         assert repo.salvas == []
         assert (uow.comandos, uow.committed, uow.rolled_back) == ([], False, True)
@@ -354,10 +360,9 @@ class TestCancelarOrdem:
         repo, uow = RepoDoBanco(cenario.ordem, conflito=True), FakeUnitOfWork()
         sagas = SagasDoBanco(cenario.saga)
 
+        cancelar = _cancelar_ordem(repo, uow, sagas)
         with pytest.raises(ConflitoDeConcorrenciaException):
-            _cancelar_ordem(repo, uow, sagas).executar(
-                cenario.ordem_id, "x", ator=ATOR_ATENDENTE
-            )
+            cancelar.executar(cenario.ordem_id, "x", ator=ATOR_ATENDENTE)
 
         # Reread value (RFC-004 secao 4.5): tres leituras, e o 409 na ultima.
         assert repo.leituras == 3
@@ -372,13 +377,12 @@ class TestCancelarOrdem:
         repo = RepoDoBanco(cenario.ordem, conflito=True)
         sagas = SagasDoBanco(cenario.saga)
 
+        cancelar = _cancelar_ordem(repo, FakeUnitOfWork(), sagas)
         with (
             structlog.testing.capture_logs() as logs,
             pytest.raises(ConflitoDeConcorrenciaException),
         ):
-            _cancelar_ordem(repo, FakeUnitOfWork(), sagas).executar(
-                cenario.ordem_id, "x", ator=ATOR_ATENDENTE
-            )
+            cancelar.executar(cenario.ordem_id, "x", ator=ATOR_ATENDENTE)
 
         auditoria = [log for log in logs if log["event"].startswith("order canc")]
         assert [(log["event"], log["resultado"], log["ator"]) for log in auditoria] == [
@@ -401,10 +405,10 @@ class TestCancelarOrdem:
         assert not cenario.publicador.committed
 
     def test_inexistente_levanta_404(self) -> None:
+        cancelar = _cancelar_ordem(RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria())
+        ordem_id = uuid4()
         with pytest.raises(OrdemNaoEncontradaException):
-            _cancelar_ordem(
-                RepoEmMemoria(), FakeUnitOfWork(), SagasEmMemoria()
-            ).executar(uuid4(), "x", ator=ATOR_ATENDENTE)
+            cancelar.executar(ordem_id, "x", ator=ATOR_ATENDENTE)
 
     @pytest.mark.parametrize(("perfil", "plano"), CANCELAMENTOS)
     def test_antes_do_pivot_a_saga_compensa_e_a_os_guarda_o_pedido(
@@ -541,10 +545,9 @@ class TestRegistrarEntrega:
         ordem = ordem_em(estado)
         repo, uow = RepoEmMemoria(ordem), FakeUnitOfWork()
 
+        registrar = RegistrarEntrega(repo, uow, SagasEmMemoria(), NotificacoesEspia())
         with pytest.raises(TransicaoStatusInvalidaException):
-            RegistrarEntrega(repo, uow, SagasEmMemoria(), NotificacoesEspia()).executar(
-                ordem.id, ator=ATOR_ATENDENTE
-            )
+            registrar.executar(ordem.id, ator=ATOR_ATENDENTE)
 
         assert repo.salvas == []
         assert not uow.committed

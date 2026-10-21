@@ -179,8 +179,9 @@ def test_quebra_de_linha_no_fim_do_valor_e_recusada(
         f"[{p}]" if isinstance(p, int) else f".{p}" for p in caminho
     )
 
+    contratos = catalogo()
     with pytest.raises(ContratoInvalidoError) as erro:
-        catalogo().validar(exemplo)
+        contratos.validar(exemplo)
 
     assert (erro.value.caminho, erro.value.regra) == (esperado, "pattern")
 
@@ -244,13 +245,15 @@ def test_sku_fora_do_formato_do_billing_e_recusado_ao_montar_o_reservar_pecas(
 
     ordem_id = uuid4()
 
+    contratos = catalogo()
+    ocorrido_em = datetime.now(UTC)
     with pytest.raises(ContratoInvalidoError) as erro:
-        catalogo().montar_envelope(
+        contratos.montar_envelope(
             "ReservarPecas",
             {"ordem_id": ordem_id, "pecas": [{"sku": sku, "quantidade": 1}]},
             correlation_id=ordem_id,
             causation_id=None,
-            ocorrido_em=datetime.now(UTC),
+            ocorrido_em=ocorrido_em,
         )
 
     assert (erro.value.caminho, erro.value.regra) == (
@@ -281,13 +284,15 @@ def test_sku_de_51_caracteres_e_recusado() -> None:
 
     ordem_id = uuid4()
 
+    contratos = catalogo()
+    ocorrido_em = datetime.now(UTC)
     with pytest.raises(ContratoInvalidoError) as erro:
-        catalogo().montar_envelope(
+        contratos.montar_envelope(
             "ReservarPecas",
             {"ordem_id": ordem_id, "pecas": [{"sku": "A" * 51, "quantidade": 1}]},
             correlation_id=ordem_id,
             causation_id=None,
-            ocorrido_em=datetime.now(UTC),
+            ocorrido_em=ocorrido_em,
         )
 
     assert erro.value.regra == "maxLength"

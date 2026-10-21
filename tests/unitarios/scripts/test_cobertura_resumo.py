@@ -155,8 +155,9 @@ def test_milhar_com_ponto_na_secao_do_readme() -> None:
     ids=["run-sem-numero", "job-dentro-do-run", "fora-do-github"],
 )
 def test_secao_do_readme_so_aceita_o_endereco_de_um_run(url: str) -> None:
+    medida = Medida(contextos={}, camadas={}, ramos=(0, 0))
     with pytest.raises(ValueError, match="endereco de um run do CI"):
-        secao_do_readme(Medida(contextos={}, camadas={}, ramos=(0, 0)), url)
+        secao_do_readme(medida, url)
 
 
 def _argv(xml: Path, readme: Path) -> list[str]:

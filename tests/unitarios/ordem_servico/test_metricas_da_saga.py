@@ -27,8 +27,9 @@ def test_fato_sem_metrica_levanta_antes_do_commit() -> None:
     # after_commit; aqui levanta antes, com a transacao ainda desfazivel.
     sessao = Session()
 
+    fatos = [DomainEvent(agregado_id=uuid4())]
     with pytest.raises(TypeError, match="DomainEvent"):
-        metricas_da_saga.anotar(sessao, [DomainEvent(agregado_id=uuid4())])
+        metricas_da_saga.anotar(sessao, fatos)
 
     assert sessao.info == {}
 

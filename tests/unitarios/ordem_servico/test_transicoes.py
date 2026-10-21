@@ -200,10 +200,10 @@ class TestVocabularioDoGatilho:
         ["", "evento", "Abertura", "abertura ", "diagnosticoiniciado", "retomar"],
     )
     def test_gatilho_fora_do_vocabulario_e_recusado(self, gatilho: str) -> None:
+        transicao = Transicao(E.EM_EXECUCAO)
+        cabecalho = Gatilho(gatilho, None, AGORA, "x")
         with pytest.raises(TransicaoDaSagaInvalidaError, match="vocabulario"):
-            conferir_gatilho(
-                Transicao(E.EM_EXECUCAO), Gatilho(gatilho, None, AGORA, "x")
-            )
+            conferir_gatilho(transicao, cabecalho)
 
     def test_o_da_transicao_vale_no_lugar_do_tipo_do_evento(self) -> None:
         # A corrida do pivot grava cancelamento_recusado; o tipo da mensagem
@@ -212,11 +212,10 @@ class TestVocabularioDoGatilho:
             Transicao(E.EM_EXECUCAO, gatilho="cancelamento_recusado"),
             Gatilho("qualquer", None, AGORA, "x"),
         )
+        transicao = Transicao(E.EM_EXECUCAO, gatilho="inventado")
+        cabecalho = Gatilho("abertura", None, AGORA, "x")
         with pytest.raises(TransicaoDaSagaInvalidaError, match="inventado"):
-            conferir_gatilho(
-                Transicao(E.EM_EXECUCAO, gatilho="inventado"),
-                Gatilho("abertura", None, AGORA, "x"),
-            )
+            conferir_gatilho(transicao, cabecalho)
 
     def test_a_saga_recusa_o_registro_com_gatilho_fora_do_vocabulario(
         self, monkeypatch: pytest.MonkeyPatch
@@ -229,10 +228,12 @@ class TestVocabularioDoGatilho:
             Transicao(E.EM_EXECUCAO, gatilho="inventado"),
         )
 
+        recebido = evento("ExecucaoIniciada", saga.ordem_id)
+        marcos = marcos_da_ordem()
         with pytest.raises(TransicaoDaSagaInvalidaError, match="inventado"):
             saga.avancar(
-                evento("ExecucaoIniciada", saga.ordem_id),
-                marcos_da_ordem(),
+                recebido,
+                marcos,
                 agora=DEPOIS,
                 ator=ATOR_PROCESSO,
             )

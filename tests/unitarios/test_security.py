@@ -121,20 +121,24 @@ class TestJWTAlgorithmEnforcement:
     def test_hmac_assinado_com_a_chave_publica_rejected(self, algoritmo: str) -> None:
         # Troca de algoritmo: o PEM publico (que esta no JWKS) como segredo HMAC.
         token = forjar_hmac_com_a_chave_publica(algoritmo)
+        svc = jwt_service()
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(token)
+            svc.validar_token(token)
         assert exc.value.motivo == "invalid_algorithm"
 
     def test_rs512_com_a_chave_certa_rejected(self) -> None:
         token = jwt.encode(claims(), CHAVE, algorithm="RS512", headers={"kid": KID})
+        svc = jwt_service()
         with pytest.raises(TokenInvalidoException) as exc:
-            jwt_service().validar_token(token)
+            svc.validar_token(token)
         assert exc.value.motivo == "invalid_algorithm"
 
     def test_none_algorithm_rejected(self) -> None:
         """The 'none' algorithm attack must be blocked."""
+        svc = jwt_service()
+        token = forjar_sem_assinatura()
         with pytest.raises(TokenInvalidoException):
-            jwt_service().validar_token(forjar_sem_assinatura())
+            svc.validar_token(token)
 
 
 class TestJWTExpiredToken:
@@ -152,13 +156,16 @@ class TestJWTTamperedPayload:
 
     def test_tampered_payload_rejected(self) -> None:
         token = jwt_service().gerar_access_token(uuid4(), "atendente")
+        svc = jwt_service()
+        adulterado = adulterar(token, papel="admin")
         with pytest.raises(TokenInvalidoException):
-            jwt_service().validar_token(adulterar(token, papel="admin"))
+            svc.validar_token(adulterado)
 
     def test_wrong_key_rejected(self) -> None:
         token = jwt_service(chave=OUTRA_CHAVE).gerar_access_token(uuid4(), "admin")
+        svc = jwt_service()
         with pytest.raises(TokenInvalidoException):
-            jwt_service().validar_token(token)
+            svc.validar_token(token)
 
 
 class TestJWTTokenRevocation:

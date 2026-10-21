@@ -31,20 +31,24 @@ class TestDinheiro:
         assert d.valor == Decimal("0.00")
 
     def test_valor_negativo_invalido(self) -> None:
+        valor = Decimal("-1")
         with pytest.raises(ValueError, match="negativo"):
-            Dinheiro(valor=Decimal("-1"))
+            Dinheiro(valor=valor)
 
     def test_moeda_minuscula_invalida(self) -> None:
+        valor = Decimal("10")
         with pytest.raises(ValueError, match="maiusculas"):
-            Dinheiro(valor=Decimal("10"), moeda="brl")
+            Dinheiro(valor=valor, moeda="brl")
 
     def test_moeda_duas_letras_invalida(self) -> None:
+        valor = Decimal("10")
         with pytest.raises(ValueError, match="maiusculas"):
-            Dinheiro(valor=Decimal("10"), moeda="BR")
+            Dinheiro(valor=valor, moeda="BR")
 
     def test_moeda_com_numeros_invalida(self) -> None:
+        valor = Decimal("10")
         with pytest.raises(ValueError, match="maiusculas"):
-            Dinheiro(valor=Decimal("10"), moeda="BR1")
+            Dinheiro(valor=valor, moeda="BR1")
 
     def test_igualdade_estrutural(self) -> None:
         a = Dinheiro(valor=Decimal("10.00"))
@@ -81,12 +85,14 @@ class TestDinheiro:
         assert len({a, b}) == 1
 
     def test_valor_infinito_invalido(self) -> None:
+        valor = Decimal("Infinity")
         with pytest.raises(ValueError, match="finito"):
-            Dinheiro(valor=Decimal("Infinity"))
+            Dinheiro(valor=valor)
 
     def test_valor_nan_invalido(self) -> None:
+        valor = Decimal("NaN")
         with pytest.raises(ValueError, match="finito"):
-            Dinheiro(valor=Decimal("NaN"))
+            Dinheiro(valor=valor)
 
     def test_coercao_de_int_para_decimal(self) -> None:
         d = Dinheiro(valor=10)  # type: ignore[arg-type]
@@ -100,8 +106,9 @@ class TestDinheiro:
 
     def test_moeda_nao_ascii_invalida(self) -> None:
         # isalpha/isupper aceitam letras acentuadas; ISO 4217 exige A-Z.
+        valor = Decimal("10")
         with pytest.raises(ValueError, match="maiusculas"):
-            Dinheiro(valor=Decimal("10"), moeda="RÉA")
+            Dinheiro(valor=valor, moeda="RÉA")
 
     def test_valor_string_invalida_vira_value_error(self) -> None:
         # Decimal("abc") levantaria decimal.InvalidOperation (nao ValueError):
@@ -120,14 +127,17 @@ class TestTetoDaColuna:
 
     def test_teto_passa_e_um_centavo_acima_levanta(self) -> None:
         assert Dinheiro(VALOR_MAXIMO).valor == Decimal("9999999999.99")
+        acima_do_teto = VALOR_MAXIMO + Decimal("0.01")
         with pytest.raises(ValueError, match="excede"):
-            Dinheiro(VALOR_MAXIMO + Decimal("0.01"))
+            Dinheiro(acima_do_teto)
 
     def test_arredondamento_que_passa_do_teto_levanta(self) -> None:
+        valor = Decimal("9999999999.995")
         with pytest.raises(ValueError, match="excede"):
-            Dinheiro(Decimal("9999999999.995"))
+            Dinheiro(valor)
 
     def test_valor_alem_da_precisao_vira_value_error(self) -> None:
         # quantize de 1E+30 levanta decimal.InvalidOperation no contexto padrao.
+        valor = Decimal("1E+30")
         with pytest.raises(ValueError, match="valor monetario invalido"):
-            Dinheiro(Decimal("1E+30"))
+            Dinheiro(valor)

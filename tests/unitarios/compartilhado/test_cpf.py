@@ -124,5 +124,6 @@ class TestDigitoVerificadorContraOModulo11:
     def test_qualquer_digito_da_base_alterado_invalida(self, posicao: int) -> None:
         digitos = list(CPF_VALIDO)
         digitos[posicao] = str((int(digitos[posicao]) + 1) % 10)
+        numero = "".join(digitos)
         with pytest.raises(ValueError, match="CPF invalido"):
-            CPF(numero="".join(digitos))
+            CPF(numero=numero)

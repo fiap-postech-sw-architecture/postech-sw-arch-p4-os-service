@@ -20,8 +20,9 @@ class TestDependencies:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(dependencies, "_session_factory", None)
+        sessao = obter_session()
         with pytest.raises(RuntimeError, match="Session factory"):
-            next(obter_session())
+            next(sessao)
 
     def test_obter_session_com_factory(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Garante o estado limpo ANTES e a restauracao DEPOIS (teardown do

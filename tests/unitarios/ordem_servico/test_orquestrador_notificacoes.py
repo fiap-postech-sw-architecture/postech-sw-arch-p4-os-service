@@ -139,8 +139,9 @@ def test_evento_recusado_nao_pede_e_mail() -> None:
     cenario = CenarioDaSaga.em("aguardando_diagnostico")
     cenario.ordens.ordens.clear()
 
+    recebido = cenario.evento("DiagnosticoIniciado")
     with pytest.raises(EventoRecusadoError):
-        cenario.orquestrador.tratar(cenario.evento("DiagnosticoIniciado"))
+        cenario.orquestrador.tratar(recebido)
 
     assert cenario.notificacoes.registradas == []
 

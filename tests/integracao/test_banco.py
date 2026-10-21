@@ -159,8 +159,9 @@ def test_banco_fora_do_alcance_espera_e_diz_a_causa_sem_a_senha(
     )
 
     try:
+        esperar = _no_primeiro_intervalo(lambda: None)
         with pytest.raises(_EsperaInterrompidaError):
-            banco.aguardar(errada, esperar=_no_primeiro_intervalo(lambda: None))
+            banco.aguardar(errada, esperar=esperar)
     finally:
         errada.dispose()
 
@@ -172,8 +173,9 @@ def test_banco_fora_do_alcance_espera_e_diz_a_causa_sem_a_senha(
 
 def test_aguardar_so_le_o_banco(engine: Engine) -> None:
     # Com o banco vazio, esperar nao cria o alembic_version nem tabela nenhuma.
+    esperar = _no_primeiro_intervalo(lambda: None)
     with pytest.raises(_EsperaInterrompidaError):
-        banco.aguardar(engine, esperar=_no_primeiro_intervalo(lambda: None))
+        banco.aguardar(engine, esperar=esperar)
 
     assert inspect(engine).get_table_names() == []
 

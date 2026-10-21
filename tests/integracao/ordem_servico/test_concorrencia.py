@@ -181,14 +181,10 @@ def test_cancelamento_falho_na_outbox_desfaz_a_os_e_a_saga(
 ) -> None:
     ordem_id = _ordem_aberta_com_saga(session_factory)
 
-    with (
-        outbox_recusando_no_commit(engine),
-        session_factory() as sess,
-        pytest.raises(DBAPIError, match="outbox indisponivel"),
-    ):
-        obter_cancelar_ordem(sess).executar(
-            ordem_id, "cliente desistiu", ator="atendente-teste"
-        )
+    with outbox_recusando_no_commit(engine), session_factory() as sess:
+        cancelar = obter_cancelar_ordem(sess)
+        with pytest.raises(DBAPIError, match="outbox indisponivel"):
+            cancelar.executar(ordem_id, "cliente desistiu", ator="atendente-teste")
 
     with session_factory() as sess:
         ordem = OrdemDeServicoSQLAlchemyRepository(sess).obter_por_id(ordem_id)
@@ -224,10 +220,9 @@ def test_cancelamento_e_entrega_terminam_sem_transacao_aberta(
             {"id": com_saga},
         )
     with session_factory() as sess:
+        cancelar = obter_cancelar_ordem(sess)
         with pytest.raises(TransicaoStatusInvalidaException):
-            obter_cancelar_ordem(sess).executar(
-                com_saga, "cliente desistiu", ator="atendente-teste"
-            )
+            cancelar.executar(com_saga, "cliente desistiu", ator="atendente-teste")
         assert not sess.in_transaction()
 
     finalizada = _ordem_commitada(session_factory, ate=StatusOrdem.FINALIZADA)
