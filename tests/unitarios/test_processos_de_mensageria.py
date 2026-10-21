@@ -329,7 +329,7 @@ def test_main_do_notificador_sobe_so_com_o_banco_e_o_smtp_e_fecha_o_banco(
 ) -> None:
     engine = MagicMock()
     registro: list[str] = []
-    _Processo.criados = []
+    monkeypatch.setattr(_Processo, "criados", [])
     monkeypatch.setattr(processo_notificador, "instalar_sinais", lambda parar: None)
     monkeypatch.setattr(
         processo_notificador,
