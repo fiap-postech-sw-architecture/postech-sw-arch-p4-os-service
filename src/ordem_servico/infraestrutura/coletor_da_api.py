@@ -74,6 +74,8 @@ VALIDADE_DAS_ORDENS_S: Final = 30.0
 # Cada consulta: 2 s de execucao e 1 s esperando um lock.
 _PRAZO_DA_CONSULTA: Final = text("SET LOCAL statement_timeout = '2s'")
 _PRAZO_DO_LOCK: Final = text("SET LOCAL lock_timeout = '1s'")
+# Evento de log da raspagem que sai sem os gauges por consulta; ``motivo`` diz por que.
+_SEM_GAUGES: Final = "api gauges unavailable"
 
 
 def _idade_da_outbox(valor: float | None = None) -> GaugeMetricFamily:
@@ -156,9 +158,9 @@ class ColetorDaApi:
         leitura = _Leitura()
         if self._ocupado.acquire(blocking=False):
             if self._iniciar(leitura) and not leitura.pronta.wait(self._orcamento_s):
-                _log.warning("api gauges unavailable", motivo="prazo_esgotado")
+                _log.warning(_SEM_GAUGES, motivo="prazo_esgotado")
         else:
-            _log.warning("api gauges unavailable", motivo="raspagem_anterior_presa")
+            _log.warning(_SEM_GAUGES, motivo="raspagem_anterior_presa")
         # Uma copia de cada campo: a thread que passou do prazo pode atribuir
         # o que falta, mas nunca muda o que esta raspagem ja leu.
         saga, outbox, ordens = leitura.saga, leitura.outbox, leitura.ordens
@@ -185,7 +187,7 @@ class ColetorDaApi:
             ).start()
         except Exception as exc:  # noqa: BLE001  # RuntimeError "can't start new thread"
             self._ocupado.release()
-            _log.warning("api gauges unavailable", motivo=type(exc).__name__)
+            _log.warning(_SEM_GAUGES, motivo=type(exc).__name__)
             return False
         return True
 
@@ -194,7 +196,7 @@ class ColetorDaApi:
         try:
             self._ler_tudo(leitura)
         except Exception as exc:  # noqa: BLE001  # a raspagem nunca cai pelo coletor
-            _log.warning("api gauges unavailable", motivo=type(exc).__name__)
+            _log.warning(_SEM_GAUGES, motivo=type(exc).__name__)
         finally:
             leitura.pronta.set()
             self._ocupado.release()
