@@ -33,9 +33,12 @@ O primeiro comando sobe o cluster, a plataforma e os Secrets do serviço, o segu
 ## Como testar
 
 ```bash
+uv sync --all-extras --frozen
 make check
 make smoke
 ```
+
+O `uv sync --all-extras --frozen` é o mesmo passo do CI: o extra `otel` (o exportador OTLP) é preciso para o mypy do `make check`, que sem ele para em `src/compartilhado/infraestrutura/observability.py`.
 
 - **`make check`**: roda os gates do CI: `uv.lock` em dia, ruff, import-linter, actionlint, mypy strict, bandit e o `pytest` com gate de cobertura de 95% e `diff-cover` de 90% no código novo.
 - **Testes**: unitários, de contrato (a cópia dos contratos do platform é conferida byte a byte), de integração com PostgreSQL e RabbitMQ 4.3.6 efêmeros (testcontainers) e BDD de componente da saga (`tests/bdd/`). O BDD do fluxo completo, pela borda do kind, é do platform e roda no `deploy-kind` do CD.
