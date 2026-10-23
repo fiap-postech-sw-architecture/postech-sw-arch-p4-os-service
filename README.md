@@ -1192,30 +1192,30 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 ## Cobertura
 
 <!-- cobertura:inicio -->
-**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), medidos no [run 39233375064 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39233375064). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
+**99,61% no gate** (linhas e ramos somados): 6.281 linhas, 6.265 cobertas (99,7%), e 930 ramos, 918 cobertos (98,7%), medidos no [run 39938942997 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39938942997). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
-| `src` (processos) | 236 | 231 | 97,9% |
-| `src/autenticacao` | 562 | 562 | 100,0% |
-| `src/cliente_veiculo` | 903 | 902 | 99,9% |
-| `src/compartilhado` | 1.854 | 1.844 | 99,5% |
-| `src/ordem_servico` | 2.699 | 2.699 | 100,0% |
-| **total** | 6.254 | 6.238 | 99,7% |
+| `src` (processos) | 240 | 235 | 97,9% |
+| `src/autenticacao` | 569 | 569 | 100,0% |
+| `src/cliente_veiculo` | 909 | 908 | 99,9% |
+| `src/compartilhado` | 1.860 | 1.850 | 99,5% |
+| `src/ordem_servico` | 2.703 | 2.703 | 100,0% |
+| **total** | 6.281 | 6.265 | 99,7% |
 
 | Camada | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
-| `dominio` | 942 | 939 | 99,7% |
-| `aplicacao` | 1.788 | 1.788 | 100,0% |
-| `infraestrutura` | 2.491 | 2.487 | 99,8% |
-| `interfaces` | 797 | 793 | 99,5% |
+| `dominio` | 943 | 940 | 99,7% |
+| `aplicacao` | 1.790 | 1.790 | 100,0% |
+| `infraestrutura` | 2.492 | 2.488 | 99,8% |
+| `interfaces` | 816 | 812 | 99,5% |
 
 <!-- cobertura:fim -->
 
 As tabelas não são digitadas: `make cobertura-readme RUN=<id do run>` baixa o `coverage.xml` do artefato `relatorios-de-teste` de um run do CI e reescreve, com `scripts/cobertura_resumo.py`, o trecho entre os dois marcadores de comentário desta seção (`cobertura:inicio` e `cobertura:fim`), com o link do run. `tests/unitarios/test_documentacao.py` reprova o trecho editado à mão. O CI publica a mesma medida, por pacote, no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)), e `uv run python scripts/cobertura_resumo.py coverage.xml` a mostra depois de um `make test` local.
 
 - **Gate.** 95% de linhas e ramos somados (`fail_under` no `.coveragerc`), e 90% no código que a branch muda (`make diff-cover`). A suíte tem testes unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais.
-- **Oscilação.** Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917.
+- **Oscilação.** Com o mesmo código, o número oscila entre 99,63% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 918 ramos cobertos em vez de 919.
 - **Fora da medição.** Os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
 - **Linhas sem teste.** São 16: o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista.
 
