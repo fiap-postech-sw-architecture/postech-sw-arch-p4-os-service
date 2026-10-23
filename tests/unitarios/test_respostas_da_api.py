@@ -23,6 +23,8 @@ from tests.respostas_da_api import Resposta, conferir, nao_declaradas
 
 _SAUDE = "/api/v1/saude"
 _CLIENTES = "/api/v1/clientes"
+_CLIENTE = _CLIENTES + "/{cliente_id}"
+_INEXISTENTE = "6f1b8e4a-5c1d-4c53-9a43-1b2f6c7d8e90"
 
 
 @pytest.fixture(scope="module")
@@ -58,6 +60,18 @@ def test_guarda_o_erro_que_sai_do_gate_com_a_rota_que_o_atenderia(
 
     assert resposta.status_code == 401
     assert respostas_vistas == [Resposta("GET", _CLIENTES, 401)]
+    assert nao_declaradas(openapi, respostas_vistas) == []
+
+
+def test_guarda_o_metodo_da_requisicao_e_nao_so_o_get(
+    respostas_vistas: list[Resposta], openapi: dict[str, Any]
+) -> None:
+    cliente = TestClient(_app_com_a_rota_de_clientes())
+
+    resposta = cliente.delete(_CLIENTE.format(cliente_id=_INEXISTENTE))
+
+    assert resposta.status_code == 401
+    assert respostas_vistas == [Resposta("DELETE", _CLIENTE, 401)]
     assert nao_declaradas(openapi, respostas_vistas) == []
 
 
