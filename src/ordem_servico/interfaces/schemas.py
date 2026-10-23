@@ -41,7 +41,7 @@ class _ComSituacao(BaseModel):
 
 
 # O que a validacao do texto livre recusa (dominio/texto_livre.py), incluindo o
-# falso positivo conhecido que o README ("Texto livre") explica e mantem.
+# falso positivo conhecido que docs/saga.md ("Texto livre") explica e mantem.
 _SEM_CARACTERE_OCULTO = (
     "sem caractere de controle ou de formatacao (override bidirecional, espaco de "
     "largura zero, separador de linha e, como efeito colateral, o emoji composto "

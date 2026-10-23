@@ -1,14 +1,19 @@
-"""Documentos do servico: README, docs/arquitetura.md e docs/api.
+"""Documentos do servico: README, docs/*.md (a arquitetura e os temas) e docs/api.
 
-- Os comandos dos blocos ``bash`` do README rodam colados no terminal.
+- O README segue o esqueleto comum dos servicos e guarda as ancoras que o
+  platform cita.
+- Os comandos dos blocos ``bash`` do README e dos documentos rodam colados no
+  terminal.
 - ``docs/api`` (OpenAPI e colecao Postman) acompanha o app (``make docs-api``),
   e a colecao guarda o token e os ids que as outras requisicoes usam.
-- Toda rota do OpenAPI tem um ``curl`` na secao Exemplos da API do README, e
-  cada ``curl`` traz o corpo no schema e os cabecalhos que a operacao pede.
+- Toda rota do OpenAPI tem um ``curl`` em ``docs/api/exemplos.md``, e cada
+  ``curl`` dos documentos traz o corpo no schema e os cabecalhos que a operacao
+  pede.
 - ``docs/arquitetura.md`` segue o codigo: o ER e as tabelas, o metadata dos
   mapeamentos; os estados, a ``MaquinaDeStatus``; a saga, o ``FLUXO_NORMAL``; a
   mensageria, o catalogo do AsyncAPI e a ``ETAPA_ESPERADA``.
-- Os links relativos do README e da arquitetura caem em arquivo e secao reais.
+- Os links relativos do README e dos documentos caem em arquivo e secao reais, e
+  o README aponta cada documento de ``docs/``.
 - A secao Cobertura do README sai de ``scripts/cobertura_resumo.py``.
 """
 
@@ -45,8 +50,11 @@ if TYPE_CHECKING:
 RAIZ = Path(__file__).resolve().parents[2]
 README = RAIZ / "README.md"
 ARQUITETURA = RAIZ / "docs" / "arquitetura.md"
+EXEMPLOS = RAIZ / "docs" / "api" / "exemplos.md"
 OPENAPI = RAIZ / "docs" / "api" / "openapi.json"
 COLECAO = RAIZ / "docs" / "api" / "os-service.postman_collection.json"
+# O README e o que ele aponta: o detalhe que nao cabe nele mora em docs/.
+DOCUMENTOS = [README, *sorted((RAIZ / "docs").rglob("*.md"))]
 # A cerca pode vir indentada: os passos numerados do README levam o bloco recuado.
 _BLOCO = re.compile(
     r"^[ \t]*```(?:bash|sh)\n(.*?)^[ \t]*```[ \t]*$", re.DOTALL | re.MULTILINE
@@ -67,10 +75,10 @@ def _linhas_com_comentario(texto: str) -> list[str]:
 
 
 def test_blocos_de_comando_nao_levam_comentario() -> None:
-    texto = README.read_text(encoding="utf-8")
+    textos = [documento.read_text(encoding="utf-8") for documento in DOCUMENTOS]
 
-    assert len(_BLOCO.findall(texto)) > 10
-    assert _linhas_com_comentario(texto) == []
+    assert sum(len(_BLOCO.findall(texto)) for texto in textos) > 10
+    assert [linha for texto in textos for linha in _linhas_com_comentario(texto)] == []
 
 
 def test_bloco_indentado_de_passo_numerado_tambem_e_conferido() -> None:
@@ -357,7 +365,7 @@ def test_main_com_rota_sem_exemplo_reprova_sem_gravar(
     assert "faltam [('get', '/api/v1/saude')]" in capsys.readouterr().err
 
 
-# README: um curl por rota do OpenAPI.
+# docs/api/exemplos.md: um curl por rota do OpenAPI.
 
 # Opcoes do curl que levam valor; as demais (-s, -k, -f...) sao flags.
 _DADOS = frozenset({"-d", "--data", "--data-raw", "--data-binary", "--json"})
@@ -474,15 +482,16 @@ def test_parametro_da_rota_so_casa_com_variavel_do_shell() -> None:
     assert not _casa("/api/v1/sagas/$ORDEM_ID/compensacao", "/api/v1/sagas/{ordem_id}")
 
 
-def test_toda_rota_do_openapi_tem_um_curl_na_secao_exemplos_da_api(
+def test_toda_rota_do_openapi_tem_um_curl_nos_exemplos_da_api(
     openapi: dict[str, Any],
 ) -> None:
-    exemplos = _secao(README.read_text(encoding="utf-8"), "## Exemplos da API")
-    cobertas = {_rota(openapi, curl) for curl in _curls(exemplos)}
+    cobertas = {
+        _rota(openapi, curl) for curl in _curls(EXEMPLOS.read_text(encoding="utf-8"))
+    }
 
     faltam = [par for par in _pares(openapi) if par not in cobertas]
 
-    assert faltam == [], "rota do OpenAPI sem curl no README (secao Exemplos da API)"
+    assert faltam == [], "rota do OpenAPI sem curl em docs/api/exemplos.md"
 
 
 def _erros_do_curl(openapi: dict[str, Any], curl: Curl) -> list[str]:
@@ -507,10 +516,14 @@ def _erros_do_curl(openapi: dict[str, Any], curl: Curl) -> list[str]:
     return erros
 
 
-def test_curl_do_readme_tem_o_token_o_corpo_e_o_content_type_que_a_rota_pede(
+def test_curl_dos_documentos_tem_o_token_o_corpo_e_o_content_type_que_a_rota_pede(
     openapi: dict[str, Any],
 ) -> None:
-    curls = _curls(README.read_text(encoding="utf-8"))
+    curls = [
+        curl
+        for documento in DOCUMENTOS
+        for curl in _curls(documento.read_text(encoding="utf-8"))
+    ]
 
     erros = [erro for curl in curls for erro in _erros_do_curl(openapi, curl)]
 
@@ -576,6 +589,50 @@ def test_ancora_gerada_como_a_do_github() -> None:
     assert _ancoras(texto) == {"ação-lgpd", "testes", "testes-1"}
 
 
+# Os titulos do README que o platform cita por ancora (INDICE-DA-ENTREGA, entrega
+# da fase 4, matriz de rastreabilidade, runbook da saga, nuvem opcional e o README
+# dele). Renomear um deles quebra o link do outro lado sem aviso.
+ANCORAS_CITADAS_NO_README = frozenset(
+    {
+        "por-que-orquestração",
+        "cobertura",
+        "mutação",
+        "o-que-o-deploy-kind-faz-na-ordem",
+        "evento-fora-de-ordem",
+        "operação-do-e-mail",
+        "deploy-remoto-opcional",
+        "rotação-da-chave",
+    }
+)
+# Os titulos de nivel 2, na ordem: o esqueleto que os tres servicos repetem. O
+# sumario sao duas linhas de links, sem titulo proprio.
+ESQUELETO_DO_README = [
+    "Como rodar",
+    "Como testar",
+    "Cobertura",
+    "API",
+    "Mensageria",
+    "Arquitetura",
+    "Observabilidade",
+    "CI/CD",
+    "Segurança",
+    "Decisões e rastreabilidade",
+]
+
+
+def test_readme_guarda_as_ancoras_que_o_platform_cita() -> None:
+    assert _ancoras(README.read_text(encoding="utf-8")) >= ANCORAS_CITADAS_NO_README
+    # O platform cita tambem docs/arquitetura.md#3-modelo-de-dados.
+    assert "3-modelo-de-dados" in _ancoras(ARQUITETURA.read_text(encoding="utf-8"))
+
+
+def test_readme_segue_o_esqueleto_comum_dos_servicos() -> None:
+    texto = _CERCA.sub("", README.read_text(encoding="utf-8"))
+
+    assert re.findall(r"^## (.+)$", texto, re.MULTILINE) == ESQUELETO_DO_README
+    assert re.search(r"^\*\*Sumário\*\*: ", texto, re.MULTILINE) is not None
+
+
 def _links_relativos(origem: Path) -> list[tuple[str, Path, str]]:
     """(alvo, arquivo de destino, ancora) dos links de ``origem`` para o repositorio."""
     links = []
@@ -602,11 +659,22 @@ def _quebrados(links: list[tuple[str, Path, str]]) -> list[str]:
     ]
 
 
-def test_links_relativos_do_readme_e_da_arquitetura_existem() -> None:
-    links = [*_links_relativos(README), *_links_relativos(ARQUITETURA)]
+def test_links_relativos_dos_documentos_existem() -> None:
+    links = [link for documento in DOCUMENTOS for link in _links_relativos(documento)]
 
     assert len(links) > 60
     assert _quebrados(links) == [], "link para arquivo ou secao que nao existe"
+
+
+def test_readme_aponta_cada_documento_de_docs() -> None:
+    apontados = {destino.resolve() for _, destino, _ in _links_relativos(README)}
+    sem_link = [
+        str(documento.relative_to(RAIZ))
+        for documento in DOCUMENTOS[1:]
+        if documento.resolve() not in apontados
+    ]
+
+    assert sem_link == [], "documento de docs/ que o README nao aponta"
 
 
 def test_link_para_arquivo_ou_secao_que_nao_existe_reprova(tmp_path: Path) -> None:

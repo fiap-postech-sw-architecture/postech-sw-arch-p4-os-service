@@ -49,7 +49,7 @@ def test_texto_valido_passa_aparado(valor: str, esperado: str) -> None:
         pytest.param("a\u200db", "controle", id="juncao-de-largura-zero"),
         pytest.param("a\u200cb", "controle", id="nao-juncao-de-largura-zero"),
         pytest.param("a\u200eb", "controle", id="marca-esquerda-direita"),
-        # Falso positivo conhecido (README, "Texto livre"): o emoji composto por
+        # Falso positivo conhecido (docs/saga.md, "Texto livre"): o emoji composto por
         # juncao de largura zero (homem + mecanico) tambem e recusado.
         pytest.param("\U0001f468\u200d\U0001f527", "controle", id="emoji-composto"),
         pytest.param("a\ufeffb", "controle", id="marca-de-ordem-de-bytes"),

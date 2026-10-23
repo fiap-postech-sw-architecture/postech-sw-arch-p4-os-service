@@ -38,7 +38,7 @@ DESCRICAO = (
     "do cadastro do cliente, do veiculo e da abertura da OS guardam cliente_id, "
     "veiculo_id e ordem_id (antes deles, valem os ids dos exemplos). As pastas "
     "seguem as tags do OpenAPI, e nao um roteiro: para rodar em sequencia, siga a "
-    "ordem da secao Exemplos da API do README, com as remocoes do cliente depois "
+    "ordem de docs/api/exemplos.md, com as remocoes do cliente depois "
     "da abertura da OS e o logout, que revoga o token, por ultimo. Gerada por "
     "scripts/gerar_docs_api.py (make docs-api); o OpenAPI esta em "
     "docs/api/openapi.json."
@@ -173,8 +173,8 @@ def _pagina(item: dict[str, Any]) -> dict[str, Any]:
 # nomes de campo, e nao credenciais, que o B105 toma por senha).
 _GUARDA_TOKENS = {"token": "access_token", "refresh_token": "refresh_token"}  # nosec B105
 
-# Ordem dos fluxos do README; as chaves sao as do OpenAPI (metodo, rota). O
-# "guarda" de uma requisicao vira o script de teste dela (_script_de_teste).
+# Ordem dos fluxos de docs/api/exemplos.md; as chaves sao as do OpenAPI (metodo,
+# rota). O "guarda" de uma requisicao vira o script de teste dela (_script_de_teste).
 EXEMPLOS: dict[tuple[str, str], dict[str, Any]] = {
     ("get", "/api/v1/saude"): {"status": 200, "resposta": {"status": "ok"}},
     ("get", "/api/v1/saude/pronto"): {"status": 200, "resposta": {"status": "ok"}},

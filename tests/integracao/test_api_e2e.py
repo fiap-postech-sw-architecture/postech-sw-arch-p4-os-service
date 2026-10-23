@@ -672,7 +672,7 @@ class TestRodizioDoRefresh:
         self, api_client: TestClient, admin_user: Usuario
     ) -> None:
         # O refresh so e revogado se vier no corpo: sem ele, o logout encerra o
-        # access e o refresh ainda cunha um par novo (README, Autenticacao).
+        # access e o refresh ainda cunha um par novo (docs/autenticacao.md).
         login = self._entrar(api_client, admin_user.email)
 
         saida = api_client.post(

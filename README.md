@@ -2,875 +2,15 @@
 
 [![CD](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/cd.yml/badge.svg?branch=main)](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/cd.yml)
 
-Serviço de ordens de serviço (OS) do PytStop, o sistema de gestão da oficina mecânica. Abre e acompanha a OS, cadastra clientes e veículos (com LGPD), emite o JWT dos usuários internos e orquestra a saga de atendimento. Banco próprio: PostgreSQL 16.
+Serviço de ordens de serviço (OS) do PytStop, o sistema de gestão da oficina mecânica. Abre e acompanha a OS, cadastra clientes e veículos (com LGPD) e emite o JWT dos usuários internos. Na saga de atendimento ele é o orquestrador: envia os comandos ao [Billing](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-billing-service) e à [Execução](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-execution-service) pelo RabbitMQ e conduz a OS da abertura à entrega, com compensações quando um passo falha. Banco próprio: PostgreSQL 16. Integrações: o RabbitMQ (outbox transacional, relay e consumidor idempotente, sem chamada HTTP a outro serviço), o Mailpit (e-mail ao cliente, por SMTP), o Jaeger, o Prometheus e o Loki da plataforma e o Kong, que é a borda. Faz parte da entrega da fase 4 do Tech Challenge, e o [índice da entrega](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/INDICE-DA-ENTREGA.md) liga os quatro repositórios, os requisitos e as evidências.
 
-Este repositório é um dos quatro da entrega da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT). Nessa fase o PytStop virou microsserviços com Saga Pattern, mensageria assíncrona, CI/CD por serviço e deploy automatizado em Kubernetes. O [índice da entrega](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/INDICE-DA-ENTREGA.md) liga os quatro repositórios, os requisitos e as evidências.
+**Sumário**: [Como rodar](#como-rodar), [Como testar](#como-testar), [Cobertura](#cobertura), [API](#api), [Mensageria](#mensageria), [Arquitetura](#arquitetura), [Observabilidade](#observabilidade), [CI/CD](#cicd), [Segurança](#segurança) e [Decisões e rastreabilidade](#decisões-e-rastreabilidade).
 
-## Em poucas linhas
+**Documentos em `docs/`**: [arquitetura](docs/arquitetura.md), [saga](docs/saga.md), [mensageria, e-mail e LGPD](docs/mensageria.md), [API](docs/api/) e [exemplos da API](docs/api/exemplos.md), [como rodar e implantar](docs/como-rodar.md), [testes](docs/testes.md), [observabilidade](docs/observabilidade.md), [CI/CD](docs/ci-cd.md), [autenticação](docs/autenticacao.md) e [escopo e origem do código](docs/escopo-e-origem.md).
 
-- **Na saga:** é o orquestrador. A abertura da OS inicia a saga, o consumidor da fila `os.eventos` conduz o caminho feliz até `FINALIZADA`, e as compensações levam a OS a `CANCELADA` quando um passo falha ([Saga](#saga)).
-- **Como rodar:** `make compose-up` sobe a API em http://localhost:8000 (Swagger em `/docs`), o PostgreSQL, o RabbitMQ e os processos da saga, e `make compose-down` derruba tudo ([Como rodar local](#como-rodar-local)).
-- **Como testar:** `make check` roda lint, tipos, segurança e os testes com gate de cobertura de 95%, e `make smoke` prova a imagem pelo entrypoint real. Os dois pedem Docker, e o `make check` pede também o `kubectl` no PATH ([Qualidade](#qualidade)).
-- **Arquitetura (RNF-051):** responsabilidades, camadas e módulos, modelo completo do banco, fluxos com diagramas de sequência, mensageria, segurança e LGPD em [`docs/arquitetura.md`](docs/arquitetura.md).
-- **API (RNF-052):** OpenAPI e coleção Postman em [`docs/api/`](docs/api/) (o `make docs-api` os gera de novo a partir do app), um `curl` por rota em [Exemplos da API](#exemplos-da-api) e Swagger em `/docs`. A coleção do fluxo completo, que roda com newman, é do platform.
-- **Cobertura (RNF-050):** tabela gerada do `coverage.xml` de um run do CI, em [Cobertura](#cobertura).
-- **CD:** o [`cd.yml`](.github/workflows/cd.yml) chama o workflow reutilizável do platform, que publica a imagem no GHCR e implanta num kind efêmero (Kubernetes dentro de contêineres do runner), com smoke e E2E da saga ([CD](#cd)).
+## Como rodar
 
-## Sumário
-
-- [Origem do código](#origem-do-código)
-- [Escopo do serviço](#escopo-do-serviço)
-- [Autenticação](#autenticação) e a [rotação da chave](#rotação-da-chave)
-- [Mensageria](#mensageria): [contratos](#contratos), [publicar um comando](#publicar-um-comando) e [configuração](#configuração)
-- [Saga](#saga): [por que orquestração](#por-que-orquestração), [caminho feliz](#caminho-feliz), [compensações e cancelamento](#compensações-e-cancelamento), [prazos e retomada](#prazos-falha-na-compensação-e-retomada), [implantação e DLQ](#implantação-e-dlq) e [consulta e operação](#consulta-e-operação)
-- [Notificações por e-mail e LGPD](#notificações-por-e-mail-e-lgpd)
-- [Observabilidade](#observabilidade): [métricas](#métricas), [spans](#spans) e [logs](#logs)
-- [Como rodar local](#como-rodar-local)
-- [Exemplos da API](#exemplos-da-api)
-- [Implantação](#implantação): [no kind](#implantar-no-kind) e [troca de senha e de chave](#troca-de-senha-e-de-chave)
-- [Qualidade](#qualidade), [Cobertura](#cobertura), [Mutação](#mutação) e [Dependências automatizadas](#dependências-automatizadas)
-- [CD](#cd): [jobs](#jobs), [reexecutar e acompanhar](#reexecutar-e-acompanhar) e [deploy remoto](#deploy-remoto-opcional)
-- [Repositórios da fase 4](#repositórios-da-fase-4)
-
-## Origem do código
-
-O código parte de um recorte da `main` do PytStop da fase 3 (`postech-sw-arch-p3`): o commit [`08dcffe`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/08dcffe6365ece594f438cdbc4c5eef1d88ebfb1) mais o [`fc06263`](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/commit/fc06263d1f99747145e5a354b817905c59637ebd), a normalização ASCII de CPF e CNPJ (p3 #32). Entraram só os contextos deste serviço: `compartilhado`, `cliente_veiculo`, `autenticacao` e `ordem_servico`.
-
-As referências `p3 #N` no código apontam para issues e PRs daquele repositório. Os identificadores `RF-018`, `ADR-020` e `TD-017` seguem a numeração contínua das fases anteriores ([requisitos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/requisitos), [ADRs](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/arquitetura/adr) e [dívida técnica](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p3/tree/main/docs/tech-debt) do p3). A fase 4 começa em RF-028 e ADR-034.
-
-A RFC-004 e os ADRs 034 a 043 ficam em [`docs/arquitetura` do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura). O código os cita nos comentários como `RFC-004 secao N` e `ADR-0NN`. Os entregáveis RNF-050 a RNF-052 vêm da [gap analysis da fase](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/requisitos/fase4/gap-analysis-fase-4.md).
-
-## Escopo do serviço
-
-- Ciclo de vida da OS: `RECEBIDA → EM_DIAGNOSTICO → AGUARDANDO_APROVACAO → AGUARDANDO_PAGAMENTO → AGUARDANDO_EXECUCAO → EM_EXECUCAO → FINALIZADA → ENTREGUE`, com `CANCELADA` antes do início da execução. A OS guarda o histórico de mudanças de status, o resumo do orçamento e do pagamento (que vivem no Billing) e uma versão para lock otimista (escrita concorrente responde 409).
-- Saga de atendimento orquestrada pelo OS Service. A abertura da OS inicia a saga, e o consumidor conduz o caminho feliz até `FINALIZADA`. As falhas de negócio e o cancelamento disparam as compensações, uma por vez, até a OS `CANCELADA` ou até a falha da compensação. A etapa fica visível na OS e na rota de operação.
-- Prazos da saga: o processo `prazos` reenvia o comando sem resposta e compensa o passo que esgota os reenvios. Quando a compensação esgota os reenvios sem resposta, ele leva a saga ao estado `falha_na_compensacao`, de onde o admin a retoma ([Saga](#saga)).
-- API (o OpenAPI completo está em [`docs/api/`](docs/api/)):
-  - OS: `POST` e `GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico` (com os passos da saga), `POST /{id}/cancelamento` (202 com a etapa, ou 409) e `POST /{id}/entrega`.
-  - Saga (admin): `GET /api/v1/sagas/{ordem_id}` e `POST /api/v1/sagas/{ordem_id}/compensacao`.
-  - Clientes e veículos, com as rotas da LGPD.
-  - Autenticação: `/api/v1/autenticacao/*` e o JWKS em `GET /.well-known/jwks.json`.
-  - Acompanhamento público: `POST /api/v1/publico/acompanhamento`, com placa e documento no corpo.
-  - Operação: `GET /api/v1/saude` (liveness), `GET /api/v1/saude/pronto` (readiness: 503 se o banco não responder em 2 s), `GET /api/v1/ordens-de-servico/metricas` (admin: total, OS por status e permanência média em cada status) e `GET /metrics` (sempre ligado).
-  - Swagger em `/docs`.
-- Mensageria com RabbitMQ: outbox transacional no envelope do contrato, relay com confirmação do broker e consumidor idempotente da fila `os.eventos`, com retry por atraso e DLQ ([Mensageria](#mensageria)).
-- Manifestos Kubernetes em `k8s/`, com o PostgreSQL do serviço, o Job de migração e a borda no Kong ([Implantação](#implantação)).
-- E-mail ao cliente a cada mudança de situação da OS, pelo processo `notificador` e o Mailpit. A eliminação de dados da LGPD também anonimiza a placa na Execução e nos comandos da outbox ([Notificações por e-mail e LGPD](#notificações-por-e-mail-e-lgpd)).
-- A compensação vai para o cluster junto com o processo `prazos`. Sem ele, um participante que nunca responde deixa a saga em `compensando` sem reenvio nem alerta de prazo. Os manifestos têm os dois ([Implantação e DLQ](#implantação-e-dlq)).
-- Observabilidade: o `/metrics` de cada processo, spans do OpenTelemetry (exportados para o Jaeger com `OTEL_ENABLED=true`) e `trace_id` nos logs. Os gauges por consulta (saga, outbox e OS por status) saem do coletor da API. `GET /api/v1/ordens-de-servico/metricas` (admin) devolve os mesmos números das OS ([Observabilidade](#observabilidade)).
-
-## Autenticação
-
-O OS Service é o único emissor de tokens (ADR-039). `POST /api/v1/autenticacao/login` devolve um access token de 15 min e um refresh de 7 dias; `/refresh` troca o refresh por um par novo (uso único); `/logout` revoga o `jti` (identificador do token) do access do cabeçalho e, se o `refresh_token` vier no corpo, o do refresh também: sem ele, o refresh continua valendo até expirar. A revogação só vale neste serviço: nos outros, o limite é a expiração do access.
-
-- **Assinatura:** JWT (JSON Web Token) assinado com RS256 (RSA com SHA-256), com chave RSA de 2048 bits ou mais. Claims: `iss=pytstop-os-service`, `aud=pytstop`, `sub` (UUID do usuário), `papel` (só no access: `admin`, `atendente` ou `mecanico`), `type` (`access` ou `refresh`), `jti`, `iat` e `exp`, sem e-mail.
-- **JWKS (JSON Web Key Set):** `GET /.well-known/jwks.json`, público, com `Cache-Control: public, max-age=600` e limite de 60 chamadas por minuto por IP. Traz só a parte pública de cada chave (`kty`, `use`, `alg`, `kid`, `n`, `e`); o `kid` (identificador da chave, repetido no cabeçalho de cada token) é a impressão digital (*thumbprint*, RFC 7638) da chave pública.
-
-  ```bash
-  curl -s localhost:8000/.well-known/jwks.json | jq
-  ```
-
-- **Quem valida:** Billing e Execução validam o access token localmente, com o JWKS que leem de `JWKS_URL`, sem chamar o OS a cada requisição. Conferem a assinatura RS256 (algoritmo fixo), `iss`, `aud` e `exp` (com 10 s de tolerância entre relógios), `type=access`, `sub` (UUID) e `papel` (um dos três acima); o cache do JWKS é de cada consumidor (README de [Billing](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-billing-service) e de [Execução](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-execution-service)). O `scripts/validar_token.py` é o modelo dessa conferência, só com o PyJWT, e o `make smoke` o roda com o token do login.
-- **Erros:** toda falha de credencial responde 401 `NAO_AUTENTICADO` com a mensagem `Credencial ausente, invalida ou expirada`, a mesma dos três serviços; o motivo (assinatura, `aud`, `iss`, claim ausente, `iat` no futuro, token malformado, expirado, revogado) fica só no log. Um refresh reapresentado depois de usado, ou de revogado no logout, gera também o evento `refresh_reuse_detected`. Papel válido sem permissão responde 403 `ACESSO_NEGADO`. O OpenAPI declara esses erros em cada rota de autenticação, com o 409 `ENTIDADE_DUPLICADA` do e-mail já cadastrado em `/registrar` e o 429 do limite por IP: 5 chamadas por minuto em `/login` e `/registrar`, 10 em `/logout` e `/refresh`.
-
-| Variável | Uso |
-|---|---|
-| `JWT_PRIVATE_KEY` | chave privada RSA em PEM; no cluster vem de um Secret, no compose e no `.env.example` é uma chave de demonstração |
-| `JWT_PREVIOUS_PUBLIC_KEY` | opcional: a chave pública que entra (etapa 1 da rotação) ou que sai (etapa 2), só publicada no JWKS e aceita na validação, nunca usada para assinar |
-| `JWT_EXPIRATION_MINUTES`, `JWT_REFRESH_EXPIRATION_MINUTES` | validade do access (15, no máximo 60) e do refresh (10080, no máximo 43200 = 30 dias) |
-
-Fora de `development` e `test`, o boot aborta se a chave estiver ausente, ilegível, não for RSA, tiver menos de 2048 bits ou for a de demonstração (como atual ou anterior), ou se uma validade estiver fora dos limites.
-
-### Rotação da chave
-
-A chave privada não entra no repositório nem na imagem (`*.pem` e `*.key` são ignorados pelo git e pelo Docker); gere as chaves num diretório temporário, fora do repositório, e leve-as direto para o Secret (apague o diretório depois de atualizar o Secret). O primeiro `openssl pkey` mostra a pública da nova; o segundo, a da atual, que sai da chave que está no Secret, gravada no mesmo diretório como `atual.pem`:
-
-```bash
-chaves="$(mktemp -d)"
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$chaves/nova.pem"
-openssl pkey -in "$chaves/nova.pem" -pubout
-openssl pkey -in "$chaves/atual.pem" -pubout
-```
-
-A chave nova só assina depois que todos os pods e consumidores a conhecem; por isso a troca tem etapas. Com mais de uma réplica, um pod antigo recusaria o token de um pod novo que assinasse com uma chave que ele ainda não publica. Chame de K1 a chave atual e de K2 a nova:
-
-| Etapa | `JWT_PRIVATE_KEY` | `JWT_PREVIOUS_PUBLIC_KEY` | Depois |
-|---|---|---|---|
-| 1. Publicar a nova | K1 | pública da K2 | Espere o rollout e os 10 min do cache dos consumidores; confira com `curl -s localhost:8000/.well-known/jwks.json \| jq '.keys[].kid'` (a primeira chave da lista é a que assina) |
-| 2. Trocar | K2 | pública da K1 | Os tokens emitidos com a K1 seguem válidos |
-| 3. Aposentar a antiga | K2 | vazio | Só depois de 7 dias, a validade do refresh: a partir daqui os tokens da K1 deixam de valer |
-| Emergência (K1 comprometida) | K2 | vazio | Derruba as sessões: o OS recusa a K1 assim que o rollout termina e Billing e Execução, quando renovarem o JWKS (até 10 min; até 1 h com o OS fora do ar). É o único jeito de uma chave vazada deixar de forjar tokens `admin` aceitos pelos três serviços |
-
-## Mensageria
-
-O OS Service orquestra a saga pelo RabbitMQ da plataforma, com AMQP (o protocolo do broker): publica comandos para Billing e Execução e consome os eventos que eles publicam ([ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md), [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 5). A entrega é pelo menos uma vez e o consumidor é idempotente: cada efeito acontece uma vez (RN-028).
-
-```mermaid
-flowchart LR
-    uc["caso de uso<br/>(publicar_comando)"] -->|"mesmo commit do efeito"| ob[("outbox")]
-    ob -->|"NOTIFY + poll"| relay["relay<br/>python -m src.relay"]
-    relay -->|"confirm + mandatory"| cmd{{"pytstop.comandos"}}
-    cmd --> filas["billing.comandos<br/>execucao.comandos"]
-    evt{{"pytstop.eventos"}} --> q["os.eventos"]
-    q --> cons["consumidor<br/>python -m src.consumidor"]
-    cons -->|"um commit"| mp[("mensagens_processadas<br/>+ efeito + comandos")]
-    cons -.->|"erro transitório"| rt{{"pytstop.retry"}} -.-> rq["os.eventos.retry.1s ... .300s"] -.->|"TTL vence"| q
-    cons -.->|"erro permanente ou 6ª falha"| dlq["os.eventos.dlq"]
-```
-
-### Contratos
-
-`contratos/` é cópia de arquivos do platform no SHA gravado em `contratos/ORIGEM` (um commit da `main` de lá): do `contratos/` de lá, o AsyncAPI (`asyncapi.yaml`), um JSON Schema por mensagem e os exemplos; em `contratos/rabbitmq/`, a topologia do broker do `k8s/base/rabbitmq/` (definitions, permissões, configuração e o script que cria os usuários) e o admin de demonstração do `compose/`. O `tests/contratos/test_copia_do_platform.py` baixa o platform nesse SHA uma vez (com novas tentativas) e compara cada arquivo byte a byte; atualizar a cópia é copiar de novo e trocar o `ORIGEM`. Os `pattern` de data, hora, dinheiro, URL, código, placa e tipo terminam em `(?![\s\S])`, que recusa a quebra de linha no fim do valor (o `$` a aceita), e um teste confere que nenhum `pattern` dos schemas volta ao `$`. O `sku` do `ReservarPecas` é mais estrito que o `codigo` dos itens do diagnóstico e do `GerarOrcamento`: só o formato do Billing, dono dos códigos (letras maiúsculas e dígitos separados por hífens, até 50 caracteres). O que isso muda para um código fora desse formato está em [Evento fora de ordem](#evento-fora-de-ordem).
-
-O catálogo sai do próprio `asyncapi.yaml`: quem publica cada tipo (o `userId` da operação de envio), em que exchange e routing key, e o que a fila `os.eventos` recebe. Os eventos internos da OS (abertura e mudança de status) ficam no histórico e não vão para o broker.
-
-| | Mensagens |
-|---|---|
-| O OS publica (11 comandos, enum `Comando`) | `SolicitarDiagnostico`, `DescartarDiagnostico`, `GerarOrcamento`, `CancelarOrcamento`, `ReservarPecas`, `LiberarReserva`, `SolicitarPagamento`, `EstornarPagamento`, `AgendarExecucao`, `CancelarExecucao`, `AnonimizarVeiculo` |
-| O OS consome do Billing (13) | `OrcamentoGerado`, `GeracaoDeOrcamentoFalhou`, `OrcamentoAprovado`, `OrcamentoRecusado`, `OrcamentoExpirado`, `OrcamentoCancelado`, `PagamentoSolicitado`, `PagamentoConfirmado`, `PagamentoRecusado`, `PagamentoExpirado`, `PagamentoCancelado`, `PagamentoEstornado`, `EstornoDePagamentoFalhou` |
-| O OS consome da Execução (10) | `DiagnosticoIniciado`, `DiagnosticoConcluido`, `DiagnosticoDescartado`, `PecasReservadas`, `ReservaDePecasFalhou`, `ReservaLiberada`, `ExecucaoAgendada`, `ExecucaoCancelada`, `ExecucaoIniciada`, `ExecucaoFinalizada` |
-
-A validação usa o payload de cada mensagem no AsyncAPI: envelope, `tipo`, `versao` e `origem` constantes e o schema de `dados`. O leitor é tolerante (campo novo não invalida) e `versao` desconhecida reprova. O erro aponta o caminho e a regra (`const em $.versao`), nunca o valor, que pode ser a placa ou texto livre.
-
-### Publicar um comando
-
-Na API (e em todo processo sem mensagem de entrada), o caso de uso grava o comando na outbox pela própria unidade de trabalho, no mesmo commit do efeito. O trecho roda com o banco do compose (`set -a && . ./.env && set +a` antes):
-
-```python
-from uuid import uuid4
-
-from src.compartilhado.aplicacao.mensageria import Comando
-from src.compartilhado.infraestrutura.database import (
-    criar_engine,
-    criar_session_factory,
-    resolver_database_url,
-)
-from src.compartilhado.infraestrutura.unit_of_work import SQLAlchemyUnitOfWork
-
-ordem_id = uuid4()
-uow = SQLAlchemyUnitOfWork(criar_session_factory(criar_engine(resolver_database_url())))
-with uow:
-    uow.publicar_comando(
-        Comando.DESCARTAR_DIAGNOSTICO,
-        {"ordem_id": ordem_id, "motivo": "cancelamento"},
-        correlation_id=ordem_id,  # o id da OS, que tambem identifica a saga
-    )
-    uow.commit()
-```
-
-No consumidor, o handler recebe a mensagem e a `TransacaoDaMensagem`: monta os repositórios sobre a `session` dela, grava o efeito e publica os comandos nela, sem comitar. O consumidor comita uma vez efeito, comandos e o registro em `mensagens_processadas`; commit, rollback ou close pela `session` dentro do handler, ou um retorno que não é `Desfecho`, mandam a mensagem para a DLQ (fila de mensagens mortas) sem gravar nada. A guarda não alcança o que passa por baixo da `session`, que grava o efeito antes do consumidor: o `commit()` da transação raiz com um savepoint aberto manda a mensagem para a DLQ (o redrive vira `duplicada`), o `session.connection().commit()` faz o commit do consumidor falhar e a mensagem volta pela retry como `duplicada` (o que o handler gravasse depois se perde), e o `COMMIT` em SQL literal (`session.execute(text("COMMIT"))`) passa sem guarda nenhuma. Por isso o handler usa só a `session` e os repositórios:
-
-```python
-def tratar_diagnostico_concluido(
-    mensagem: MensagemRecebida, transacao: TransacaoDaMensagem
-) -> Desfecho:
-    ordens = OrdemDeServicoSQLAlchemyRepository(session=transacao.session)
-    if ordens.obter_por_id(mensagem.correlation_id) is None:
-        return Desfecho.IGNORADA
-    transacao.publicar_comando(
-        Comando.GERAR_ORCAMENTO,
-        {"ordem_id": mensagem.correlation_id, "itens": mensagem.dados["itens"]},
-        correlation_id=mensagem.correlation_id,
-        causation_id=mensagem.id,
-    )
-    return Desfecho.PROCESSADA
-```
-
-O envelope (`id`, `tipo`, `versao`, `origem=os-service`, `correlation_id`, `causation_id`, `ocorrido_em` em UTC e `dados`) é validado na hora: comando fora do contrato é bug e sobe como 500. A linha guarda o envelope, o exchange, a routing key e o contexto W3C (`traceparent`, `tracestate`) do span corrente; os tempos dela são do relógio do banco.
-
-### Relay (`python -m src.relay`)
-
-- Acorda com o `NOTIFY` da outbox e, por segurança, a cada `OUTBOX_POLL_SEGUNDOS`. Reivindica lotes com `FOR UPDATE SKIP LOCKED` e um lease, na ordem de cada OS: uma linha em espera segura as seguintes da mesma OS, e `dead` não segura.
-- Nenhuma transação fica aberta durante a publicação: claim, renovação do lease antes de publicar e desfecho são transações curtas, e o fim do lease gravado no claim é o token da réplica. Quem perdeu a linha (o lease venceu e outra réplica a reivindicou) não grava o desfecho por cima. A entrega é pelo menos uma vez: um publish que passa do lease pode sair também pela outra réplica, e o consumidor do destino descarta a repetição pelo `id`.
-- Publica com *publisher confirms* e `mandatory`, com as propriedades AMQP do contrato (`message_id`, `correlation_id`, `type`, `user_id=os`, `content_type`, `delivery_mode=2`) e o `traceparent` no header. A linha só vira `entregue` depois da confirmação.
-- Mensagem devolvida (sem fila para a routing key), recusada (nack), canal fechado pelo broker ou qualquer outra falha da própria linha conta tentativa e volta depois de 1, 4, 16 e 64 s; na quinta falha vira `dead` (métrica `outbox_dead`). Envelope fora do contrato vira `dead` direto.
-- Broker fora do ar não conta tentativa: sem conexão o relay não reivindica linhas e reconecta com backoff (espera sorteada entre 0 e um teto que dobra de 1 s até 30 s), e as linhas de um lote interrompido voltam na hora. Com o broker em alarme de memória ou disco, a conexão bloqueada para os claims até o desbloqueio, e o timeout do bloqueio (30 s) derruba a conexão como uma queda.
-- Uma vez por hora apaga, em lotes de 1000, as linhas entregues há mais de 7 dias e as `dead` há mais de 30, contados da morte da linha e não da criação (a janela para o redrive); `pendente` nunca expira.
-
-### Consumidor (`python -m src.consumidor`)
-
-Para cada mensagem da fila `os.eventos`, uma por vez (prefetch 1) e com ack manual:
-
-1. Origem: o `user_id` (o broker garante que é o usuário da conexão de quem publicou) tem de ser o produtor do `tipo` no catálogo; a cópia que volta da fila de retry traz o `user_id` do próprio consumidor e só é aceita com `x-tentativa` de 1 a 5. Sem `user_id`, ou qualquer outro caso, vai para a DLQ.
-2. Trace: o span CONSUMER é filho do `traceparent` recebido.
-3. Contrato: corpo de até 64 KiB, JSON, envelope e `dados` validados; `message_id`, `correlation_id` e `type` têm de bater com o envelope. Antes da validação, só o `message_id` e o `correlation_id` convertidos em UUID vão para o log e o span.
-4. Efeito: grava o `id` em `mensagens_processadas` e chama o handler do `tipo` no despachante (`montar_despachante`, em `src/consumidor.py`: os 23 eventos vão ao orquestrador da saga) com a transação da mensagem; o consumidor comita e só então dá ack. Id repetido recebe ack sem efeito.
-
-| Situação | Resultado |
-|---|---|
-| Handler concluiu | ack (`processada`, ou `ignorada` quando a mensagem não corresponde ao estado atual) |
-| Mesmo `id` de novo | ack sem efeito (`duplicada`) |
-| Erro transitório (banco fora, `FalhaTransitoriaError`, conflito de versão) | cópia em `pytstop.retry` com `x-tentativa` + 1 e a routing key da fila do nível (`os.eventos.retry.1s`, `.5s`, `.15s`, `.60s` e `.300s`), com confirmação e `mandatory`, e só então o ack (`retry`); a cópia leva as propriedades da original e o contexto de trace do consumo |
-| Sexta falha transitória, tipo, versão, contrato ou origem inválidos, cópia de retry devolvida ou recusada, `FalhaPermanenteError` do handler (com o motivo dela em código no log) ou outra exceção do handler | `reject` sem requeue, e a fila manda para `os.eventos.dlq` (`dlq`); o `id` não entra em `mensagens_processadas`, e o redrive trata a mensagem de novo |
-
-Cada nível de atraso tem a sua fila, com o TTL (tempo de vida da mensagem) como argumento dela: uma fila só, com `expiration` por mensagem, seguraria a cópia de 1 s atrás da de 300 s, porque a mensagem só expira na cabeça da fila. Uma mensagem que o cliente AMQP não consegue nem decodificar (um header de timestamp fora do intervalo, por exemplo) derruba a conexão a cada entrega: com prefetch 1 só ela cai, e o `delivery-limit` de 5 da fila (policy do platform) a manda para a DLQ sem levar as seguintes. Uma vez por hora o consumidor apaga, em lotes, as linhas de `mensagens_processadas` com mais de 30 dias.
-
-### Observabilidade, saúde e encerramento
-
-- Spans: `publish <tipo>` (PRODUCER, filho do span que gravou a outbox) e `process <tipo>` (CONSUMER, filho da publicação), com o `correlation_id` (o id da OS) no atributo `messaging.message.conversation_id` e, na falha, o status de erro e o atributo `pytstop.falha` só com o tipo da exceção ou um código fixo; os laços ociosos não abrem span. O SDK do OpenTelemetry fica sempre ligado no relay, no consumidor e no `prazos` (que abre o `saga prazo` só com trabalho), e `OTEL_ENABLED=true` liga a exportação OTLP (o protocolo do OpenTelemetry) para o Jaeger e a instrumentação do banco. O recurso leva `service.name` (de `OTEL_SERVICE_NAME`) e `pytstop.processo` (`api`, `relay`, `consumidor` ou `prazos`). O `notificador` não abre span: a linha de e-mail não guarda o contexto de trace. Tudo sobre spans e métricas está na [seção Observabilidade](#observabilidade).
-- Logs JSON com `correlation_id`, `trace_id` e `span_id`, sem dados pessoais nem texto livre: o envelope não vai para o log, e do cliente AMQP só sai o nível ERROR (em WARNING ele imprime o corpo da mensagem devolvida).
-- Métricas no `/metrics` de cada processo (porta `METRICS_PORT`, 9100): a lista, os rótulos e o momento em que cada série conta estão na [tabela da seção Observabilidade](#métricas). As séries de rótulo fechado nascem com zero no boot.
-- Saúde: cada processo toca `/tmp/<processo>-heartbeat` a cada volta do laço, a cada linha do lote do relay e entre os lotes da limpeza (liveness), e mantém `/tmp/<processo>-pronto` enquanto está conectado ao broker (readiness; o `notificador` não fala com o broker, e o seu pronto é o banco respondendo). Broker fora, inclusive com o nome dele sem resolução no DNS (o Service headless sem pod pronto) e o broker que aceita a conexão TCP e não responde o AMQP no prazo do cliente (15 s), tira o processo de pronto sem reiniciá-lo, e ele reconecta com backoff (o `prazos` reconecta a cada ciclo, sem backoff: os `PRAZOS_INTERVALO_SEGUNDOS` entre os ciclos espaçam as tentativas); a tentativa que falha toca o heartbeat de novo, porque a resolução do nome não tem prazo no cliente AMQP. Falta de descritores, certificado TLS recusado e erro de disco no arquivo de saúde não são broker fora: derrubam o processo, para o Kubernetes reiniciá-lo e o defeito aparecer. A sonda de liveness tolera 90 s sem heartbeat (120 s no `prazos`): com o broker mudo um publish fica até cerca de 70 s preso antes de o heartbeat AMQP (30 s) derrubar a conexão, e com o broker em alarme até 30 s. No SIGTERM o processo termina a mensagem em curso e fecha as conexões; no consumidor, as demais seguem na fila, e no `prazos` as sagas vencidas que sobram ficam para o ciclo do processo seguinte.
-- Banco: relay, consumidor, `prazos` e notificador usam um pool de 2 + 2 conexões e sessões com `statement_timeout` de 15 s e `lock_timeout` de 10 s, abaixo da janela do heartbeat do broker (o handler roda na thread da conexão AMQP).
-
-### Configuração
-
-| Variável | Padrão | Uso |
-|---|---|---|
-| `RABBITMQ_URL` | obrigatória | URL AMQP com o usuário `os`; fora de `development` e `test`, a senha de demonstração é recusada no boot (a do Postgres também) |
-| `METRICS_PORT` | 9100 | porta do `/metrics` do relay, do consumidor, do `prazos` e do notificador |
-| `OUTBOX_POLL_SEGUNDOS` | 5 | poll de segurança do relay, de 0,1 a 15 s (o laço ocioso atende o heartbeat AMQP) |
-| `OUTBOX_LOTE` | 10 | linhas por lote do relay (1 ou mais) |
-| `OUTBOX_LEASE_SEGUNDOS` | 60 | lease de cada linha reivindicada (45 ou mais: cobre o publish bloqueado por alarme do broker, de até 30 s, e a marcação da linha) |
-| `OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT` | `false`, `http://jaeger:4317` | exportação OTLP dos spans e instrumentação do FastAPI e do banco (o compose a deixa desligada, e o kind a liga) |
-| `OTEL_BSP_EXPORT_TIMEOUT`, `OTEL_EXPORTER_OTLP_TIMEOUT` | 30000 ms, 10 s do SDK; 2000 ms e 2 s no compose e no ConfigMap | prazos do envio dos spans: com o Jaeger fora e a fila cheia, a API levou 30,5 s para sair com o padrão do OTLP e 8,1 s com 2 s ([medição](#encerramento-com-o-exportador-fora)); o `OTEL_BSP_EXPORT_TIMEOUT` não muda nada no SDK 1.45 |
-| `OTEL_SERVICE_NAME` | `pytstop-os-service` | `service.name` dos spans |
-| `SAGA_PRAZO_RESPOSTA_SEGUNDOS` | 120 | prazo técnico gravado pela saga no envio de cada comando com resposta automática (1 ou mais; [seção Saga](#saga)). Tem de ser o mesmo valor na API (a primeira compensação do cancelamento e a retomada), no consumidor e no processo `prazos`; no compose é um ponto só (`x-saga`) |
-| `SAGA_MAX_REENVIOS` | 5 | reenvios do mesmo comando (0 ou mais) antes de compensar ou de parar a compensação; só o `prazos` lê ([Prazos, falha na compensação e retomada](#prazos-falha-na-compensação-e-retomada)) |
-| `PRAZOS_INTERVALO_SEGUNDOS` | 30 | intervalo entre os ciclos do `prazos`, de 0,1 a 300 s; o alerta "Saga parada" do platform usa 60 s, duas vezes o padrão |
-| `ROOT_PATH` | vazio | prefixo da API atrás do gateway (`/os` no cluster); o `entrypoint.sh` o passa ao uvicorn como `--root-path` e recusa, no boot, valor sem a barra inicial ou com a barra final |
-
-Valor fora da faixa aborta o boot com a variável e o valor na mensagem.
-
-## Saga
-
-O OS Service orquestra a saga de atendimento ([ADR-035](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/035-saga-orquestrada.md), [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 4). Há uma instância por OS, com `saga_id = ordem_id`, que também é o `correlation_id` de todas as mensagens.
-
-- O orquestrador é um *process manager*: o objeto que guarda o estado da saga e, a cada evento, decide o próximo comando. Ele vive na camada de aplicação (`src/ordem_servico/aplicacao/saga/`), com estado e regras sem I/O, e é persistido como agregado próprio na tabela `sagas`, no mesmo PostgreSQL da outbox.
-- A etapa da saga, o status da OS, o registro da transição na linha do tempo da saga e o comando seguinte entram no mesmo commit: na abertura, o da requisição; nos eventos, o do consumidor, junto com `mensagens_processadas`.
-
-### Por que orquestração
-
-- **O tamanho da saga.** São nove passos, T1 a T9 (as transações locais de cada serviço, da abertura à finalização), em três serviços, mais a entrega local (T10). Há esperas humanas (mecânico e cliente), um provedor externo (Mercado Pago) e seis compensações. Um dos passos é o *pivot*, o ponto sem retorno (RN-029): o início da execução física, depois do qual não há compensação.
-- **Por que não coreografia.** A Aula 02 de SAGA Pattern, citando Richardson, recomenda a coreografia para sagas simples, e esta não é. Com coreografia, os passos ficariam espalhados nos três serviços, sem um lugar que diga em que etapa a OS está. Prazos, ordem das compensações e o pivot exigiriam que cada serviço assinasse eventos dos outros dois, com risco de ciclo.
-- **Por que no OS, e não num quarto serviço.** Como nos exemplos do material, o orquestrador fica no serviço que inicia a saga: o fluxo inteiro fica num lugar só, testável sem broker, e etapa e status mudam na mesma transação local.
-- **Os dois contras da aula, contidos.** O orquestrador só conhece a ordem dos passos, as compensações e os prazos: preço, validade e pagamento são dos participantes, que respondem a comandos sem conhecer a saga. E ele não é ponto único de falha: o estado fica no banco e as mensagens, em filas duráveis. O consumidor roda com uma réplica; se o pod cai, o Kubernetes o recria, a mensagem sem confirmação volta à fila e a reentrega não repete efeito (RN-028). As alternativas descartadas (coreografia, orquestrador como quarto serviço, motor de workflow) estão no ADR-035.
-
-### Caminho feliz
-
-O diagrama é o da RFC-004, seção 4.8a; setas abertas são mensagens assíncronas (outbox, relay, exchange, fila, consumidor).
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor AT as Atendente
-    actor ME as Mecânico
-    actor CL as Cliente
-    participant OS as os-service
-    participant EX as execution-service
-    participant BI as billing-service
-    participant MP as Mercado Pago
-
-    rect rgba(70, 130, 180, 0.10)
-        Note over AT,EX: T1 e T2: abertura e diagnóstico
-        AT->>OS: POST /api/v1/ordens-de-servico
-        OS->>OS: transação: OS RECEBIDA, saga AGUARDANDO_DIAGNOSTICO, comando na outbox
-        OS-->>AT: 201 Created
-        OS-)EX: SolicitarDiagnostico
-        ME->>EX: POST /api/v1/diagnosticos/{ordem_id}/inicio
-        EX-)OS: DiagnosticoIniciado
-        Note over OS: OS EM_DIAGNOSTICO
-        ME->>EX: POST /api/v1/diagnosticos/{ordem_id}/conclusao
-        EX->>EX: valida o estado local: diagnóstico em andamento, mecânico dono, itens e SKUs no estoque
-        EX->>BI: POST /api/v1/precos/validacao (REST síncrono)
-        BI-->>EX: 200, invalidos vazio
-        EX-)OS: DiagnosticoConcluido
-    end
-
-    rect rgba(60, 179, 113, 0.10)
-        Note over OS,BI: T3 e T4: orçamento e decisão do cliente
-        OS-)BI: GerarOrcamento
-        BI-)OS: OrcamentoGerado
-        Note over OS,EX: OS AGUARDANDO_APROVACAO, e-mail com link_decisao pela outbox
-        CL->>BI: POST /api/v1/publico/orcamentos/{token}/decisao (aprova)
-        BI-)OS: OrcamentoAprovado
-    end
-
-    rect rgba(218, 165, 32, 0.12)
-        Note over OS,MP: T5 e T6: reserva de peças e pagamento
-        OS-)EX: ReservarPecas
-        EX-)OS: PecasReservadas
-        OS-)BI: SolicitarPagamento
-        Note over OS: OS AGUARDANDO_PAGAMENTO
-        BI->>MP: POST /checkout/preferences
-        MP-->>BI: init_point
-        BI-)OS: PagamentoSolicitado
-        Note over OS,EX: e-mail com checkout_url pela outbox
-        CL->>MP: paga no Checkout Pro
-        MP->>BI: POST /api/v1/webhooks/mercadopago (x-signature)
-        BI->>MP: GET /v1/payments/{id}
-        MP-->>BI: status approved
-        Note over BI,MP: sem webhook, a conciliação do prazos acha o pagamento em até 30 s
-        BI-)OS: PagamentoConfirmado
-        Note over OS: OS AGUARDANDO_EXECUCAO
-    end
-
-    rect rgba(147, 112, 219, 0.10)
-        Note over OS,EX: T7 a T9: fila, execução e finalização
-        OS-)EX: AgendarExecucao
-        EX-)OS: ExecucaoAgendada
-        ME->>EX: POST /api/v1/execucoes/{ordem_id}/inicio
-        EX-)OS: ExecucaoIniciada
-        Note over OS,EX: pivot: OS EM_EXECUCAO, cancelamento passa a responder 409
-        ME->>EX: POST /api/v1/execucoes/{ordem_id}/finalizacao
-        EX->>EX: baixa das peças reservadas
-        EX-)OS: ExecucaoFinalizada
-        Note over OS,EX: OS FINALIZADA, saga CONCLUIDA
-    end
-
-    AT->>OS: POST /api/v1/ordens-de-servico/{id}/entrega
-    Note over AT,OS: T10: OS ENTREGUE (fora da saga)
-```
-
-O e-mail ao cliente do diagrama sai do processo `notificador`, e não da outbox de comandos ([Notificações por e-mail e LGPD](#notificações-por-e-mail-e-lgpd)).
-
-### Etapas e status
-
-Etapa (o estado do orquestrador) e status (o que cliente e atendente veem) são campos diferentes, com dois nomes em comum; a API, o banco e o label `etapa` das métricas usam os nomes em minúsculas.
-
-| Etapa | Status da OS | Evento que tira a saga da etapa | Comando enviado |
-|---|---|---|---|
-| `aguardando_diagnostico` | `recebida`; `em_diagnostico` com `DiagnosticoIniciado` | `DiagnosticoConcluido` (com a OS em diagnóstico) | `GerarOrcamento`, com os itens do diagnóstico |
-| `aguardando_orcamento` | `em_diagnostico` | `OrcamentoGerado` (a OS guarda o resumo) | nenhum |
-| `aguardando_decisao` | `aguardando_aprovacao` | `OrcamentoAprovado` | `ReservarPecas`, com as peças dos itens (lista vazia vale) |
-| `aguardando_reserva` | `aguardando_aprovacao` | `PecasReservadas` | `SolicitarPagamento` |
-| `aguardando_pagamento` | `aguardando_pagamento` | `PagamentoConfirmado` (depois do `PagamentoSolicitado`, que grava o resumo) | `AgendarExecucao`, prioridade `normal` |
-| `aguardando_agendamento` | `aguardando_execucao` | `ExecucaoAgendada` (a posição na fila fica só no passo) | nenhum |
-| `aguardando_inicio` | `aguardando_execucao` | `ExecucaoIniciada` (pivot) | nenhum |
-| `em_execucao` | `em_execucao` | `ExecucaoFinalizada` | nenhum |
-| `concluida` | `finalizada`; `entregue` com a entrega (T10, fora da saga) | nenhum | nenhum |
-
-A falha de negócio e o cancelamento levam a saga às etapas `compensando`, `compensada` e `falha_na_compensacao` (seção [Compensações e cancelamento](#compensações-e-cancelamento)); nelas o status da OS não muda, até a OS ficar `cancelada`.
-
-- **O agregado `Saga` impõe a tabela** (`tabela_da_saga.py`, `transicoes.py`). Antes de mudar, ele confere que o evento é da OS e se classifica para ser processado (com os marcos da OS de antes do fato), que o instante não volta antes do último registro e que o gatilho do registro é do vocabulário fechado.
-- **Confere o comando.** O comando enviado tem de ser o da linha, com o `ordem_id` da OS, os itens ou as peças que a saga guarda, o orçamento da OS no `SolicitarPagamento`, a prioridade `normal` no `AgendarExecucao`, os ids dos recursos nas compensações e o prazo técnico. O orquestrador só traduz cada evento em chamadas: o fato na OS, o comando na outbox e o registro na saga.
-- **Um só caminho de envio.** A abertura, o orquestrador e o cancelamento gravam o comando pela mesma função (`enviar`, em `contexto_de_envio.py`), e o `ContextoDeEnvio` leva o prazo técnico, o relógio e o span da ação. O instante de cada passo nunca fica antes do último registro da saga, que pode ter vindo de outra réplica ou da API com o relógio um pouco adiantado; é a mesma política no consumidor e na API: com mais de 1 s de defasagem avisa no log `saga clock behind last record`, e com mais de 60 s recusa o passo (no consumidor, DLQ com o motivo `relogio_defasado`; no cancelamento, 500).
-- **Causa.** Cada comando sai com `causation_id` = id do evento que o causou; o `SolicitarDiagnostico` da abertura, causado pela requisição, sai sem ele.
-- **Comando em voo.** O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado` e `AgendarExecucao`) fica registrado na saga como o comando em voo, o que espera a resposta, com o prazo técnico (`prazo_resposta_em`, `SAGA_PRAZO_RESPOSTA_SEGUNDOS` depois do envio) e o id de cada envio (`mensagem_ids`), com que a resposta casa pelo `causation_id`. O `SolicitarDiagnostico` e as esperas humanas não têm prazo.
-- **Só códigos.** A saga guarda etapa, gatilho, comando e ator; texto livre e placa ficam na OS e na mensagem.
-
-### Evento fora de ordem
-
-O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa antes de tocar no domínio (RFC-004 seção 4.5). Os eventos que chegam durante uma compensação têm a tabela própria, em [Compensações e cancelamento](#compensações-e-cancelamento).
-
-| Situação | Exemplo | Desfecho |
-|---|---|---|
-| Etapa do evento é a atual | `OrcamentoGerado` em `aguardando_orcamento` | processado: status, registro e comando seguinte |
-| Etapa já passada, inclusive a resposta republicada | `OrcamentoGerado` em `aguardando_decisao` | ignorado com log (`saga event ignored`) |
-| Mesma etapa, fato já aplicado | `DiagnosticoIniciado` com a OS já em diagnóstico; `PagamentoSolicitado` com o resumo gravado | ignorado com log |
-| Etapa à frente da atual | `ExecucaoIniciada` antes da `ExecucaoAgendada` | adiantado (`FalhaTransitoriaError`): volta pela fila de retry até a saga alcançá-lo |
-| Mesma etapa, antes do fato que o habilita | `DiagnosticoConcluido` com a OS ainda `recebida`; `PagamentoConfirmado` antes do `PagamentoSolicitado` | adiantado |
-| Saga concluída | `ExecucaoFinalizada` repetida em `concluida` | ignorado com log |
-| OS sem saga, ou `ordem_id` dos dados diferente do `correlation_id` | `DiagnosticoIniciado` de uma OS que não tem saga | erro permanente: DLQ com o motivo `saga_inexistente` ou `ordem_id_divergente` |
-| OS cancelada ou entregue com a saga viva (estado que o cancelamento recusa) | `PagamentoConfirmado` de uma OS que um `UPDATE` por fora deixou `cancelada` | DLQ com o motivo `ordem_encerrada`: nenhum comando para OS encerrada |
-| Fato que a OS ou a saga recusam | `PagamentoSolicitado` com a OS fora de `aguardando_pagamento` | DLQ com o motivo `transicao_invalida` |
-| `OrcamentoAprovado` de uma saga com peça de código fora do formato do Billing | `pec_vela.2` (minúsculas, `.` ou `_`): o diagnóstico e o `GerarOrcamento` aceitam, o `sku` do `ReservarPecas` não | DLQ com o motivo `erro_no_handler`; a saga fica em `aguardando_decisao` até o cancelamento da OS |
-| Relógio desta réplica mais de 60 s atrás do último registro da saga (de outra réplica ou da API) | réplica com o relógio 90 s atrás do `em` do último registro | DLQ com o motivo `relogio_defasado`: não é jitter, e gravaria `em` e prazos no futuro; até 60 s o registro fica no instante do anterior |
-
-**Peça com código fora do formato do Billing.** O `sku` do `ReservarPecas` é só o formato do Billing (maiúsculas, dígitos e hífens, até 50 caracteres), e o diagnóstico e o `GerarOrcamento` aceitam mais. O fluxo real não produz o caso: o Billing só cota código nesse formato e responde `GeracaoDeOrcamentoFalhou` aos outros, e a saga compensa. Se a aprovação vier mesmo assim, o comando não é montado (`ContratoInvalidoError`), a transação desfaz e nada vai para a outbox; o redrive repete a falha enquanto o código seguir fora do formato. A `os.eventos.dlq` guarda a mensagem por 7 dias, com o alerta "DLQ com mensagens"; depois disso nada acusa a saga em `aguardando_decisao`, que não tem prazo técnico (o `prazos` só reivindica saga com prazo de resposta e o alerta "Saga parada" não a vê) e deixa o orçamento aprovado no Billing. Cancele a OS antes, com `POST /api/v1/ordens-de-servico/{id}/cancelamento` (202 nessa etapa). Uma linha de `ReservarPecas` já pendente na outbox com esse SKU vai para `dead` no relay e nada chega ao broker: nem a DLQ nem o prazo da saga a acusam: quem acusa é a métrica `outbox_dead` e o alerta "Outbox com mensagem dead" do platform.
-
-O descompasso de estado (etapa já passada, fato repetido, saga encerrada) é ignorado com log e nunca vai para a DLQ. O adiantado volta pela fila de retry nas cinco cópias (1, 5, 15, 60 e 300 s, 381 s ao todo), bem mais que o atraso entre eventos do mesmo passo; se a saga ainda não o tiver alcançado, a sexta falha vai para a DLQ, com alerta (RFC-004 seção 4.5, ADR-035). O motivo de cada recusa sai em código no log `message rejected to dlq` e no status de erro do span do consumo.
-
-A mensagem que o consumidor recusa não entra em `mensagens_processadas` (ADR-036): o redrive da DLQ a trata de novo. A `os.eventos.dlq` guarda cada mensagem por 7 dias (`message-ttl` da política `dlq` em `contratos/rabbitmq/definitions.json`); o procedimento está em [Implantação e DLQ](#implantação-e-dlq).
-
-### Compensações e cancelamento
-
-Termos desta seção:
-
-- **Plano:** as compensações que a saga ainda tem de enviar, na ordem fixa `CancelarExecucao`, `EstornarPagamento`, `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico`. É uma função pura (`aplicacao/saga/compensacao.py`), calculada quando a saga entra em `compensando` e gravada em `plano_compensacao`.
-- **Pendente:** a primeira compensação do plano, a que espera resposta (é o comando em voo).
-- **Resposta casada:** a resposta cujo `causation_id` é o id de um envio do comando em voo (um dos `comando_em_voo.mensagem_ids`).
-- **Estorno automático:** o `PagamentoEstornado` que o Billing publica sozinho, com o `motivo` `pagamento_apos_encerramento`, quando o cliente paga depois de a cobrança ser cancelada, expirada ou recusada (ADR-040). A causa dele é o `SolicitarPagamento`, e não o `EstornarPagamento`.
-- **Corrida do pivot:** o `ExecucaoIniciada` que chega com a compensação em curso ou parada, porque a Execução iniciou antes de receber o `CancelarExecucao`.
-
-Entra no plano a compensação de cada passo concluído ou em voo, menos o que a falha de negócio já encerrou no participante; o `DescartarDiagnostico` entra sempre ([RFC-004 seção 4.4](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md)):
-
-| Etapa | Gatilho | Compensações, em ordem |
-|---|---|---|
-| `aguardando_diagnostico` | cancelamento | `DescartarDiagnostico` |
-| `aguardando_orcamento` | `GeracaoDeOrcamentoFalhou` | `DescartarDiagnostico` |
-| `aguardando_orcamento` | cancelamento (ou prazo técnico), com o `GerarOrcamento` em voo | `CancelarOrcamento`, `DescartarDiagnostico` |
-| `aguardando_decisao` | `OrcamentoRecusado` ou `OrcamentoExpirado` | `DescartarDiagnostico` |
-| `aguardando_decisao` | cancelamento | `CancelarOrcamento`, `DescartarDiagnostico` |
-| `aguardando_reserva` | `ReservaDePecasFalhou` | `CancelarOrcamento`, `DescartarDiagnostico` |
-| `aguardando_reserva` | cancelamento (ou prazo técnico), com o `ReservarPecas` em voo | `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico` |
-| `aguardando_pagamento` | `PagamentoRecusado` ou `PagamentoExpirado` | `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico` |
-| `aguardando_pagamento` | cancelamento (antes do `PagamentoSolicitado` ou com o checkout aberto) | `EstornarPagamento`, `LiberarReserva`, `CancelarOrcamento`, `DescartarDiagnostico` |
-| `aguardando_agendamento` | cancelamento (ou prazo técnico), com o `AgendarExecucao` em voo | as cinco |
-| `aguardando_inicio` | cancelamento | as cinco |
-
-Os estados da compensação e o que move a saga entre eles:
-
-```mermaid
-stateDiagram-v2
-    [*] --> compensando: falha de negócio ou cancelamento (antes do pivot)
-    compensando --> compensando: resposta casada da pendente, a seguinte sai
-    compensando --> compensada: resposta da última, OS cancelada
-    compensando --> falha_na_compensacao: EstornoDePagamentoFalhou
-    compensando --> em_execucao: ExecucaoIniciada, só o CancelarExecucao pendente
-    falha_na_compensacao --> em_execucao: ExecucaoIniciada, só o CancelarExecucao pendente
-    compensada --> [*]
-```
-
-O cancelamento depois do pagamento, com o estorno (RFC-004 seção 4.8d, sem a retomada do admin):
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor AT as Atendente
-    participant OS as os-service
-    participant EX as execution-service
-    participant BI as billing-service
-
-    Note over OS,BI: saga AGUARDANDO_INICIO, OS AGUARDANDO_EXECUCAO (paga e na fila)
-    AT->>OS: POST /api/v1/ordens-de-servico/{id}/cancelamento com o motivo
-    OS->>OS: OS guarda o texto, saga COMPENSANDO (plano das cinco)
-    OS-->>AT: 202 Accepted, etapa compensando
-    OS-)EX: CancelarExecucao
-    EX-)OS: ExecucaoCancelada
-    OS-)BI: EstornarPagamento
-    alt estorno aceito
-        BI-)OS: PagamentoEstornado
-        OS-)EX: LiberarReserva
-        EX-)OS: ReservaLiberada
-        OS-)BI: CancelarOrcamento
-        BI-)OS: OrcamentoCancelado
-        OS-)EX: DescartarDiagnostico
-        EX-)OS: DiagnosticoDescartado
-        OS->>OS: OS CANCELADA com o texto do atendente, saga COMPENSADA
-    else estorno recusado pelo provedor
-        BI-)OS: EstornoDePagamentoFalhou
-        OS->>OS: saga FALHA_NA_COMPENSACAO, sequência suspensa, comando em voo sem prazo
-    end
-    Note over AT,BI: depois de ExecucaoIniciada (pivot), o mesmo POST responde 409
-```
-
-Os eventos que chegam durante a compensação:
-
-| Situação | Exemplo | Desfecho |
-|---|---|---|
-| Falha de negócio na etapa do passo que falha | `OrcamentoRecusado` em `aguardando_decisao` | processado: a compensação começa pela primeira do plano |
-| Resposta da compensação pendente | `ExecucaoCancelada` com o `CancelarExecucao` pendente; as três do `EstornarPagamento` só se forem casadas | processado: a seguinte sai, ou a saga termina |
-| Resposta de compensação que não é a da pendente, ou fora de `compensando` | `ReservaLiberada` com o `EstornarPagamento` pendente; qualquer resposta em `falha_na_compensacao` | ignorado com log |
-| Evento do fluxo normal com a saga em compensação ou compensada | `OrcamentoAprovado` ou `PagamentoConfirmado` atrasados | ignorado com log: a compensação já cancela o orçamento e devolve o pagamento |
-| Estorno automático, em qualquer etapa | `PagamentoEstornado` com `pagamento_apos_encerramento` e o `causation_id` do `SolicitarPagamento` | só o resumo do pagamento passa a `estornado`, se a OS o tiver: sem etapa nova, sem comando e sem registro, com o log `late payment refunded` (sem resumo, ou já estornado, ignorado com log) |
-| Corrida do pivot | `ExecucaoIniciada` com só o `CancelarExecucao` pendente | a saga volta a `em_execucao`, e a OS descarta o texto do pedido |
-| `ExecucaoIniciada` com outra compensação pendente | `ExecucaoIniciada` com o `EstornarPagamento` pendente | ignorado com log de erro: o `CancelarExecucao` já foi respondido |
-| `ExecucaoFinalizada` com o `CancelarExecucao` pendente | | adiantado: volta pela retry até o `ExecucaoIniciada` chegar |
-
-Como a saga se comporta:
-
-- **Uma por vez.** Cada compensação espera a resposta da anterior, com o prazo técnico gravado pela saga no envio. A resposta da última leva a saga a `compensada` e a OS a `cancelada`.
-- **Dados do comando.** `{ordem_id, motivo}`, em que `motivo` é o código da compensação e nunca o texto do atendente, mais o `orcamento_id` no `CancelarOrcamento` e o `pagamento_id` no `EstornarPagamento` quando a OS já os tem (sem eles o participante acha o recurso pelo `ordem_id`).
-- **A OS cancelada.** Tem origem `saga` e o motivo que o atendente escreveu ou, nas falhas de negócio, o rótulo do código (`ROTULO_DO_MOTIVO`: "Orçamento recusado pelo cliente", "Falta de peça para a reserva", "Pagamento não realizado no prazo"...). O `ator` da mudança é o `sub` do atendente que pediu o cancelamento e, nas falhas de negócio, o processo `consumidor` (ADR-039).
-- **Resposta casada.** Com o `EstornarPagamento` pendente, concluem a compensação o `PagamentoCancelado` e o `PagamentoEstornado` (de qualquer `motivo`) casados, e o `EstornoDePagamentoFalhou` casado leva a saga a `falha_na_compensacao`. O `motivo` não serve de chave: o Billing responde ao comando com `pagamento_apos_encerramento` quando a aprovação tardia já tinha sido estornada.
-- **Resumo do pagamento.** A OS passa o resumo a `cancelado` ou `estornado` com a resposta, quando o tem (`ResumoPagamento.cancelado()` e `.estornado()`). O cancelamento só atinge a cobrança em aberto e o estorno aceita qualquer origem; nenhuma das duas recusa a resposta do Billing. Se o estorno automático chegou antes e o resumo já está `estornado`, a resposta casada deixa o resumo como está e a compensação avança, em qualquer ordem de chegada entre as réplicas do consumidor.
-- **Falha na compensação.** Duas causas a levam: o `EstornoDePagamentoFalhou` (`falha=estorno_recusado`) e a compensação sem resposta depois dos reenvios (`falha=reenvios_esgotados`). A sequência para: o compensado fica compensado, o resto como estava e a OS mantém o status. A saga guarda a `falha`, o plano com a pendente em primeiro lugar e o comando em voo **sem prazo**, com os ids de todos os envios (a resposta tardia ao original ainda casa depois da retomada). A resposta que chega em `falha_na_compensacao` é ignorada, salvo o estorno automático (só o resumo) e o `ExecucaoIniciada` com o `CancelarExecucao` parado. O reenvio por prazo e a retomada pelo admin estão em [Prazos, falha na compensação e retomada](#prazos-falha-na-compensação-e-retomada).
-- **Corrida do pivot.** Se o `ExecucaoIniciada` vence o cancelamento, a saga e a OS voltam a `em_execucao`: o texto do pedido é descartado, motivo, plano e falha se limpam, e o registro tem o gatilho `cancelamento_recusado` com o `mensagem_id` do evento. Se o cancelamento venceu, o `ExecucaoIniciada` que chega depois é ignorado com log de erro.
-- **Registros.** O gatilho de cada registro é o tipo da mensagem ou uma palavra da lista fechada `abertura`, `cancelamento_solicitado`, `cancelamento_recusado`, `reenvio`, `prazo_esgotado` e `retomada`; a saga recusa outro, e o `GET /api/v1/sagas/{ordem_id}` documenta a lista.
-
-`POST /api/v1/ordens-de-servico/{id}/cancelamento` (atendente, corpo `{"motivo": "texto livre"}`) responde:
-
-| Etapa | Resposta |
-|---|---|
-| `aguardando_*` (antes do pivot) | **202** com a OS e `etapa: "compensando"`: a OS guarda o texto em `motivo_cancelamento` sem mudar o status, a saga entra em `compensando` com `motivo=cancelamento` e a primeira compensação sai no mesmo commit, com o registro `cancelamento_solicitado` |
-| `compensando` ou `falha_na_compensacao` | **202** com a etapa atual, sem efeito: o pedido repetido não grava texto, registro nem comando |
-| `em_execucao` ou `concluida` | **409** `TRANSICAO_STATUS_INVALIDA`, "Cancelamento recusado: execução já iniciada" (RN-029) |
-| `compensada` | **409** `TRANSICAO_STATUS_INVALIDA`, "Ordem já cancelada" |
-| Conflito de versão com o consumidor que persiste nas três leituras | **409** `CONFLITO_DE_CONCORRENCIA` |
-| OS inexistente, ou sem saga (toda OS tem saga desde a migração `003`) | **404** `ENTIDADE_NAO_ENCONTRADA`; não há cancelamento direto |
-| Motivo vazio, em branco, com mais de 500 caracteres ou com caractere de controle ou de formatação (ver "Texto livre", abaixo) | **422** `VALOR_INVALIDO`, no envelope do domínio, antes de qualquer efeito |
-| Corpo fora do schema (sem `motivo`, campo a mais, tipo errado) | **422** no formato da validação de schema dos três serviços, `{detail, id_requisicao}` |
-
-```bash
-curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/cancelamento \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"motivo": "Cliente vendeu o veículo"}' | jq '{status, etapa, motivo_cancelamento}'
-```
-
-Com a OS recém-aberta (sem resposta dos participantes ainda), a resposta é `{"status": "recebida", "etapa": "compensando", "motivo_cancelamento": "Cliente vendeu o veículo"}`; repetido o mesmo `POST`, vem outro 202, sem efeito, e depois do início da execução vem o 409 da tabela.
-
-- **Conflito de versão.** Quando o consumidor grava a mesma OS ou saga no meio, a requisição relê as duas e decide de novo, até três leituras (*reread value*, RFC-004 seção 4.5).
-- **O texto do atendente.** O `motivo_cancelamento` é o texto do pedido, guardado já no 202, enquanto a OS segue com o status anterior. Quem lê a OS vê o texto com a etapa `compensando`, e ele volta a `null` se o início da execução vencer o pedido. As OS canceladas diretamente, antes de o cancelamento passar pela saga, guardam o texto no mesmo campo.
-- **Onde o texto fica.** Em `ordens_de_servico.motivo_cancelamento` e, depois de a OS ser cancelada, em `historico_status_ordem.motivo` (devolvido por `GET /{id}/historico`). O apagamento LGPD do cliente anonimiza as duas colunas, e a saga guarda só códigos.
-- **Texto livre.** A descrição do problema (`POST /api/v1/ordens-de-servico`, até 1000 caracteres) e o motivo do cancelamento (até 500) passam pela mesma validação, no domínio: o texto entra aparado (CRLF vira LF), e a violação volta como 422 `VALOR_INVALIDO`.
-  - **Recusa:** o texto vazio, o que passa do limite e os caracteres das categorias Unicode `Cc` (controle, como o NUL e o CR solto), `Cf` (formatação: espaço de largura zero, override bidirecional, marca de direção), `Zl` e `Zp` (separador de linha e de parágrafo). A quebra de linha e a tabulação passam.
-  - **Passa:** acentos, o espaço sem quebra e o emoji simples, com tom de pele, bandeira ou variação de apresentação.
-  - **Falso positivo conhecido:** o emoji composto por junção de largura zero (`👨‍🔧`, `👩‍💻`, as famílias), o hífen condicional e a marca esquerda-direita também são `Cf` e voltam 422 com `<campo> tem caractere de controle ou de formatacao`, sem dizer qual. Texto colado do WhatsApp ou do Word pode trazê-los.
-  - **Decisão:** manter a categoria `Cf` inteira recusada. O atendente lê o texto na tela e a LGPD o alcança, e o override bidirecional e o espaço de largura zero escondem ou reordenam o que se lê. Liberar só a junção entre dois pictogramas pediria a propriedade Emoji do Unicode, que o `unicodedata` do Python não tem, e uma lista de pictogramas que cresce a cada versão do Unicode. O custo é o atendente tirar o caractere ou trocar o emoji composto pelo simples; `test_texto_livre.py` fixa os dois lados.
-- **Auditoria (ADR-039).** Cada pedido deixa uma linha de log com `correlation_id` (a OS), `ator` (o `sub` de quem pediu) e `resultado`: `order cancellation requested` com `aceito` ou `repetido` (e a `etapa`), ou `order cancellation refused` com o código do erro. Nunca o texto do motivo. O `sub` fica também no registro `cancelamento_solicitado` da saga e no `ator` da mudança `cancelada` do histórico. Só o que chega ao caso de uso é auditado: o corpo fora do schema (422 de schema) e as falhas inesperadas (500, como o relógio defasado ou a invariante da saga violada) saem apenas pelo log genérico da requisição ou do erro, sem `ator` nem `correlation_id`.
-- **Cliente com OS em andamento.** Enquanto a OS tem compensação em andamento ela segue ativa, e a desativação e o apagamento do cliente respondem 409 até a saga terminar (`existe_os_ativa_para_cliente` só libera a OS entregue ou cancelada).
-
-### Prazos, falha na compensação e retomada
-
-Termos desta seção:
-
-- **Prazo técnico:** quanto o OS espera a resposta automática de um comando (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado`, `AgendarExecucao` e as cinco compensações) antes de reenviá-lo. `SolicitarDiagnostico` e as esperas humanas (o mecânico, a decisão do orçamento, o checkout aberto, o início da execução) não têm prazo técnico: quem expira o orçamento e o pagamento é o Billing.
-- **Envio mais recente:** o último id de `comando_em_voo.mensagem_ids`, o do original, de um reenvio ou da retomada. O prazo conta dele.
-- **Reenvio:** o mesmo `tipo` e os mesmos `dados` (a mesma chave de negócio, então o participante não repete o efeito e republica o desfecho que já registrou), com `id` novo e `causation_id` nulo. O id novo entra em `mensagem_ids`: a resposta ao original, a qualquer reenvio e à retomada continua casando pelo `causation_id`.
-
-O processo `prazos` (`python -m src.prazos`, a mesma imagem) roda a cada `PRAZOS_INTERVALO_SEGUNDOS`, uma transação por saga ([RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seções 4.6 e 4.7):
-
-1. Confere o relógio do processo contra o do banco (`clock_timestamp()`, o que grava o `entregue_em` da outbox), uma vez por ciclo. Com desvio acima de 5 s, adiantado ou atrasado, o ciclo não age e registra `clock skew too large` em erro, com o desvio: o relógio adiantado reenviaria e esgotaria antes da hora, sem volta, e o atrasado não acharia as vencidas. O ciclo seguinte confere de novo.
-2. Reivindica a saga de prazo vencido mais antiga com `FOR UPDATE SKIP LOCKED` (`SagaRepository.reivindicar_vencida`): duas réplicas nunca pegam a mesma saga. O `prazo_resposta_em` que a saga grava no envio é só o limite inferior que o índice parcial `ix_sagas_prazo` usa para achar as candidatas.
-3. O prazo só corre depois que o comando sai da outbox: a saga só vence se a linha do envio mais recente está `entregue` e `entregue_em + SAGA_PRAZO_RESPOSTA_SEGUNDOS` já passou. Linha `pendente` (relay ou broker fora) ou `dead` não vence e não gasta reenvio; o sinal são as métricas `outbox_pendentes` e `outbox_dead` e os alertas "Outbox parada" e "Outbox com mensagem dead" do platform. Uma saga cujo último id de `mensagem_ids` não é um uuid (só nasce por corrupção manual) não casa com linha nenhuma da outbox: não vence e não derruba a consulta do ciclo nem a do gauge, e o alerta "Saga parada", que usa a mesma consulta, também não a vê.
-4. Com a saga na mão, e antes de tratá-la, confere a fila do consumidor: uma declaração passiva de `os.eventos` (o usuário `os` já lê a fila) devolve o número de consumidores e o de mensagens prontas. Sem consumidor, com qualquer mensagem pronta na fila ou com o broker fora, o ciclo desfaz a transação da saga, não reenvia nem esgota prazo e só avisa em log (`saga deadlines paused`, com o `motivo`): a resposta pode estar esperando na fila, e é o que acontece logo depois de o consumidor voltar, com o backlog de uma parada ainda por drenar. Uma mensagem transitória, de um consumidor em dia, também pausa o ciclo e o seguinte segue. Quando a fila fica em dia a saga segue de onde estava; como ela é conferida a cada saga, o consumidor que cai no meio do ciclo interrompe o resto dele. O ciclo ocioso, sem saga vencida, não consulta a fila nem avisa: só conecta ao broker, o que mantém o processo pronto. O `/metrics` e o alerta "Saga parada" seguem vendo o prazo vencido.
-5. Decide pela saga, sem ler a OS, e comita a saga e o comando na outbox juntos. O consumidor que leu a saga antes perde na conferência da `versao`, volta pela fila de retry, relê e segue: a resposta ao comando original continua válida, e a repetida que o reenvio provoca chega depois e é ignorada.
-6. Cada ciclo trata no máximo 100 sagas, reenviadas ou esgotadas (`SAGAS_POR_CICLO`), e recusa no máximo 1000 (`RECUSADAS_POR_CICLO`, teto próprio: a saga com defeito não gasta o teto das boas). O resto fica para o ciclo seguinte, o que reparte a rajada de depois de uma parada longa e deixa a fila conferida a cada saga. Com mais de 1000 sagas com defeito na frente (as de prazo mais antigo), as boas esperam; o alerta de prazo vencido segue disparando. O SIGTERM é visto entre duas sagas.
-
-| Situação | O que o `prazos` faz |
-|---|---|
-| Prazo vencido, `reenvios < SAGA_MAX_REENVIOS` | reenvia o comando em voo, `reenvios + 1`, prazo novo, registro `reenvio` (campo `reenvio` com o número, 1 a 5) |
-| Esgotado em etapa linear (`aguardando_orcamento`, `_reserva`, `_pagamento` ou `_agendamento`) | inicia a compensação com `motivo=prazo_tecnico` e o passo em voo no plano (as linhas "prazo técnico esgotado" da tabela da RFC 4.4), envia a primeira e zera o contador; registro `prazo_esgotado`. A primeira compensação leva só `ordem_id` e `motivo`: a OS ainda não conhece o recurso do passo em voo (o id nasce na resposta que apagaria o prazo), e o participante o acha pelo `ordem_id` |
-| Esgotado em `compensando` | a saga vai a `falha_na_compensacao` com `falha=reenvios_esgotados`; nenhum comando sai, o comando em voo fica sem prazo e o plano segue com a pendente primeiro; o `reenvios` fica no máximo até a retomada, que o zera; registro `prazo_esgotado` |
-| Saga parada em `falha_na_compensacao`, esperas humanas, sagas encerradas | nada: não têm `prazo_resposta_em` |
-| Saga que falha por defeito próprio (o domínio a recusa, o comando guardado está fora do contrato, um erro do banco que se repetiria a cada ciclo) | a saga fica de fora do resto do ciclo e as outras seguem, até 1000 recusadas por ciclo: `saga deadline refused` em erro com o `correlation_id`, o tipo da exceção e o `arquivo:linha` (a mensagem só para a recusa do domínio, que traz etapa e tipo, sem dado de cliente), e o prazo vencido continua acusando no gauge. Só o banco fora (conexão recusada ou caída, pool sem conexão) falha o ciclo inteiro, e o laço tenta de novo no seguinte |
-
-O ator dos registros é `prazos`. Com os padrões (120 s, 5 reenvios, ciclo de 30 s), o original e os cinco reenvios dão ao participante 12 minutos (6 x 120 s) e o limite real chega a cerca de 15 (6 x (120 + 30 + a latência do relay)).
-
-As três variáveis (`SAGA_PRAZO_RESPOSTA_SEGUNDOS`, `SAGA_MAX_REENVIOS` e `PRAZOS_INTERVALO_SEGUNDOS`) estão em [Configuração](#configuração); o prazo é contado da saída do comando da outbox.
-
-O limite é do agregado, não só do ciclo: `Saga.reenviar` recusa o reenvio depois do `SAGA_MAX_REENVIOS` e `Saga.esgotar_prazo`, o esgotamento antes dos reenvios todos.
-
-A janela de reenvio (720 s) tem de passar da soma dos atrasos de retry do consumidor (1 + 5 + 15 + 60 + 300 = 381 s): senão a saga desistiria de um passo cuja resposta ainda está na fila de retry. `test_configuracao_dos_prazos.py` confere a relação a partir do TTL das filas de retry do `definitions.json`, dos padrões do código, do compose e dos três overlays. Os reenvios saem depois e podem ainda estar no retry quando a saga desiste; o efeito deles é desfeito pela compensação do passo em voo ou descartado pelo participante, que ignora o comando que chega depois do desfecho da mesma chave de negócio.
-
-**Falha na compensação.** Entra em `falha_na_compensacao` o `EstornoDePagamentoFalhou` (`falha=estorno_recusado`) ou a compensação sem resposta depois dos reenvios (`falha=reenvios_esgotados`). A sequência para: o compensado fica compensado, o resto fica como estava, a OS mantém o status, o alerta "Saga parada" dispara, e a resposta que chega atrasada é ignorada (salvo o `ExecucaoIniciada` com o `CancelarExecucao` parado, que devolve a saga a `em_execucao`). O operador segue o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md), resolve a causa e retoma.
-
-`POST /api/v1/sagas/{ordem_id}/compensacao` (admin) reenvia a compensação pendente, o comando guardado em `comando_em_voo`, com `id` novo, que se soma a `mensagem_ids` (os ids do original e dos reenvios ficam: a resposta tardia ao original ainda conclui a compensação), `reenvios = 0` e prazo novo; limpa a `falha`, volta a saga a `compensando`, grava o registro `retomada` com o `sub` do admin e segue o plano até `compensada`:
-
-| Etapa | Resposta |
-|---|---|
-| `falha_na_compensacao` | **202** com a saga (`SagaResponse`, a mesma do `GET`), `etapa: "compensando"`, `falha: null`, `reenvios: 0` e o prazo novo |
-| Qualquer outra | **409** `TRANSICAO_STATUS_INVALIDA`, "Retomada recusada: a saga não está em falha na compensação" |
-| Conflito de versão com o consumidor (a corrida do pivot gravou a saga no meio) | **409** `CONFLITO_DE_CONCORRENCIA`; o operador repete o pedido |
-| OS inexistente ou sem saga | **404** `ENTIDADE_NAO_ENCONTRADA` |
-| Outro papel, sem token | **403** `ACESSO_NEGADO`, **401** `NAO_AUTENTICADO` |
-
-`$TOKEN` é o JWT do admin, do login do admin semeado no compose (veja [Como rodar local](#como-rodar-local)); `$ORDEM_ID`, o id da OS cuja saga parou, que o alerta "Saga parada" e o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md) indicam.
-
-```bash
-curl -s -X POST localhost:8000/api/v1/sagas/$ORDEM_ID/compensacao \
-  -H "Authorization: Bearer $TOKEN" | jq '{etapa, falha, reenvios, plano_compensacao}'
-```
-
-Cada retomada deixa uma linha de log com `correlation_id`, `ator` e `resultado` (`saga resumed`, ou `saga resume refused` com o código do erro), sem os `dados` do comando, e o span `saga retomada` é filho do contexto que a saga guardou, com link para a requisição. Uma falha inesperada (500) sai só pelo log genérico do erro interno, sem o `ator`.
-
-### Implantação e DLQ
-
-- **Ordem.** A migração primeiro (a `004` cria a tabela `notificacoes`, de que o `notificador` depende); depois a API, o relay, o consumidor e o `prazos`, juntos (no cluster, o mesmo `kubectl apply -k` aplica tudo, e os pods esperam a migração no `initContainer`) ou o consumidor antes: a compensação que a API inicia é respondida na `os.eventos`, e uma réplica do consumidor de versão anterior, sem tratador para a falha de negócio e para a resposta de compensação, a recusa com o motivo `sem_tratador_nesta_versao`. Durante o rollout, as respostas que uma réplica antiga consumir vão para a DLQ. O `notificador` sobe por último, depois que a API e o consumidor já gravam o pedido.
-- **Janela do rolling update e o e-mail.** Durante o rollout o Deployment do consumidor tem a réplica antiga e a nova consumindo `os.eventos` juntas, e só a nova grava o pedido de e-mail na transação. A transição que a réplica antiga tratar nunca gera e-mail, e nada a reconcilia depois: é aceito (o e-mail é complementar e a OS segue o fluxo). O mesmo vale para o `kubectl rollout undo` do consumidor. O pedido que a API já nova gravar com modelo, status ou motivo que um `notificador` antigo não conhece fica `pendente` até a versão nova subir, sem gastar tentativa.
-- **Redrive depois da versão nova, em todas as réplicas.** Antes disso a versão antiga recusa as mesmas mensagens de novo e o prazo de 7 dias recomeça. No clone do platform, `make redrive FILA=os.eventos`; se a implantação conviveu com réplicas antigas, repita-o no fim. O teste `test_redrive_so_trata_o_evento_depois_de_implantar_a_versao_nova` mostra a ordem com o shovel do platform.
-- **Inspecione a DLQ antes.** O redrive devolve a fila inteira, sem filtrar por motivo: anote o `type`, o `message_id`, o `user_id` e o `correlation_id` de cada mensagem, como o [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md) manda.
-- **Rollback.** Não volte a imagem com saga em `compensando` ou em `falha_na_compensacao`: a réplica anterior que tentar mudar essa saga viola a invariante dela, que exige prazo junto do comando em voo (`ValueError`, e a mensagem vai para a DLQ com `erro_no_handler`), e manda a resposta da compensação para a DLQ com `sem_tratador_nesta_versao`. Se voltar, faça o redrive depois de implantar de novo.
-- **O processo `prazos` junto com a compensação.** O reenvio por prazo e a retomada (`POST /api/v1/sagas/{ordem_id}/compensacao`) vêm com o `prazos`: sem ele, um participante que nunca responde deixa a saga em `compensando` sem reenvio nem alerta de prazo, e a saga em `falha_na_compensacao` dispara o alerta "Saga parada" cujo procedimento termina na retomada. Por isso a versão que compensa e o `prazos` vão juntos para o cluster (os manifestos têm os dois), e o `make smoke` confere que o `prazos` fica pronto.
-
-### Consulta e operação
-
-- `GET /api/v1/ordens-de-servico/{id}`: a etapa da saga ao lado do status.
-- `GET /api/v1/ordens-de-servico/{id}/historico`: as mudanças de status (`mudancas`), com o ator de cada uma (`sub` do JWT ou o processo `consumidor`), e os registros da saga (`passos`: gatilho, etapa antes e depois, comando enviado e ator), em duas listas, cada uma na sua ordem.
-- `GET /api/v1/sagas/{ordem_id}` (admin): etapa, motivo, falha, plano de compensação restante, comando em voo (tipo e hora do envio), reenvios, prazo e registros (o `reenvio` traz o número, 1 a `SAGA_MAX_REENVIOS`, só no registro de reenvio); é a primeira consulta do [runbook da saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/runbook-saga.md).
-- `POST /api/v1/sagas/{ordem_id}/compensacao` (admin): a retomada da compensação parada ([Prazos, falha na compensação e retomada](#prazos-falha-na-compensação-e-retomada)).
-
-```bash
-curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq
-```
-
-Logo depois do `DiagnosticoConcluido`, a resposta fica assim (registros abreviados: cada um traz também `em`, `mensagem_id`, `comando_id` e `motivo`):
-
-```json
-{
-  "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
-  "etapa": "aguardando_orcamento",
-  "motivo": null,
-  "falha": null,
-  "plano_compensacao": [],
-  "comando_em_voo": {"tipo": "GerarOrcamento", "enviado_em": "2026-10-07T13:02:11Z"},
-  "reenvios": 0,
-  "prazo_resposta_em": "2026-10-07T13:04:11Z",
-  "passos": [
-    {"seq": 1, "gatilho": "abertura", "de": null, "para": "aguardando_diagnostico", "comando": "SolicitarDiagnostico", "ator": "<sub do atendente>"},
-    {"seq": 2, "gatilho": "DiagnosticoIniciado", "de": "aguardando_diagnostico", "para": "aguardando_diagnostico", "comando": null, "ator": "consumidor"},
-    {"seq": 3, "gatilho": "DiagnosticoConcluido", "de": "aguardando_diagnostico", "para": "aguardando_orcamento", "comando": "GerarOrcamento", "ator": "consumidor"}
-  ]
-}
-```
-
-Depois do cancelamento com o pagamento já feito e da `ExecucaoCancelada`, a saga está em `compensando`: `plano_compensacao` traz o que falta (a primeira é a pendente), `comando_em_voo` é essa pendente e `prazo_resposta_em` é o prazo técnico dela (só os três últimos registros, abreviados como acima):
-
-```json
-{
-  "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
-  "etapa": "compensando",
-  "motivo": "cancelamento",
-  "falha": null,
-  "plano_compensacao": ["EstornarPagamento", "LiberarReserva", "CancelarOrcamento", "DescartarDiagnostico"],
-  "comando_em_voo": {"tipo": "EstornarPagamento", "enviado_em": "2026-10-07T15:21:14Z"},
-  "reenvios": 0,
-  "prazo_resposta_em": "2026-10-07T15:23:14Z",
-  "passos": [
-    {"seq": 9, "gatilho": "ExecucaoAgendada", "de": "aguardando_agendamento", "para": "aguardando_inicio", "comando": null, "ator": "consumidor"},
-    {"seq": 10, "gatilho": "cancelamento_solicitado", "de": "aguardando_inicio", "para": "compensando", "comando": "CancelarExecucao", "ator": "<sub do atendente>"},
-    {"seq": 11, "gatilho": "ExecucaoCancelada", "de": "compensando", "para": "compensando", "comando": "EstornarPagamento", "ator": "consumidor"}
-  ]
-}
-```
-
-Se o provedor recusa o estorno, o Billing publica o `EstornoDePagamentoFalhou` e a saga para em `falha_na_compensacao`: `falha` traz a causa, o plano segue com a pendente em primeiro lugar, o `comando_em_voo` continua sendo o `EstornarPagamento` e o `prazo_resposta_em` é `null`, porque o comando parado não tem prazo (registros abreviados também):
-
-```json
-{
-  "ordem_id": "3f6e1c2a-8d4b-4f7e-9a11-5c2d0b7e9f40",
-  "etapa": "falha_na_compensacao",
-  "motivo": "cancelamento",
-  "falha": "estorno_recusado",
-  "plano_compensacao": ["EstornarPagamento", "LiberarReserva", "CancelarOrcamento", "DescartarDiagnostico"],
-  "comando_em_voo": {"tipo": "EstornarPagamento", "enviado_em": "2026-10-07T15:21:14Z"},
-  "reenvios": 0,
-  "prazo_resposta_em": null,
-  "passos": [
-    {"seq": 10, "gatilho": "cancelamento_solicitado", "de": "aguardando_inicio", "para": "compensando", "comando": "CancelarExecucao", "ator": "<sub do atendente>"},
-    {"seq": 11, "gatilho": "ExecucaoCancelada", "de": "compensando", "para": "compensando", "comando": "EstornarPagamento", "ator": "consumidor"},
-    {"seq": 12, "gatilho": "EstornoDePagamentoFalhou", "de": "compensando", "para": "falha_na_compensacao", "comando": null, "ator": "consumidor"}
-  ]
-}
-```
-
-O trace da saga é o do `POST` de abertura: no Jaeger, busque pelo `correlation_id` (o id da OS, atributo dos spans de mensagem); no Loki, pelo campo `correlation_id` dos logs.
-
-### Observabilidade da saga
-
-- **Trace.**
-  - O span da requisição de abertura é a raiz do trace da saga: a outbox guarda o contexto, o relay publica como filho, e o `process <tipo>` do consumidor ganha `pytstop.saga.etapa`, `pytstop.saga.etapa_nova` e `pytstop.saga.desfecho` (`processada`, `ignorada`, `adiantada` ou `recusada`, com o motivo no status de erro), mais `pytstop.saga.falha` quando o evento leva a saga a `falha_na_compensacao`.
-  - A saga guarda o `traceparent` da última transição. O cancelamento chega com trace próprio (a requisição do atendente): o caso de uso abre o span `saga cancelamento` como filho desse contexto, com span link para a requisição, e a primeira compensação e o novo `traceparent` da saga nascem nele, de modo que a compensação segue no trace da saga.
-  - O `prazos` e a retomada fazem o mesmo: abrem `saga prazo` (um por saga tratada, o ciclo ocioso não abre span) e `saga retomada` como filhos do contexto da saga, e o reenvio sai no trace dela.
-  - Os spans `saga cancelamento`, `saga prazo` e `saga retomada` ficam com status de erro e `pytstop.falha` (o tipo da exceção, sem a mensagem) só numa falha inesperada; as recusas de negócio (404, 409, 422) não os marcam.
-- **Métricas** ([ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md)).
-  - Contadores e histograma, contados só depois do commit da transação raiz (rollback, conflito de versão, commit que falha, savepoint liberado e savepoint desfeito não contam, e a retry não conta duas vezes): `pytstop_saga_iniciadas_total` (API), `pytstop_saga_finalizadas_total{resultado}` (`concluida` ou `compensada`), `pytstop_saga_compensacoes_total{motivo}` (quem inicia a compensação: o consumidor nas falhas de negócio e a API no cancelamento; os oito códigos) e `pytstop_saga_etapa_duracao_segundos{etapa}` (quem tira a saga da etapa). O `prazos` soma `pytstop_saga_reenvios_total{comando}` e `pytstop_saga_prazos_esgotados_total{comando}` (os nove comandos com prazo) e inicia a compensação `prazo_tecnico` na contagem de compensações.
-  - Gauges `pytstop_saga_ativas{etapa}`, `pytstop_saga_etapa_mais_antiga_segundos{etapa}` e `pytstop_saga_prazo_vencido_segundos`: o coletor da API os calcula em duas consultas por raspagem, na conexão própria da raspagem, fora do pool das requisições, com 2 s de prazo para cada consulta e 1 s para esperar um lock ([Observabilidade](#observabilidade) tem o prazo total da raspagem e o que mais o coletor lê). O de prazo vencido é o maior `agora - (entregue_em + SAGA_PRAZO_RESPOSTA_SEGUNDOS)` da linha da outbox do envio mais recente de cada saga com prazo, só entre as entregues, e 0 sem atraso: comando `pendente` ou `dead` na outbox não conta, nem a saga parada em `falha_na_compensacao`. Como o coletor só lê o banco, ele acusa o prazo vencido também com o `prazos` fora do ar ou em pausa (o alerta "Saga parada" usa `max(pytstop_saga_prazo_vencido_segundos) > 60`).
-  - Se a leitura das sagas falha, os três gauges ficam ausentes (nunca zero), `pytstop_saga_coletor_falhas_total` conta a falha e `pytstop_saga_coletor_disponivel` vai a 0, para o alerta "Saga parada" não ficar mudo com o coletor quebrado. As séries de rótulo fechado nascem em zero em cada processo.
-- **Logs** JSON em inglês, com `correlation_id`, `etapa` e `tipo` (o `comando` nos do `prazos`).
-  - `saga started`, `saga transition` (com o `motivo` da compensação; em aviso e com a `falha` quando a saga para na compensação), `saga event ignored` (com a classificação), `saga event ahead`, `late payment refunded` (o estorno automático) e `saga clock behind last record` (com a defasagem em segundos).
-  - O pedido de cancelamento audita em `order cancellation requested` e `order cancellation refused`, com o `ator` e o `resultado`, sem texto livre, placa nem links.
-  - O `prazos` loga `saga command resent` (com o número do `reenvio`), `saga deadline exhausted` (em aviso e com a `falha` quando a saga para), `saga deadline refused`, `saga deadlines paused` (com o `motivo`), `clock skew too large: saga deadlines skipped` (em erro, com o desvio) e `deadline cycle done` (só com trabalho). Nunca os `dados` do comando.
-  - A retomada audita em `saga resumed` e `saga resume refused`, com o `ator` e o `resultado`.
-
-### Testes da saga
-
-- **Unitários.**
-  - Cada linha da tabela de etapas no agregado e no handler (etapa, status, comando e `dados`, prazo, resumos da OS e ator) e as recusas do agregado: `tests/unitarios/ordem_servico/test_saga.py` e `test_orquestrador.py`.
-  - A matriz da classificação, gerada de um oráculo escrito a partir da RFC: 12 etapas x 10 perfis da OS x 23 tipos no agregado (`test_classificacao.py`) e, no handler, com a OS de cada etapa e com a OS encerrada (`test_orquestrador.py`).
-  - As conferências do agregado, as invariantes e o vocabulário do gatilho (`test_transicoes.py`); o envio e a política do relógio (`test_contexto_de_envio.py`).
-  - As compensações: as 11 linhas da tabela da RFC-004 seção 4.4 (`test_compensacao.py`), cada compensação pendente por cada resposta, casada ou não pelo `causation_id` (`test_orquestrador_compensacoes.py`), as 12 células das transições do resumo do pagamento (`test_resumos.py`) e o cancelamento em cada etapa, com o rótulo dos oito códigos (202, repetido, 409 e 422: `test_use_cases_os.py`).
-- **Limites.** `test_limites_do_dominio.py` mede o que o desenho manda: no máximo 300 linhas por módulo de `aplicacao/saga/` e da `OrdemDeServico`, e 10 métodos públicos que mudam estado em cada um dos dois agregados (a conta inclui os mixins de leitura; as propriedades e as duas consultas da `LeituraDaSaga` não contam).
-- **Propriedade** (`test_propriedades_da_saga.py`).
-  - Em mil sementes, participantes simulados respondem a cada comando com eventos embaralhados, repetidos com id novo e atrasados, com retry nos atrasos das filas, e o atendente tenta cancelar e entregar a OS em pontos aleatórios.
-  - Cada roteiro escolhe uma falha de negócio (ou nenhuma), se o provedor recusa o estorno, se o cliente paga depois de a cobrança ser encerrada e se o estorno automático chega antes da resposta ao `EstornarPagamento` (a ordem trocada entre duas réplicas do consumidor).
-  - Só a falha transitória escapa, o par etapa e status fica na tabela, o repetido não muda nada, a OS fica cancelada se e só se a saga está compensada, a compensação seguinte só sai depois da resposta da anterior (o estorno nunca antes da execução cancelada), o gatilho de todo registro é do vocabulário, o plano é o da tabela da RFC e nada vai para a DLQ.
-  - Uma guarda confere que o gerador produz de fato obsoletos, repetidos, adiantados, estornos automáticos, a ordem trocada e eventos fora do fluxo.
-- **Prazos** (a matriz abaixo roda no `make test`).
-  - Unitários: o reenvio de 1 a 5 em cada etapa técnica, o esgotamento em cada uma e em `compensando`, a retomada e tudo o que cada uma recusa sem mudar nada (`test_prazos_da_saga.py`); o ciclo do `VencerPrazos` com relógio manual, sem consumidor e com a saga que o domínio recusa (`test_vencer_prazos.py`); a retomada pelo caso de uso e pela rota (`test_retomar_compensacao.py`, `test_router_os.py`); a configuração: a soma dos atrasos de retry (381 s) contra a janela de reenvio (720 s), no código, no compose e nos três overlays (`test_configuracao_dos_prazos.py`); os manifestos do `prazos` (`test_contrato_dos_manifestos.py`, `test_manifestos.py`).
-  - Propriedade (`test_propriedades_dos_prazos.py`): em mil sementes, participantes mudos, lentos, que perdem o envio ou que recusam o estorno, com o consumidor do OS fora por uma janela, cancelamento e retomada em pontos aleatórios; o par etapa e status fica na tabela, o prazo existe se e só se há comando com prazo em voo, os reenvios nunca passam do máximo, o ciclo pausado não muda nada, cada reenvio é do mesmo comando e só sai depois do prazo, o esgotamento só vem com os reenvios gastos e com participante mudo a saga nunca conclui.
-  - PostgreSQL real (`tests/integracao/ordem_servico/test_prazos_no_banco.py`): a consulta com `SKIP LOCKED` (linha pendente, `dead`, entregue há pouco, último envio, ordem, saga travada por outra transação), a transação única com a falha forçada no commit, duas réplicas em threads sobre doze sagas, o consumidor que perde na versão, o gauge de prazo vencido nos dois sentidos e os 12 minutos com os padrões (relógio controlado, ciclo de 30 s, compensação em 720 s, falha em 1440 s e retomada).
-  - RabbitMQ real (`tests/integracao/mensageria/test_prazos_com_broker.py`): participante mudo (cinco reenvios com id novo e os mesmos dados, depois a compensação), duas réplicas do `prazos`, estorno recusado, falha e retomada (resposta ao reenvio e ao original), `os.eventos` sem consumidor e relay parado sem gastar reenvio, dois consumidores com a resposta tardia ao original e a presença do consumidor.
-- **BDD de componente.** `tests/bdd/saga_atendimento.feature`, em português, com o OS sobre o PostgreSQL de teste e um barramento em memória no lugar do RabbitMQ; os passos ficam em `tests/integracao/test_saga_atendimento.py`, ao lado das fixtures do banco. Cobre o caminho feliz, o adiantado, o repetido e o obsoleto, cada falha de negócio, o cancelamento em cada etapa (plano da RFC, passo em voo e ordem das compensações), repetido, recusado depois do início e com a OS já cancelada, a corrida do pivot nos dois sentidos, o estorno recusado, a resposta atrasada e o estorno automático. O prazo anda no banco (o prazo gravado e a entrega recuam 121 s a cada "o prazo de resposta vence") e o `prazos` roda um ciclo: cobre o reenvio até o máximo em cada etapa técnica e a compensação por prazo técnico, a resposta ao original depois do reenvio, o consumidor fora, o relay parado, a falha na compensação, a retomada (inclusive depois do estorno recusado e com a resposta ao envio original) e a retomada recusada fora da falha.
-- **Integração** (`tests/integracao/mensageria/test_saga_com_broker.py`): relay, consumidor e RabbitMQ reais com participantes falsos.
-  - O caminho feliz até `ENTREGUE` num trace só (com a árvore de spans conferida), o adiantado passando pela retry, a reentrega do mesmo evento sem repetir o comando, as recusas na DLQ com o motivo e a placa e a descrição só no comando da Execução.
-  - A transação única: com o `PagamentoConfirmado`, o commit recusado depois de gravadas a OS, o histórico, a saga, o comando e o pedido de e-mail desfaz tudo, inclusive o registro da mensagem; a entrega pela API com o commit recusado deixa a OS `finalizada` e sem pedido de e-mail.
-  - O cancelamento depois do pagamento, com as cinco compensações uma por vez e o span do cancelamento no trace da saga; a falta de peça (orçamento e diagnóstico compensados, cada um causado pela resposta anterior); o estorno recusado (a sequência para e o comando em voo fica sem prazo).
-  - O redrive da DLQ com o shovel do platform: antes de implantar a versão nova, a versão anterior recusa a mensagem de novo; depois, o consumidor novo trata o evento que ela recusou.
-
-## Notificações por e-mail e LGPD
-
-### E-mail ao cliente
-
-O cliente recebe um e-mail a cada mudança de situação da OS ([RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 3 e [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md), "E-mail ao cliente"). O pedido nasce na transação da transição e o envio é de outro processo, então SMTP lento ou fora não atrasa comando, resposta nem a saga.
-
-```mermaid
-flowchart LR
-    t["transição da OS<br/>(consumidor ou API)"] -->|"mesmo commit"| n[("notificacoes")]
-    n -->|"NOTIFY + poll"| nt["notificador<br/>python -m src.notificador"]
-    nt -->|"OS e contato do cliente"| db[("PostgreSQL")]
-    nt -->|"SMTP, prazo de 5 s"| mp["Mailpit"]
-```
-
-- **Quando.** Cada mudança de status da OS pede um e-mail do modelo do novo status, menos a abertura (`recebida`) e `aguardando_pagamento`, cujo e-mail é o do checkout, que o `PagamentoSolicitado` pede (ele não muda o status). O consumidor grava o pedido junto com o fato da saga e `mensagens_processadas`; a API, na entrega. O pedido de cancelamento (202) não muda a OS e não manda e-mail: o da `cancelada` sai quando a última compensação responde.
-
-  | Modelo | Quando | Texto |
-  |---|---|---|
-  | `situacao` | `em_diagnostico`, `aguardando_execucao`, `em_execucao`, `finalizada`, `entregue` | o rótulo da situação |
-  | `orcamento` | `aguardando_aprovacao` | total, validade e o `link_decisao` do Billing |
-  | `pagamento` | `PagamentoSolicitado` | valor, validade e o `checkout_url` do Billing |
-  | `cancelamento` | `cancelada` | o rótulo do código da compensação (nunca o texto do atendente) |
-
-- **O pedido.** A tabela `notificacoes` (migração `004`, só expansão) guarda `ordem_id`, `modelo`, `status_da_ordem` e o `motivo` com o código, mais a situação da linha (`pendente`, `entregue` ou `dead`), as tentativas e o lease. Não tem endereço, nome, link nem texto livre: o nome e o endereço (extraído do campo livre `contato`) saem do cadastro, por uma projeção de duas colunas, sem carregar o agregado nem decifrar o documento, e por isso o `notificador` não recebe a `ENCRYPTION_KEY`; os links saem do resumo do orçamento e do pagamento que a OS guarda. A `outbox` não muda e continua só com comandos AMQP: um relay de uma versão anterior nunca vê um e-mail.
-- **Entrega** (`python -m src.notificador`, a mesma imagem). Uma linha por vez, com o claim da outbox: `FOR UPDATE SKIP LOCKED` e lease com fencing, na ordem de cada OS (um e-mail em espera segura só os seguintes da mesma OS). A OS e o contato são lidos numa transação de leitura que fecha antes do envio. O envio é SMTP puro (`smtplib`, prazo de 5 s por operação); falha conta tentativa e volta depois de 1, 4, 16 e 64 s, e a quinta falha da linha a deixa `dead`, visível na tabela e no log. Não há métrica nem alerta próprios: o e-mail é complementar e não segura a saga. Cliente anonimizado (o contato virou marcador), sem e-mail no contato ou sem o resumo que o modelo pede: a linha é dada como entregue, sem envio, com um aviso no log. Uma vez por hora apaga as linhas entregues há mais de 7 dias e as `dead` há mais de 30.
-- **Sem dado pessoal no log.** O log leva só `correlation_id` (a OS), `modelo` e o resultado: nunca o endereço, o nome, o `link_decisao` ou o `checkout_url`, e o `ultimo_erro` da linha é o nome da exceção. O processo não abre span nem tem métrica própria; o `/metrics` na 9100 traz só as métricas padrão do Python.
-- **Saúde.** Heartbeat a cada volta do laço e arquivo de pronto enquanto o banco responde; SMTP fora não o tira de pronto. Encerramento gracioso no SIGTERM.
-
-| Variável | Padrão | Uso |
-|---|---|---|
-| `SMTP_HOST` | `localhost` só em development/test | servidor SMTP (`mailpit` no compose; `mailpit.pytstop-plataforma.svc.cluster.local` no cluster). Fora de development/test é obrigatório: sem ele o notificador não sobe, em vez de mandar todo e-mail ao `localhost` do pod e deixá-lo `dead` |
-| `SMTP_PORT` | 1025 | porta SMTP (1 ou mais); valor inválido aborta o boot |
-| `SMTP_FROM` | `oficina@pytstop.local` | remetente |
-
-No compose, o Mailpit mostra a caixa de entrada em `http://localhost:8026` (`MAILPIT_UI_PORT`) e recebe o SMTP em `localhost:1026` (`MAILPIT_SMTP_PORT`), fora das portas do compose do platform (8025 e 1025), para os dois conviverem. Sem credencial nem TLS: o Mailpit da demonstração não pede. **SMTP externo** exigiria STARTTLS e credencial por Secret, que o adapter ainda não implementa (a política de saída `notificador-saida` também teria de mudar); o link de decisão e o de pagamento vão no corpo do e-mail, então só um servidor de confiança deve recebê-lo.
-
-**Rede no Kubernetes.** O notificador é o único processo do serviço com política de saída (`notificador-saida`: DNS, PostgreSQL do namespace e Mailpit na 1025), porque é o único com destino de rede de terceiro configurável (`SMTP_HOST`) e com escrita em todo o banco; a API, o relay, o consumidor e o `prazos` ficam sem política de saída, porque os destinos deles são fixos (o PostgreSQL do namespace e o RabbitMQ e o Jaeger da plataforma, e o `prazos` usa os três: exporta o span `saga prazo`). Um `SMTP_HOST` fora da regra não é recusado, apenas expira (os 5 s de cada tentativa) e os e-mails vão para `dead`: trocar o servidor exige ajustar a política. A política foi exercitada num kind (Mailpit:1025 e banco:5432 abrem; Mailpit:8025, broker:5672, a API do namespace e a internet fecham; o DNS resolve), e o smoke dos serviços do platform (`scripts/ci/smoke-servicos.sh`) repete a prova a cada CD: o notificador alcança o Mailpit na 1025 e a conexão dele ao broker na 5672 precisa esgotar o prazo. A regra de entrada no Mailpit é do platform.
-
-### Operação do e-mail
-
-- **Linha `dead`.** Sem métrica nem alerta próprios, a linha que esgotou as cinco tentativas fica na tabela e no log (`notification send failed; row dead`, com o `correlation_id` da OS). Para listá-las:
-
-  ```sql
-  SELECT id, ordem_id, modelo, status_da_ordem, tentativas, ultimo_erro
-  FROM notificacoes WHERE situacao = 'dead' ORDER BY id;
-  ```
-
-- **Reenvio.** Depois de corrigir a causa (o SMTP voltou, o endereço do cliente foi ajustado), devolva a linha à fila; o notificador a pega no próximo ciclo (o `UPDATE` não emite `NOTIFY`, então vale o poll de 5 s). Só vale até a retenção de 30 dias, quando a limpeza horária apaga a linha:
-
-  ```sql
-  UPDATE notificacoes
-  SET situacao = 'pendente', tentativas = 0, ultimo_erro = NULL, proxima_tentativa_em = now()
-  WHERE id = 42 AND situacao = 'dead';  -- o id da consulta acima
-  ```
-
-  A `dead` não segura a fila da OS, então o e-mail reenviado chega depois dos seguintes da mesma OS que já saíram.
-- **Ordem de implantação e rolling update:** ver [Implantação e DLQ](#implantação-e-dlq).
-
-### Eliminação de dados (LGPD)
-
-`DELETE /api/v1/clientes/{id}/dados-pessoais` (admin) só vale sem OS ativa e, numa transação só, anonimiza:
-
-- o cliente, os veículos e o texto livre das OS (descrição do problema e motivos de cancelamento);
-- a placa e a descrição do `SolicitarDiagnostico` que ficaram na outbox, em qualquer situação da linha (pendente, entregue ou `dead`), achadas pelo `correlation_id` das OS do cliente: a placa vira `AAA0A00`, que respeita o padrão do schema (a linha pendente continua publicável e o relay segue validando o envelope), e a descrição vira `[removido]`; marca e modelo não identificam o titular e ficam;
-- a placa guardada na Execução, por um comando `AnonimizarVeiculo` por veículo, fora da saga (o `correlation_id` é o `veiculo_id`, sem resposta nem prazo; a falha definitiva vai para a `execucao.comandos.dlq`). O `DELETE` repetido responde 204 de novo e não reenvia o comando: só os veículos que ainda guardam a placa original geram um.
-
-Se a transação desfaz, nenhum comando sai e nada é anonimizado. A cópia do comando na `execucao.comandos.dlq` (7 dias) mantém a placa original: depois de um apagamento, **não faça redrive de DLQ de comando**, que recriaria a placa na Execução.
-
-**Reenviar só um `AnonimizarVeiculo`.** Como o `DELETE` repetido não reemite o comando, o que cair na `execucao.comandos.dlq` (a Execução não anonimizou a placa) precisa de reenvio próprio. O comando leva só o `veiculo_id` (o `correlation_id` da mensagem na DLQ), sem placa. Publicá-lo à mão no exchange de comandos não funciona: o broker só aceita um `user_id` igual ao usuário da conexão, a Execução só aceita `os` como produtor desse tipo, e o usuário `os` não entra na API de gerenciamento (publicar como `admin` com `user_id` `os` volta 406, e sem `user_id` a Execução recusa o comando). O reenvio grava o comando de novo na outbox, na transação e com o contrato do erasure, e o relay o publica como `os`. Troque o `VEICULO_ID` pelo da mensagem na DLQ (a senha do banco já está no ambiente do pod) e rode, com prazo:
-
-```bash
-VEICULO_ID=3277db7e-8283-4dd9-89e7-df3eeacb8710
-timeout 60 kubectl --context kind-pytstop-p4 -n pytstop-os exec deploy/os-service-consumidor -- python scripts/reenviar_anonimizacao.py "$VEICULO_ID"
-```
-
-No macOS sem o `timeout` do coreutils, troque-o por `perl -e 'alarm shift; exec @ARGV' 60`. O script sai com 1, sem enviar nada, para um veículo que não foi anonimizado (o comando de um veículo vivo apagaria a placa dele na Execução). A cópia na DLQ expira sozinha em 7 dias, e o redrive da fila inteira continua proibido: a mesma DLQ pode guardar um `SolicitarDiagnostico` com a placa original.
-
-### Testes
-
-- **Unitários.** O modelo de cada status e a exaustividade da tabela (`test_notificacoes.py`), o texto de cada e-mail, o que fica de fora dele e o aviso sem dado pessoal (`test_emails.py`), o adapter SMTP (`test_email_adapter.py`), o pedido gravado por cada evento do fluxo, de cada compensação e da corrida do pivot (`test_orquestrador_notificacoes.py`), um comando por veículo e a transação desfeita (`test_lgpd_use_cases.py`) e os manifestos e o compose do `notificador`.
-- **Propriedade** (`test_propriedades_da_saga.py`): em mil sementes, com eventos embaralhados, repetidos e atrasados, um pedido de e-mail por transição de status e nunca dois, e o código do motivo só no cancelamento.
-- **BDD** (`tests/bdd/notificacoes_do_cliente.feature`): os pedidos do caminho feliz, o cancelamento, a falha de negócio, o texto de cada modelo e o cliente apagado.
-- **Integração.** A tabela, o claim (que só pega o modelo, o status e o motivo que esta versão conhece), o fencing de cada desfecho, o lease vencido que não devolve linha `entregue` nem `dead`, a ordem por OS, os atrasos até `dead` e a retenção (`test_fila_de_notificacoes.py`); o `notificador` com PostgreSQL e Mailpit reais (`test_notificador.py`); a saga com relay, consumidor, RabbitMQ, notificador e Mailpit, com um e-mail por gatilho, SMTP fora sem atrasar a saga e nenhum dado pessoal no log, nos spans e nas métricas (`test_notificacoes_da_saga.py`); o erasure com um comando por veículo, a outbox anonimizada e a linha anonimizada publicada pelo relay (`test_erasure_outbox.py`).
-
-## Observabilidade
-
-Métricas, traces e logs do OS Service seguem o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md). O catálogo das métricas dos três serviços (tipo, rótulos, quem emite, quando conta e a unidade), os painéis do Grafana e as regras de alerta ficam no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#catálogo-de-métricas), onde um teste reprova o painel ou o alerta que consulte uma métrica fora do catálogo ou um rótulo que ela não tem. Esta seção diz o que o OS emite e por quê.
-
-Dashboards relacionados no Grafana: [Atendimento](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-negocio-atendimento.json), [Saga](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-saga.json), [Mensageria](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-mensageria.json), [Serviços](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-servicos.json), [Bancos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/dashboards/pytstop-bancos.json). Consulte a documentação dos [painéis de negócio](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/negocio.md) e dos [técnicos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md).
-
-### Métricas
-
-Cada processo serve o `/metrics`: a API na 8000, junto do resto da API, e o relay, o consumidor, o `prazos` e o notificador na `METRICS_PORT` (9100). O `/metrics` da API está sempre ligado e fica fora da borda: o Ingress do Kong responde 404 a `/os/metrics` sem chegar ao serviço (`k8s/base/borda.yaml`, conferido pelo smoke do platform), e o Prometheus raspa cada pod direto, pelas anotações `prometheus.io/*` dos Deployments.
-
-| Processo | Série | Tipo e rótulos | Quando |
-|---|---|---|---|
-| API | `http_request_duration_seconds` | histograma, `method`, `rota` (o template, `nao_roteada` sem rota casada), `status` | fim de cada request, inclusive a que estoura (conta como 500) |
-| API | `pytstop_os_criadas_total` | contador | OS gravada: conta depois do commit da transação raiz (rollback, conflito de versão ou commit que falha não contam) |
-| API | `pytstop_os_por_status` | gauge por consulta, `status` (os nove, com zero onde não há OS) | raspagem |
-| API | `pytstop_os_tempo_medio_status_segundos` | gauge por consulta, `status` | raspagem; só os status com permanência concluída na janela, ausente (nunca zero) nos demais |
-| API | `pytstop_outbox_mais_antiga_segundos` | gauge por consulta | raspagem; idade da linha pendente mais antiga da outbox, 0 sem pendente. Vem da API: segue exportando com o relay parado, que é o que mantém o alerta "Outbox parada" de pé |
-| API | `pytstop_saga_ativas{etapa}`, `pytstop_saga_etapa_mais_antiga_segundos{etapa}`, `pytstop_saga_prazo_vencido_segundos`, `pytstop_saga_coletor_disponivel`, `pytstop_saga_coletor_falhas_total` | gauges por consulta e contador | raspagem ([Observabilidade da saga](#observabilidade-da-saga)) |
-| API, consumidor, `prazos` | `pytstop_saga_iniciadas_total`, `pytstop_saga_finalizadas_total{resultado}`, `pytstop_saga_compensacoes_total{motivo}`, `pytstop_saga_etapa_duracao_segundos{etapa}` | contadores e histograma | depois do commit, no processo que tira a saga da etapa |
-| relay | `pytstop_mensagens_publicadas_total{tipo}`, `outbox_pendentes`, `outbox_dead` | contador e gauges | confirmação do broker; raspagem |
-| consumidor | `pytstop_mensagens_consumidas_total{tipo,resultado}` | contador (`processada`, `duplicada`, `ignorada`, `retry`, `dlq`; `tipo` do catálogo ou `desconhecido`) | mensagem resolvida, depois do commit e do ack |
-| relay, consumidor | `pytstop_reconexoes_ao_broker_total{componente}` | contador (`relay` ou `consumidor`; o rótulo é `componente`, e não `processo`, porque o Prometheus já põe `processo` em todo alvo e o da métrica viraria `exported_processo`) | cada espera antes de reconectar ao broker |
-| `prazos` | `pytstop_saga_reenvios_total{comando}`, `pytstop_saga_prazos_esgotados_total{comando}`, `pytstop_prazos_ultimo_ciclo_timestamp_seconds` | contadores e gauge | depois do commit da saga; fim de cada ciclo que terminou (ocioso, com trabalho ou pausado: o que falha por banco fora não o atualiza) |
-
-Toda série de rótulo fechado nasce com zero no boot do processo que a emite (a lista fechada vem do catálogo dos contratos, dos códigos da saga e do `StatusOrdem`), para o `increase()` dos painéis não perder o primeiro evento de cada série. Fora disso o contador conta quando o caso de uso comita; no consumidor, como as demais métricas dele, depois do ack, pelo menos uma vez.
-
-**Os gauges por consulta** (saga, idade da outbox e OS por status) são do coletor da API (`coletor_da_api.py`), que só existe com a API de pé:
-
-- **A raspagem não pendura.** O Prometheus do platform desiste em 10 s, e o alvo viraria `up=0` justo no incidente do banco. A raspagem abre uma conexão (`connect_timeout` de 1 s) e roda as consultas nela, cada uma com `statement_timeout` de 2 s e `lock_timeout` de 1 s. O trabalho roda numa thread e a raspagem espera no máximo 5 s, porque o prazo do servidor não corta um socket que emudece depois de aberto.
-- **O que falta fica ausente.** Passado o prazo, a raspagem sai com o que já leu, e o que faltou fica ausente, nunca em zero. Com a leitura anterior ainda presa, a raspagem seguinte nem tenta (uma thread presa por vez) e sai só com `pytstop_saga_coletor_disponivel` em 0. Uma leitura presa num socket que o banco deixou aberto e mudo não tem prazo próprio: ela segura a vez, e os gauges seguem ausentes até o socket cair: o banco reinicia, a conexão é resetada ou o TCP desiste de um buraco de rede (em geral em minutos, porque a engine das métricas não fixa `keepalives` nem `tcp_user_timeout`). Aí a thread sai e a raspagem seguinte lê de novo (um teste de integração cobre a volta). O coletor não derruba esse socket por conta própria, e reiniciar o pod resolve na hora.
-- **A OS por status tem cache.** A leitura das OS por status (a contagem e a permanência) vale 30 s no coletor: a raspagem de 15 s de cada réplica não repete a consulta.
-- **O custo é pequeno.** As consultas de `sagas`, `outbox` e `historico_status_ordem` leem por índice (a migração 005 acrescenta `(status, criado_em)` na outbox e `(ocorrido_em)` no histórico, e um teste confere o plano das duas); a contagem de `ordens_de_servico` por status lê a tabela inteira, que no volume de uma oficina é pequena. Cada réplica da API repete os valores; os painéis agregam com `max`.
-
-**Logs do coletor.** Quando uma leitura falha, o coletor registra um WARNING sem dado pessoal. `api gauges unavailable` leva `motivo=` (`prazo_esgotado`, `raspagem_anterior_presa` ou o tipo da exceção) e diz que a raspagem inteira saiu sem os gauges; `api gauge unavailable` leva `gauge=` (`saga`, `outbox` ou `ordens`) e `erro=` (o tipo da exceção) e diz que só aquela consulta falhou. No Loki, `{namespace="pytstop-os"} |= "api gauge"` pega os dois; o nome antigo, `saga gauges unavailable`, não existe mais.
-
-**`GET /api/v1/ordens-de-servico/metricas`** (admin) devolve os mesmos números do `pytstop_os_por_status` e do `pytstop_os_tempo_medio_status_segundos`, na hora, sem o cache do coletor (`$TOKEN` é o JWT do admin, do login do [compose](#como-rodar-local)):
-
-```bash
-curl -s localhost:8000/api/v1/ordens-de-servico/metricas -H "Authorization: Bearer $TOKEN" | jq
-```
-
-```json
-{
-  "total": 3,
-  "por_status": {"recebida": 0, "em_diagnostico": 1, "aguardando_aprovacao": 1, "aguardando_pagamento": 0, "aguardando_execucao": 0, "em_execucao": 0, "finalizada": 0, "entregue": 0, "cancelada": 1},
-  "tempo_medio_por_status_segundos": {"recebida": 150.0, "em_diagnostico": 41550.0, "aguardando_aprovacao": 600.0}
-}
-```
-
-A permanência de um status é o tempo da linha do histórico em que a OS entrou nele até a linha seguinte da mesma OS, nas entradas dos últimos 30 dias; a OS que ainda está no status, os status finais e o status de outra versão não entram, e uma permanência negativa por desvio de relógio entre réplicas conta como zero. Os painéis "Volume diário de OS" (a partir do `increase()` de `pytstop_os_criadas_total`, em barras por dia UTC) e "Tempo médio por status" (RF-027 da fase 3, o pedido da banca) vêm destas séries; o painel de execução por serviço (RF-008) é da Execução.
-
-### Spans
-
-O relay, o consumidor e o `prazos` montam o provider (`criar_provedor`) sempre; a API só o monta com `OTEL_ENABLED=true`, e sem a flag ela não abre span (as métricas seguem, e o `trace_id` dos logs vem de um span aberto). O notificador não abre span. O recurso leva `service.name` (de `OTEL_SERVICE_NAME`), `service.version` e `pytstop.processo`, e `OTEL_ENABLED=true` liga a exportação OTLP para o Jaeger e a instrumentação do FastAPI e do SQLAlchemy.
-
-| Processo | Spans |
-|---|---|
-| API | um SERVER por request, `GET /api/v1/ordens-de-servico/{ordem_id}`, com um CLIENT por comando SQL como filho (o SQLAlchemy cobre o psycopg2; o driver não é instrumentado à parte, para não duplicar o span); `saga cancelamento` e `saga retomada` (INTERNAL) |
-| relay | `publish <tipo>` (PRODUCER, filho do contexto gravado na linha da outbox), com o comando SQL que marca a linha como filho |
-| consumidor | `process <tipo>` (CONSUMER, filho do contexto do header), com os comandos SQL do tratamento da mensagem |
-| `prazos` | `saga prazo` (INTERNAL), só quando uma saga é tratada, com os comandos SQL dela |
-| notificador | nenhum (a linha de e-mail não guarda o contexto de trace) |
-
-O pika não tem instrumentador: os spans de publicação e de consumo são abertos à mão (`mensageria/telemetria.py`), porque o contexto atravessa a outbox e a cópia de retry. O OS não chama outro serviço por HTTP, então não há span de cliente HTTP: o trace da saga atravessa os três serviços pelas mensagens, e o E2E do platform confere os três `service.name`. O contexto de entrada é só o W3C (`traceparent` e `tracestate`): o `baggage` do chamador não entra no processo nem sai dele, e o `tracestate` de mais de 512 caracteres é descartado também na entrada HTTP.
-
-**Ocioso não gera trace.** O amostrador descarta o span de cliente sem pai: o poll do relay, a raspagem do `/metrics`, a limpeza horária, o ciclo do `prazos` sem saga vencida (ou pausado, sem consumidor ou com resposta na fila) e o laço do consumidor só fazem consultas sem span em volta. Um span de cliente dentro de uma request ou de uma mensagem segue a decisão do pai.
-
-### O que não é exportado, e por quê
-
-- **`/metrics` e as sondas** (`/api/v1/saude`, `/api/v1/saude/pronto`): o Prometheus e o kubelet as chamam a cada poucos segundos e não contam história nenhuma. A exclusão casa o caminho inteiro (com ou sem o prefixo do `--root-path`), e um `Host` com barra não tira outra rota do trace.
-- **Os spans `receive` e `send` do ASGI**: duplicariam cada request.
-- **O caminho cru, a query, o user-agent, o IP e a porta do par e o cabeçalho `Host`**: identificam o titular (o caminho traz o id da OS, do cliente e do veículo, e a query é de quem chama). O span leva o template da rota (`/api/v1/ordens-de-servico/{ordem_id}`) e `REDACTED` no lugar do resto; a porta do par vira o inteiro `0`, o tipo em que o instrumentador a grava.
-- **O texto das exceções, o stack trace e a descrição do status de erro**: o erro do driver traz o `DETAIL` do PostgreSQL com o valor da linha (placa, texto livre), e o dos instrumentadores fica por fora da limpeza de PII dos logs. Um processador do provider, o primeiro e dono do exportador, tira esse texto de todo span; o motivo da falha vai no atributo `pytstop.falha`, só com o tipo da exceção ou um código fixo.
-- **Os parâmetros dos comandos SQL**: o instrumentador do SQLAlchemy grava só o texto do comando, com os marcadores, e nunca os parâmetros. O `hide_parameters` do engine cuida da mensagem de erro e do log do engine.
-- **Dinheiro, ids e rótulos abertos nas métricas**: os rótulos são enumerações fechadas (`status`, `etapa`, `motivo`, `comando`, `tipo`, `resultado`, `componente`) ou o template da rota; nunca `ordem_id`, placa ou documento.
-
-O Jaeger do platform guarda até 250 traces em memória (`MEMORY_MAX_TRACES=250`), com retenção por contagem e sem prazo ([Retenção e prazos](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#retenção-e-prazos)): o trace mais antigo sai quando entra o 251º, reiniciar o pod apaga tudo, e o que fica como evidência são os prints.
-
-### Logs
-
-Cada processo escreve um JSON por linha no stdout, que o Promtail do platform leva ao Loki.
-
-- **Campos.** `event` (o nome do evento), `level`, `timestamp` (ISO 8601, em UTC), `logger`, `git_sha` e `git_date` (a versão da imagem), `trace_id` e `span_id` com um span aberto, e os campos de cada evento: o `correlation_id` (o id da OS) nos de saga, mensageria e prazos. Cada requisição da API deixa o evento `http_request`, com `method`, `path`, `status`, `duration_ms` e o `request_id`.
-- **Idioma.** O `event` vem em inglês, menos os nomes herdados da fase 3: as auditorias LGPD (`dados_pessoais_exportados_via_admin`, `dados_pessoais_excluidos_via_admin`, `consentimento_registrado_via_admin` e `consentimento_revogado_via_admin`) e os do tratamento de erros (`erro_interno`, `dominio_excecao_tratada`, `validacao_schema_tratada_422` e `value_error_tratado_422`). As duas mensagens de `compartilhado/infraestrutura/encryption.py` (chave de criptografia não configurada e falha ao decifrar um token Fernet) usam o `logging` da stdlib e também saem em português.
-- **Sem dado pessoal.** O mascaramento de `compartilhado/infraestrutura/logging.py` roda em todo evento, inclusive no log das bibliotecas e no traceback: CPF, CNPJ, e-mail e telefone viram máscara, e o valor de uma chave sensível (senha, token, contato, telefone) sai trocado inteiro. O texto livre, a placa e o envelope das mensagens não vão para o log, e do cliente AMQP só sai o nível ERROR.
-- **Auditoria.** O pedido de cancelamento e a retomada da compensação deixam uma linha com o `ator` (o `sub` do JWT) e o resultado, e a leitura dos dados pessoais, com o `ator` e a rota (`via`).
-- **Busca.** No Grafana do kind, a consulta `{namespace="pytstop-os"} | json | correlation_id="<id da OS>"` traz a OS nos cinco processos, e o `trace_id` de cada linha abre o trace no Jaeger.
-
-### Como ver
-
-- **Sem cluster.** `make compose-up` e `curl -s localhost:8000/metrics | grep '^pytstop_'` (a API); o relay, o consumidor, o `prazos` e o notificador servem o deles na 9100 dentro do container (`docker compose exec relay python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:9100/metrics').read().decode())"`). O compose deixa `OTEL_ENABLED=false`: a API não abre span, e o relay, o consumidor e o `prazos` abrem os deles e levam o `trace_id` aos logs, mas os spans não saem do processo. Para ver um trace, acrescente um serviço `jaeger` ao compose (por exemplo num `docker-compose.override.yml`: `services: {jaeger: {image: "jaegertracing/all-in-one:1.76.0", ports: ["127.0.0.1:16686:16686"]}}`) e suba com `OTEL_ENABLED=true make compose-up`: o endpoint padrão dos processos é `http://jaeger:4317`, e a tela fica em `http://localhost:16686` (serviço `pytstop-os-service`; o atributo `pytstop.processo` do recurso diz de qual processo veio cada span).
-- **No kind.** O ConfigMap do serviço liga `OTEL_ENABLED=true`, aponta para o Jaeger do platform e fixa `OTEL_SERVICE_NAME=os-service`: no Jaeger do kind o serviço aparece como `os-service` (no compose, sem a variável, é `pytstop-os-service`). Depois de `make -C ../postech-sw-arch-p4-platform kind-up deploy` e do `make kind-deploy` deste serviço (e dos outros), `make -C ../postech-sw-arch-p4-platform port-forward` abre o Jaeger em `http://localhost:16686` (busque pelo atributo `messaging.message.conversation_id`, o id da OS), o Grafana em `http://localhost:3000` e o Prometheus em `http://localhost:9090`. O `make -C ../postech-sw-arch-p4-platform e2e` roda os cenários da saga, o caminho feliz entre eles, e deixa os traces no Jaeger; ele pede o overlay `kind-ci` (`deploy OVERLAY=kind-ci`), que não tem o Grafana. Os painéis e os alertas estão descritos no [README de observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md).
-
-### Encerramento com o exportador fora
-
-A API encerra o provider no fim do `lifespan` (`provedor.shutdown()` descarrega o lote de spans; o `atexit` do SDK não roda quando o uvicorn não é o PID 1) e o relay, o consumidor e o `prazos`, na saída do processo. Com o Jaeger fora do ar o SDK ainda tenta enviar a fila inteira (até 2.048 spans, em lotes de 512), e cada lote espera o prazo do exportador. Medido no container da imagem (uvicorn como PID 1), com um listener que aceita a conexão e não responde e a fila cheia (6.000 requisições em rajada, de dentro do container, a uma rota que não existe):
-
-| `OTEL_EXPORTER_OTLP_TIMEOUT` | `OTEL_BSP_EXPORT_TIMEOUT` | `docker stop` da API |
-|---|---|---|
-| 10 s (o padrão do SDK) | 30 s (o padrão do SDK) | 30,5 s: mais que os 30 s do `terminationGracePeriodSeconds`, e o kubelet encerraria o processo à força |
-| 2 s (compose e ConfigMap) | 2 s (compose e ConfigMap) | 8,1 s (quatro lotes de 2 s) |
-| 2 s | 30 s (o padrão do SDK) | 8,0 s |
-
-Com a fila vazia o encerramento leva 0,4 s nos dois casos. O compose e o ConfigMap fixam `OTEL_EXPORTER_OTLP_TIMEOUT=2` e `OTEL_BSP_EXPORT_TIMEOUT=2000`. O segundo não muda nada no SDK 1.45: o processador de lote ainda não aplica esse prazo, e a medida com o padrão dele (30 s) é a de 8,0 s. Ele fica fixado para valer quando o SDK passar a usá-lo.
-
-## Como rodar local
-
-Pré-requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/); o `make test` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`). O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, o Mailpit, as migrações, o admin de demonstração, o relay, o consumidor, o `prazos` e o notificador; o `make compose-down` derruba tudo e apaga os volumes.
+Requisitos: Docker com Compose e [uv](https://docs.astral.sh/uv/).
 
 ```bash
 make compose-up
@@ -878,210 +18,9 @@ curl -s localhost:8000/api/v1/saude
 make compose-down
 ```
 
-A API sobe em `http://localhost:8000` (porta configurável com `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O RabbitMQ do compose carrega a topologia de `contratos/rabbitmq/` e cria os usuários dos três serviços; o console fica em `http://localhost:15674` (usuário `admin`, senha de demonstração em `contratos/rabbitmq/rabbitmq-admin.json`) e o AMQP em `localhost:5674`, fora das portas do compose do platform. O usuário de demonstração é `admin@pytstop.dev` com a senha de `ADMIN_PASSWORD` no `docker-compose.yml` (valores só de dev; o boot com `ENVIRONMENT=production` recusa esses literais).
+O `make compose-up` faz o build da imagem e sobe o PostgreSQL 16, o RabbitMQ, o Mailpit, as migrações, o admin de demonstração e os processos `relay`, `consumidor`, `prazos` e `notificador`. A API sobe em `http://localhost:8000` (porta em `APP_PORT`) e o Swagger em `http://localhost:8000/docs`. O `make compose-down` derruba tudo e apaga os volumes. O usuário de demonstração é `admin@pytstop.dev`, com a senha de `ADMIN_PASSWORD` no `docker-compose.yml`. O login, o primeiro `curl` autenticado e como rodar a API e os processos fora do compose estão em [docs/como-rodar.md](docs/como-rodar.md#como-rodar-local).
 
-```bash
-TOKEN=$(curl -s localhost:8000/api/v1/autenticacao/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email":"admin@pytstop.dev","senha":"admin-demo-os-2026"}' | jq -r .access_token)
-curl -s localhost:8000/api/v1/ordens-de-servico -H "Authorization: Bearer $TOKEN"
-```
-
-Fora do compose (API, relay, consumidor, `prazos` e notificador no host), o `.env.example` lista todas as variáveis lidas pelo serviço, com os mesmos valores de demonstração; o RabbitMQ pode ser o do compose (`docker compose up -d rabbitmq rabbitmq-usuarios`, AMQP em `localhost:5674`) e o SMTP do `.env.example` aponta para o Mailpit do compose (`docker compose up -d mailpit`). A API sobe em `http://127.0.0.1:8000`; o relay, o consumidor, o `prazos` e o notificador rodam cada um em outro terminal, com o mesmo `.env` e um `METRICS_PORT` diferente do dos outros:
-
-```bash
-docker run -d --name os-postgres -p 127.0.0.1:5432:5432 \
-  -e POSTGRES_DB=os -e POSTGRES_USER=pytstop -e POSTGRES_PASSWORD=pytstop postgres:16
-cp .env.example .env && set -a && . ./.env && set +a
-uv run alembic upgrade head && uv run python scripts/seed_admin.py
-uv run python -m src.main
-uv run python -m src.relay
-uv run python -m src.consumidor
-uv run python -m src.prazos
-uv run python -m src.notificador
-```
-
-## Exemplos da API
-
-Os `curl` das rotas do OpenAPI, um por rota e agrupados por fluxo, contra a API do compose (`make compose-up`, porta 8000). Pela borda do kind, troque `localhost:8000` por `https://localhost/os` e acrescente `-k` (o certificado do Kong é autoassinado). O OpenAPI e a coleção Postman, com um exemplo de corpo e de resposta por rota, estão em [`docs/api/`](docs/api/) (na coleção, o login e o refresh guardam o token, e o cadastro do cliente, o do veículo e a abertura da OS guardam os ids nas variáveis), e os fluxos por trás de cada rota, em [`docs/arquitetura.md`](docs/arquitetura.md).
-
-- **Variáveis.** Cada bloco usa as que os anteriores preenchem: `TOKEN` e `REFRESH` saem do login, e `CLIENTE_ID`, `VEICULO_ID` e `ORDEM_ID`, das respostas do cadastro e da abertura.
-- **O que o compose não tem.** O compose não sobe o Billing nem a Execução, então a OS aberta aqui fica em `recebida`, com a saga esperando o diagnóstico. As rotas que pedem outro estado respondem o erro da regra, que o texto de cada bloco diz.
-- **Teste.** `tests/unitarios/test_documentacao.py` reprova o README quando uma rota do OpenAPI fica sem `curl` nesta seção, quando um corpo sai do schema da rota (inclusive o formato, como o de um uuid) e quando falta o `Authorization` de uma rota protegida ou o `Content-Type` de um corpo.
-
-### Saúde
-
-Liveness e readiness (503 com o banco fora), sem token:
-
-```bash
-curl -s localhost:8000/api/v1/saude
-curl -s localhost:8000/api/v1/saude/pronto
-```
-
-### Autenticação
-
-Login do admin de demonstração do compose. A resposta traz o access token, de 15 min, e o refresh, de 7 dias:
-
-```bash
-RESPOSTA=$(curl -s -X POST localhost:8000/api/v1/autenticacao/login \
-  -H 'Content-Type: application/json' \
-  -d '{"email": "admin@pytstop.dev", "senha": "admin-demo-os-2026"}')
-TOKEN=$(echo "$RESPOSTA" | jq -r .access_token)
-REFRESH=$(echo "$RESPOSTA" | jq -r .refresh_token)
-```
-
-A troca do refresh por um par novo; o refresh usado deixa de valer:
-
-```bash
-RESPOSTA=$(curl -s -X POST localhost:8000/api/v1/autenticacao/refresh \
-  -H 'Content-Type: application/json' \
-  -d '{"refresh_token": "'"$REFRESH"'"}')
-TOKEN=$(echo "$RESPOSTA" | jq -r .access_token)
-REFRESH=$(echo "$RESPOSTA" | jq -r .refresh_token)
-```
-
-As chaves públicas com que Billing e Execução validam o token, sem token e com cache de 10 min:
-
-```bash
-curl -s localhost:8000/.well-known/jwks.json | jq '.keys[].kid'
-```
-
-O cadastro de um usuário interno (admin). O `papel` é `admin`, `atendente` ou `mecanico`, e a senha tem de 12 a 128 caracteres:
-
-```bash
-curl -s -X POST localhost:8000/api/v1/autenticacao/registrar \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"email": "atendente@pytstop.dev", "senha": "atendente-demo-2026", "papel": "atendente"}' | jq
-```
-
-O logout fica no fim desta seção, porque revoga o `TOKEN`.
-
-### Cadastro do cliente com consentimento (LGPD)
-
-O cliente com CPF (o dígito verificador é conferido, e o documento repetido responde 409), o consentimento de tratamento dos dados e um veículo:
-
-```bash
-CLIENTE_ID=$(curl -s -X POST localhost:8000/api/v1/clientes \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"nome": "Maria Souza", "documento": "529.982.247-25", "tipo_documento": "cpf", "contato": "maria.souza@example.com"}' | jq -r .id)
-curl -s -X POST localhost:8000/api/v1/clientes/$CLIENTE_ID/consentimento \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"tipo": "tratamento_dados"}' | jq
-VEICULO_ID=$(curl -s -X POST localhost:8000/api/v1/clientes/$CLIENTE_ID/veiculos \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"placa": "BRA2E19", "marca": "Fiat", "modelo": "Argo", "ano": 2022}' | jq -r .id)
-```
-
-A listagem paginada, a consulta, a atualização do nome e do contato e os veículos do cliente:
-
-```bash
-curl -s "localhost:8000/api/v1/clientes?offset=0&limit=20" -H "Authorization: Bearer $TOKEN" | jq
-curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID -H "Authorization: Bearer $TOKEN" | jq
-curl -s -X PUT localhost:8000/api/v1/clientes/$CLIENTE_ID \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"nome": "Maria Souza Lima", "contato": "maria.lima@example.com"}' | jq
-curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID/veiculos -H "Authorization: Bearer $TOKEN" | jq
-```
-
-Os dados pessoais do titular, decifrados (acesso e portabilidade). Cada leitura deixa uma linha de auditoria no log, sem o dado:
-
-```bash
-curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID/dados-pessoais -H "Authorization: Bearer $TOKEN" | jq
-curl -s localhost:8000/api/v1/clientes/$CLIENTE_ID/dados-pessoais/exportar -H "Authorization: Bearer $TOKEN" | jq
-```
-
-### Ordem de serviço
-
-A abertura da OS, que inicia a saga e manda o `SolicitarDiagnostico` à Execução, a consulta com a etapa da saga, o histórico e a fila por prioridade de status:
-
-```bash
-ORDEM_ID=$(curl -s -X POST localhost:8000/api/v1/ordens-de-servico \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"cliente_id": "'"$CLIENTE_ID"'", "veiculo_id": "'"$VEICULO_ID"'", "descricao_problema": "Barulho no freio dianteiro ao frear em descida"}' | jq -r .id)
-curl -s localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq '{status, situacao, etapa}'
-curl -s localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/historico -H "Authorization: Bearer $TOKEN" | jq
-curl -s "localhost:8000/api/v1/ordens-de-servico?offset=0&limit=20&incluir_encerradas=false" -H "Authorization: Bearer $TOKEN" | jq
-```
-
-O total, as OS por status e a permanência média em cada status (admin):
-
-```bash
-curl -s localhost:8000/api/v1/ordens-de-servico/metricas -H "Authorization: Bearer $TOKEN" | jq
-```
-
-A entrega ao cliente (T10) só sai de `finalizada`; a OS do compose, sem a Execução, responde 409 `TRANSICAO_STATUS_INVALIDA`:
-
-```bash
-curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/entrega -H "Authorization: Bearer $TOKEN" | jq
-```
-
-O pedido de cancelamento responde 202 com a etapa `compensando` antes do pivot (as respostas de cada etapa estão em [Compensações e cancelamento](#compensações-e-cancelamento)):
-
-```bash
-curl -s -X POST localhost:8000/api/v1/ordens-de-servico/$ORDEM_ID/cancelamento \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"motivo": "Cliente vendeu o veículo"}' | jq '{status, etapa, motivo_cancelamento}'
-```
-
-### Saga (operação, admin)
-
-O estado da saga e a retomada da compensação parada; fora de `falha_na_compensacao`, a retomada responde 409:
-
-```bash
-curl -s localhost:8000/api/v1/sagas/$ORDEM_ID -H "Authorization: Bearer $TOKEN" | jq
-curl -s -X POST localhost:8000/api/v1/sagas/$ORDEM_ID/compensacao -H "Authorization: Bearer $TOKEN" | jq
-```
-
-### Acompanhamento público
-
-Sem token, com a placa e o documento no corpo. Formato ou dígito verificador inválido e OS não encontrada dão o mesmo 404; placa fora de 7 a 8 caracteres ou documento fora de 11 a 18 dão o 422 da validação de schema:
-
-```bash
-curl -s -X POST localhost:8000/api/v1/publico/acompanhamento \
-  -H 'Content-Type: application/json' \
-  -d '{"placa": "BRA2E19", "documento": "529.982.247-25"}' | jq
-```
-
-### Revogação e eliminação (LGPD)
-
-A revogação do consentimento, a remoção do veículo, a desativação do cliente e a eliminação dos dados pessoais (admin) respondem 204, sem corpo. A remoção do veículo responde 409 se ele tem OS, e a desativação e a eliminação, enquanto o cliente tem OS ativa: no roteiro acima, só a revogação passa, porque a OS segue `recebida` com a compensação esperando a Execução.
-
-```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE "localhost:8000/api/v1/clientes/$CLIENTE_ID/consentimento?tipo=tratamento_dados" -H "Authorization: Bearer $TOKEN"
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID/veiculos/$VEICULO_ID -H "Authorization: Bearer $TOKEN"
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID -H "Authorization: Bearer $TOKEN"
-curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:8000/api/v1/clientes/$CLIENTE_ID/dados-pessoais -H "Authorization: Bearer $TOKEN"
-```
-
-### Logout
-
-Revoga o access do cabeçalho e o refresh do corpo:
-
-```bash
-curl -s -X POST localhost:8000/api/v1/autenticacao/logout \
-  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"refresh_token": "'"$REFRESH"'"}' | jq
-```
-
-## Implantação
-
-Os manifestos Kubernetes ficam em `k8s/`: `base/` e três overlays, `kind` (local), `kind-ci` (o CD, com uma réplica só da API) e `k3s` (um cluster persistente genérico, o overlay padrão do [deploy remoto](#deploy-remoto-opcional), que vem desligado). Tudo vai para o namespace `pytstop-os`, com Pod Security `restricted`. Nenhum Secret está nos manifestos: os do serviço nascem no `make deploy` do platform ([segredos gerados](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)) e entram por `secretKeyRef` ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)).
-
-| Objeto | O que é |
-|---|---|
-| Deployment e HPA `os-service-api` | A API na porta 8000, com o `/metrics` na mesma porta; o HPA, por CPU (70%), vai de 1 a 2 réplicas no `kind`, a 1 no `kind-ci` e a 3 no `k3s` |
-| Deployments `os-service-relay`, `os-service-consumidor`, `os-service-prazos` e `os-service-notificador` | Relay, consumidor, prazos da saga e notificador dos e-mails, uma réplica cada, com o `/metrics` na 9100. O notificador só recebe a senha do banco e o `SMTP_*` do ConfigMap (o Mailpit da plataforma, na 1025): sem `RABBITMQ_URL` e sem `ENCRYPTION_KEY` |
-| StatefulSet e Service headless `os-postgres` | PostgreSQL 16.15 com volume de 1Gi (5Gi no `k3s`) e o `postgres_exporter` como sidecar, na 9187 |
-| Job `os-migracao` | `alembic upgrade head` e a semente do admin, antes dos Deployments |
-| Service `os-service` | O endereço interno da API, o do `JWKS_URL` de Billing e Execução |
-| `borda.yaml` | Os Services e Ingress do Kong, os mesmos objetos do [exemplo do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/k8s/exemplos/borda-os-service.yaml) com o cabeçalho deste repositório: `/os/api/v1`, `/os/docs`, `/os/openapi.json` e o JWKS pela borda, e `/os/api/v1/admin` e `/os/metrics` respondendo 404 sem chegar ao serviço |
-| NetworkPolicy | Nega toda entrada no namespace e libera só a API para o Kong, o Prometheus e as APIs de Billing e Execução (que leem o JWKS), relay, consumidor, prazos e notificador para o Prometheus, o PostgreSQL para os pods do namespace e o exporter para o Prometheus. A saída do notificador também é restrita (`notificador-saida`): só o DNS, o PostgreSQL do namespace e o Mailpit da plataforma na 1025. É a única política de saída do serviço, por critério: o notificador é o único processo com destino de rede de terceiro configurável (`SMTP_HOST`) e escreve em todo o banco; os demais, o `prazos` inclusive, têm destinos fixos (o PostgreSQL do namespace e o RabbitMQ e o Jaeger da plataforma, e o `prazos` usa os três: exporta o span `saga prazo`). Trocar o `SMTP_HOST` exige ajustar essa política. A regra de entrada no Mailpit é do platform |
-
-Todo pod roda sem root (uid 1001; 999 no banco e 65534 no exporter), sem escalar privilégio, sem capability, com seccomp `RuntimeDefault`, raiz somente leitura (`/tmp` em `emptyDir`) e sem token de ServiceAccount. O `make manifests` valida os três overlays com o kubeconform, contra os schemas do Kubernetes 1.35 e com `Secret` reprovado, e com o `trivy config`, sem achado HIGH nem CRITICAL; o job `build` do CI o roda em todo PR.
-
-### Implantar no kind
-
-Pré-requisitos: Docker, kind, kubectl, jq e curl (o `implantar-servicos.sh` e o smoke usam os cinco; o `make manifests` e o `make test` precisam só do kubectl e do Docker) e o platform clonado ao lado deste repositório. O primeiro comando sobe o cluster, a plataforma e os Secrets do serviço; o segundo implanta a imagem deste commit, com o Job de migração e os rollouts; o terceiro roda o smoke:
+No kind, com o repositório [platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform) clonado ao lado deste e com kind, kubectl, jq e curl instalados:
 
 ```bash
 make -C ../postech-sw-arch-p4-platform kind-up deploy
@@ -1089,107 +28,30 @@ make kind-deploy
 ../postech-sw-arch-p4-platform/scripts/ci/smoke-servicos.sh os-service
 ```
 
-O `make kind-deploy` chama o `scripts/ci/implantar-servicos.sh` do platform, o mesmo do CD (o contrato de implantação dos serviços está no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#contrato-com-os-serviços)): ele constrói a imagem `pytstop-os-service` com o commit como tag, a carrega no kind, aplica o overlay `kind` com essa imagem e espera o banco, o Job e cada Deployment. `PLATFORM_DIR=<caminho>` aponta outro clone do platform (`PLATFORM`, o nome antigo, também vale) e `KIND_OVERLAY=kind-ci` troca o overlay, os mesmos nomes do Billing e da Execução. O smoke confere pela borda a saúde em 200 e o `/metrics` em 404, o `up` de cada pod no Prometheus e a NetworkPolicy barrando o banco a quem vem de outro namespace. O Swagger fica em `https://localhost/os/docs` (com o certificado padrão do Kong).
+O primeiro comando sobe o cluster, a plataforma e os Secrets do serviço, o segundo implanta a imagem deste commit e o terceiro roda o smoke. O Swagger fica em `https://localhost/os/docs`. Os manifestos, os overlays, a troca de senha e de chave e o rollback estão em [docs/como-rodar.md](docs/como-rodar.md#implantação).
 
-O overlay `kind` também pode ser aplicado sem o script: a tag `dev` dele é a de uma imagem que o script não constrói, então `docker build -t pytstop-os-service:dev .` e `kind load docker-image pytstop-os-service:dev --name pytstop-p4` vêm antes. O script apaga o Job `os-migracao` antes de cada aplicação (um Job é imutável); à mão, faça o mesmo.
-
-- **Configuração:** o ConfigMap `os-service` sai do `configMapGenerator` de `k8s/base/kustomization.yaml`, com `ENVIRONMENT=production` também no kind (as guardas de boot valem com os segredos gerados), `ROOT_PATH=/os` (o Swagger acha o `/os/openapi.json` atrás do Kong) e a exportação OTLP para o Jaeger. Um teste (`tests/unitarios/test_contrato_dos_manifestos.py`) confere que o código lê cada variável do ConfigMap.
-- **Confiança no `X-Forwarded-For`:** o `TRUSTED_PROXIES` leva o CIDR de pods do overlay (`10.244.0.0/16` no kind, `10.42.0.0/16` no k3s), e o `X-Forwarded-For` do Kong vale como IP do cliente no limite de login. Vale também o dos outros pods que a NetworkPolicy deixa chegar à API, o Prometheus e as APIs de Billing e Execução, que não são clientes.
-- **Senhas:** nenhuma senha está nos manifestos. A `DATABASE_URL` se monta no pod com a senha do Secret (`postgresql://os_app:$(POSTGRES_APP_PASSWORD)@os-postgres...`), e o `kubectl describe` mostra o molde, não a senha. O gitleaks tem regras para URL com senha, com um teste que as faz reprovar (`scripts/ci/testa-gitleaks.sh`), e o `make manifests` reprova um `PASSWORD` literal no `papeis.sql`. Os testes de integração se conectam com a `DATABASE_URL` do próprio manifesto, e um teste do render dos três overlays confere o Secret e a chave de cada processo.
-- **Papéis do banco:** criados pelo `k8s/base/papeis.sql` no primeiro init do volume. `postgres`, o superusuário, só inicializa; `os`, dono do banco e das tabelas (DDL), é o do Job; `os_app`, só DML nas tabelas do dono, é o da API, do relay, do consumidor e do notificador (este lê `clientes.contato` em claro, por projeção, sem a chave de cifragem), e lê a `alembic_version` sem escrevê-la (o `migrations/env.py` revoga a escrita a cada upgrade); `os_exporter`, com `pg_monitor`, é o do exporter. Nenhum tem `CREATEROLE`, `CREATEDB`, replicação nem `BYPASSRLS`, e o `PUBLIC` perde o `CONNECT` e o `TEMPORARY` dos bancos `os` e `postgres`.
-- **Log do servidor:** o psql troca o `\getenv` pela senha antes de enviar o `CREATE ROLE`, e um `log_statement` ligado, a linha `STATEMENT` de um erro ou o log por duração ou por amostragem a gravariam no log do servidor. O script desliga esses caminhos na própria sessão.
-- **Acesso ao banco:** o loopback e o socket também pedem senha (`POSTGRES_INITDB_ARGS` com `scram-sha-256`), e o exporter não entra como `postgres`. Para um `psql` no container, a senha vem do ambiente dele, não de argumento: `kubectl --context kind-pytstop-p4 -n pytstop-os exec -it os-postgres-0 -c postgres -- sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -U postgres -d os'`.
-- **Init do banco que falha:** a imagem roda o init uma vez por volume. Se ele falhar no meio, o volume fica sem os papéis, o StatefulSet fica pronto (o `pg_isready` não autentica) e o Job falha na autenticação do `os`. Apague o PVC e o pod do banco para o init rodar de novo, o que apaga os dados: `kubectl --context kind-pytstop-p4 -n pytstop-os delete pvc dados-os-postgres-0 --wait=false` e `kubectl --context kind-pytstop-p4 -n pytstop-os delete pod os-postgres-0`.
-- **Migração e rollout:** o script do platform aplica tudo de uma vez e espera o banco, o Job (com o papel `os`) e os Deployments, nessa ordem. Os pods dos processos sobem junto e esperam, no initContainer `aguarda-migracao` (`python -m src.banco aguardar`), o banco chegar à última revisão do Alembic da imagem, com o motivo da espera no log dele (a revisão em que o banco está, nenhuma ou o erro de conexão): ele só lê o `alembic_version`, com o papel `os_app`, e não prepara o banco. No rolling update, os pods novos esperam a migração da versão deles enquanto os antigos seguem servindo.
-- **Rollback:** `kubectl rollout undo`, sem descer migração (migrações em expandir e contrair, ADR-042). Com o banco adiante da imagem, a revisão que ela não conhece também libera o pod.
-- **Processo `prazos`:** `k8s/base/prazos.yaml`, com o mesmo molde do relay e do consumidor (mesma imagem, `python -m src.prazos`, o initContainer `aguarda-migracao`, o Secret do banco e o do RabbitMQ, e sem a `ENCRYPTION_KEY`, que só a API recebe). Uma réplica: duas não se atropelam (`SKIP LOCKED`), mas uma basta para o intervalo de 30 s. `SAGA_PRAZO_RESPOSTA_SEGUNDOS`, `SAGA_MAX_REENVIOS` e `PRAZOS_INTERVALO_SEGUNDOS` vêm do ConfigMap `os-service`. No SIGTERM o `prazos` termina a saga em curso, sem começar outra, e sai; os 30 s do encerramento cobrem a transação dela. A compensação só vai para o cluster junto com ele ([Implantação e DLQ](#implantação-e-dlq)).
-- **Sondas:** a API tem liveness em `/api/v1/saude` e readiness em `/api/v1/saude/pronto`; relay, consumidor, `prazos` e notificador, sem curl na imagem, têm liveness pela idade do heartbeat (até 90 s; 120 s no `prazos`, onde a startup é a mesma) e readiness pelo arquivo de pronto (o do notificador é o banco respondendo; o do `prazos`, o broker de pé), os de `/tmp` (seção [Observabilidade, saúde e encerramento](#observabilidade-saúde-e-encerramento)). A sonda de startup dá 1 min ao boot de cada processo e 2 min ao primeiro init do banco.
-- **Imagens de terceiros:** o job `trivy` do workflow Security reprova a imagem do serviço com HIGH ou CRITICAL corrigíveis. As duas que o serviço põe no cluster, `postgres:16.15` e `postgres-exporter:v0.20.1`, só têm relatório no summary do job, sem reprovar, porque a correção depende de um build novo do fornecedor (`scripts/ci/relatorio-trivy-terceiros.sh`; a falha da varredura em si, como um pull recusado, vira aviso). O risco aceito, medido com o trivy 0.72.0: a `postgres:16.15` tem 1 CRITICAL e 24 HIGH, todos no binário Go `gosu`, que o pod, já como uid 999, não executa, e a chave de teste `ssl-cert-snakeoil` do Debian, que o PostgreSQL daqui não usa (sem SSL); o exporter tem 16 HIGH na biblioteca padrão do Go do próprio binário, e sua porta 9187 só chega ao Prometheus. A política é subir a versão quando o fornecedor publicar um build corrigido, junto da tabela de versões do platform.
-
-### Troca de senha e de chave
-
-Os comandos usam o contexto do kind; no k3s, troque o `--context`. O pod lê o Secret só no start, por isso cada troca termina num restart.
-
-1. Senha de um papel do PostgreSQL (o exemplo troca a do `os_app`; a chave do Secret de cada papel está na [tabela do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#segredos-gerados)). Grave a senha nova no Secret:
-
-   ```bash
-   senha=$(openssl rand -hex 24)
-   kubectl --context kind-pytstop-p4 -n pytstop-os get secret os-postgres -o json \
-     | SENHA="$senha" jq '.data.POSTGRES_APP_PASSWORD = (env.SENHA | @base64)' \
-     | kubectl --context kind-pytstop-p4 replace -f -
-   ```
-
-2. Aplique a senha no banco, como `postgres`, pela entrada padrão, como na [troca de senha do banco](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#troca-de-senha-do-banco) do platform: ela não passa por argumento, que fica no `ps` da máquina e no pedido ao apiserver. O `psql` troca o `:'senha'` pelo valor antes de enviar o comando, e os `SET`, que valem só para a sessão, tiram a senha do log do servidor: o de comandos, a linha `STATEMENT` de um comando que falha e o log por duração ou por amostragem. A saída esperada é `SET` cinco vezes e `ALTER ROLE`:
-
-   ```bash
-   { printf '%s\n' "$senha"; cat <<'SQL'
-   SET log_statement = none;
-   SET log_min_error_statement = panic;
-   SET log_min_duration_statement = -1;
-   SET log_min_duration_sample = -1;
-   SET log_transaction_sample_rate = 0;
-   \getenv senha SENHA_NOVA
-   ALTER ROLE os_app PASSWORD :'senha';
-   SQL
-   } | kubectl --context kind-pytstop-p4 -n pytstop-os exec -i statefulset/os-postgres -c postgres -- \
-       sh -c 'read -r SENHA_NOVA && [ -n "$SENHA_NOVA" ] && export SENHA_NOVA && PGPASSWORD=$POSTGRES_PASSWORD exec psql -w -U postgres -v ON_ERROR_STOP=1'
-   ```
-
-3. Reinicie quem usa o papel: o `os_app`, os Deployments (`kubectl --context kind-pytstop-p4 -n pytstop-os rollout restart deployment`); o `os_exporter`, o StatefulSet do banco, de que o exporter é sidecar; o `os`, ninguém, porque o Job a relê na próxima implantação; o `postgres`, o StatefulSet do banco, que lê a senha dele só no start (sem o restart, a troca seguinte não autentica). Até o restart, conexão nova com a senha antiga é recusada.
-
-A chave RSA do JWT gira pelas etapas da [rotação da chave](#rotação-da-chave), e cada etapa repete os mesmos três passos, com `$chaves` o diretório da rotação:
-
-1. Grave as duas chaves da etapa no Secret `os-jwt`. Os PEM entram pelo ambiente do `jq`, nunca por argumento, que fica no `ps` e no pedido ao apiserver. `privada` é o arquivo da `JWT_PRIVATE_KEY` e `anterior` é a pública da `JWT_PREVIOUS_PUBLIC_KEY`, vazia na etapa 3. O exemplo é a etapa 1; nas outras só as duas primeiras linhas mudam, como na tabela da rotação (etapa 2: `nova.pem` e a pública da `atual.pem`; etapa 3: `nova.pem` e `anterior=""`):
-
-   ```bash
-   privada="$chaves/atual.pem"
-   anterior="$(openssl pkey -in "$chaves/nova.pem" -pubout)"
-   kubectl --context kind-pytstop-p4 -n pytstop-os get secret os-jwt -o json \
-     | PRIVADA="$(cat "$privada")" ANTERIOR="$anterior" \
-       jq '.data.JWT_PRIVATE_KEY = (env.PRIVADA | @base64) | .data.JWT_PREVIOUS_PUBLIC_KEY = (env.ANTERIOR | @base64)' \
-     | kubectl --context kind-pytstop-p4 replace -f -
-   ```
-
-2. Reinicie a API e espere o rollout:
-
-   ```bash
-   kubectl --context kind-pytstop-p4 -n pytstop-os rollout restart deployment/os-service-api
-   kubectl --context kind-pytstop-p4 -n pytstop-os rollout status deployment/os-service-api
-   ```
-
-3. Espere os 10 min do cache do JWKS nos consumidores e confira o `kid` pela borda antes da etapa seguinte; a primeira chave da lista é a que assina:
-
-   ```bash
-   curl -sk https://localhost/os/.well-known/jwks.json | jq '.keys[].kid'
-   ```
-
-A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ilegíveis os dados pessoais já cifrados. E a `ADMIN_PASSWORD` (Secret `os-admin`) não gira pelo Secret: a semente só cria o admin que ainda não existe.
-
-## Qualidade
-
-- `make check`: `uv.lock` em dia, ruff (lint e formato), import-linter, mypy strict, bandit, pytest com o gate de 95% e o `diff-cover` (90% no código que a branch muda em relação à `origin/main`).
-- `make manifests`: kubeconform e trivy config dos três overlays de `k8s/`, mais a conferência de que todo `PASSWORD` do `papeis.sql` vem de uma variável do psql.
-- `make lint-workflows`: actionlint, com o shellcheck da imagem nos scripts dos `run:`, em todos os workflows (a imagem é a `rhysd/actionlint:1.7.12`, fixada por digest no Makefile, na mesma versão do `lint-scripts` do platform). Entra no `make check` e no job `lint`.
-- `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
-- `make mutacao`: mutantes escritos à mão nos módulos críticos, aplicados um por vez numa cópia do código (seção [Mutação](#mutação)). Fica fora do `make check` e do CI.
-- `make docs-api`: gera de novo o OpenAPI e a coleção Postman de [`docs/api/`](docs/api/) a partir do app, sem servidor nem banco; o `make test` reprova os arquivos atrás do código.
-- Erros no OpenAPI: o `make test` reprova o teste de API que recebe de uma rota de `src` um status que o OpenAPI não declara. A fixture automática `respostas_vistas` (`tests/respostas_da_api.py`) confere, no fim de cada teste, o que as rotas responderam contra o `responses` do app real; o status que nenhum teste provoca não é conferido. Os erros declarados usam o envelope de erro (`src/compartilhado/interfaces/respostas.py`). Fica de fora o 422 de domínio (`VALOR_INVALIDO`, no envelope): só o cancelamento o descreve, e nas demais rotas o 422 do OpenAPI é o padrão do FastAPI (`HTTPValidationError`), dívida registrada no `MEMORY.md`. O 500 não se declara, e o 429 só vale nas rotas com `@limiter.limit` próprio, porque o limite padrão não alcança as rotas dos routers. `tests/integracao/test_erros_da_api.py` provoca, contra o app real, os erros de registrar, dos limites por IP e das rotas de cliente.
-- `make cobertura-readme RUN=<id do run>`: reescreve a seção [Cobertura](#cobertura) com o `coverage.xml` de um run do CI (pede o `gh` autenticado).
-- `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
+## Como testar
 
 ```bash
+uv sync --all-extras --frozen
 make check
-make lint-workflows
-make manifests
-make audit
 make smoke
 ```
 
-`make test` (ou `uv run pytest`) roda os testes unitários, os de contrato, o BDD de componente da saga e os de integração contra um PostgreSQL e um RabbitMQ 4.3.6 efêmeros (testcontainers, Docker necessário), com gate de cobertura de 95% (`.coveragerc`). Os testes dos manifestos leem o render do `kubectl kustomize`, então o `kubectl` precisa estar no PATH: sem ele a suíte encerra de uma vez, com essa mensagem, em vez de falhar teste a teste. O teste de checksum dos contratos baixa o platform do GitHub e o que confere o SHA das actions contra as tags roda `git ls-remote`: os dois precisam de rede, e offline se roda com `-m "not rede"` (a cobertura do gate continua valendo). O schema dos testes de integração é criado pela própria migração Alembic (as migrações só acrescentam, e o rollback de uma imagem não roda `downgrade`, que apaga dados: o da `003` apaga a tabela `sagas` e a coluna `ator` do histórico; a `003` desiste em 5 s de um lock que uma leitura longa segure), e o broker de teste sobe com a topologia de `contratos/rabbitmq/`, só com o TTL das filas de retry reduzido a 100 ms para o ciclo inteiro de tentativas caber num teste.
+O `uv sync --all-extras --frozen` é o mesmo passo do CI: o extra `otel` (o exportador OTLP) é preciso para o mypy do `make check`, que sem ele para em `src/compartilhado/infraestrutura/observability.py`.
 
-No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em todo PR, publica `coverage.xml`, `htmlcov/` e o JUnit como artefato com o resumo de cobertura por pacote no summary, roda o `make diff-cover` no PR (com o relatório dele no summary, logo abaixo), passa o SonarQube com quality gate versionado (`.sonar/quality-gate.json`), valida os manifestos (`make manifests`), builda a imagem e roda o `make smoke`. O workflow `Security` roda pip-audit (dependências de runtime com os extras da imagem), gitleaks (o histórico do commit testado, inclusive o que um commit seguinte apagou) e trivy (imagem), em todo PR e toda segunda-feira. O resultado do pip-audit e o do trivy aparecem no log enquanto rodam e também no summary do job (`scripts/ci/registra-no-summary.sh`, que mantém o código de saída da ferramenta); o resumo da cobertura mostra o número do gate (linhas e ramos), o que o `fail_under` compara.
+- **`make check`**: roda os gates do CI: `uv.lock` em dia, ruff, import-linter, actionlint, mypy strict, bandit e o `pytest` com gate de cobertura de 95% e `diff-cover` de 90% no código novo.
+- **Testes**: unitários, de contrato (a cópia dos contratos do platform é conferida byte a byte), de integração com PostgreSQL e RabbitMQ 4.3.6 efêmeros (testcontainers) e BDD de componente da saga (`tests/bdd/`). O BDD do fluxo completo, pela borda do kind, é do platform e roda no `deploy-kind` do CD.
+- **`make smoke`**: prova a imagem pelo entrypoint real. Os dois pedem Docker, e o `make check` pede também o `kubectl` no PATH (os testes dos manifestos leem o `kubectl kustomize`).
+- **Outros gates**: `make manifests`, `make audit`, `make lint-workflows` e `make docs-api`. O detalhe de cada um e dos testes da saga está em [docs/testes.md](docs/testes.md).
+
+### Mutação
+
+São 60 mutantes escritos à mão nos módulos críticos (`scripts/mutantes.toml`), e a suíte matou os 60 em 18/10/2026 (`make mutacao`). Não é gate de CI e não tem pontuação mínima. A tabela por área, o motivo de não usar o `mutmut` e os códigos de saída estão em [docs/testes.md](docs/testes.md#mutação).
 
 ## Cobertura
+
+O gate é de 95% no total, com linhas e ramos somados (`fail_under` no `.coveragerc`), e o código novo precisa de 90% (`make diff-cover`), como pede o ADR-041 (RNF-050). As tabelas não são digitadas: o [`scripts/cobertura_resumo.py`](scripts/cobertura_resumo.py) as escreve a partir do `coverage.xml` de um run do CI.
 
 <!-- cobertura:inicio -->
 **99,63% no gate** (linhas e ramos somados): 6.282 linhas, 6.266 cobertas (99,7%), e 930 ramos, 919 cobertos (98,8%), medidos no [run 39952450189 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39952450189). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
@@ -1212,199 +74,117 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 
 <!-- cobertura:fim -->
 
-As tabelas não são digitadas: `make cobertura-readme RUN=<id do run>` baixa o `coverage.xml` do artefato `relatorios-de-teste` de um run do CI e reescreve, com `scripts/cobertura_resumo.py`, o trecho entre os dois marcadores de comentário desta seção (`cobertura:inicio` e `cobertura:fim`), com o link do run. `tests/unitarios/test_documentacao.py` reprova o trecho editado à mão. O CI publica a mesma medida, por pacote, no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)), e `uv run python scripts/cobertura_resumo.py coverage.xml` a mostra depois de um `make test` local.
+Para refazer depois de mudar `src/`: `make cobertura-readme RUN=<id do run do CI>`. Oscilação: com o mesmo código, o número varia cerca de 0,02 ponto, por um ramo de `encryption.py` que só roda quando as threads do teste de concorrência se cruzam ([como ler a diferença](docs/testes.md#cobertura)). O gate, o `diff-cover` e o que fica fora da medição estão em [docs/testes.md](docs/testes.md#cobertura).
 
-- **Gate.** 95% de linhas e ramos somados (`fail_under` no `.coveragerc`), e 90% no código que a branch muda (`make diff-cover`). A suíte tem testes unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais.
-- **Oscilação.** Com o mesmo código, o número oscila entre 99,63% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 918 ramos cobertos em vez de 919.
-- **Fora da medição.** Os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
-- **Linhas sem teste.** São 16: o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista.
+## API
 
-O `make diff-cover` lê o `coverage.xml` do `make test` e exige que ele exista e seja mais novo que o código de `src/`: sem o XML, ou com ele velho, recusa e manda rodar o `make test` antes. Com o XML velho, o diff-cover passaria sem medir nada. O `make check` já roda os dois na ordem certa.
+- **Swagger**: `http://localhost:8000/docs` (`https://localhost/os/docs` no kind).
+- **OpenAPI e Postman (RNF-052)**: [`docs/api/openapi.json`](docs/api/openapi.json) e a [coleção Postman](docs/api/os-service.postman_collection.json), com um exemplo de corpo e de resposta por rota, ficam em [`docs/api/`](docs/api/). O `make docs-api` os gera de novo a partir do app, e o `make test` reprova os arquivos atrás do código. A coleção do fluxo completo, que roda com newman, é do platform.
+- **Exemplos**: um `curl` por rota, agrupado por fluxo, em [docs/api/exemplos.md](docs/api/exemplos.md).
+- **Erros**: os erros saem no envelope `{"erro": {"codigo", "mensagem", "id_requisicao"}}`, menos o 422 de validação de schema (`{detail, id_requisicao}`, o formato dos três serviços) e a readiness 503 (`{"status": "indisponivel"}`). O OpenAPI declara os erros que cada rota devolve, menos o 500 ([detalhe](docs/testes.md#qualidade)).
+- **Rotas principais**:
+  - OS: `POST` e `GET /api/v1/ordens-de-servico`, `GET /{id}` (com a etapa da saga), `GET /{id}/historico`, `POST /{id}/cancelamento` (202 ou 409) e `POST /{id}/entrega`.
+  - Saga (admin): `GET /api/v1/sagas/{ordem_id}` e `POST /api/v1/sagas/{ordem_id}/compensacao`.
+  - Clientes e veículos, com as rotas da LGPD: `/api/v1/clientes`.
+  - Autenticação: `/api/v1/autenticacao/*` e `GET /.well-known/jwks.json`. Acompanhamento público: `POST /api/v1/publico/acompanhamento`.
+  - Operação: `GET /api/v1/saude`, `GET /api/v1/saude/pronto`, `GET /api/v1/ordens-de-servico/metricas` (admin) e `GET /metrics`.
 
-## Mutação
+## Mensageria
 
-Cobertura diz que a linha rodou; mutação diz se a suíte percebe quando ela está errada (ADR-041). Não é gate de CI e não tem pontuação mínima.
+O OS orquestra a saga pelo RabbitMQ da plataforma ([ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md), [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) seção 5). Publica 11 comandos para o Billing e a Execução e consome 23 eventos deles (13 do Billing e 10 da Execução), todos no envelope do contrato. A entrega é pelo menos uma vez e o efeito acontece uma vez (RN-028).
 
-O `mutmut` não roda num pacote chamado `src`, que é o caso deste serviço (e do Billing, onde se mediu): a versão 3.8.0 espera o pacote em `src/<pacote>` e tira o prefixo `src.` do nome do módulo, e a primeira função mutada que os testes chamam reprova com
+- **Outbox e relay**: o caso de uso grava o comando na tabela `outbox`, no mesmo commit do efeito. O `relay` (`python -m src.relay`) o publica com *publisher confirms* e `mandatory`. A falha volta depois de 1, 4, 16 e 64 s e, na quinta, a linha vira `dead`.
+- **Consumidor** (`python -m src.consumidor`): lê `os.eventos` uma mensagem por vez, com ack manual, e comita o efeito, os comandos e o registro em `mensagens_processadas` de uma vez. A idempotência é a chave primária dessa tabela: o mesmo `id` recebe ack sem efeito.
+- **Retry e DLQ**: o erro transitório volta pela fila de retry (1, 5, 15, 60 e 300 s). A sexta falha, o erro permanente e a mensagem fora do contrato vão para `os.eventos.dlq` (7 dias), de onde o redrive as trata de novo.
+- **Contratos**: `contratos/` é cópia dos arquivos do platform no SHA de `contratos/ORIGEM`: o [AsyncAPI](contratos/asyncapi.yaml), um JSON Schema por mensagem e os exemplos. Um teste compara cada arquivo byte a byte.
+- Catálogo das mensagens, envelope, variáveis de ambiente, comportamento com o broker fora e o e-mail ao cliente: [docs/mensageria.md](docs/mensageria.md) e [docs/arquitetura.md](docs/arquitetura.md#5-mensageria).
 
-```text
-AssertionError: Failed trampoline hit. Module name starts with `src.`, which is invalid
-```
+### Evento fora de ordem
 
-(`mutmut/stats.py`, `record_trampoline_hit`). Renomear o pacote ou remendar a ferramenta mudaria o que se mede, então a alternativa são mutantes escritos à mão: [`scripts/mutantes.toml`](scripts/mutantes.toml) lista 60 defeitos plausíveis nos módulos críticos, e [`scripts/mutacao_manual.py`](scripts/mutacao_manual.py) (o mesmo script do Billing) aplica um por vez numa cópia do código (`mutants/`, fora do git) e roda só os testes que deveriam pegá-lo.
+O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa da saga antes de tocar no domínio (RFC-004 seção 4.5). O evento de etapa já passada ou repetido é ignorado com log e nunca vai para a DLQ. O adiantado volta pela fila de retry nas cinco cópias (381 s ao todo) e, se a saga não o alcançar, a sexta falha vai para a DLQ, com alerta.
 
-**Resultado** em 18/10/2026: 60 mortos de 60 medidos (100%), sem equivalentes, em cerca de 6 min: de 5,5 a 6,3 min em seis medições, conforme a carga da máquina.
+A recusa permanente vai para a DLQ com o motivo em código no log `message rejected to dlq` (como `saga_inexistente`, `ordem_encerrada`, `transicao_invalida`, `relogio_defasado` e `erro_no_handler`). Um caso conhecido: a aprovação de um orçamento com peça de código fora do formato do Billing vira `erro_no_handler`, e a saga fica em `aguardando_decisao` até o cancelamento da OS. A tabela completa e esse caso estão em [docs/saga.md](docs/saga.md#evento-fora-de-ordem).
 
-| Área | Mutantes | Mortos | Equivalentes |
-|---|---:|---:|---:|
-| Status da OS (máquina e agregado) | 11 | 11 | 0 |
-| Classificação do evento na saga | 7 | 7 | 0 |
-| Transições da saga | 5 | 5 | 0 |
-| Prazos da saga | 4 | 4 | 0 |
-| Compensação da saga | 4 | 4 | 0 |
-| Orquestrador da saga | 3 | 3 | 0 |
-| Consumidor | 5 | 5 | 0 |
-| Idempotência | 2 | 2 | 0 |
-| Relay | 6 | 6 | 0 |
-| JWT e acesso | 9 | 9 | 0 |
-| CPF | 4 | 4 | 0 |
-| **total** | **60** | **60** | **0** |
+### Operação do e-mail
 
-- **Sobrevivente que virou teste:** o corpo no teto exato de 64 KiB tratado como grande demais (Q05). O único caso era um corpo de cerca de 70 KB, longe do limite; `test_corpo_ate_64_kib_passa_do_limite_de_tamanho` prende a constante e os dois lados dela, sem broker.
-- **O que o percentual não é:** a lista é curada, então ele diz que a suíte pega esses 60 defeitos, e não é comparável ao de uma ferramenta que gera os mutantes sozinha.
+O e-mail ao cliente não passa pelo broker: a transição da OS grava um pedido na tabela `notificacoes`, no mesmo commit, e o processo `notificador` o envia por SMTP ao Mailpit. A linha que esgota as cinco tentativas fica `dead`, sem métrica nem alerta. A consulta das linhas `dead` e o `UPDATE` que as devolve à fila estão em [docs/mensageria.md](docs/mensageria.md#operação-do-e-mail).
 
-Para refazer:
+## Arquitetura
 
-```bash
-make mutacao
-make mutacao MUTANTES="Q05 R03"
-```
+DDD com arquitetura em camadas (onion) em cada contexto: `interfaces` → `aplicacao` → `dominio`, com a `infraestrutura` implementando as portas. O mapeamento do SQLAlchemy é imperativo, e as classes do domínio são dataclasses puras. Os contextos são `autenticacao`, `cliente_veiculo` e `ordem_servico`, mais o núcleo técnico `compartilhado`, sem regra de negócio. As regras de dependência são contratos do import-linter (`make lint-arch`): `dominio` e `aplicacao` não importam a `infraestrutura`, o `pika` nem o `opentelemetry`, a saga não importa o SQLAlchemy, e um contexto não importa o núcleo de outro.
 
-Como o alvo se comporta:
+Cinco processos saem da mesma imagem, e só o comando muda: a API, o `relay`, o `consumidor`, o `prazos` e o `notificador`, mais o Job de migração. A saga é um *process manager* (`ordem_servico/aplicacao/saga/`): estado e regras sem I/O, persistido como o agregado `Saga` na tabela `sagas`, na mesma transação da OS e da outbox.
 
-- Para de iniciar mutantes depois de `MUTACAO_PRAZO` segundos (900); os que sobram saem `nao rodado`.
-- Antes do primeiro mutante de cada grupo de testes, roda o grupo na cópia sem mutante. Se o grupo já reprova ou estoura o tempo, os mutantes dele saem `erro`: um teste que já falha mataria qualquer um.
-- Com `erro` ou `nao rodado`, o percentual vira `n/d`. A tabela vai para `reports/mutacao.md`.
-- Os testes de integração sobem um PostgreSQL por testcontainers a cada grupo e a cada mutante, e os do consumidor e do relay também um RabbitMQ: o Docker precisa estar no ar.
-- O script lê o arquivo original de `src/` a cada mutante: não edite `src/` com a bateria rodando.
-- Um mutante novo entra com o trecho exato (`de`, uma ocorrência no arquivo), e `tests/unitarios/test_mutacao_manual.py` reprova se a lista envelhecer.
+As responsabilidades, as camadas, o modelo completo do banco, os fluxos passo a passo, a mensageria, a segurança e a LGPD estão em [docs/arquitetura.md](docs/arquitetura.md) (RNF-051). A saga tem o fluxo, as [compensações e o cancelamento](docs/saga.md#compensações-e-cancelamento) e os [prazos e a retomada](docs/saga.md#prazos-falha-na-compensação-e-retomada) em [docs/saga.md](docs/saga.md). As decisões globais estão na [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) e nos [ADR-034 a ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura/adr/fase4) do platform.
 
-Códigos de saída:
+### Por que orquestração
 
-- `0`: nenhum mutante saiu `erro`. Sobrevivente e `nao rodado` não reprovam, porque não há gate (ADR-041). É o código do script; o `make mutacao` sai com 0 ou com 2 (o `make` troca o 1 do script pelo 2 dele).
-- `1`: algum mutante saiu `erro`, uma medida inválida, como o Docker fora ou um arquivo que os testes leem e que a cópia não levou.
-- `2`: um id de `MUTANTES` não existe (a mensagem lista os válidos) ou o `.toml` não bate com o código.
+- **O tamanho da saga.** São nove passos, T1 a T9 (as transações locais de cada serviço, da abertura à finalização), em três serviços, mais a entrega local (T10). Há esperas humanas (mecânico e cliente), um provedor externo (Mercado Pago) e seis compensações. Um dos passos é o *pivot*, o ponto sem retorno (RN-029): o início da execução física, depois do qual não há compensação.
+- **Por que não coreografia.** A Aula 02 de SAGA Pattern, citando Richardson, recomenda a coreografia para sagas simples, e esta não é. Com coreografia, os passos ficariam espalhados nos três serviços, sem um lugar que diga em que etapa a OS está. Prazos, ordem das compensações e o pivot exigiriam que cada serviço assinasse eventos dos outros dois, com risco de ciclo.
+- **Por que no OS, e não num quarto serviço.** Como nos exemplos do material, o orquestrador fica no serviço que inicia a saga: o fluxo inteiro fica num lugar só, testável sem broker, e etapa e status mudam na mesma transação local.
+- **Os dois contras da aula, contidos.** O orquestrador só conhece a ordem dos passos, as compensações e os prazos: preço, validade e pagamento são dos participantes, que respondem a comandos sem conhecer a saga. E ele não é ponto único de falha: o estado fica no banco e as mensagens, em filas duráveis. O consumidor roda com uma réplica; se o pod cai, o Kubernetes o recria, a mensagem sem confirmação volta à fila e a reentrega não repete efeito (RN-028). As alternativas descartadas (coreografia, orquestrador como quarto serviço, motor de workflow) estão no ADR-035.
 
-## Dependências automatizadas
+## Observabilidade
 
-O Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml)) abre pull requests para três ecossistemas: `pyproject.toml` e `uv.lock` (uv), as actions dos workflows e as imagens base do `Dockerfile`.
+Segue o [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md).
 
-- **Agenda:** uma vez por semana, às segundas às 06:00 (São Paulo), com no máximo 3 PRs abertos por ecossistema.
-- **Grupos:** patch e minor de cada ecossistema chegam juntos num PR. Major abre PR próprio, para ser lido com o changelog.
-- **OpenTelemetry:** as bibliotecas `opentelemetry-*` sobem juntas no grupo de patch e minor do uv. O SDK fixa `opentelemetry-api` e `opentelemetry-semantic-conventions` na mesma versão e cada instrumentação fixa a sua, então subir só uma parte não resolve. Um grupo só delas ficaria vazio, porque o Dependabot o trata como menos específico que o de patch e minor. A major da família fica fora, atrás do teto do `pyproject.toml`: `<1.46` no SDK e no exportador, `<0.67` nas instrumentações. O teto barra também a próxima minor, porque o `observability.py` troca `_status` e `_events` de um span, atributos privados do SDK que uma minor nova pode mudar.
-- **Commit e rótulos:** prefixo `chore(deps)`, ou `ci` nas actions. O arquivo não declara `labels`: os PRs levam os rótulos padrão do Dependabot (`dependencies` e o do ecossistema), que ele cria se faltarem. Declarar rótulo que não existe no repositório só faz o Dependabot comentar isso em cada PR.
-- **Checks:** cada PR passa pelos mesmos checks do CI e da varredura de segurança, inclusive o pip-audit, o trivy e o gate de cobertura.
-- **Python:** no bloco do Docker, major e minor do Python ficam de fora. A versão sobe à mão, de uma vez, em `.python-version`, `UV_PYTHON` e `python-version` dos workflows, `requires-python` e `python_version` (mypy) do `pyproject.toml`, `sonar.python.version` do `sonar-project.properties` e nas duas imagens do `Dockerfile`. Sem isso, o 3.14 → 3.15 chegaria como "minor" e trocaria só a imagem do runtime. O patch vem do rebuild da tag móvel `python:3.14-slim`, sem PR; hoje o bloco do Docker não abre PR, porque as duas linhas `FROM` são `python:3.14-slim` e a única atualização possível está no `ignore`.
+- **Métricas**: cada processo serve o `/metrics`. A API o serve na porta 8000, fora da borda, e o `relay`, o `consumidor`, o `prazos` e o `notificador`, na 9100. O Prometheus do platform raspa cada pod. Os gauges por consulta (saga, outbox e OS por status) saem de um coletor da API e ficam ausentes, nunca zerados, quando a leitura falha.
+- **Traces**: os spans do OpenTelemetry vão ao Jaeger com `OTEL_ENABLED=true`. A requisição de abertura é a raiz do trace da saga, que atravessa os três serviços pelas mensagens.
+- **Logs**: JSON com `correlation_id` (o id da OS), `trace_id` e `span_id`, sem dado pessoal. O Promtail do platform os leva ao Loki.
+- **No platform**: o catálogo das métricas dos três serviços, os painéis do Grafana e os alertas estão na [observabilidade do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/observabilidade/README.md#catálogo-de-métricas).
+- A tabela das séries, os spans, o que não é exportado, os logs e como ver no compose e no kind estão em [docs/observabilidade.md](docs/observabilidade.md).
 
-Depois do congelamento do código em 06/11/2026, o `open-pull-requests-limit` de cada bloco passa de 3 para 0 (e o valor esperado em `tests/unitarios/test_cd.py` com ele). O 0 desliga só as atualizações de versão: os PRs de segurança do Dependabot, habilitados no repositório, não entram no limite e seguem abrindo. Sobem à mão, porque o Dependabot não os enxerga ou a versão está fixada de propósito: o uv do `Dockerfile` (entra por `COPY --from`, e o Dependabot só lê as linhas `FROM`), o PostgreSQL e o `postgres-exporter` de `k8s/`, o PostgreSQL, o RabbitMQ e o Mailpit do compose, o PostgreSQL e o RabbitMQ dos testes de integração (`tests/conftest.py` e `tests/integracao/broker.py`), a imagem do SonarQube do `ci.yml` e o scanner (`scripts/sonar/analisar.sh`), o trivy, o gitleaks, o pip-audit, o diff-cover, o kubeconform e o actionlint.
+## CI/CD
 
-## CD
-
-O workflow `CD` ([`cd.yml`](.github/workflows/cd.yml), [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)) implanta o serviço depois do merge. **O ambiente Kubernetes do deploy automatizado é o kind efêmero do runner**: o `deploy-kind` sobe a plataforma e os três serviços num cluster que some com o job e valida o deploy com o E2E (teste ponta a ponta) da saga; o que fica são os relatórios, no artefato `e2e-kind`, por 90 dias. Um deploy remoto, num cluster persistente, é opcional e vem desligado ([abaixo](#deploy-remoto-opcional)). O caller conserva os gatilhos, a concorrência e os gates locais; o job `cd` chama o [workflow reutilizável do Platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/3f7cca2eb555a038b0d2780058ef0e692f93ee8a/.github/workflows/cd-servico.yml), fixado no commit `3f7cca2eb555a038b0d2780058ef0e692f93ee8a` (S). Esse pin escolhe a definição do workflow; o input `sha_platform` escolhe separadamente os scripts e manifests usados no deploy (P).
-
-O primeiro CD deste caller na `main` foi aprovado no [run 39233375064](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39233375064), sobre `5e4ed2a1c2d74bdc65cc207c3f5a208b4ea672ca`: CI, segurança, imagem com SBOM e digest conferido, implantação no kind, smoke, E2E, varredura e `remote-skipped` passaram.
-
-A cada push na `main`, depois do merge de cada PR, e no `workflow_dispatch`:
-
-1. `ci` e `security-scan` chamam o `ci.yml` e o `security.yml` como workflows reutilizáveis: o CI e a varredura de segurança não rodam duas vezes, e o PR continua rodando os dois pelo próprio gatilho.
-2. `cd`, depois dos dois gates verdes, chama o reutilizável com `servico: os-service` e os quatro inputs de SHA. Nele, `image` constrói a imagem uma vez e a publica no GHCR (GitHub Container Registry), com o SHA do commit como tag.
-3. `deploy-kind` carrega essa imagem num kind, roda o smoke de cada namespace e o E2E, e guarda os relatórios.
-4. `deploy-remote`, se estiver ligado, implanta no cluster remoto o mesmo digest que passou no kind (o digest é o `sha256:...` que identifica o conteúdo da imagem). Desligado, o `remote-skipped` só registra o aviso.
-
-Só roda um CD por vez no repositório, sem cancelar o que está em curso (`concurrency` por repositório). O GitHub guarda um único run pendente por grupo: um push ou um dispatch seguinte substitui o pendente, e o commit do run trocado fica sem CD. O run que sobra testa o estado mais novo da `main`.
-
-### Jobs
-
-| Job | O que faz | Depende de | Prazo | Permissões do job |
-|---|---|---|---|---|
-| `ci` | Chama o `ci.yml`: `lint`, `type-check`, `security`, `test`, `sonarqube` e `build` | | | `contents: read` |
-| `security-scan` | Chama o `security.yml`: `pip-audit`, `gitleaks` e `trivy` | | | `contents: read` |
-| `cd` | Chama o reutilizável do Platform pelo SHA S, sem herdar segredos | `ci`, `security-scan` | definidos nos jobs chamados | `contents: read`, `actions: read`, `packages: write` |
-| `image` | Só roda na `main` (o primeiro passo reprova qualquer outra ref). Constrói a imagem uma vez e a publica em `ghcr.io/<organização>/pytstop-os-service:<sha do commit>`, com SBOM (a lista de pacotes da imagem) em SPDX (formato padrão de SBOM) e proveniência mínima (`provenance: mode=min`). Confere o digest com um `docker pull`, salva o tar `linux/amd64` e o SBOM | gates do caller `cd` | 30 min | `contents: read`, `packages: write` |
-| `deploy-kind` | Sobe a plataforma e os três serviços num kind do runner, roda o smoke de cada namespace e o E2E da saga (abaixo) | `image` | 45 min | `contents: read`, `actions: read` |
-| `deploy-remote` | Opcional, desligado: implanta no cluster remoto configurado o mesmo digest que passou no kind. Só roda na `main` e com `DEPLOY_REMOTO_HABILITADO` igual a `true` ([abaixo](#deploy-remoto-opcional)) | `image`, `deploy-kind` | 20 min | `contents: read`, `packages: read` |
-| `remote-skipped` | O oposto: com a variável desligada, só registra o aviso de que o deploy remoto não rodou | `deploy-kind` | 5 min | nenhuma |
-
-Os quatro jobs de imagem e deploy da tabela pertencem ao reutilizável do Platform. O caller concede a união de permissões, e cada job chamado a reduz conforme a tabela. O CD só começa com o CI e a varredura do commit verdes. Os jobs rodam no `ubuntu-24.04`, fixo, e o único que escreve pacote é o `image`. Nenhum job pede token de identidade, e o arquivo não guarda credencial de provedor nenhum. O `actions: read` do `deploy-kind` serve à consulta dos runs do `cd.yml` dos vizinhos. Como os dois repositórios são públicos, a leitura talvez funcione sem a permissão, mas só um run na `main` prova isso, então ela fica.
-
-O `workflow_dispatch` aceita qualquer ref, e o `image` publica no GHCR a imagem que o deploy remoto implanta. Por isso o primeiro passo do `image` reprova fora de `refs/heads/main` (`images are published from main only`), e o `deploy-remote` repete a condição. O CI e a varredura de segurança rodam antes, então o erro de ref aparece só depois deles.
+- **CI e segurança**: o `ci.yml` roda `lint`, `type-check`, `security`, `test`, `sonarqube` (com quality gate versionado) e `build` (imagem e `make smoke`), e o `security.yml` roda `pip-audit`, `gitleaks` e `trivy`, em todo PR e toda segunda-feira. Esses nove nomes são os checks obrigatórios da `main`, que é protegida: toda mudança entra por PR, com squash.
+- **CD**: o [`cd.yml`](.github/workflows/cd.yml) roda a cada push na `main` e no `workflow_dispatch`. Com o CI e a segurança verdes, o job `cd` chama o workflow reutilizável do platform ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)): o `image` publica a imagem no GHCR, com SBOM e proveniência, e o `deploy-kind` implanta a plataforma e os três serviços num kind efêmero do runner e roda o smoke e o E2E da saga. O `deploy-remote` é opcional e vem desligado.
+- **Dependabot**: uma vez por semana, para o uv, as actions e as imagens do `Dockerfile` ([`dependabot.yml`](.github/dependabot.yml)).
+- Jobs, permissões, artefatos, como reexecutar e os limites conhecidos: [docs/ci-cd.md](docs/ci-cd.md).
 
 ### O que o `deploy-kind` faz, na ordem
 
-1. Escolhe os commits do platform e dos dois serviços vizinhos ([abaixo](#commits-do-platform-e-dos-vizinhos)) e faz o checkout de cada um, mais o deste repositório, sem guardar a credencial do GitHub.
+1. Escolhe os commits do platform e dos dois serviços vizinhos (o do dispatch, senão o do último CD verde, senão a `main`) e faz o checkout de cada um.
 2. Baixa o artefato `imagem`, o tar da imagem que o `image` acabou de publicar: o E2E testa a mesma imagem que vai ao GHCR.
-3. `scripts/ci/deploy-kind.sh` do platform: kind e kubectl com versão e sha256 fixados, `make kind-up` e `make deploy` no overlay `kind-ci`, que gera os Secrets no run. Nada de segredo vem do GitHub.
-4. `scripts/ci/implantar-servicos.sh --overlay kind-ci`: este serviço entra pelo tar (`kind load image-archive`); o Billing e a Execução são construídos do código no commit escolhido. Aplica o overlay `kind-ci` de cada serviço e espera o banco, o Job de migração e os Deployments, nessa ordem. O contrato está no [README do platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform#contrato-com-os-serviços).
-5. `scripts/ci/smoke-servicos.sh`: por namespace, o Job completo, os rollouts, a saúde e o Swagger pela borda, o `/metrics` fora da borda, o `up` de cada pod e o `pg_up` ou `mongodb_up` no Prometheus e a NetworkPolicy do banco. A tabela `Service | Stage | Result` vai para o summary e o passo reprova nomeando o serviço.
-6. `make -C platform e2e`: o BDD (cenários em Gherkin) da saga pela borda, com o resumo e os relatórios.
-7. Sempre, mesmo com falha: o resumo de minutos por etapa e memória (`scripts/medir-kind.sh`) no summary, a varredura de segredos nos relatórios do E2E (`python -m e2e.varredura` do platform, que apaga o arquivo com segredo e reprova o passo) e o upload do artefato `e2e-kind`. Com falha ou cancelamento (inclusive o do `timeout-minutes`): `scripts/ci/diagnostico.sh`, que despeja pods, eventos e logs de todos os namespaces com o cluster ainda de pé.
+3. Sobe o kind e a plataforma (`scripts/ci/deploy-kind.sh` do platform), com os Secrets gerados no run.
+4. Implanta os três serviços no overlay `kind-ci` e espera o banco, o Job de migração e os Deployments.
+5. Roda o smoke de cada namespace.
+6. Roda o E2E BDD da saga pela borda.
+7. Sempre, mesmo com falha: o resumo de minutos e memória, a varredura de segredos nos relatórios, o upload do artefato `e2e-kind` e, em falha, o diagnóstico do cluster.
 
-O job fica verde só se o E2E passar. O resumo e o diagnóstico só rodam se o checkout do platform aconteceu: com um `sha_*` inválido o primeiro passo reprova antes de qualquer checkout, e o único vermelho é o dele.
-
-### Commits do platform e dos vizinhos
-
-O primeiro passo do `deploy-kind` escolhe o commit de cada um dos três repositórios e escreve a tabela no summary, com a origem de cada commit. Este serviço é sempre o commit do run.
-
-1. O commit do input do dispatch, se houver.
-2. Senão, o commit do último run verde do `cd.yml` daquele repositório, na `main` e disparado por push (`gh api repos/<organização>/<repositório>/actions/workflows/cd.yml/runs` com `branch=main`, `event=push` e `status=success`). O platform e os vizinhos entram assim, e não pelo último commit da `main`: uma `main` quebrada de um vizinho não derruba o CD dos outros, e o vermelho fica no CD de quem a quebrou.
-3. Senão, a `main` HEAD do repositório, com um `::warning::` nomeando o repositório. É o caso de um repositório sem nenhum CD verde, o que inclui o repositório sem `cd.yml` (a API responde 404). Qualquer outra falha da API, como o limite de requisições, reprova o passo, em vez de cair na `main` calado.
-
-### Imagem, SBOM e proveniência
-
-- **Tag e digest:** a tag é o SHA do commit. O `image` confere que o digest que o `docker pull` imprime é o do build e usa esse digest no deploy remoto.
-- **SBOM:** o `docker buildx imagetools inspect --format '{{ json .SBOM }}'` devolve o documento SPDX dentro de `{"SPDX": ...}`; o passo extrai o documento, reprova se ele não lista nenhum pacote e sobe o resultado como artefato.
-- **Proveniência:** o atestado de proveniência (como a imagem foi construída) fica no índice da imagem, no registro público. É o mínimo (`mode=min`) e sem o payload do evento do push: o buildx o grava na proveniência em qualquer modo, com nome e e-mail dos autores, e só o `provenance-add-gha=false` do `setup-buildx-action` o tira.
-- **Imagens do build fixadas por digest:** o BuildKit, o gerador do SBOM e a imagem do actionlint do Makefile. As tags delas andam; os comentários do reutilizável e do Makefile dizem como subir.
-- **Visibilidade:** o pacote `pytstop-os-service` é público por herança, e nada neste repositório o configura: ele nasce vinculado a este repositório, que é público, pela label `org.opencontainers.image.source` do Dockerfile. Se a visibilidade mudar, o cluster do `deploy-remote` precisa de um segredo de pull do `ghcr.io`.
-- **Gate no commit, não no artefato:** o `ci / build`, o `security-scan / trivy` e o `image` constroem o Dockerfile cada um no seu job, e o Dockerfile faz `apt-get upgrade` sobre `python:3.14-slim`, uma tag que anda. O digest publicado pode ter pacotes do sistema diferentes dos que passaram no smoke do CI e no trivy. O E2E do `deploy-kind` testa o tar do `image`, a mesma imagem que foi ao GHCR.
-- **Registro antes do E2E:** a imagem vai ao GHCR antes do smoke e do E2E, então o registro tem imagens de commits cujo `deploy-kind` ficou vermelho. A tag não é um selo de CD verde; o deploy remoto implanta por digest, e só depois do kind verde.
-
-### Artefatos e summary
-
-| Artefato | Conteúdo | Retenção |
-|---|---|---|
-| `imagem` | `imagem.tar`, a imagem `linux/amd64` sem os manifestos de atestado (com eles, o `kind load` falha por digest ausente no image store do containerd) | 1 dia |
-| `sbom-os-service` | O documento SPDX 2.3 da imagem publicada, com os pacotes dela | 90 dias |
-| `e2e-kind` | `platform/reports/e2e/` depois da varredura de segredos: `resumo.md`, `junit.xml`, `cucumber.json`, `cenarios.json` e o trace do caminho feliz | 90 dias |
-
-São os três artefatos do run. O registro do build (`*.dockerbuild`) que o `docker/build-push-action` anexaria sozinho está desligado (`DOCKER_BUILD_RECORD_UPLOAD`).
-
-O summary do run traz, em ordem: os commits usados, a imagem (referência, digest e número de pacotes do SBOM), as tabelas do smoke e do E2E e os minutos por etapa e a memória do nó do kind.
-
-### Reexecutar e acompanhar
-
-Dispare o `workflow_dispatch` sempre com `--ref main`. Ele aceita `sha_platform`, `sha_billing_service` e `sha_execution_service`, todos opcionais, cada um com 40 caracteres hexadecimais minúsculos (um SHA abreviado, em maiúsculas, um nome de ramo ou qualquer outra coisa reprova o passo antes de qualquer checkout). O `sha_os_service` mantém as mesmas entradas dos CDs dos outros serviços e só aceita vazio ou o commit do run: este serviço é sempre o commit que iniciou o workflow. Os valores entram nos passos só por variável de ambiente, nunca dentro de um script.
-
-```bash
-BILLING=$(gh api repos/fiap-postech-sw-architecture/postech-sw-arch-p4-billing-service/commits/main --jq .sha)
-gh workflow run cd.yml --ref main -f sha_billing_service="$BILLING"
-gh run watch "$(gh run list --workflow cd.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
-```
-
-O `gh run watch` sem id abre um seletor interativo; o comando acima segue o último run. Antes de reexecutar, quatro fatos:
-
-1. O artefato `imagem` vive 1 dia. Depois disso, o "Re-run failed jobs" reprova no download dele: rode `gh workflow run cd.yml --ref main` no lugar do re-run.
-2. O re-run do job `image` publica de novo a mesma tag (o SHA do commit) com outro digest. O digest que vale é o da tentativa mais recente, o do summary dela.
-3. Um dispatch pendente é trocado por um push seguinte, e um push pendente, por um dispatch: o grupo de `concurrency` guarda um pendente só.
-4. Um `sha_*` inválido só reprova no primeiro passo do `deploy-kind`, depois do CI e da imagem (cerca de 10 minutos). A mensagem nomeia a entrada.
-
-### Dois serviços que mudam contrato juntos
-
-O CD de cada serviço usa os vizinhos no último CD verde deles. Se o OS e o Billing mudam o mesmo contrato de forma incompatível, o CD de cada um sobe a versão nova com a antiga do outro e fica vermelho, e o último verde de nenhum dos dois avança. Para sair do impasse:
-
-1. Prove a combinação nova com o `workflow_dispatch`: no OS, `sha_billing_service` com o commit novo do Billing; no Billing, `sha_os_service` com o commit novo do OS. Com o deploy remoto ligado, o mesmo run implanta o digest dela.
-2. Esse run não vira "último CD verde", porque a consulta olha só os runs disparados por push.
-3. Um dos dois precisa então de um push verde com o vizinho antigo, ou seja, de um PR que aceite os dois formatos. Depois o outro muda, e o primeiro retira o formato antigo (expandir e contrair, [ADR-036](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/036-mensageria-rabbitmq.md)).
-
-Entrar em duas etapas desde o começo evita o impasse.
+O job só fica verde se o E2E passar. O texto completo está em [docs/ci-cd.md](docs/ci-cd.md#o-que-o-deploy-kind-faz-na-ordem).
 
 ### Deploy remoto (opcional)
 
-O deploy remoto leva o mesmo digest que passou no kind para um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Ele substitui o `deploy-k3s` do ADR-042, e o `DEPLOY_REMOTO_HABILITADO` ocupa o lugar do `K3S_HABILITADO`: a emenda do ADR-042, da RFC-004 e da análise de lacunas já está no platform ([ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md)). Fica desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true` (ou ausente), o `deploy-remote` fica de fora e o `remote-skipped` registra um `::notice::` no run.
+Leva o mesmo digest que passou no kind a um cluster persistente que o dono do repositório configura, sem ligar o CD a nenhum provedor. Vem desligado: com `DEPLOY_REMOTO_HABILITADO` diferente de `true`, o `deploy-remote` fica de fora e o `remote-skipped` registra um aviso. O caller não tem credencial de provedor, `environment` nem `id-token`. Os passos, as guardas e a receita de acesso estão em [docs/ci-cd.md](docs/ci-cd.md#deploy-remoto-opcional) e em [Nuvem opcional](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/operacao/nuvem-opcional.md), no platform.
 
-O `deploy-remote` do reutilizável só roda na `main`. Antes do checkout ele compara o commit P do Platform usado no kind com a `main` do Platform (`compare main...<sha>`) e só aceita `identical` ou `behind`. Depois faz checkout do Platform em `platform/` e deste serviço em `servico/`, sem persistir credenciais, e executa `../platform/scripts/ci/deploy-remoto.sh` a partir de `servico/`, com `--contexto`, `--overlay`, `--servico os-service` e `--imagem <referência>@<digest>`.
+## Segurança
 
-O gancho permanece desligado: não há credencial de provedor, `environment`, `secrets: inherit` ou `id-token` no caller. Uma habilitação futura exige alterar deliberadamente o reutilizável no Platform, seus testes e o pin S deste caller; acrescentar passos ao job `cd` que usa `uses` não é permitido. A receita e os requisitos de acesso estão em [Nuvem opcional](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/3f7cca2eb555a038b0d2780058ef0e692f93ee8a/docs/operacao/nuvem-opcional.md).
+- **Autenticação**: o OS é o único emissor de JWT ([ADR-039](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/039-autenticacao-entre-servicos.md)). O access token vale 15 min e o refresh, 7 dias, assinados com RS256 e chave RSA de 2048 bits ou mais. O JWKS público (`GET /.well-known/jwks.json`) deixa o Billing e a Execução validarem o token localmente. Toda falha de credencial responde 401 `NAO_AUTENTICADO`, com a mesma mensagem e o motivo só no log. Papel válido sem permissão responde 403 `ACESSO_NEGADO`. Fora de `development` e `test`, o boot recusa a chave de demonstração, a ausente e a fraca.
+- **Papéis**: `admin`, `atendente` (o `admin` herda) e `mecanico`, que não tem rota de negócio no OS e trabalha pelas filas da Execução. O SlowAPI limita por IP as rotas sem token e as de credencial (5 chamadas por minuto no login e no registro), e o resto é limitado na borda pelo Kong.
+- **LGPD**: o documento do cliente fica cifrado (Fernet), com consentimento, exportação e eliminação dos dados pessoais. A eliminação anonimiza o cliente, os veículos, o texto livre das OS e a placa na outbox e na Execução. Os logs mascaram CPF, CNPJ, e-mail e telefone, e os spans não levam o texto das exceções.
+- **Infraestrutura**: pods sem root, NetworkPolicy, papéis do banco separados e nenhum segredo nos manifestos. O CI roda `gitleaks` no histórico e `trivy` na imagem.
+- Detalhe em [docs/autenticacao.md](docs/autenticacao.md), [docs/mensageria.md](docs/mensageria.md#eliminação-de-dados-lgpd) e [docs/arquitetura.md](docs/arquitetura.md#6-segurança-e-lgpd).
 
-A plataforma precisa estar implantada antes. O script remoto implanta o overlay deste serviço, por digest do GHCR, na ordem banco, Job e Deployments; o smoke é executado pelo `deploy-kind` no runner. Se o commit P não tiver o script executável, o job reprova. O job remoto pede só `contents: read` e `packages: read`; se o pacote do GHCR deixar de ser público, o cluster precisa de um segredo de pull do `ghcr.io`.
+### Rotação da chave
 
-### Conferir o workflow sem empurrar
+A chave nova só assina depois que todos os pods e consumidores a conhecem, por isso a troca tem etapas:
 
-O `cd.yml` só roda no GitHub, depois do merge ou no dispatch. Antes disso: `make lint-workflows` (actionlint e shellcheck), `uv run pytest tests/unitarios/test_cd.py` e `make check`. O contrato local confere os três jobs do caller, os nove checks locais, o needs que exige CI e segurança verdes, o pin S, serviço e quatro inputs, permissões, gatilhos, concorrência, Dependabot na raiz e actions locais. Os testes de actions por SHA e tag continuam disponíveis com o marcador `rede` (`git ls-remote`).
+1. Publicar a nova: a pública dela entra em `JWT_PREVIOUS_PUBLIC_KEY` e a atual segue assinando. Espere o rollout e os 10 min do cache do JWKS dos consumidores.
+2. Trocar: a nova passa a assinar, e a pública da antiga fica em `JWT_PREVIOUS_PUBLIC_KEY`.
+3. Aposentar a antiga: só depois de 7 dias, a validade do refresh.
 
-Os testes que executam os passos Bash de escolha dos commits, validação de inputs, guarda da main, SBOM, digest, varredura e deploy remoto ficam uma única vez no [teste compartilhado do Platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/3f7cca2eb555a038b0d2780058ef0e692f93ee8a/tests/test_cd_servico_workflow.py). A atualização desse reutilizável exige seu próprio gate e revisão; o caller só muda de versão ao mudar S. O Dependabot `github-actions` cobre a raiz, inclusive essa referência; até haver prova de um bump reconhecido, a atualização do pin é supervisionada.
+Se a chave atual vazar, assina-se com a nova e esvazia-se `JWT_PREVIOUS_PUBLIC_KEY`, o que derruba as sessões. As chaves nascem fora do repositório e vão direto para o Secret. A tabela das etapas está em [docs/autenticacao.md](docs/autenticacao.md#rotação-da-chave), e os comandos de Secret e a troca de senha de um papel do banco, em [docs/como-rodar.md](docs/como-rodar.md#troca-de-senha-e-de-chave).
 
-## Repositórios da fase 4
+## Decisões e rastreabilidade
+
+Este repositório é um dos quatro da entrega da fase 4 do Tech Challenge (FIAP Pós Tech, Software Architecture, 15SOAT). Nessa fase o PytStop, sistema de gestão de oficina mecânica das fases anteriores, virou microsserviços com Saga Pattern, mensageria assíncrona, CI/CD por serviço e deploy automatizado em Kubernetes.
+
+- **ADRs e RFC-004**: o serviço segue a [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) e os [ADR-034 a ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura/adr/fase4), citados no código como `RFC-004 secao N` e `ADR-0NN`. A tabela de decisões deste serviço, com o ADR e o código de cada uma, está em [docs/arquitetura.md](docs/arquitetura.md#8-decisões).
+- **Requisitos**: a [matriz de rastreabilidade](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/entrega/matriz-de-rastreabilidade.md) do platform liga cada RF, RNF e RN aos PRs e às evidências, e o [documento de entrega](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/entrega/fase4/entrega-fase-4.md) reúne o conjunto. Neste README: a justificativa da saga (RNF-037) em [Por que orquestração](#por-que-orquestração), a cobertura (RNF-050) em [Cobertura](#cobertura), a arquitetura (RNF-051) em [Arquitetura](#arquitetura) e a API (RNF-052) em [API](#api).
+- **Origem do código e escopo**: o código parte de um recorte da `main` do PytStop da fase 3 (`postech-sw-arch-p3`), e o escopo do serviço está em [docs/escopo-e-origem.md](docs/escopo-e-origem.md).
+- **Histórico**: as decisões, as convenções e as dívidas do serviço ficam no [`MEMORY.md`](MEMORY.md).
+
+### Repositórios da fase 4
 
 | Repositório | Papel |
 |---|---|

@@ -1,5 +1,5 @@
 # Relay da outbox (python -m src.relay), na mesma imagem da API. Sem HTTP de
-# negocio: a saude e por arquivo em /tmp (README, "Observabilidade, saude e
+# negocio: a saude e por arquivo em /tmp (docs/mensageria.md, "Observabilidade, saude e
 # encerramento"). O heartbeat e tocado a cada volta do laco, inclusive com o
 # broker fora; o pronto so existe com a conexao ao broker de pe.
 apiVersion: apps/v1
