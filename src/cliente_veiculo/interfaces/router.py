@@ -337,8 +337,9 @@ def exportar_dados_pessoais(
         403: {"description": "Papel sem acesso: so admin."},
         **_CLIENTE_404,
         **_regra_409(
-            "Cliente com ordem de servico ativa: a LGPD (art. 16) permite reter os "
-            "dados enquanto o contrato esta em andamento.",
+            "Cliente com ordem de servico ativa: enquanto o contrato esta em "
+            "andamento, os dados ainda sao necessarios para executa-lo "
+            "(LGPD, art. 7, V).",
             "Cliente possui ordem de servico ativa",
         ),
     },

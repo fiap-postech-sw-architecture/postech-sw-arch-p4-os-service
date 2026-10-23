@@ -1155,7 +1155,7 @@
             }
           },
           "409": {
-            "description": "Cliente com ordem de servico ativa: a LGPD (art. 16) permite reter os dados enquanto o contrato esta em andamento.",
+            "description": "Cliente com ordem de servico ativa: enquanto o contrato esta em andamento, os dados ainda sao necessarios para executa-lo (LGPD, art. 7, V).",
             "content": {
               "application/json": {
                 "example": {

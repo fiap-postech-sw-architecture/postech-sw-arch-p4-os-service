@@ -307,8 +307,8 @@ class TestExcluirDadosPessoais:
         ]
 
     def test_com_os_ativa_bloqueado(self) -> None:
-        # LGPD Art. 16: dados podem ser retidos para execucao de contrato. Uma
-        # OS ativa e o contrato em andamento -> erasure bloqueado com 409
+        # LGPD art. 7, V: com a OS ativa o tratamento ainda nao terminou, os dados
+        # servem a execucao do contrato -> erasure bloqueado com 409
         # (mesmo guard de DesativarCliente, que e menos destrutivo).
         repo = FakeClienteRepoLGPD()
         uow = FakeUnitOfWork()
