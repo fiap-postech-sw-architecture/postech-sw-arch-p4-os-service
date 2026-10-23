@@ -1,10 +1,11 @@
 """Os erros que o OpenAPI declara em registrar, login, logout, refresh e clientes.
 
-Um caso para cada status que o OpenAPI passou a declarar nessas rotas, contra o app
-real e o PostgreSQL. Cada caso confere o status e o ``codigo`` do envelope, e que a
-declaracao da rota nomeia esse ``codigo`` (no exemplo ou na descricao): o contrato
-diz o que a API faz. Que o OpenAPI declare o status e conferido em todo teste de API
-pela fixture ``respostas_vistas``.
+Contra o app real e o PostgreSQL: o 401, o 403 e o 409 do registrar, o 429 de login,
+registrar, logout e refresh, o 404 do cliente inexistente em cada rota de cliente e
+os 409 das regras do cliente. Cada caso confere o status e o ``codigo`` do envelope,
+e que a declaracao da rota nomeia esse ``codigo`` (no exemplo ou na descricao): o
+contrato diz o que a API faz. Que o OpenAPI declare o status e conferido em todo
+teste de API pela fixture ``respostas_vistas``.
 """
 
 from __future__ import annotations
