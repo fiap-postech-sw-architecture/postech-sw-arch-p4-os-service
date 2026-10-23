@@ -199,11 +199,15 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
     ]
     # O teto do pyproject.toml nao segura o Dependabot (ele o alarga): a minor do
     # sqlalchemy (troca o driver do PostgreSQL) e a dos opentelemetry-* (o
-    # observability.py mexe em atributos privados do SDK) so entram a mao.
+    # observability.py mexe em atributos privados do SDK) so entram a mao. A do
+    # fastapi (0.x: a minor traz mudanca incompativel) fica segurada ate a
+    # entrega da fase 4, em 17/11/2026: o patch sobe pelo grupo, e o pydantic
+    # nao tem ignore.
     sem_minor = ["version-update:semver-major", "version-update:semver-minor"]
-    sem_minor_de_sqlalchemy_e_opentelemetry = [
+    ignore_do_uv = [
         {"dependency-name": "sqlalchemy", "update-types": sem_minor},
         {"dependency-name": "opentelemetry-*", "update-types": sem_minor},
+        {"dependency-name": "fastapi", "update-types": sem_minor},
     ]
     # Os opentelemetry-* sobem juntos no generico do uv: um grupo so deles
     # nunca recebe pacote, porque o Dependabot o trata como menos especifico.
@@ -211,7 +215,7 @@ def test_dependabot_sobe_actions_python_e_imagens_toda_semana_agrupados() -> Non
         "uv": (
             "chore(deps)",
             {"python-patch-e-minor": patch_e_minor},
-            sem_minor_de_sqlalchemy_e_opentelemetry,
+            ignore_do_uv,
         ),
         "github-actions": ("ci", {"actions-patch-e-minor": patch_e_minor}, []),
         "docker": (
