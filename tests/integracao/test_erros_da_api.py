@@ -198,8 +198,9 @@ class TestClienteInexistente:
 
 
 class TestRegrasDoCliente:
+    @pytest.mark.parametrize("desativado", [False, True], ids=["ativo", "desativado"])
     def test_documento_ja_cadastrado_409(
-        self, api_client: TestClient, admin: dict[str, str]
+        self, api_client: TestClient, admin: dict[str, str], *, desativado: bool
     ) -> None:
         corpo = {
             "nome": "Maria Silva",
@@ -207,7 +208,13 @@ class TestRegrasDoCliente:
             "tipo_documento": "cpf",
             "contato": "maria@exemplo.com",
         }
-        assert api_client.post(_CLIENTES, headers=admin, json=corpo).status_code == 201
+        criado = api_client.post(_CLIENTES, headers=admin, json=corpo)
+        assert criado.status_code == 201
+        if desativado:  # a desativacao nao libera o documento
+            apagado = api_client.delete(
+                f"{_CLIENTES}/{criado.json()['id']}", headers=admin
+            )
+            assert apagado.status_code == 204
 
         repetido = api_client.post(_CLIENTES, headers=admin, json=corpo)
 
