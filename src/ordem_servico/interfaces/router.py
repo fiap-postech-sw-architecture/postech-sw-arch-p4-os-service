@@ -26,6 +26,7 @@ from src.autenticacao.interfaces.middleware import exigir_papel
 from src.compartilhado.interfaces.auditoria import ator_de
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.compartilhado.interfaces.middleware import limiter
+from src.compartilhado.interfaces.respostas import erro, limite_excedido
 from src.ordem_servico.aplicacao.dtos import AbrirOrdemDTO
 from src.ordem_servico.interfaces.dependencies import (
     obter_abrir_ordem,
@@ -72,24 +73,6 @@ _RESPOSTA_409: dict[int | str, dict[str, Any]] = {
 }
 
 
-def _erro(descricao: str, codigo: str, mensagem: str) -> dict[str, Any]:
-    """Resposta de erro documentada, com o envelope de exemplo."""
-    return {
-        "description": descricao,
-        "content": {
-            "application/json": {
-                "example": {
-                    "erro": {
-                        "codigo": codigo,
-                        "mensagem": mensagem,
-                        "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11",
-                    }
-                }
-            }
-        },
-    }
-
-
 router = APIRouter(
     prefix="/api/v1/ordens-de-servico",
     tags=["ordens-de-servico"],
@@ -104,6 +87,7 @@ router_sagas = APIRouter(
     },
 )
 router_publico = APIRouter(prefix="/api/v1/publico", tags=["publico"])
+_LIMITE_ACOMPANHAMENTO = "10/minute"
 
 # Toda rota de OS e do atendente (admin herda); o mecanico nao tem rota no
 # OS Service: trabalha pela fila do Execution Service (ADR-039).
@@ -230,19 +214,19 @@ def obter_historico(
                 "parada, tambem responde 202, sem efeito."
             )
         },
-        404: _erro(
+        404: erro(
             "Ordem inexistente (ou sem saga, o que uma OS aberta nao deveria ser).",
             "ENTIDADE_NAO_ENCONTRADA",
             "Ordem de servico 5f0c7a52-3d0e-4c39-9d76-0f2b8f4f6a11 nao encontrada",
         ),
-        409: _erro(
+        409: erro(
             "`TRANSICAO_STATUS_INVALIDA`: execucao ja iniciada (o ponto sem "
             "retorno) ou ordem ja cancelada. `CONFLITO_DE_CONCORRENCIA`: escrita "
             "concorrente que voltou nas tres leituras.",
             "TRANSICAO_STATUS_INVALIDA",
             "Cancelamento recusado: execução já iniciada",
         ),
-        422: _erro(
+        422: erro(
             "`VALOR_INVALIDO`: motivo vazio, longo demais ou com caractere de "
             "controle ou de formatacao. O corpo fora do schema (sem `motivo`, campo "
             "extra) sai no formato de validacao de schema, `{detail, id_requisicao}`.",
@@ -309,12 +293,12 @@ def obter_saga(ordem_id: UUID, usuario: _Admin, session: _Sessao) -> SagaRespons
                 "`compensando`."
             )
         },
-        404: _erro(
+        404: erro(
             "Ordem sem saga.",
             "ENTIDADE_NAO_ENCONTRADA",
             "Saga da ordem 5f0c7a52-3d0e-4c39-9d76-0f2b8f4f6a11 nao encontrada",
         ),
-        409: _erro(
+        409: erro(
             "`TRANSICAO_STATUS_INVALIDA`: a saga nao esta em "
             "`falha_na_compensacao`. `CONFLITO_DE_CONCORRENCIA`: o consumidor "
             "gravou a saga no meio; repita o pedido.",
@@ -343,10 +327,10 @@ def retomar_compensacao(
     summary="Consulta publica do status por placa + documento",
     responses={
         404: {"description": "Nenhuma ordem para o par placa + documento."},
-        429: {"description": "Rate limit excedido (10/minute por IP)."},
+        429: limite_excedido(_LIMITE_ACOMPANHAMENTO),
     },
 )
-@limiter.limit("10/minute")
+@limiter.limit(_LIMITE_ACOMPANHAMENTO)
 def acompanhamento(
     request: Request, corpo: AcompanhamentoRequest, session: _Sessao
 ) -> AcompanhamentoResponse:

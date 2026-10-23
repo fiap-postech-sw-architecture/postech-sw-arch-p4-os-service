@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -30,8 +30,10 @@ from src.autenticacao.interfaces.schemas import (
     TokenResponse,
     UsuarioResponse,
 )
+from src.compartilhado.dominio.exceptions import FalhaAutenticacaoException
 from src.compartilhado.interfaces.dependencies import obter_session
 from src.compartilhado.interfaces.middleware import limiter
+from src.compartilhado.interfaces.respostas import erro, limite_excedido
 
 router = APIRouter(prefix="/api/v1/autenticacao", tags=["autenticacao"])
 # Fora de /api/v1: o caminho padrao do JWKS, lido por Billing e Execucao.
@@ -41,9 +43,28 @@ router_jwks = APIRouter(tags=["autenticacao"])
 # para header ausente; o 401 manual abaixo espelha `obter_usuario_atual`.
 _bearer_scheme = HTTPBearer(auto_error=False)
 
+# O mesmo limite vale na rota (`@limiter.limit`) e no 429 do OpenAPI.
+_LIMITE_CREDENCIAL = "5/minute"
+_LIMITE_SESSAO = "10/minute"
+_LIMITE_JWKS = "60/minute"
 
-@router.post("/login", summary="Autentica e emite par de tokens")
-@limiter.limit("5/minute")
+
+def _nao_autenticado(descricao: str) -> dict[str, Any]:
+    """401 da rota: toda falha de credencial tem o mesmo codigo e a mesma mensagem."""
+    return erro(descricao, "NAO_AUTENTICADO", FalhaAutenticacaoException.MENSAGEM)
+
+
+@router.post(
+    "/login",
+    summary="Autentica e emite par de tokens",
+    responses={
+        401: _nao_autenticado(
+            "E-mail inexistente e senha errada: a mesma resposta para os dois."
+        ),
+        429: limite_excedido(_LIMITE_CREDENCIAL),
+    },
+)
+@limiter.limit(_LIMITE_CREDENCIAL)
 def login(
     request: Request,
     body: LoginRequest,
@@ -69,8 +90,18 @@ def login(
     "/registrar",
     status_code=status.HTTP_201_CREATED,
     summary="Registra um novo usuario (admin)",
+    responses={
+        401: _nao_autenticado("Credencial ausente, invalida, expirada ou revogada."),
+        403: erro(
+            "Papel sem acesso: so admin.",
+            "ACESSO_NEGADO",
+            "Papel nao autorizado para esta operacao",
+        ),
+        409: erro("E-mail ja cadastrado.", "ENTIDADE_DUPLICADA", "Email ja cadastrado"),
+        429: limite_excedido(_LIMITE_CREDENCIAL),
+    },
 )
-@limiter.limit("5/minute")
+@limiter.limit(_LIMITE_CREDENCIAL)
 def registrar(
     request: Request,
     body: RegistrarRequest,
@@ -88,8 +119,18 @@ def registrar(
     return UsuarioResponse(id=result.id, email=result.email, papel=result.papel)
 
 
-@router.post("/logout", summary="Revoga o access e, opcionalmente, o refresh")
-@limiter.limit("10/minute")
+@router.post(
+    "/logout",
+    summary="Revoga o access e, opcionalmente, o refresh",
+    responses={
+        401: _nao_autenticado(
+            "Header `Authorization` ausente, ou token invalido, expirado ou que "
+            "nao e de acesso."
+        ),
+        429: limite_excedido(_LIMITE_SESSAO),
+    },
+)
+@limiter.limit(_LIMITE_SESSAO)
 def logout(
     request: Request,
     credentials: Annotated[
@@ -114,8 +155,15 @@ def logout(
     return uc.executar(credentials.credentials, refresh_token=refresh_token)
 
 
-@router.post("/refresh", summary="Rotaciona o par de tokens via refresh")
-@limiter.limit("10/minute")
+@router.post(
+    "/refresh",
+    summary="Rotaciona o par de tokens via refresh",
+    responses={
+        401: _nao_autenticado("Refresh invalido, expirado, ja usado ou revogado."),
+        429: limite_excedido(_LIMITE_SESSAO),
+    },
+)
+@limiter.limit(_LIMITE_SESSAO)
 def refresh(
     request: Request,
     body: RefreshRequest,
@@ -154,10 +202,10 @@ def refresh(
                 }
             },
         },
-        429: {"description": "Rate limit excedido (60/minute por IP)."},
+        429: limite_excedido(_LIMITE_JWKS),
     },
 )
-@limiter.limit("60/minute")
+@limiter.limit(_LIMITE_JWKS)
 # `async` de proposito: a rota so monta um dict em memoria e, no event loop,
 # responde mesmo com o threadpool das rotas sincronas cheio.
 async def jwks(request: Request, response: Response) -> dict[str, list[dict[str, str]]]:
