@@ -12,7 +12,8 @@
 - ``docs/arquitetura.md`` segue o codigo: o ER e as tabelas, o metadata dos
   mapeamentos; os estados, a ``MaquinaDeStatus``; a saga, o ``FLUXO_NORMAL``; a
   mensageria, o catalogo do AsyncAPI e a ``ETAPA_ESPERADA``.
-- Os links relativos do README e dos documentos caem em arquivo e secao reais.
+- Os links relativos do README e dos documentos caem em arquivo e secao reais, e
+  o README aponta cada documento de ``docs/``.
 - A secao Cobertura do README sai de ``scripts/cobertura_resumo.py``.
 """
 
@@ -663,6 +664,17 @@ def test_links_relativos_dos_documentos_existem() -> None:
 
     assert len(links) > 60
     assert _quebrados(links) == [], "link para arquivo ou secao que nao existe"
+
+
+def test_readme_aponta_cada_documento_de_docs() -> None:
+    apontados = {destino.resolve() for _, destino, _ in _links_relativos(README)}
+    sem_link = [
+        str(documento.relative_to(RAIZ))
+        for documento in DOCUMENTOS[1:]
+        if documento.resolve() not in apontados
+    ]
+
+    assert sem_link == [], "documento de docs/ que o README nao aponta"
 
 
 def test_link_para_arquivo_ou_secao_que_nao_existe_reprova(tmp_path: Path) -> None:
