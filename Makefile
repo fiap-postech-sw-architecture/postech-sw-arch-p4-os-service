@@ -48,7 +48,8 @@ TESTES_TIPADOS := tests/manifestos.py tests/migracoes.py \
 	tests/integracao/banco_do_manifesto.py tests/integracao/test_banco.py \
 	tests/integracao/test_banco_do_manifesto.py tests/integracao/test_log_do_init_do_banco.py \
 	tests/unitarios/test_documentacao.py tests/unitarios/test_cd.py \
-	tests/unitarios/test_mutacao_manual.py
+	tests/unitarios/test_mutacao_manual.py \
+	tests/respostas_da_api.py tests/unitarios/test_respostas_da_api.py
 
 typecheck:
 	$(PY) mypy src scripts $(TESTES_TIPADOS)
