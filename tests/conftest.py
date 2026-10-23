@@ -5,14 +5,16 @@ import types
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from fastapi import FastAPI
 from opentelemetry.sdk.trace.export import SpanExportResult
 from prometheus_client import REGISTRY
 
 from tests.manifestos import exigir_kubectl
 from tests.rastreamento import Rastreador, tudo_que_o_span_leva
+from tests.respostas_da_api import Resposta, conferir, espiar
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from opentelemetry.sdk.trace import ReadableSpan
 
@@ -47,6 +49,20 @@ def _reset_encryption_singleton() -> None:
     from src.compartilhado.infraestrutura.encryption import EncryptionService
 
     EncryptionService._instance = None
+
+
+@pytest.fixture(autouse=True)
+def respostas_vistas(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Resposta]]:
+    """Espia o que as rotas do servico respondem; no fim, o OpenAPI tem de declarar.
+
+    Ver ``tests/respostas_da_api.py``. Se um teste precisar provocar de proposito uma
+    resposta fora do OpenAPI, a saida e pedir esta fixture e esvazia-la (``clear()``)
+    no fim do teste.
+    """
+    vistas: list[Resposta] = []
+    monkeypatch.setattr(FastAPI, "__call__", espiar(vistas))
+    yield vistas
+    conferir(vistas)
 
 
 @pytest.fixture(scope="session")

@@ -71,7 +71,7 @@ O OS Service é o único emissor de tokens (ADR-039). `POST /api/v1/autenticacao
   ```
 
 - **Quem valida:** Billing e Execução validam o access token localmente, com o JWKS que leem de `JWKS_URL`, sem chamar o OS a cada requisição. Conferem a assinatura RS256 (algoritmo fixo), `iss`, `aud` e `exp` (com 10 s de tolerância entre relógios), `type=access`, `sub` (UUID) e `papel` (um dos três acima); o cache do JWKS é de cada consumidor (README de [Billing](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-billing-service) e de [Execução](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-execution-service)). O `scripts/validar_token.py` é o modelo dessa conferência, só com o PyJWT, e o `make smoke` o roda com o token do login.
-- **Erros:** toda falha de credencial responde 401 `NAO_AUTENTICADO` com a mensagem `Credencial ausente, invalida ou expirada`, a mesma dos três serviços; o motivo (assinatura, `aud`, `iss`, claim ausente, `iat` no futuro, token malformado, expirado, revogado) fica só no log. Um refresh reapresentado depois de usado, ou de revogado no logout, gera também o evento `refresh_reuse_detected`. Papel válido sem permissão responde 403 `ACESSO_NEGADO`.
+- **Erros:** toda falha de credencial responde 401 `NAO_AUTENTICADO` com a mensagem `Credencial ausente, invalida ou expirada`, a mesma dos três serviços; o motivo (assinatura, `aud`, `iss`, claim ausente, `iat` no futuro, token malformado, expirado, revogado) fica só no log. Um refresh reapresentado depois de usado, ou de revogado no logout, gera também o evento `refresh_reuse_detected`. Papel válido sem permissão responde 403 `ACESSO_NEGADO`. O OpenAPI declara esses erros em cada rota de autenticação, com o 409 `ENTIDADE_DUPLICADA` do e-mail já cadastrado em `/registrar` e o 429 do limite por IP: 5 chamadas por minuto em `/login` e `/registrar`, 10 em `/logout` e `/refresh`.
 
 | Variável | Uso |
 |---|---|
@@ -1173,6 +1173,7 @@ A `ENCRYPTION_KEY` (Secret `os-cripto`) não gira: uma chave nova deixaria ileg�
 - `make audit`: pip-audit das dependências de runtime, com os extras da imagem.
 - `make mutacao`: mutantes escritos à mão nos módulos críticos, aplicados um por vez numa cópia do código (seção [Mutação](#mutação)). Fica fora do `make check` e do CI.
 - `make docs-api`: gera de novo o OpenAPI e a coleção Postman de [`docs/api/`](docs/api/) a partir do app, sem servidor nem banco; o `make test` reprova os arquivos atrás do código.
+- Erros no OpenAPI: o `make test` reprova o teste de API que recebe de uma rota de `src` um status que o OpenAPI não declara. A fixture automática `respostas_vistas` (`tests/respostas_da_api.py`) confere, no fim de cada teste, o que as rotas responderam contra o `responses` do app real; o status que nenhum teste provoca não é conferido. Os erros declarados usam o envelope de erro (`src/compartilhado/interfaces/respostas.py`). Fica de fora o 422 de domínio (`VALOR_INVALIDO`, no envelope): só o cancelamento o descreve, e nas demais rotas o 422 do OpenAPI é o padrão do FastAPI (`HTTPValidationError`), dívida registrada no `MEMORY.md`. O 500 não se declara, e o 429 só vale nas rotas com `@limiter.limit` próprio, porque o limite padrão não alcança as rotas dos routers. `tests/integracao/test_erros_da_api.py` provoca, contra o app real, os erros de registrar, dos limites por IP e das rotas de cliente.
 - `make cobertura-readme RUN=<id do run>`: reescreve a seção [Cobertura](#cobertura) com o `coverage.xml` de um run do CI (pede o `gh` autenticado).
 - `make smoke`: a imagem pelo entrypoint real. Confere a readiness, o login do admin semeado validado pelo JWKS (e a assinatura adulterada recusada), o log de boot em JSON, o `http_request` estruturado e nenhum access log do uvicorn, a imagem de produção (usuário 1001, `ENVIRONMENT=production`, sem header `server`) e o relay, o consumidor, o `prazos` e o notificador prontos (`/metrics` respondendo, `outbox_pendentes` numérico, as séries de reenvio da saga em zero no `prazos`, consumidor inscrito em `os.eventos` com prefetch 1 no `list_consumers`), as séries de rótulo fechado da API, do relay, do consumidor e do `prazos` em zero logo depois do boot (e o último ciclo do `prazos` gravado), a OS aberta contada no `pytstop_os_criadas_total` e um e-mail entregue ao Mailpit pelo notificador (uma OS aberta pela API, um pedido gravado em `notificacoes` e a caixa lida pela API do Mailpit, sem endereço nem nome no log dele); depois, `down -v`.
 
@@ -1191,30 +1192,30 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 ## Cobertura
 
 <!-- cobertura:inicio -->
-**99,62% no gate** (linhas e ramos somados): 6.254 linhas, 6.238 cobertas (99,7%), e 928 ramos, 917 cobertos (98,8%), medidos no [run 39233375064 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39233375064). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
+**99,63% no gate** (linhas e ramos somados): 6.282 linhas, 6.266 cobertas (99,7%), e 930 ramos, 919 cobertos (98,8%), medidos no [run 39952450189 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39952450189). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
-| `src` (processos) | 236 | 231 | 97,9% |
-| `src/autenticacao` | 562 | 562 | 100,0% |
-| `src/cliente_veiculo` | 903 | 902 | 99,9% |
-| `src/compartilhado` | 1.854 | 1.844 | 99,5% |
-| `src/ordem_servico` | 2.699 | 2.699 | 100,0% |
-| **total** | 6.254 | 6.238 | 99,7% |
+| `src` (processos) | 240 | 235 | 97,9% |
+| `src/autenticacao` | 569 | 569 | 100,0% |
+| `src/cliente_veiculo` | 909 | 908 | 99,9% |
+| `src/compartilhado` | 1.861 | 1.851 | 99,5% |
+| `src/ordem_servico` | 2.703 | 2.703 | 100,0% |
+| **total** | 6.282 | 6.266 | 99,7% |
 
 | Camada | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
-| `dominio` | 942 | 939 | 99,7% |
-| `aplicacao` | 1.788 | 1.788 | 100,0% |
-| `infraestrutura` | 2.491 | 2.487 | 99,8% |
-| `interfaces` | 797 | 793 | 99,5% |
+| `dominio` | 943 | 940 | 99,7% |
+| `aplicacao` | 1.790 | 1.790 | 100,0% |
+| `infraestrutura` | 2.492 | 2.488 | 99,8% |
+| `interfaces` | 817 | 813 | 99,5% |
 
 <!-- cobertura:fim -->
 
 As tabelas não são digitadas: `make cobertura-readme RUN=<id do run>` baixa o `coverage.xml` do artefato `relatorios-de-teste` de um run do CI e reescreve, com `scripts/cobertura_resumo.py`, o trecho entre os dois marcadores de comentário desta seção (`cobertura:inicio` e `cobertura:fim`), com o link do run. `tests/unitarios/test_documentacao.py` reprova o trecho editado à mão. O CI publica a mesma medida, por pacote, no summary do job `test` de cada run ([Actions → CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/workflows/ci.yml)), e `uv run python scripts/cobertura_resumo.py coverage.xml` a mostra depois de um `make test` local.
 
 - **Gate.** 95% de linhas e ramos somados (`fail_under` no `.coveragerc`), e 90% no código que a branch muda (`make diff-cover`). A suíte tem testes unitários, de contrato, BDD de componente e de integração com PostgreSQL e RabbitMQ reais.
-- **Oscilação.** Com o mesmo código, o número oscila entre 99,62% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 916 ramos cobertos em vez de 917.
+- **Oscilação.** Com o mesmo código, o número oscila entre 99,63% e 99,61%, no macOS e no CI: o ramo em que a segunda verificação do double-checked locking de `encryption.py` (linha 45) acha a instância já criada só roda quando as 8 threads do teste de concorrência se cruzam no lock, o que às vezes não acontece. Com 99,61%, são 918 ramos cobertos em vez de 919.
 - **Fora da medição.** Os `__init__.py` e os módulos só com `Protocol` (portas dos repositórios, `ports.py` da aplicação e a unidade de trabalho), pelo `omit` do `.coveragerc`.
 - **Linhas sem teste.** São 16: o `if __name__ == "__main__"` dos cinco processos, os três corpos `pass` do `Protocol` `Documento` e oito linhas de quatro trechos que o relatório do `make test` lista.
 

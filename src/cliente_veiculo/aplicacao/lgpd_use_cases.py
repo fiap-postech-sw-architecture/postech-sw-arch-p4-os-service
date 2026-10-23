@@ -59,10 +59,10 @@ class ExcluirDadosPessoais:
     Espelha o guard de `DesativarCliente`: trava o cliente (FOR UPDATE) e
     consulta `OrdemDeServicoPort.existe_os_ativa_para_cliente` na mesma
     transacao do apagamento; se houver OS ativa, levanta
-    `ViolacaoRegraDeNegocioException` (409). A LGPD
-    (Art. 16) permite reter dados pessoais para a execucao de um contrato, e
-    uma OS ativa e justamente esse contrato em andamento — apagar agora
-    quebraria a prestacao do servico.
+    `ViolacaoRegraDeNegocioException` (409). Com OS ativa o tratamento ainda
+    nao terminou: os dados sao necessarios para executar o contrato do qual o
+    titular e parte (LGPD, art. 7, V), e apagar agora quebraria a prestacao do
+    servico.
     """
 
     def __init__(

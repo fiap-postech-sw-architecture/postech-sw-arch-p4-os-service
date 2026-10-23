@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID  # noqa: TC003
 
 import structlog
@@ -49,6 +49,7 @@ from src.cliente_veiculo.interfaces.schemas import (
 )
 from src.compartilhado.interfaces.auditoria import ator_de
 from src.compartilhado.interfaces.dependencies import obter_session
+from src.compartilhado.interfaces.respostas import erro
 
 # 401 e 403 valem para toda rota do router (todas autenticadas).
 router = APIRouter(
@@ -62,10 +63,30 @@ router = APIRouter(
 _log = structlog.get_logger(__name__)
 
 
+# Erros do dominio das rotas de cliente: o 404 e o 409 de regra de negocio, cada
+# rota com o seu motivo. O 404 da maioria e o do cliente que nao existe.
+def _nao_encontrado(descricao: str, mensagem: str) -> dict[int | str, dict[str, Any]]:
+    return {404: erro(descricao, "ENTIDADE_NAO_ENCONTRADA", mensagem)}
+
+
+def _regra_409(descricao: str, mensagem: str) -> dict[int | str, dict[str, Any]]:
+    return {409: erro(descricao, "VIOLACAO_REGRA_NEGOCIO", mensagem)}
+
+
+_CLIENTE_404 = _nao_encontrado("Cliente inexistente.", "Cliente nao encontrado")
+
+
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
     summary="Cadastra um cliente (CPF ou CNPJ)",
+    responses={
+        409: erro(
+            "Documento (CPF ou CNPJ) ja cadastrado, mesmo o de um cliente desativado.",
+            "ENTIDADE_DUPLICADA",
+            "Documento ja cadastrado",
+        )
+    },
 )
 def criar_cliente(
     body: CriarClienteRequest,
@@ -107,7 +128,9 @@ def listar_clientes(
     )
 
 
-@router.get("/{cliente_id}", summary="Consulta um cliente por id")
+@router.get(
+    "/{cliente_id}", summary="Consulta um cliente por id", responses=_CLIENTE_404
+)
 def obter_cliente(
     cliente_id: UUID,
     usuario: Annotated[
@@ -121,7 +144,17 @@ def obter_cliente(
     return ClienteResponse(**dataclasses.asdict(result))
 
 
-@router.put("/{cliente_id}", summary="Atualiza nome e contato de um cliente")
+@router.put(
+    "/{cliente_id}",
+    summary="Atualiza nome e contato de um cliente",
+    responses={
+        **_CLIENTE_404,
+        **_regra_409(
+            "Cliente desativado ou anonimizado: a mutacao reverteria o apagamento.",
+            "cliente inativo nao pode ser alterado",
+        ),
+    },
+)
 def atualizar_cliente(
     cliente_id: UUID,
     body: AtualizarClienteRequest,
@@ -141,6 +174,13 @@ def atualizar_cliente(
     "/{cliente_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Desativa (soft-delete) um cliente sem OS ativa",
+    responses={
+        **_CLIENTE_404,
+        **_regra_409(
+            "Cliente com ordem de servico ativa.",
+            "Cliente possui ordem de servico ativa",
+        ),
+    },
 )
 def desativar_cliente(
     cliente_id: UUID,
@@ -158,6 +198,15 @@ def desativar_cliente(
     "/{cliente_id}/veiculos",
     status_code=status.HTTP_201_CREATED,
     summary="Adiciona um veiculo a um cliente",
+    responses={
+        **_CLIENTE_404,
+        409: erro(
+            "`ENTIDADE_DUPLICADA`: placa ja cadastrada, em qualquer cliente. "
+            "`VIOLACAO_REGRA_NEGOCIO`: cliente desativado ou anonimizado.",
+            "ENTIDADE_DUPLICADA",
+            "Placa ja cadastrada",
+        ),
+    },
 )
 def adicionar_veiculo(
     cliente_id: UUID,
@@ -179,7 +228,11 @@ def adicionar_veiculo(
     return VeiculoResponse(**dataclasses.asdict(result))
 
 
-@router.get("/{cliente_id}/veiculos", summary="Lista os veiculos de um cliente")
+@router.get(
+    "/{cliente_id}/veiculos",
+    summary="Lista os veiculos de um cliente",
+    responses=_CLIENTE_404,
+)
 def listar_veiculos(
     cliente_id: UUID,
     usuario: Annotated[
@@ -197,6 +250,17 @@ def listar_veiculos(
     "/{cliente_id}/veiculos/{veiculo_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Remove um veiculo de um cliente",
+    responses={
+        **_nao_encontrado(
+            "Cliente inexistente, ou veiculo que nao e dele.",
+            "Veiculo nao encontrado",
+        ),
+        **_regra_409(
+            "Cliente desativado ou anonimizado, ou veiculo com ordem de servico "
+            "vinculada.",
+            "Veiculo possui ordem de servico vinculada e nao pode ser removido",
+        ),
+    },
 )
 def remover_veiculo(
     cliente_id: UUID,
@@ -236,6 +300,7 @@ def _exportar_dados_pessoais_e_auditar(
 @router.get(
     "/{cliente_id}/dados-pessoais",
     summary="Consulta os dados pessoais de um cliente (LGPD acesso)",
+    responses=_CLIENTE_404,
 )
 def obter_dados_pessoais(
     cliente_id: UUID,
@@ -251,6 +316,7 @@ def obter_dados_pessoais(
 @router.get(
     "/{cliente_id}/dados-pessoais/exportar",
     summary="Exporta os dados pessoais de um cliente (LGPD portabilidade)",
+    responses=_CLIENTE_404,
 )
 def exportar_dados_pessoais(
     cliente_id: UUID,
@@ -267,6 +333,16 @@ def exportar_dados_pessoais(
     "/{cliente_id}/dados-pessoais",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Anonimiza os dados de um cliente (LGPD erasure)",
+    responses={
+        403: {"description": "Papel sem acesso: so admin."},
+        **_CLIENTE_404,
+        **_regra_409(
+            "Cliente com ordem de servico ativa: enquanto o contrato esta em "
+            "andamento, os dados ainda sao necessarios para executa-lo "
+            "(LGPD, art. 7, V).",
+            "Cliente possui ordem de servico ativa",
+        ),
+    },
 )
 def excluir_dados_pessoais(
     cliente_id: UUID,
@@ -294,6 +370,13 @@ def excluir_dados_pessoais(
     "/{cliente_id}/consentimento",
     status_code=status.HTTP_201_CREATED,
     summary="Registra um consentimento LGPD do cliente",
+    responses={
+        **_CLIENTE_404,
+        **_regra_409(
+            "Ja existe consentimento ativo desse tipo para o cliente.",
+            "Consentimento ativo ja existe para este tipo",
+        ),
+    },
 )
 def registrar_consentimento(
     cliente_id: UUID,
@@ -322,6 +405,11 @@ def registrar_consentimento(
     "/{cliente_id}/consentimento",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revoga um consentimento LGPD do cliente",
+    responses=_nao_encontrado(
+        "Nao ha consentimento desse tipo para o cliente (vale tambem para "
+        "cliente inexistente).",
+        "Consentimento nao encontrado",
+    ),
 )
 def revogar_consentimento(
     cliente_id: UUID,

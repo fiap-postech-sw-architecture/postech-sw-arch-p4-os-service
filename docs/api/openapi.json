@@ -84,6 +84,34 @@
               }
             }
           },
+          "401": {
+            "description": "E-mail inexistente e senha errada: a mesma resposta para os dois.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "NAO_AUTENTICADO",
+                    "mensagem": "Credencial ausente, invalida ou expirada",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (5/minute por IP).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "RATE_LIMIT_EXCEDIDO",
+                    "mensagem": "Limite de requisicoes excedido: 5 per 1 minute",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -122,6 +150,62 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UsuarioResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Credencial ausente, invalida, expirada ou revogada.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "NAO_AUTENTICADO",
+                    "mensagem": "Credencial ausente, invalida ou expirada",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Papel sem acesso: so admin.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ACESSO_NEGADO",
+                    "mensagem": "Papel nao autorizado para esta operacao",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "E-mail ja cadastrado.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_DUPLICADA",
+                    "mensagem": "Email ja cadastrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (5/minute por IP).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "RATE_LIMIT_EXCEDIDO",
+                    "mensagem": "Limite de requisicoes excedido: 5 per 1 minute",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
                 }
               }
             }
@@ -176,6 +260,34 @@
               }
             }
           },
+          "401": {
+            "description": "Header `Authorization` ausente, ou token invalido, expirado ou que nao e de acesso.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "NAO_AUTENTICADO",
+                    "mensagem": "Credencial ausente, invalida ou expirada",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (10/minute por IP).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "RATE_LIMIT_EXCEDIDO",
+                    "mensagem": "Limite de requisicoes excedido: 10 per 1 minute",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -223,6 +335,34 @@
               }
             }
           },
+          "401": {
+            "description": "Refresh invalido, expirado, ja usado ou revogado.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "NAO_AUTENTICADO",
+                    "mensagem": "Credencial ausente, invalida ou expirada",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit excedido (10/minute por IP).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "RATE_LIMIT_EXCEDIDO",
+                    "mensagem": "Limite de requisicoes excedido: 10 per 1 minute",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -265,7 +405,18 @@
             }
           },
           "429": {
-            "description": "Rate limit excedido (60/minute por IP)."
+            "description": "Rate limit excedido (60/minute por IP).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "RATE_LIMIT_EXCEDIDO",
+                    "mensagem": "Limite de requisicoes excedido: 60 per 1 minute",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -309,6 +460,20 @@
           },
           "403": {
             "description": "Papel sem acesso a rota."
+          },
+          "409": {
+            "description": "Documento (CPF ou CNPJ) ja cadastrado, mesmo o de um cliente desativado.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_DUPLICADA",
+                    "mensagem": "Documento ja cadastrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -431,6 +596,20 @@
           "403": {
             "description": "Papel sem acesso a rota."
           },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -494,6 +673,34 @@
           "403": {
             "description": "Papel sem acesso a rota."
           },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cliente desativado ou anonimizado: a mutacao reverteria o apagamento.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "VIOLACAO_REGRA_NEGOCIO",
+                    "mensagem": "cliente inativo nao pode ser alterado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -539,6 +746,34 @@
           },
           "403": {
             "description": "Papel sem acesso a rota."
+          },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cliente com ordem de servico ativa.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "VIOLACAO_REGRA_NEGOCIO",
+                    "mensagem": "Cliente possui ordem de servico ativa",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -605,6 +840,34 @@
           "403": {
             "description": "Papel sem acesso a rota."
           },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "`ENTIDADE_DUPLICADA`: placa ja cadastrada, em qualquer cliente. `VIOLACAO_REGRA_NEGOCIO`: cliente desativado ou anonimizado.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_DUPLICADA",
+                    "mensagem": "Placa ja cadastrada",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -661,6 +924,20 @@
           },
           "403": {
             "description": "Papel sem acesso a rota."
+          },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -720,6 +997,34 @@
           "403": {
             "description": "Papel sem acesso a rota."
           },
+          "404": {
+            "description": "Cliente inexistente, ou veiculo que nao e dele.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Veiculo nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cliente desativado ou anonimizado, ou veiculo com ordem de servico vinculada.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "VIOLACAO_REGRA_NEGOCIO",
+                    "mensagem": "Veiculo possui ordem de servico vinculada e nao pode ser removido",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -775,6 +1080,20 @@
           "403": {
             "description": "Papel sem acesso a rota."
           },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -819,7 +1138,35 @@
             "description": "Credencial ausente, invalida, expirada ou revogada."
           },
           "403": {
-            "description": "Papel sem acesso a rota."
+            "description": "Papel sem acesso: so admin."
+          },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Cliente com ordem de servico ativa: enquanto o contrato esta em andamento, os dados ainda sao necessarios para executa-lo (LGPD, art. 7, V).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "VIOLACAO_REGRA_NEGOCIO",
+                    "mensagem": "Cliente possui ordem de servico ativa",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -875,6 +1222,20 @@
           },
           "403": {
             "description": "Papel sem acesso a rota."
+          },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -941,6 +1302,34 @@
           "403": {
             "description": "Papel sem acesso a rota."
           },
+          "404": {
+            "description": "Cliente inexistente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Cliente nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Ja existe consentimento ativo desse tipo para o cliente.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "VIOLACAO_REGRA_NEGOCIO",
+                    "mensagem": "Consentimento ativo ja existe para este tipo",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -997,6 +1386,20 @@
           },
           "403": {
             "description": "Papel sem acesso a rota."
+          },
+          "404": {
+            "description": "Nao ha consentimento desse tipo para o cliente (vale tambem para cliente inexistente).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "ENTIDADE_NAO_ENCONTRADA",
+                    "mensagem": "Consentimento nao encontrado",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1626,7 +2029,18 @@
             "description": "Nenhuma ordem para o par placa + documento."
           },
           "429": {
-            "description": "Rate limit excedido (10/minute por IP)."
+            "description": "Rate limit excedido (10/minute por IP).",
+            "content": {
+              "application/json": {
+                "example": {
+                  "erro": {
+                    "codigo": "RATE_LIMIT_EXCEDIDO",
+                    "mensagem": "Limite de requisicoes excedido: 10 per 1 minute",
+                    "id_requisicao": "3f1e6a52-9d0b-4c1c-8a55-0d6b9b7a1c11"
+                  }
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
