@@ -1,7 +1,7 @@
 # Processo prazos (python -m src.prazos), na mesma imagem da API: a cada
 # PRAZOS_INTERVALO_SEGUNDOS reenvia o comando da saga que ficou sem resposta
 # e, esgotados os reenvios, inicia a compensacao ou para a saga em
-# falha_na_compensacao (README, "Prazos, falha na compensacao e retomada"). Sem
+# falha_na_compensacao (docs/saga.md, "Prazos, falha na compensacao e retomada"). Sem
 # HTTP de negocio: a saude e por arquivo em /tmp, como o relay (relay.yaml). O
 # pronto so existe com o RabbitMQ de pe: sem consumidor em os.eventos ou sem
 # broker o ciclo nao reenvia nem esgota prazo, so loga. Mesmos Secrets do relay

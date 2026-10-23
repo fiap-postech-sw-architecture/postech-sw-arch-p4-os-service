@@ -356,7 +356,7 @@ manifests:
 print-trivy-version:
 	@echo $(TRIVY_VERSION)
 
-# Implantacao no kind do platform (README, "Implantacao"), com a plataforma
+# Implantacao no kind do platform (docs/como-rodar.md, "Implantacao"), com a plataforma
 # de pe (`make kind-up deploy` no platform, que tambem gera os Secrets do
 # servico): o implantar-servicos.sh do platform constroi a imagem do commit, a
 # carrega no kind, aplica o overlay e espera o banco, o Job de migracao e os

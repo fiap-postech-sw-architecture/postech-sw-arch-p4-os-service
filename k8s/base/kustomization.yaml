@@ -1,4 +1,4 @@
-# OS Service no namespace pytstop-os (README, "Implantacao"). Nao aplique este
+# OS Service no namespace pytstop-os (docs/como-rodar.md, "Implantacao"). Nao aplique este
 # diretorio direto: os overlays (kind, kind-ci e k3s) trazem o que muda por
 # ambiente, e o implantar-servicos.sh do platform aplica um deles de uma vez e
 # espera o banco, o Job de migracao e os Deployments, nessa ordem (os pods dos
