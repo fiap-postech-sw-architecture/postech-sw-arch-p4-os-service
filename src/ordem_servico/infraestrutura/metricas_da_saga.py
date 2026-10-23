@@ -77,8 +77,30 @@ DURACAO_DA_ETAPA: Final = Histogram(
     "pytstop_saga_etapa_duracao_segundos",
     "Permanencia da saga em cada etapa, observada quando ela sai da etapa.",
     ["etapa"],
-    # De segundos (resposta automatica) a 7 dias (espera humana).
-    buckets=(5, 30, 120, 600, 3600, 14400, 86400, 259200, 604800),
+    # De 50 ms (resposta automatica) a 7 dias (espera humana), com 120 s (o prazo
+    # tecnico) e 300 s (o fim da escada de retry) em baldes proprios. O
+    # histogram_quantile interpola linearmente dentro do balde: com o primeiro em
+    # 5 s toda etapa automatica saia com p95 de 4,75 s (0,95 x 5), igual em todas.
+    buckets=(
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2.5,
+        5,
+        10,
+        30,
+        60,
+        120,
+        300,
+        600,
+        3600,
+        14400,
+        86400,
+        259200,
+        604800,
+    ),
 )
 COMPENSACOES: Final = Counter(
     "pytstop_saga_compensacoes_total",
