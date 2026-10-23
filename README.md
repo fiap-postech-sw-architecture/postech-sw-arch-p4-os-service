@@ -1192,23 +1192,23 @@ No GitHub, o workflow `CI` (`.github/workflows/ci.yml`) roda os mesmos gates em 
 ## Cobertura
 
 <!-- cobertura:inicio -->
-**99,61% no gate** (linhas e ramos somados): 6.281 linhas, 6.265 cobertas (99,7%), e 930 ramos, 918 cobertos (98,7%), medidos no [run 39938942997 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39938942997). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
+**99,63% no gate** (linhas e ramos somados): 6.282 linhas, 6.266 cobertas (99,7%), e 930 ramos, 919 cobertos (98,8%), medidos no [run 39952450189 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39952450189). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
 | `src` (processos) | 240 | 235 | 97,9% |
 | `src/autenticacao` | 569 | 569 | 100,0% |
 | `src/cliente_veiculo` | 909 | 908 | 99,9% |
-| `src/compartilhado` | 1.860 | 1.850 | 99,5% |
+| `src/compartilhado` | 1.861 | 1.851 | 99,5% |
 | `src/ordem_servico` | 2.703 | 2.703 | 100,0% |
-| **total** | 6.281 | 6.265 | 99,7% |
+| **total** | 6.282 | 6.266 | 99,7% |
 
 | Camada | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
 | `dominio` | 943 | 940 | 99,7% |
 | `aplicacao` | 1.790 | 1.790 | 100,0% |
 | `infraestrutura` | 2.492 | 2.488 | 99,8% |
-| `interfaces` | 816 | 812 | 99,5% |
+| `interfaces` | 817 | 813 | 99,5% |
 
 <!-- cobertura:fim -->
 
