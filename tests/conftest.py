@@ -55,8 +55,9 @@ def _reset_encryption_singleton() -> None:
 def respostas_vistas(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[Resposta]]:
     """Espia o que as rotas do servico respondem; no fim, o OpenAPI tem de declarar.
 
-    Ver ``tests/respostas_da_api.py``. O teste que provoca de proposito uma resposta
-    fora do OpenAPI pede esta fixture e a esvazia (``vistas.clear()``) no fim.
+    Ver ``tests/respostas_da_api.py``. Se um teste precisar provocar de proposito uma
+    resposta fora do OpenAPI, a saida e pedir esta fixture e esvazia-la (``clear()``)
+    no fim do teste.
     """
     vistas: list[Resposta] = []
     monkeypatch.setattr(FastAPI, "__call__", espiar(vistas))
