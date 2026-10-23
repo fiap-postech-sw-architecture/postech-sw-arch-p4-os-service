@@ -4,7 +4,7 @@ O OS Service é um dos três serviços do PytStop na fase 4 do Tech Challenge (F
 
 - **Arquitetura global.** A divisão dos serviços, o catálogo de mensagens, a borda, a observabilidade e a implantação estão na [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) e nos [ADR-034 a ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura) do platform.
 - **Este documento.** O que é deste serviço: responsabilidades, camadas e módulos, o modelo completo do banco (a RFC-004, seção 7, o delega para cá), os comandos e eventos e os fluxos passo a passo. É a documentação da arquitetura do serviço que a [gap analysis](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/requisitos/fase4/gap-analysis-fase-4.md) da fase pede no RNF-051.
-- **API e operação.** O [README](../README.md) traz a operação (configuração, implantação, testes, CD), um `curl` por rota e a evidência de cobertura (RNF-050). O OpenAPI exportado e a coleção Postman com exemplos (RNF-052) estão em [`docs/api/`](api/); a coleção do fluxo completo, que roda com newman, é do platform.
+- **API e operação.** O [README](../README.md) traz como rodar e testar e a evidência de cobertura (RNF-050), e os documentos desta pasta detalham a operação (configuração, implantação, testes, CD), com um `curl` por rota em [`api/exemplos.md`](api/exemplos.md). O OpenAPI exportado e a coleção Postman com exemplos (RNF-052) estão em [`docs/api/`](api/); a coleção do fluxo completo, que roda com newman, é do platform.
 
 Sumário:
 
@@ -65,7 +65,7 @@ Todos saem da mesma imagem e do mesmo código; muda o comando.
 | notificador | `python -m src.notificador` | Entrega os e-mails da tabela `notificacoes` por SMTP | PostgreSQL, Mailpit |
 | migração | Job com `alembic upgrade head` e a semente do admin | Leva o banco à última revisão; os pods esperam por ela no initContainer `python -m src.banco aguardar` | PostgreSQL |
 
-Relay, consumidor, `prazos` e notificador servem o `/metrics` na porta 9100 e informam a saúde por arquivos em `/tmp` (heartbeat e pronto); a API tem liveness em `/api/v1/saude` e readiness em `/api/v1/saude/pronto`. Os manifestos estão em `k8s/` e o compose em `docker-compose.yml` ([README, Implantação](../README.md#implantação)).
+Relay, consumidor, `prazos` e notificador servem o `/metrics` na porta 9100 e informam a saúde por arquivos em `/tmp` (heartbeat e pronto); a API tem liveness em `/api/v1/saude` e readiness em `/api/v1/saude/pronto`. Os manifestos estão em `k8s/` e o compose em `docker-compose.yml` ([Como rodar e implantar, Implantação](como-rodar.md#implantação)).
 
 ## 2. Camadas e módulos
 
@@ -382,7 +382,7 @@ stateDiagram-v2
 | `iniciada_em`, `etapa_desde`, `atualizada_em` | `timestamptz` | não | | abertura, entrada na etapa atual e última transição |
 | `versao` | `integer` | não | | lock otimista |
 
-As etapas, o status que cada uma mostra e o comando que cada evento dispara estão no [README, Etapas e status](../README.md#etapas-e-status); o diagrama de estados da instância é o da RFC-004, seção 4.1.
+As etapas, o status que cada uma mostra e o comando que cada evento dispara estão em [Saga, Etapas e status](saga.md#etapas-e-status); o diagrama de estados da instância é o da RFC-004, seção 4.1.
 
 ### Mensageria e e-mail (contexto `compartilhado` e `ordem_servico`)
 
@@ -467,7 +467,7 @@ sequenceDiagram
     OS-->>U: 200
 ```
 
-Rotação da chave sem derrubar sessão, variáveis e limites: [README, Autenticação](../README.md#autenticação).
+Rotação da chave sem derrubar sessão, variáveis e limites: [Autenticação](autenticacao.md#autenticação).
 
 ### 4.2 Cadastro com consentimento LGPD
 
@@ -580,7 +580,7 @@ Antes de tocar no domínio, o orquestrador classifica o evento pela etapa (RFC-0
 - o adiantado (`ExecucaoIniciada` antes do `ExecucaoAgendada`) volta pela fila de retry até a saga alcançá-lo;
 - o que não tem como ser aplicado (OS sem saga, `ordem_id` divergente, OS encerrada com a saga viva, transição recusada) vai para a DLQ com o motivo em código.
 
-A tabela completa está no [README, Evento fora de ordem](../README.md#evento-fora-de-ordem), e o diagrama com os atores humanos e o Mercado Pago no [README, Caminho feliz](../README.md#caminho-feliz).
+A tabela completa está em [Saga, Evento fora de ordem](saga.md#evento-fora-de-ordem), e o diagrama com os atores humanos e o Mercado Pago em [Saga, Caminho feliz](saga.md#caminho-feliz).
 
 O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado`, `AgendarExecucao` e as cinco compensações) fica na saga como comando em voo, com o prazo técnico e o id de cada envio; a resposta casa com ele pelo `causation_id`.
 
@@ -607,7 +607,7 @@ sequenceDiagram
     OS->>OS: OS cancelada (origem saga), saga compensada, e-mail de cancelamento
 ```
 
-As onze linhas do plano por etapa e gatilho, os eventos que chegam durante a compensação e o estorno automático do Billing estão no [README, Compensações e cancelamento](../README.md#compensações-e-cancelamento).
+As onze linhas do plano por etapa e gatilho, os eventos que chegam durante a compensação e o estorno automático do Billing estão em [Saga, Compensações e cancelamento](saga.md#compensações-e-cancelamento).
 
 ### 4.6 Cancelamento pedido pelo atendente
 
@@ -642,7 +642,7 @@ sequenceDiagram
     OS->>OS: OS cancelada com o texto do atendente, saga compensada
 ```
 
-As respostas por etapa estão no [README, Compensações e cancelamento](../README.md#compensações-e-cancelamento).
+As respostas por etapa estão em [Saga, Compensações e cancelamento](saga.md#compensações-e-cancelamento).
 
 ### 4.7 Prazos técnicos e reenvio
 
@@ -677,7 +677,7 @@ sequenceDiagram
     P->>DB: commit
 ```
 
-Com os padrões, o original e os cinco reenvios dão ao participante 12 minutos, mais que os 381 s da escada de retry do consumidor (`tests/unitarios/test_configuracao_dos_prazos.py` confere a relação). Detalhes e limites: [README, Prazos, falha na compensação e retomada](../README.md#prazos-falha-na-compensação-e-retomada).
+Com os padrões, o original e os cinco reenvios dão ao participante 12 minutos, mais que os 381 s da escada de retry do consumidor (`tests/unitarios/test_configuracao_dos_prazos.py` confere a relação). Detalhes e limites: [Saga, Prazos, falha na compensação e retomada](saga.md#prazos-falha-na-compensação-e-retomada).
 
 ### 4.8 Falha na compensação e retomada
 
@@ -731,7 +731,7 @@ sequenceDiagram
     end
 ```
 
-O texto de cada modelo e a operação da linha `dead` estão no [README, Notificações por e-mail e LGPD](../README.md#notificações-por-e-mail-e-lgpd).
+O texto de cada modelo e a operação da linha `dead` estão em [Mensageria, Notificações por e-mail e LGPD](mensageria.md#notificações-por-e-mail-e-lgpd).
 
 ### 4.10 Acompanhamento público
 
@@ -790,7 +790,7 @@ sequenceDiagram
     end
 ```
 
-O comportamento com o broker fora, com alarme de memória e o encerramento estão no [README, Mensageria](../README.md#mensageria).
+O comportamento com o broker fora, com alarme de memória e o encerramento estão em [Mensageria](mensageria.md#mensageria).
 
 ## 5. Mensageria
 
@@ -900,9 +900,9 @@ sequenceDiagram
     end
 ```
 
-Depois de uma eliminação não se faz redrive de DLQ de comando, que recriaria a placa na Execução; o reenvio de um `AnonimizarVeiculo` que caiu na DLQ é `scripts/reenviar_anonimizacao.py` ([README, Eliminação de dados](../README.md#eliminação-de-dados-lgpd)).
+Depois de uma eliminação não se faz redrive de DLQ de comando, que recriaria a placa na Execução; o reenvio de um `AnonimizarVeiculo` que caiu na DLQ é `scripts/reenviar_anonimizacao.py` ([Mensageria, Eliminação de dados](mensageria.md#eliminação-de-dados-lgpd)).
 
-**Infraestrutura** ([README, Implantação](../README.md#implantação)):
+**Infraestrutura** ([Como rodar e implantar, Implantação](como-rodar.md#implantação)):
 
 - pods sem root, raiz somente leitura, sem token de ServiceAccount e com seccomp `RuntimeDefault`;
 - NetworkPolicy que nega toda entrada no namespace e libera só o necessário, e restringe a saída do notificador ao DNS, ao PostgreSQL e ao Mailpit;
@@ -917,7 +917,7 @@ Métricas, traces e logs seguem o [ADR-043](https://github.com/fiap-postech-sw-a
 - **Traces.** A requisição de abertura é a raiz do trace da saga: a outbox guarda o contexto, o relay publica como filho, o consumidor abre o span de consumo como filho da publicação, e cancelamento, prazo e retomada abrem spans filhos do contexto que a saga guarda. O `correlation_id` (o id da OS) vai no atributo `messaging.message.conversation_id`.
 - **Logs.** JSON com `correlation_id`, `trace_id` e `span_id`, sem dado pessoal nem texto livre. O `event` vem em inglês, menos os nomes herdados da fase 3: as auditorias LGPD (como `dados_pessoais_exportados_via_admin`) e os do tratamento de erros (como `erro_interno`). Também saem em português as duas mensagens da criptografia (`compartilhado/infraestrutura/encryption.py`: chave não configurada e falha ao decifrar um token), que usam o `logging` da stdlib.
 
-A tabela das séries, o que não é exportado e por quê, e como ver localmente e no kind estão no [README, Observabilidade](../README.md#observabilidade).
+A tabela das séries, o que não é exportado e por quê, e como ver localmente e no kind estão em [Observabilidade](observabilidade.md#observabilidade).
 
 ## 8. Decisões
 
@@ -930,8 +930,8 @@ A tabela das séries, o que não é exportado e por quê, e como ver localmente 
 | Borda no Kong, com `/metrics` e `/api/v1/admin` fora dela; o OS não chama outro serviço por HTTP | [ADR-038](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/038-borda-e-comunicacao-sincrona.md), `k8s/base/borda.yaml` |
 | O OS como único emissor de JWT, com RS256, JWKS e validação local nos outros serviços | [ADR-039](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/039-autenticacao-entre-servicos.md), `autenticacao/` |
 | Mercado Pago só no Billing; o OS guarda o resumo do pagamento e casa o estorno pelo `causation_id` | [ADR-040](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/040-integracao-mercado-pago.md), `aplicacao/saga/linhas_da_compensacao.py` |
-| Testes em pirâmide com testcontainers, BDD de componente da saga, gate de 95% e mutação | [ADR-041](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/041-estrategia-de-testes-e-qualidade.md), [README, Qualidade](../README.md#qualidade) |
-| CI/CD por serviço e deploy no kind, com migrações em expandir e contrair | [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md), [README, CD](../README.md#cd) |
+| Testes em pirâmide com testcontainers, BDD de componente da saga, gate de 95% e mutação | [ADR-041](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/041-estrategia-de-testes-e-qualidade.md), [Testes e qualidade](testes.md#qualidade) |
+| CI/CD por serviço e deploy no kind, com migrações em expandir e contrair | [ADR-042](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/042-cicd-e-deploy-kubernetes.md), [CI/CD](ci-cd.md#cd) |
 | Observabilidade com Prometheus, Jaeger e logs com `trace_id` | [ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/adr/fase4/043-observabilidade-distribuida.md) |
 
 Decisões deste serviço que não estão nos ADR:
