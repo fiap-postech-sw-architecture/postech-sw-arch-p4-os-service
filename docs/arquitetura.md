@@ -582,7 +582,7 @@ Antes de tocar no domínio, o orquestrador classifica o evento pela etapa (RFC-0
 
 A tabela completa está em [Saga, Evento fora de ordem](saga.md#evento-fora-de-ordem), e o diagrama com os atores humanos e o Mercado Pago em [Saga, Caminho feliz](saga.md#caminho-feliz).
 
-O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado`, `AgendarExecucao` e as cinco compensações) fica na saga como comando em voo, com o prazo técnico e o id de cada envio; a resposta casa com ele pelo `causation_id`.
+O comando com resposta automática (`GerarOrcamento`, `ReservarPecas`, `SolicitarPagamento` até o `PagamentoSolicitado`, `AgendarExecucao` e as cinco compensações por comando; a sexta, a OS `CANCELADA`, é local) fica na saga como comando em voo, com o prazo técnico e o id de cada envio; a resposta casa com ele pelo `causation_id`.
 
 ### 4.5 Compensações por falha de negócio
 

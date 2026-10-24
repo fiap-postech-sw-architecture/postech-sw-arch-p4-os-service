@@ -119,7 +119,7 @@ As responsabilidades, as camadas, o modelo completo do banco, os fluxos passo a 
 
 ### Por que orquestração
 
-- **O tamanho da saga.** São nove passos, T1 a T9 (as transações locais de cada serviço, da abertura à finalização), em três serviços, mais a entrega local (T10). Há esperas humanas (mecânico e cliente), um provedor externo (Mercado Pago) e seis compensações. Um dos passos é o *pivot*, o ponto sem retorno (RN-029): o início da execução física, depois do qual não há compensação.
+- **O tamanho da saga.** São nove passos, T1 a T9 (as transações locais de cada serviço, da abertura à finalização), em três serviços, mais a entrega local (T10). Há esperas humanas (mecânico e cliente), um provedor externo (Mercado Pago) e seis compensações (cinco por comando e a da OS `CANCELADA`, que é local). Um dos passos é o *pivot*, o ponto sem retorno (RN-029): o início da execução física, depois do qual não há compensação.
 - **Por que não coreografia.** A Aula 02 de SAGA Pattern, citando Richardson, recomenda a coreografia para sagas simples, e esta não é. Com coreografia, os passos ficariam espalhados nos três serviços, sem um lugar que diga em que etapa a OS está. Prazos, ordem das compensações e o pivot exigiriam que cada serviço assinasse eventos dos outros dois, com risco de ciclo.
 - **Por que no OS, e não num quarto serviço.** Como nos exemplos do material, o orquestrador fica no serviço que inicia a saga: o fluxo inteiro fica num lugar só, testável sem broker, e etapa e status mudam na mesma transação local.
 - **Os dois contras da aula, contidos.** O orquestrador só conhece a ordem dos passos, as compensações e os prazos: preço, validade e pagamento são dos participantes, que respondem a comandos sem conhecer a saga. E ele não é ponto único de falha: o estado fica no banco e as mensagens, em filas duráveis. O consumidor roda com uma réplica; se o pod cai, o Kubernetes o recria, a mensagem sem confirmação volta à fila e a reentrega não repete efeito (RN-028). As alternativas descartadas (coreografia, orquestrador como quarto serviço, motor de workflow) estão no ADR-035.
@@ -192,4 +192,4 @@ Este repositório é um dos quatro da entrega da fase 4 do Tech Challenge (FIAP 
 | [postech-sw-arch-p4-execution-service](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-execution-service) | Fila de diagnóstico e execução e estoque de peças |
 | [postech-sw-arch-p4-platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform) | Infraestrutura compartilhada, testes E2E, arquitetura global e entrega |
 
-A `main` é protegida desde o primeiro commit: toda mudança entra por pull request com squash.
+A `main` tem ruleset ativo desde o dia da criação do repositório (06/10/2026, 13:50, horário de Brasília): depois do `Initial commit` e do PR #1, toda mudança entra por pull request com squash e com os 9 checks do CI verdes.
