@@ -192,4 +192,4 @@ Este repositório é um dos quatro da entrega da fase 4 do Tech Challenge (FIAP 
 | [postech-sw-arch-p4-execution-service](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-execution-service) | Fila de diagnóstico e execução e estoque de peças |
 | [postech-sw-arch-p4-platform](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform) | Infraestrutura compartilhada, testes E2E, arquitetura global e entrega |
 
-A `main` é protegida desde o primeiro commit: toda mudança entra por pull request com squash.
+A `main` tem ruleset ativo desde o dia da criação do repositório (06/10/2026, 13:50, horário de Brasília): depois do `Initial commit` e do PR #1, toda mudança entra por pull request com squash e com os 9 checks do CI verdes.
