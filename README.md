@@ -103,7 +103,7 @@ O OS orquestra a saga pelo RabbitMQ da plataforma ([ADR-036](https://github.com/
 
 O consumidor entrega cada evento ao orquestrador, que o classifica pela etapa da saga antes de tocar no domínio (RFC-004 seção 4.5). O evento de etapa já passada ou repetido é ignorado com log e nunca vai para a DLQ. O adiantado volta pela fila de retry nas cinco cópias (381 s ao todo) e, se a saga não o alcançar, a sexta falha vai para a DLQ, com alerta.
 
-A recusa permanente vai para a DLQ com o motivo em código no log `message rejected to dlq` (como `saga_inexistente`, `ordem_encerrada`, `transicao_invalida`, `relogio_defasado` e `erro_no_handler`). Um caso conhecido: a aprovação de um orçamento com peça de código fora do formato do Billing vira `erro_no_handler`, e a saga fica em `aguardando_decisao` até o cancelamento da OS. A tabela completa e esse caso estão em [docs/saga.md](docs/saga.md#evento-fora-de-ordem).
+A recusa permanente vai para a DLQ com o motivo em código no log `message rejected to dlq` (como `saga_inexistente`, `ordem_encerrada`, `transicao_invalida`, `relogio_defasado` e `erro_no_handler`), com alerta. A tabela completa, com um exemplo e o destino de cada caso, está em [docs/saga.md](docs/saga.md#evento-fora-de-ordem).
 
 ### Operação do e-mail
 
@@ -182,7 +182,6 @@ Este repositório é um dos quatro da entrega da fase 4 do Tech Challenge (FIAP 
 - **ADRs e RFC-004**: o serviço segue a [RFC-004](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/arquitetura/rfc/fase4/rfc-004-microsservicos-saga.md) e os [ADR-034 a ADR-043](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/tree/main/docs/arquitetura/adr/fase4), citados no código como `RFC-004 secao N` e `ADR-0NN`. A tabela de decisões deste serviço, com o ADR e o código de cada uma, está em [docs/arquitetura.md](docs/arquitetura.md#8-decisões).
 - **Requisitos**: a [matriz de rastreabilidade](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/entrega/matriz-de-rastreabilidade.md) do platform liga cada RF, RNF e RN aos PRs e às evidências, e o [documento de entrega](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-platform/blob/main/docs/entrega/fase4/entrega-fase-4.md) reúne o conjunto. Neste README: a justificativa da saga (RNF-037) em [Por que orquestração](#por-que-orquestração), a cobertura (RNF-050) em [Cobertura](#cobertura), a arquitetura (RNF-051) em [Arquitetura](#arquitetura) e a API (RNF-052) em [API](#api).
 - **Origem do código e escopo**: o código parte de um recorte da `main` do PytStop da fase 3 (`postech-sw-arch-p3`), e o escopo do serviço está em [docs/escopo-e-origem.md](docs/escopo-e-origem.md).
-- **Histórico**: as decisões, as convenções e as dívidas do serviço ficam no [`MEMORY.md`](MEMORY.md).
 
 ### Repositórios da fase 4
 
