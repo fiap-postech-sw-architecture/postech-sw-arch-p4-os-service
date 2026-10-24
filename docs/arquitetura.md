@@ -426,7 +426,7 @@ A linha não guarda endereço, nome, link nem texto livre: o notificador lê o c
 
 ### Conferência com o ER da RFC-004 (seção 7.2)
 
-O ER da RFC traz só as colunas de que a saga e os contratos dependem. O banco tem também: `nome` e `tipo_documento` em `clientes`; `marca`, `modelo` e `ano` em `veiculos`; `concedido_em` em `consentimentos`; `revogado_em` em `tokens_revogados`; as colunas do resumo do orçamento e do pagamento, `criado_em` e `atualizado_em` em `ordens_de_servico`; e `tentativas`, `proxima_tentativa_em`, `criado_em` e `ultimo_erro` na outbox. `descricao_problema` é `varchar(1000)`, e não `text`. Não há diferença nas colunas que a RFC lista.
+O ER da RFC traz só as colunas de que a saga e os contratos dependem e deixa de fora a `outbox` e a `mensagens_processadas`, descritas em [Mensageria e e-mail](#mensageria-e-e-mail-contexto-compartilhado-e-ordem_servico). O banco tem também: `nome` e `tipo_documento` em `clientes`; `marca`, `modelo` e `ano` em `veiculos`; `concedido_em` em `consentimentos`; `revogado_em` em `tokens_revogados`; e as colunas do resumo do orçamento e do pagamento, `criado_em` e `atualizado_em` em `ordens_de_servico`. `descricao_problema` é `varchar(1000)`, e não `text`. Não há diferença nas colunas que a RFC lista.
 
 ## 4. Fluxos passo a passo
 
