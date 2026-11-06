@@ -54,7 +54,7 @@ São 60 mutantes escritos à mão nos módulos críticos (`scripts/mutantes.toml
 O gate é de 95% no total, com linhas e ramos somados (`fail_under` no `.coveragerc`), e o código novo precisa de 90% (`make diff-cover`), como pede o ADR-041 (RNF-050). As tabelas não são digitadas: o [`scripts/cobertura_resumo.py`](scripts/cobertura_resumo.py) as escreve a partir do `coverage.xml` de um run do CI.
 
 <!-- cobertura:inicio -->
-**99,63% no gate** (linhas e ramos somados): 6.282 linhas, 6.266 cobertas (99,7%), e 930 ramos, 919 cobertos (98,8%), medidos no [run 39952450189 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/39952450189). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
+**99,63% no gate** (linhas e ramos somados): 6.282 linhas, 6.266 cobertas (99,7%), e 930 ramos, 919 cobertos (98,8%), medidos no [run 42213140539 do CI](https://github.com/fiap-postech-sw-architecture/postech-sw-arch-p4-os-service/actions/runs/42213140539). Tabelas geradas por `scripts/cobertura_resumo.py` a partir do `coverage.xml` desse run.
 
 | Contexto | Linhas | Cobertas | Cobertura |
 |---|---:|---:|---:|
